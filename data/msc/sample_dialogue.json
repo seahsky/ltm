@@ -1,0 +1,185 @@
+[
+  {
+    "session_id": 0,
+    "persona1": [
+      "My favorite hobbies are based on old fashioned life skills.",
+      "I race large felines who are in captivity to remain healthy.",
+      "I was a really good runner when I was younger.",
+      "I am a carnivore."
+    ],
+    "persona2": [
+      "I love to redesign houses.",
+      "Killing for sport is my hobby.",
+      "I shot an arrow the other day!.",
+      "I like to get dressed up."
+    ],
+    "dialogue": [
+      "Hi, how are you doing? I'm getting ready to do some cheetah chasing to stay in shape.",
+      "You must be very fast. Hunting is one of my favorite hobbies.",
+      "I am! For my hobby I like to do canning or some whittling.",
+      "I also remodel homes when I am not out bow hunting.",
+      "That's neat. When I was in high school I placed 6th in 100m dash!",
+      "That's awesome. Do you have a favorite season or time of year?",
+      "I do not. But I do have a favorite meat since that is all I eat exclusively.",
+      "What is your favorite meat to eat?",
+      "I would have to say its prime rib. Do you have any favorite foods?",
+      "I like chicken or macaroni and cheese.",
+      "Do you have anything planned for today? I think I am going to do some canning.",
+      "I am going to watch football. What are you canning?",
+      "I think I will can some jam. Do you also play footfall for fun?",
+      "If I have time outside of hunting and remodeling homes. Which is not much!"
+    ],
+    "speaker": [
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2"
+    ]
+  },
+  {
+    "session_id": 1,
+    "persona1": [
+      "I chase cheetahs to stay in shape.",
+      "I like to do canning and whittling for hobbies.",
+      "I ran in high school.",
+      "I only eat meat.",
+      "Prime rib is my favorite meat.",
+      "I can jam."
+    ],
+    "persona2": [
+      "I like to hunt.",
+      "I bow hunt. I remodel homes.",
+      "Chicken and macaroni and cheese are some of my favorite foods."
+    ],
+    "dialogue": [
+      "Did you get to do any bow hunting lately?",
+      "No, the weather was poor, hoping to reschedule for another weekend. What have you been up to lately? How is running going?",
+      "Running is going fine. I am preparing for the marathon currently. This will be my first marathon so need to really prepare.",
+      "What time are you setting for your goal?",
+      "As it's my first, anything below 4 hours I will be happy with. What animals did you go hunting for so far?",
+      "Mostly just deer. We have been trying to get an Elk tag, but no luck yet. Do you like deer meat?",
+      "Unfortunately I never had that in my life. But would love to try. How about you? Do you like it?",
+      "It makes good jerky, but not my favorite. What are you favorite meals?",
+      "I love meat, that's my favourite food. My wife likes chicken so it's mostly chicken in the house. My wife's recipe, thai chicken with rice is fantastic. What about you? What's your favourite food?",
+      "Yah, chicken is a staple with us as well. My favorite is jerk chick with red beans and rice. I'm also a big fan of mac n' cheese. How frequently do you cook?",
+      "I cook only during weekends, no energy left after work. But my wife cooks almost every day. You need to send me the recipe for jerk chicken.",
+      "For sure, it's a great recipe and very easy. "
+    ],
+    "speaker": [
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2"
+    ]
+  },
+  {
+    "session_id": 2,
+    "persona1": [
+      "I chase cheetahs to stay in shape.",
+      "I like to do canning and whittling for hobbies.",
+      "I ran in high school.",
+      "I only eat meat. Prime rib is my favorite meat.",
+      "I am planning on running my first marathon. I have a personal goal to run a marathon in under 4 hours.",
+      "I can jam. My wife likes to cook.",
+      "I work during the week and have weekends off."
+    ],
+    "persona2": [
+      "I remodel homes.",
+      "Jerk chicken with red beans and rice, macaroni and cheese are some of my favorite foods.",
+      "I enjoy bow hunting. I have hunted deer. I am hoping to hunt elk soon."
+    ],
+    "dialogue": [
+      "I tried that jerk chicken recipe you sent me, it was very good! ",
+      "Glad to hear! If youre running low on deer I can bring you some more. Also I'm planning to finally hunt for elk this weekend maybe I can bring some of that too.",
+      "That sounds awesome, I do love to eat a lot of meat! Wife wants to try making jerk prime rib, which I think would be pure awesome",
+      "That sounds like heaven! Have you hit a new PR for running recently?",
+      "Not recently, I've had to take a pause on my running. I slipped and broke my ankle 5 days ago :(",
+      "Oh no that's horrible how long do they think you'll be out for?",
+      "I was told 4-6 weeks to recover, but that's ok, I can get some whittling done without having to move around much. Carve up a few figurines :) ",
+      "That's not too bad still unfortunate though. Perks of having multiple hobbies for sure!",
+      "Indeed! Wife said thank you for the mac and cheese too, she said it was better than hers!",
+      "She is so kind haha I can send the recipe over if she'd like.",
+      "I'll let her know, she'll love it!",
+      "Great! Are you taking any time off work since you broke your ankle?"
+    ],
+    "speaker": [
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2"
+    ]
+  },
+  {
+    "session_id": 3,
+    "persona1": [
+      "I chase cheetahs to stay in shape.",
+      "I like to do canning and whittling for hobbies.",
+      "I ran in high school.",
+      "I only eat meat. Prime rib is my favorite meat. I want to try jerk prime rib.",
+      "I am planning on running my first marathon. I have a personal goal to run a marathon in under 4 hours. I broke my ankle 5 days ago.",
+      "I can jam. My wife likes to cook. My wife occasionally makes mac and cheese, but it isn't the best.",
+      "I work during the week and have weekends off.",
+      "I like to whittle. I make figurines."
+    ],
+    "persona2": [
+      "I remodel homes.",
+      "Jerk chicken with red beans and rice, macaroni and cheese are some of my favorite foods.",
+      "I enjoy bow hunting. I have hunted deer. I am hoping to hunt elk soon.",
+      "I have a good mac and cheese recipe."
+    ],
+    "dialogue": [
+      "It's hard to get around the house with a broken ankle!",
+      "How long has it been broken? I broke my leg once a long time ago during the winter. It took forever to heal and the ice was a pain!",
+      "Almost a week! It hurts so bad! Really? How did you broke your leg?",
+      "I fell down the steps at church one icy Sunday. Thankfully it healed up but getting groceries by bus is a pain. ",
+      "Oh! Well I think I´m going to the doctor tomorrow to see if my ankle is better ",
+      "How badly did you break it? Usually they take a while to heal. ",
+      "Basically my ankle is an smashed cookie right now. So yeah... it´s really bad",
+      "Did they think you were going to need surgery? I hope it heals ok for you. Are you planning any new whittling projects while you're laid up?",
+      "Yes! But my doctor wanted to wait a week until my ankle is okay for a surgery. Really no I´m not a good planner, what do you recommend me to do?",
+      "I haven't whittled in a while. The last thing I made was a plain wooden cross for my home. Do you have a favorite thing to make? I'm working on a set of raised planters for my garden.",
+      "I love to make boats.  ",
+      "Maybe you should start a model boat kit? I love to build things. I think that I usually make functional things. I always wanted to know how to build a full size sailboat by hand."
+    ],
+    "speaker": [
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2",
+      "Speaker 1",
+      "Speaker 2"
+    ]
+  }
+]
