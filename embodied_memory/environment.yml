@@ -1,0 +1,24 @@
+name: ltm-embodied
+channels:
+  - aihabitat
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.9
+  - habitat-sim=0.3.3
+  - cmake>=3.14
+  - pip
+  - pip:
+      - habitat-lab==0.3.320250127
+      - numpy<2
+      - faiss-cpu
+      - torch>=2.2
+      - torchvision
+      - transformers>=4.40
+      - sentence-transformers
+      - open-clip-torch
+      - pillow
+      - matplotlib
+      - tqdm
+      - omegaconf
+      - hydra-core

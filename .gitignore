@@ -1,0 +1,21 @@
+# Secrets
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+# Experiment outputs
+runs/
+
+# Datasets (large, downloaded)
+data/hm3d/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
