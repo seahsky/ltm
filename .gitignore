@@ -1,21 +1,120 @@
-# Secrets
+# =============================================================================
+# Secrets / credentials
+# =============================================================================
 .env
 .env.local
+.env.*.local
+*.pem
+*.key
+secrets/
 
+# =============================================================================
 # Python
+# =============================================================================
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.so
+*.egg
 *.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+.installed.cfg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual envs
 .venv/
+venv/
+env/
+ENV/
+.python-version
 
-# Experiment outputs
+# Type checkers / linters / test caches
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+.pytest_cache/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+nosetests.xml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# =============================================================================
+# Experiment outputs / artifacts
+# =============================================================================
 runs/
+outputs/
+checkpoints/
+wandb/
+mlruns/
+lightning_logs/
+tb_logs/
+tensorboard/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.safetensors
 
+# Plots / large generated media
+*.mp4
+*.mov
+*.avi
+*.gif
+
+# =============================================================================
 # Datasets (large, downloaded)
+# =============================================================================
 data/hm3d/
+data/msc/
+data/datasets/
+data/scene_datasets/
+*.json.gz
+*.zip
+*.tar
+*.tar.gz
+*.tgz
 
-# OS / editor
+# FAISS / embedding caches
+*.faiss
+*.index
+embeddings_cache/
+
+# =============================================================================
+# OS / editor / IDE
+# =============================================================================
 .DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# =============================================================================
+# Project-local scratch
+# =============================================================================
+scratch/
+tmp/
+*.log
