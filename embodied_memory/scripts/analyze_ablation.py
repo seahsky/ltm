@@ -40,6 +40,7 @@ class EpisodeRow:
     episode_id: str
     success: bool
     spl: float
+    soft_spl: float
     n_steps: int
     rerank_disagreements: int
     retrieval_hits: int
@@ -63,11 +64,14 @@ def _coerce_episode(raw: Dict[str, Any]) -> Optional[EpisodeRow]:
     ep_id = raw.get("episode_id")
     if scene is None or ep_id is None:
         return None
+    spl = float(raw.get("spl", 1.0 if raw.get("success") else 0.0))
+    soft_spl = float(raw.get("soft_spl", raw.get("softspl", spl)))
     return EpisodeRow(
         scene_id=str(scene),
         episode_id=str(ep_id),
         success=bool(raw.get("success", False)),
-        spl=float(raw.get("spl", 1.0 if raw.get("success") else 0.0)),
+        spl=spl,
+        soft_spl=soft_spl,
         n_steps=int(raw.get("n_steps", 0)),
         rerank_disagreements=int(raw.get("rerank_disagreements", 0)),
         retrieval_hits=int(raw.get("retrieval_hits", 0)),
@@ -157,6 +161,7 @@ def paired_bootstrap_mean_diff(
 
 METRICS = [
     ("spl", "SPL", lambda r: r.spl, "%+0.4f"),
+    ("soft_spl", "soft_SPL", lambda r: r.soft_spl, "%+0.4f"),
     ("success", "success", lambda r: 1.0 if r.success else 0.0, "%+0.4f"),
     ("n_steps", "steps", lambda r: float(r.n_steps), "%+0.2f"),
 ]
@@ -187,7 +192,7 @@ def per_run_means(run: RunData, keys: List[Tuple[str, str]]) -> Dict[str, float]
 def print_per_setting_summary(runs: List[RunData], paired_keys: List[Tuple[str, str]]):
     print("=== per-setting aggregate (over paired episodes) ===")
     print(f"{'run':<25} {'setting':>7} {'n_paired':>8} {'n_total':>8} "
-          f"{'mean_SPL':>10} {'success':>9} {'mean_steps':>11} "
+          f"{'mean_SPL':>10} {'soft_SPL':>10} {'success':>9} {'mean_steps':>11} "
           f"{'rerank_dis':>11} {'retr_hits':>10}")
     for r in runs:
         m = per_run_means(r, paired_keys)
@@ -197,6 +202,7 @@ def print_per_setting_summary(runs: List[RunData], paired_keys: List[Tuple[str, 
             f"{r.name:<25} {str(r.setting):>7} {int(m.get('n_paired', 0)):>8d} "
             f"{int(m.get('n_total', 0)):>8d} "
             f"{m.get('spl', float('nan')):>10.4f} "
+            f"{m.get('soft_spl', float('nan')):>10.4f} "
             f"{m.get('success', float('nan')):>9.4f} "
             f"{m.get('n_steps', float('nan')):>11.2f} "
             f"{rerank_dis_total:>11d} {retr_hits_total:>10d}"
@@ -225,9 +231,40 @@ def print_pairwise_deltas(
     print()
 
 
-def print_phase1_gate(runs: List[RunData], paired_keys: List[Tuple[str, str]], n_bootstrap: int):
-    """Phase 1 → Phase 2 gate: setting 3 mean SPL > setting 1 mean SPL with
-    paired-bootstrap p < 0.1 (one-sided)."""
+def _one_sided_p_le_zero(deltas: List[float], n_bootstrap: int) -> float:
+    """Fraction of paired-bootstrap resamples whose mean is <= 0."""
+    if not deltas or n_bootstrap <= 0:
+        return float("nan")
+    rng = random.Random(0)
+    n = len(deltas)
+    le_zero = 0
+    for _ in range(n_bootstrap):
+        s = 0.0
+        for _i in range(n):
+            s += deltas[rng.randrange(n)]
+        if s <= 0:
+            le_zero += 1
+    return le_zero / n_bootstrap
+
+
+def print_phase2_gate(runs: List[RunData], paired_keys: List[Tuple[str, str]], n_bootstrap: int):
+    """Phase-2 gate (revised from Phase 1 in the readiness plan):
+
+    1. Backbone is alive — non-zero successful episodes in setting 1
+       (vanilla ReMEmbR baseline). Confirms the eval harness can succeed.
+    2. Memory helps soft — paired soft-SPL delta (S3 − S1) > 0 with
+       one-sided p < 0.1.
+    3. Memory helps hard (stretch) — paired SPL delta (S3 − S1) > 0 with
+       one-sided p < 0.1. Stretch only; #2 passing is sufficient.
+
+    The Phase-1 gate was paired SPL > 0 with p < 0.1, which only fits the
+    regime where the backbone can actually reach goals. In Phase 1 every
+    episode timed out at the step cap, so binary SPL stayed at 0 across
+    every setting and the gate failed for backbone reasons, not memory
+    reasons. The Phase-2 gate decouples these by reading soft-SPL (a
+    continuous progress signal) as the primary memory criterion and using
+    backbone aliveness as a separate guardrail.
+    """
     by_setting: Dict[int, RunData] = {}
     for r in runs:
         if r.setting in (1, 2, 3):
@@ -239,27 +276,57 @@ def print_phase1_gate(runs: List[RunData], paired_keys: List[Tuple[str, str]], n
     if not paired_keys:
         print("(skip gate: no paired episodes between settings.)")
         return
-    deltas = [s3.episodes[k].spl - s1.episodes[k].spl for k in paired_keys]
-    mean, lo, hi = paired_bootstrap_mean_diff(deltas, n_resamples=n_bootstrap, ci=0.9)
-    # one-sided p ≈ fraction of resamples ≤ 0
-    rng = random.Random(0)
-    n = len(deltas)
-    le_zero = 0
-    for _ in range(n_bootstrap):
-        s = 0.0
-        for _i in range(n):
-            s += deltas[rng.randrange(n)]
-        if s <= 0:
-            le_zero += 1
-    p_one_sided = le_zero / n_bootstrap if n_bootstrap > 0 else float("nan")
-    pass_gate = (mean > 0.0) and (p_one_sided < 0.1)
-    print("=== phase 1 → phase 2 gate ===")
-    print(f"  setting 3 - setting 1 SPL delta: mean={mean:+.4f}  90% CI=[{lo:+.4f}, {hi:+.4f}]  one-sided p={p_one_sided:.3f}")
-    print(f"  gate: {'PASS' if pass_gate else 'FAIL'} (require mean>0 and p<0.1)")
-    if not pass_gate:
-        print("  → audit the LTM stack before integrating ReMEmbR; the stand-in backbone")
-        print("    isn't producing a measurable memory signal.")
+
+    # Criterion 1: vanilla backbone is alive (non-zero successes in S1).
+    s1_successes = sum(1 for k in paired_keys if s1.episodes[k].success)
+    c1_pass = s1_successes > 0
+
+    # Criterion 2: paired soft-SPL delta with one-sided p < 0.1.
+    soft_deltas = [
+        s3.episodes[k].soft_spl - s1.episodes[k].soft_spl for k in paired_keys
+    ]
+    soft_mean, soft_lo, soft_hi = paired_bootstrap_mean_diff(
+        soft_deltas, n_resamples=n_bootstrap, ci=0.9
+    )
+    soft_p = _one_sided_p_le_zero(soft_deltas, n_bootstrap)
+    c2_pass = (soft_mean > 0.0) and (soft_p < 0.1)
+
+    # Criterion 3 (stretch): paired hard-SPL delta.
+    hard_deltas = [s3.episodes[k].spl - s1.episodes[k].spl for k in paired_keys]
+    hard_mean, hard_lo, hard_hi = paired_bootstrap_mean_diff(
+        hard_deltas, n_resamples=n_bootstrap, ci=0.9
+    )
+    hard_p = _one_sided_p_le_zero(hard_deltas, n_bootstrap)
+    c3_pass = (hard_mean > 0.0) and (hard_p < 0.1)
+
+    overall_pass = c1_pass and c2_pass  # criterion 3 is stretch-only
+
+    print("=== phase 2 gate ===")
+    print(f"  C1 backbone alive:    n_success(setting 1) = {s1_successes:d}  "
+          f"({'PASS' if c1_pass else 'FAIL'})")
+    print(f"  C2 memory helps soft: soft_SPL delta (S3 - S1) mean={soft_mean:+.4f}  "
+          f"90% CI=[{soft_lo:+.4f}, {soft_hi:+.4f}]  one-sided p={soft_p:.3f}  "
+          f"({'PASS' if c2_pass else 'FAIL'})")
+    print(f"  C3 memory helps hard: SPL delta (S3 - S1)      mean={hard_mean:+.4f}  "
+          f"90% CI=[{hard_lo:+.4f}, {hard_hi:+.4f}]  one-sided p={hard_p:.3f}  "
+          f"({'PASS' if c3_pass else 'FAIL'}, stretch)")
+    print(f"  gate: {'PASS' if overall_pass else 'FAIL'}  "
+          f"(require C1 and C2; C3 is stretch)")
+    if not overall_pass:
+        if not c1_pass:
+            print("  → backbone isn't reaching goals. Audit the ReMEmbR planner / max_steps")
+            print("    budget / scene difficulty before declaring Phase 2 done.")
+        elif not c2_pass:
+            print("  → memory adds no measurable progress signal. Audit the LTM stack and")
+            print("    the memory-injected candidate path before declaring Phase 2 done.")
     print()
+
+
+# Back-compat shim: older invocations called `print_phase1_gate`. Keep it as an
+# alias so existing notebooks/scripts don't break, but log a deprecation note.
+def print_phase1_gate(runs, paired_keys, n_bootstrap):
+    print("(note: phase-1 gate is deprecated; running phase-2 gate instead)")
+    print_phase2_gate(runs, paired_keys, n_bootstrap)
 
 
 # ----------------------------------------------------------------------
@@ -290,7 +357,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Per-run totals follow but pairwise deltas will be NaN.")
     print_per_setting_summary(runs, paired_keys)
     print_pairwise_deltas(runs, paired_keys, args.bootstrap, args.ci)
-    print_phase1_gate(runs, paired_keys, args.bootstrap)
+    print_phase2_gate(runs, paired_keys, args.bootstrap)
 
     return 0
 
