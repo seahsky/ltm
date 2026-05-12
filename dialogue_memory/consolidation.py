@@ -77,6 +77,10 @@ class DialogueConsolidation:
 
         return total, breakdown
 
+    # Weight applied to R for embodied records whose episode_success metadata
+    # is False. Successful and absent (dialogue path) keep weight 1.0.
+    FAILED_EPISODE_RELEVANCE_WEIGHT = 0.25
+
     def _compute_relevance(self, segment: DialogueSegment) -> float:
         """
         计算信息丰富度 (Relevance)
@@ -85,6 +89,9 @@ class DialogueConsolidation:
         1. 对话长度
         2. 是否包含个人信息
         3. 是否是关键问题
+        4. (embodied only) episode_success — failed episodes get a R multiplier
+           of FAILED_EPISODE_RELEVANCE_WEIGHT. Missing metadata defaults to 1.0
+           so the dialogue path is unchanged.
         """
         text = f"{segment.utterance} {segment.response or ''}"
 
@@ -106,6 +113,10 @@ class DialogueConsolidation:
         question_score = min(question_score, 0.5)
 
         score = 0.4 * length_score + 0.4 * personal_score + 0.2 * question_score
+
+        meta = segment.metadata or {}
+        if "episode_success" in meta and not bool(meta.get("episode_success")):
+            score *= self.FAILED_EPISODE_RELEVANCE_WEIGHT
 
         # 更新历史
         self.info_richness_history.append(score)
