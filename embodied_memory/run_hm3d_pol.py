@@ -59,6 +59,22 @@ def _build_text_encoder(name: str):
 # ----------------------------------------------------------------------
 
 
+_VALID_SPLITS = ("val_mini", "val", "train")
+
+
+def _resolve_episodes_path_for_split(split: str) -> Optional[str]:
+    """Canonical HM3D-ObjectNav layout for a given split. Returns the first
+    existing candidate or None if no dataset is on disk."""
+    candidates = [
+        f"data/hm3d/datasets/objectnav/hm3d/v1/{split}/{split}.json.gz",
+        f"data/datasets/objectnav/hm3d/v1/{split}/{split}.json.gz",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def _build_source(args):
     if args.mode == "cached":
         from .cached_source import CachedEpisodeSource, write_synthetic_bundle
@@ -81,15 +97,28 @@ def _build_source(args):
     if target is None or str(target).strip().lower() in {"", "any", "all"}:
         target = None
 
+    # Resolve effective episodes path. Precedence:
+    #   1. explicit --episodes-path  (legacy override)
+    #   2. canonical layout for --split  (Phase 2)
+    #   3. habitat_env's _default_episodes_path  (prefers val_mini, then val)
+    effective_ep_path = args.episodes_path
+    if not effective_ep_path and args.split:
+        effective_ep_path = _resolve_episodes_path_for_split(args.split)
+        if not effective_ep_path:
+            raise RuntimeError(
+                f"--split {args.split} requested but no dataset found at "
+                f"data/hm3d/datasets/objectnav/hm3d/v1/{args.split}/{args.split}.json.gz"
+            )
+
     # `--scene` accepts:
     #   - a single id (legacy):   "00800-TEEsavR23oF"
     #   - comma-separated list:   "00800-TEEsavR23oF,00802-wcojb4TFT35"
     #   - "all" / "minival":      auto-discover from episodes content dir
-    scenes: List[str] = _resolve_scene_list(args.scene, args.episodes_path)
+    scenes: List[str] = _resolve_scene_list(args.scene, effective_ep_path)
     return HabitatObjectNavSource(
         scene_id=scenes if len(scenes) > 1 else scenes[0],
         scene_dataset_path=args.scene_dataset_path,
-        episodes_path=args.episodes_path,
+        episodes_path=effective_ep_path,
         n_episodes=args.n_episodes,
         max_steps=args.max_steps,
         target_category=target,
@@ -134,7 +163,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--scene", type=str, default=None,
                         help="HM3D scene id (live mode)")
     parser.add_argument("--scene-dataset-path", type=str, default=None)
-    parser.add_argument("--episodes-path", type=str, default=None)
+    parser.add_argument("--episodes-path", type=str, default=None,
+                        help="Explicit override; if set, --split is ignored.")
+    parser.add_argument("--split", type=str, default="val_mini",
+                        choices=list(_VALID_SPLITS),
+                        help="HM3D-ObjectNav split to load (default: val_mini). "
+                             "Resolves to data/hm3d/datasets/objectnav/hm3d/v1/<split>/<split>.json.gz.")
     parser.add_argument("--cached-bundle", type=str, default=None)
     parser.add_argument("--n-episodes", type=int, default=5)
     parser.add_argument("--target", type=str, default="chair")
