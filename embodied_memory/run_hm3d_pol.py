@@ -34,6 +34,7 @@ from .episode_runner import EpisodeRunner
 from .frontier_planner import FrontierPlanner
 from .memory_bridge import EmbodiedMemoryBridge
 from .perception import CLIPKeyframeEncoder, SemanticCaptioner
+from .remembr_backbone import ReMEmbRBuilder, ReMEmbRConfig, ReMEmbRPlanner
 
 
 # ----------------------------------------------------------------------
@@ -195,6 +196,13 @@ def main(argv: Optional[list] = None) -> int:
                         help="Skip consolidation, coarse seeding, and LTM retrieval (overrides --setting).")
     parser.add_argument("--disable-rerank", action="store_true",
                         help="Pass through the planner's raw top-1 instead of running the reranker (overrides --setting).")
+    parser.add_argument("--backbone", type=str, default="frontier",
+                        choices=["frontier", "remembr"],
+                        help="Primary candidate generator. 'frontier' uses the "
+                             "Phase-1 CLIP+occupancy-grid stand-in (default). "
+                             "'remembr' uses a local VLM captioner + LLM agent "
+                             "planner; falls back to deterministic stubs when "
+                             "model weights are unavailable.")
 
     args = parser.parse_args(argv)
 
@@ -266,7 +274,20 @@ def main(argv: Optional[list] = None) -> int:
         f"disable_rerank={disable_rerank}"
     )
 
-    # 5. source + runner.
+    # 5. ReMEmbR backbone (only constructed when requested). Uses the CLIP
+    # text encoder for caption-embedding indexing so retrievals live in the
+    # same joint space as the LTM's coarse-layer category priors.
+    remembr_builder: Optional[ReMEmbRBuilder] = None
+    remembr_planner: Optional[ReMEmbRPlanner] = None
+    if args.backbone == "remembr":
+        rmb_cfg = ReMEmbRConfig()
+        remembr_builder = ReMEmbRBuilder(
+            config=rmb_cfg,
+            text_embed_fn=clip_encoder.encode_text,
+        )
+        remembr_planner = ReMEmbRPlanner(builder=remembr_builder, config=rmb_cfg)
+
+    # 6. source + runner.
     source = _build_source(args)
     runner = EpisodeRunner(
         source=source,
@@ -283,7 +304,11 @@ def main(argv: Optional[list] = None) -> int:
             "disable_stm": disable_stm,
             "disable_ltm": disable_ltm,
             "disable_rerank": disable_rerank,
+            "backbone": args.backbone,
         },
+        backbone=args.backbone,
+        remembr_builder=remembr_builder,
+        remembr_planner=remembr_planner,
     )
 
     summary = runner.run(args.n_episodes)

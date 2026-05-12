@@ -34,6 +34,7 @@ from .frontier_planner import (
 )
 from .memory_bridge import EmbodiedMemoryBridge
 from .perception import CLIPKeyframeEncoder, Keyframe, SemanticCaptioner
+from .remembr_backbone import ReMEmbRBuilder, ReMEmbRPlanner
 
 
 @dataclass
@@ -89,6 +90,9 @@ class EpisodeRunner:
         keyframe_every_m: int = 5,
         max_steps_per_episode: int = 250,
         run_config: Optional[Dict[str, Any]] = None,
+        backbone: str = "frontier",
+        remembr_builder: Optional[ReMEmbRBuilder] = None,
+        remembr_planner: Optional[ReMEmbRPlanner] = None,
     ):
         self.source = source
         self.planner = planner
@@ -100,6 +104,15 @@ class EpisodeRunner:
         self.keyframe_every_m = keyframe_every_m
         self.max_steps_per_episode = max_steps_per_episode
         self.run_config = dict(run_config or {})
+        if backbone not in ("frontier", "remembr"):
+            raise ValueError(f"backbone must be 'frontier' or 'remembr'; got {backbone!r}")
+        self.backbone = backbone
+        # ReMEmbR pair is required for backbone='remembr' but optional otherwise
+        # so the frontier-only path keeps its constructor signature simple.
+        if backbone == "remembr" and (remembr_builder is None or remembr_planner is None):
+            raise ValueError("backbone='remembr' requires remembr_builder and remembr_planner")
+        self.remembr_builder = remembr_builder
+        self.remembr_planner = remembr_planner
 
         os.makedirs(out_dir, exist_ok=True)
 
@@ -198,13 +211,21 @@ class EpisodeRunner:
         stm_captions.append(keyframe.caption)
         ep_log["steps"].append(self._serialize_step(step, keyframe))
 
+        # Reset ReMEmbR per-episode state and index the initial keyframe.
+        if self.backbone == "remembr":
+            self.remembr_builder.reset()
+            self.remembr_planner.reset()
+            self.remembr_builder.caption_and_index(
+                rgb=step.rgb,
+                agent_position=step.agent_state.position,
+                timestep=int(step.step_idx),
+            )
+
         # Loop.
         for t in range(1, self.max_steps_per_episode):
             # Decide whether to re-plan.
             if self.planner.is_decision_step() or current_candidate is None:
-                cands = self.planner.propose(
-                    step.agent_state.position, step.agent_state.rotation_yaw
-                )
+                cands = self._propose_candidates(step, ep)
                 if cands:
                     # raw_top1 is the planner's pick BEFORE memory injection,
                     # so the disagreement counter measures "did rerank+memory
@@ -312,6 +333,13 @@ class EpisodeRunner:
                 )
                 stm_captions.append(keyframe.caption)
                 ep_log["steps"].append(self._serialize_step(step, keyframe))
+                # ReMEmbR build phase: per-keyframe caption + flat-memory write.
+                if self.backbone == "remembr":
+                    self.remembr_builder.caption_and_index(
+                        rgb=step.rgb,
+                        agent_position=step.agent_state.position,
+                        timestep=int(step.step_idx),
+                    )
 
             if step.done:
                 break
@@ -361,6 +389,26 @@ class EpisodeRunner:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    def _propose_candidates(self, step: Step, ep) -> List[FrontierCandidate]:
+        """Dispatch primary candidate generation by backbone.
+
+        ``frontier`` uses the Phase-1 stand-in (depth → occupancy grid →
+        frontier clusters). ``remembr`` queries the ReMEmbR builder's flat
+        memory through the LLM agent loop in ``ReMEmbRPlanner``. Memory
+        injection from ``EmbodiedMemoryBridge.propose_memory_candidates`` is
+        layered on identically in both branches by the caller.
+        """
+        if self.backbone == "frontier":
+            return self.planner.propose(
+                step.agent_state.position, step.agent_state.rotation_yaw
+            )
+        # remembr
+        return self.remembr_planner.propose(
+            goal=ep.target_category or self.target_category,
+            agent_pose=step.agent_state.position,
+            agent_yaw=step.agent_state.rotation_yaw,
+        )
 
     def _build_keyframe(self, step: Step) -> Keyframe:
         # Cached mode may have already produced a caption + embeddings.
