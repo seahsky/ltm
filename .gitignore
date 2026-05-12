@@ -60,9 +60,14 @@ outputs/
 checkpoints/
 # Local model weights (VILA / LLaVA / Mistral / Llama) for ReMEmbR backbone.
 # Track only the README + download scripts inside models/.
+# Un-ignoring a file inside an ignored directory requires un-ignoring the
+# parent directory first, then re-ignoring its contents, then re-allowing
+# the specific file — git's negation rules don't descend into ignored dirs.
 models/*
 !models/README.md
 !models/download_remembr_models.py
+!models/embodied/
+models/embodied/*
 !models/embodied/.gitkeep
 wandb/
 mlruns/
