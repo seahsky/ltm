@@ -186,10 +186,15 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--no-strict-pass", action="store_true",
                         help="Always exit 0 (don't fail on pass-condition misses)")
     parser.add_argument("--setting", type=int, choices=[1, 2, 3], default=None,
-                        help="Ablation preset: "
-                             "1 = memory-off baseline (STM/LTM/rerank all disabled), "
-                             "2 = STM only (LTM + rerank disabled), "
-                             "3 = full system (default).")
+                        help="Ablation preset (semantics depend on --backbone):\n"
+                             "  --backbone frontier:\n"
+                             "    1 = memory-off baseline (STM/LTM/rerank all disabled);\n"
+                             "    2 = STM only (LTM + rerank disabled);\n"
+                             "    3 = full hierarchical LTM + memory-injected candidates + rerank.\n"
+                             "  --backbone remembr:\n"
+                             "    1 = vanilla ReMEmbR (flat memory only; hierarchical LTM + rerank off);\n"
+                             "    2 = + STM consolidation into hierarchical LTM (rerank still off);\n"
+                             "    3 = + memory-injected candidates + reranking on top of ReMEmbR.")
     parser.add_argument("--disable-stm", action="store_true",
                         help="Skip per-episode keyframe buffering (overrides --setting).")
     parser.add_argument("--disable-ltm", action="store_true",
@@ -269,9 +274,9 @@ def main(argv: Optional[list] = None) -> int:
         clip_encoder=clip_encoder,
     )
     print(
-        f"[run_hm3d_pol] ablation: setting={resolved_setting} "
-        f"disable_stm={disable_stm} disable_ltm={disable_ltm} "
-        f"disable_rerank={disable_rerank}"
+        f"[run_hm3d_pol] ablation: backbone={args.backbone} "
+        f"setting={resolved_setting} disable_stm={disable_stm} "
+        f"disable_ltm={disable_ltm} disable_rerank={disable_rerank}"
     )
 
     # 5. ReMEmbR backbone (only constructed when requested). Uses the CLIP
