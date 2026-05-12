@@ -208,6 +208,12 @@ def main(argv: Optional[list] = None) -> int:
                              "'remembr' uses a local VLM captioner + LLM agent "
                              "planner; falls back to deterministic stubs when "
                              "model weights are unavailable.")
+    parser.add_argument("--affordance-from-runs", type=str, nargs="+", default=None,
+                        help="Build a per-(category, room) success-rate table "
+                             "from prior runs/<dir>/ JSONs and condition coarse-"
+                             "layer prompts on the most-successful room per "
+                             "category. Empty/zero rates fall back to the "
+                             "category-only prompt.")
 
     args = parser.parse_args(argv)
 
@@ -261,6 +267,20 @@ def main(argv: Optional[list] = None) -> int:
         "chair", "sofa", "couch", "bed", "table", "tv_monitor", "toilet",
         "plant", "sink", "refrigerator",
     ]
+    # Optional: build the affordance table before constructing the bridge so
+    # _seed_coarse can condition coarse-layer prompts on the top success room.
+    affordance_table = None
+    if args.affordance_from_runs:
+        affordance_table = EmbodiedMemoryBridge.build_affordance_table(
+            run_dirs=list(args.affordance_from_runs),
+        )
+        n_pairs = sum(len(v) for v in affordance_table.values())
+        print(
+            f"[run_hm3d_pol] affordance table: "
+            f"{len(affordance_table)} categories, {n_pairs} (cat, room) pairs "
+            f"from {len(args.affordance_from_runs)} run dir(s)"
+        )
+
     bridge = EmbodiedMemoryBridge(
         text_embed_dim=text_dim,
         visual_embed_dim=clip_encoder.embed_dim,
@@ -272,6 +292,7 @@ def main(argv: Optional[list] = None) -> int:
         disable_ltm=disable_ltm,
         disable_rerank=disable_rerank,
         clip_encoder=clip_encoder,
+        affordance_table=affordance_table,
     )
     print(
         f"[run_hm3d_pol] ablation: backbone={args.backbone} "

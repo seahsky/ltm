@@ -191,6 +191,7 @@ class EmbodiedMemoryBridge:
         disable_ltm: bool = False,
         disable_rerank: bool = False,
         clip_encoder: Optional[Any] = None,
+        affordance_table: Optional[Dict[str, Dict[str, float]]] = None,
     ):
         if text_encode_fn is None:
             raise ValueError("text_encode_fn (str -> np.ndarray) is required")
@@ -298,6 +299,11 @@ class EmbodiedMemoryBridge:
             "ltm_coarse": False,
             "rerank": False,
         }
+
+        # Stash the affordance table (may be None). Picked up by _seed_coarse
+        # to condition prompts on the most-successful room for each category,
+        # and exposed via stats() so analyzer scripts can confirm it loaded.
+        self.affordance_table: Dict[str, Dict[str, float]] = dict(affordance_table or {})
 
         # Seed coarse layer once with HM3D-Semantics object categories. Skipped
         # when disable_ltm=True so Setting 1 starts with an empty LTM stack
@@ -476,21 +482,111 @@ class EmbodiedMemoryBridge:
         {category}"`` so a goal-directed retrieval query at decision time
         (also CLIP-text-encoded) can match these priors against past visual
         keyframes that captured the category.
+
+        Phase 2 (affordance learning): if ``self.affordance_table`` carries
+        per-(category, room-type) success rates from prior runs, we condition
+        the prompt on the most-successful room — e.g.
+        ``"a photo of a chair in a living_room"`` — and record the empirical
+        success rate in metadata. Without a table we fall back to the
+        category-only prompt, so the legacy behaviour is preserved.
         """
         for cat in categories:
+            best_room: Optional[str] = None
+            best_rate: Optional[float] = None
+            cat_table = self.affordance_table.get(cat) or {}
+            if cat_table:
+                best_room, best_rate = max(cat_table.items(), key=lambda kv: kv[1])
+
+            # Only condition the prompt on a room when we have *positive*
+            # success evidence for that pairing — otherwise we'd be biasing
+            # the prior toward places the agent already failed.
+            has_evidence = bool(best_room) and (best_rate or 0.0) > 0.0
             if self.clip_encoder is not None:
-                prompt = f"a photo of a {cat}"
+                if has_evidence:
+                    prompt = f"a photo of a {cat} in a {best_room.replace('_', ' ')}"
+                else:
+                    prompt = f"a photo of a {cat}"
             else:
-                prompt = f"category prior: agent searches for a {cat}"
+                if has_evidence:
+                    prompt = f"category prior: agent searches for a {cat} (typically in {best_room})"
+                else:
+                    prompt = f"category prior: agent searches for a {cat}"
             emb = self._ltm_encode_text(prompt).astype(np.float32)
+            meta: Dict[str, Any] = {"type": "category_prior", "category": cat}
+            if best_room is not None:
+                meta["preferred_room"] = best_room
+                meta["success_rate"] = float(best_rate or 0.0)
+                meta["room_distribution"] = dict(cat_table)
             self.ltm.insert(
                 level="coarse",
                 embedding=emb,
                 content=prompt,
-                metadata={"type": "category_prior", "category": cat},
+                metadata=meta,
             )
         if len(self.ltm.coarse):
             self.modules_invoked["ltm_coarse"] = True
+
+    @staticmethod
+    def build_affordance_table(
+        run_dirs: List[str],
+        room_resolver: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+        min_episodes_per_pair: int = 1,
+    ) -> Dict[str, Dict[str, float]]:
+        """Aggregate ``runs/<dir>/episode_*.json`` into a per-(category,
+        room-type) success-rate table.
+
+        ``room_resolver`` maps an episode dict to a room-type string. When
+        not supplied we default to ``episode["scene_id"]`` as a stand-in —
+        HM3D-Semantics doesn't expose room types in the ObjectNav JSON, so
+        the scene id is the next-best grouping until a proper resolver
+        (e.g. nearest-region from the scene's region annotations) is wired.
+
+        ``min_episodes_per_pair``: drop (cat, room) bins seen fewer than N
+        times so the table doesn't memorize one-off lucky/unlucky runs.
+
+        Note: Phase-1 runs have zero successes, so the table will be all
+        zeros until a working backbone (i.e. ReMEmbR) closes the
+        success-rate gap. The plumbing is still useful — the prompt
+        conditioning generalizes once non-zero rates appear, and the
+        resulting CLIP-text prompts (e.g. "a photo of a chair in a
+        living room") are themselves better priors than the bare
+        category form.
+        """
+        import glob
+        import json
+        import os as _os
+
+        counts: Dict[str, Dict[str, List[int]]] = {}  # cat -> room -> [success, total]
+        for run in run_dirs:
+            for ep_path in sorted(glob.glob(_os.path.join(run, "episode_*.json"))):
+                if ep_path.endswith("_error.json"):
+                    continue
+                try:
+                    with open(ep_path, "r", encoding="utf-8") as f:
+                        ep = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    continue
+                cat = ep.get("target_category")
+                if cat is None:
+                    continue
+                cat = str(cat).strip().lower()
+                room = room_resolver(ep) if room_resolver else ep.get("scene_id")
+                if room is None:
+                    continue
+                room = str(room)
+                success = bool(ep.get("success", False))
+                buf = counts.setdefault(cat, {}).setdefault(room, [0, 0])
+                buf[0] += 1 if success else 0
+                buf[1] += 1
+
+        table: Dict[str, Dict[str, float]] = {}
+        for cat, rooms in counts.items():
+            for room, (succ, total) in rooms.items():
+                if total < min_episodes_per_pair:
+                    continue
+                rate = succ / total if total else 0.0
+                table.setdefault(cat, {})[room] = float(rate)
+        return table
 
     # ------------------------------------------------------------------
     # Retrieval + reranking
@@ -825,4 +921,6 @@ class EmbodiedMemoryBridge:
                 "disable_ltm": self.disable_ltm,
                 "disable_rerank": self.disable_rerank,
             },
+            "affordance_table_size": sum(len(v) for v in self.affordance_table.values()),
+            "affordance_categories": sorted(self.affordance_table.keys()),
         }
