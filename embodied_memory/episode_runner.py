@@ -45,9 +45,14 @@ class RunSummary:
     rerank_calls: int = 0
     rerank_disagreements: int = 0     # top-1 reranked != raw planner top-1
     retrieval_hits: int = 0           # rerank calls that retrieved >= 1 LTM record
+    n_memory_candidates: int = 0      # total LTM-injected candidates surfaced
+    n_memory_chosen: int = 0          # decisions where reranker picked a memory candidate
+    n_keyframes_observed: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
+    ablation: Dict[str, Any] = field(default_factory=dict)
     pass_conditions: Dict[str, bool] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    episodes: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -58,9 +63,14 @@ class RunSummary:
             "rerank_calls": self.rerank_calls,
             "rerank_disagreements": self.rerank_disagreements,
             "retrieval_hits": self.retrieval_hits,
+            "n_memory_candidates": self.n_memory_candidates,
+            "n_memory_chosen": self.n_memory_chosen,
+            "n_keyframes_observed": self.n_keyframes_observed,
             "modules_invoked": self.modules_invoked,
+            "ablation": self.ablation,
             "pass_conditions": self.pass_conditions,
             "notes": self.notes,
+            "episodes": self.episodes,
         }
 
 
@@ -78,6 +88,7 @@ class EpisodeRunner:
         target_category: str = "chair",
         keyframe_every_m: int = 5,
         max_steps_per_episode: int = 250,
+        run_config: Optional[Dict[str, Any]] = None,
     ):
         self.source = source
         self.planner = planner
@@ -88,6 +99,7 @@ class EpisodeRunner:
         self.target_category = target_category
         self.keyframe_every_m = keyframe_every_m
         self.max_steps_per_episode = max_steps_per_episode
+        self.run_config = dict(run_config or {})
 
         os.makedirs(out_dir, exist_ok=True)
 
@@ -117,11 +129,36 @@ class EpisodeRunner:
             summary.rerank_calls += int(ep_metrics.get("rerank_calls", 0))
             summary.rerank_disagreements += int(ep_metrics.get("rerank_disagreements", 0))
             summary.retrieval_hits += int(ep_metrics.get("retrieval_hits", 0))
+            summary.n_memory_candidates += int(ep_metrics.get("n_memory_candidates", 0))
+            summary.n_memory_chosen += int(ep_metrics.get("n_memory_chosen", 0))
+            # Per-episode row used by analyze_ablation.py to pair runs.
+            summary.episodes.append({
+                "episode_idx": ep_idx,
+                "episode_id": ep_log.get("episode_id"),
+                "scene_id": ep_log.get("scene_id"),
+                "target_category": ep_log.get("target_category"),
+                "success": bool(ep_metrics.get("success", False)),
+                "spl": float(ep_metrics.get("spl", 0.0)),
+                "soft_spl": float(ep_metrics.get("soft_spl", 0.0)),
+                "n_steps": int(ep_log.get("n_steps", 0)),
+                "rerank_calls": int(ep_metrics.get("rerank_calls", 0)),
+                "rerank_disagreements": int(ep_metrics.get("rerank_disagreements", 0)),
+                "retrieval_hits": int(ep_metrics.get("retrieval_hits", 0)),
+                "n_memory_candidates": int(ep_metrics.get("n_memory_candidates", 0)),
+                "n_memory_chosen": int(ep_metrics.get("n_memory_chosen", 0)),
+                "distance_to_goal": ep_metrics.get("distance_to_goal"),
+            })
 
         # Finalize summary.
         bridge_stats = self.bridge.stats()
         summary.ltm_counts_final = bridge_stats["ltm_counts"]
         summary.modules_invoked = bridge_stats["modules_invoked"]
+        summary.n_keyframes_observed = int(bridge_stats.get("n_keyframes_observed", 0))
+        summary.ablation = {
+            **bridge_stats.get("ablation", {}),
+            **{k: v for k, v in self.run_config.items() if k not in {"setting"}},
+            "setting": self.run_config.get("setting"),
+        }
         summary.pass_conditions = self._evaluate_pass_conditions(summary)
 
         self._dump_json(os.path.join(self.out_dir, "summary.json"), summary.to_dict())
@@ -134,7 +171,7 @@ class EpisodeRunner:
     def _run_episode(self, ep_idx: int):
         step, ep = self.source.reset(ep_idx)
         self.planner.reset()
-        self.bridge.begin_episode(ep.episode_id)
+        self.bridge.begin_episode(ep.episode_id, scene_id=ep.scene_id)
 
         ep_log: Dict[str, Any] = {
             "episode_idx": ep_idx,
@@ -149,6 +186,8 @@ class EpisodeRunner:
         rerank_calls = 0
         rerank_disagreements = 0
         retrieval_hits = 0
+        n_memory_candidates = 0
+        n_memory_chosen = 0
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
 
@@ -167,21 +206,45 @@ class EpisodeRunner:
                     step.agent_state.position, step.agent_state.rotation_yaw
                 )
                 if cands:
+                    # raw_top1 is the planner's pick BEFORE memory injection,
+                    # so the disagreement counter measures "did rerank+memory
+                    # change the action vs vanilla planner top-1?".
                     raw_top1 = cands[0]
+
+                    # Option-2: extend the candidate pool with LTM-derived
+                    # waypoints (locations of past observations that look like
+                    # the target category in CLIP joint space). Scene-filtered
+                    # and de-duped vs planner candidates inside the bridge.
+                    mem_cands = self.bridge.propose_memory_candidates(
+                        agent_pos=step.agent_state.position,
+                        agent_yaw=step.agent_state.rotation_yaw,
+                        target_category=ep.target_category,
+                        planner_world_xys=[c.world_xy for c in cands],
+                        top_k=3,
+                    )
+                    # Assign fresh, non-clashing ids before merging.
+                    for i, mc in enumerate(mem_cands):
+                        mc.candidate_id = len(cands) + i + 1000  # offset so logs are unambiguous
+                    all_cands = cands + mem_cands
+                    n_memory_candidates += len(mem_cands)
+
                     rerank_result, retrieval = self.bridge.rerank(
-                        candidates=cands,
+                        candidates=all_cands,
                         query_text=keyframe.caption,
                         stm_captions=stm_captions[-5:],
+                        target_category=ep.target_category,
+                        query_visual_embedding=keyframe.visual_embedding,
                     )
                     rerank_calls += 1
                     if any(len(v) > 0 for v in retrieval.values()):
                         retrieval_hits += 1
 
-                    # Map reranker's chosen text back to its FrontierCandidate.
-                    chosen_idx = self._chosen_candidate_index(rerank_result, cands)
-                    chosen = cands[chosen_idx]
+                    chosen_idx = self._chosen_candidate_index(rerank_result, all_cands)
+                    chosen = all_cands[chosen_idx]
                     if chosen.candidate_id != raw_top1.candidate_id:
                         rerank_disagreements += 1
+                    if chosen.source == "memory":
+                        n_memory_chosen += 1
                     current_candidate = chosen
 
                     ep_log["decisions"].append({
@@ -191,8 +254,11 @@ class EpisodeRunner:
                         "raw_top1_score": float(raw_top1.raw_score),
                         "chosen_id": int(chosen.candidate_id),
                         "chosen_world_xy": chosen.world_xy.tolist(),
+                        "chosen_source": str(chosen.source),
                         "chosen_final_score": float(rerank_result.selected.final_score)
                         if rerank_result.selected else None,
+                        "n_planner_candidates": len(cands),
+                        "n_memory_candidates": len(mem_cands),
                         "candidates": [
                             {
                                 "id": int(c.candidate_id),
@@ -201,8 +267,9 @@ class EpisodeRunner:
                                 "bearing_rad": float(c.bearing_rad),
                                 "cluster_size": int(c.cluster_size),
                                 "raw_score": float(c.raw_score),
+                                "source": str(c.source),
                             }
-                            for c in cands
+                            for c in all_cands
                         ],
                         "rerank_top": rerank_result.debug_info["top_scores"],
                         "retrieval_counts": {k: len(v) for k, v in retrieval.items()},
@@ -253,7 +320,11 @@ class EpisodeRunner:
         success = bool(step.info.get("success", False)) or bool(
             step.info.get("distance_to_goal", 1e9) < 0.1
         )
+        spl = float(step.info.get("spl", 1.0 if success else 0.0))
+        soft_spl = float(step.info.get("softspl", step.info.get("soft_spl", spl)))
+        distance_to_goal = step.info.get("distance_to_goal")
         ep.success = success
+        ep.spl = spl
 
         # Stamp success on the most-recent observed keyframe so the segment
         # the consolidator sees can be flagged successful.
@@ -265,16 +336,26 @@ class EpisodeRunner:
         ep_log["finished_at"] = time.time()
         ep_log["n_steps"] = int(step.step_idx)
         ep_log["success"] = success
+        ep_log["spl"] = spl
+        ep_log["soft_spl"] = soft_spl
+        ep_log["distance_to_goal"] = distance_to_goal
         ep_log["rerank_calls"] = rerank_calls
         ep_log["rerank_disagreements"] = rerank_disagreements
         ep_log["retrieval_hits"] = retrieval_hits
+        ep_log["n_memory_candidates"] = n_memory_candidates
+        ep_log["n_memory_chosen"] = n_memory_chosen
         ep_log["bridge_stats_after"] = self.bridge.stats()
 
         return ep_log, {
             "success": success,
+            "spl": spl,
+            "soft_spl": soft_spl,
+            "distance_to_goal": distance_to_goal,
             "rerank_calls": rerank_calls,
             "rerank_disagreements": rerank_disagreements,
             "retrieval_hits": retrieval_hits,
+            "n_memory_candidates": n_memory_candidates,
+            "n_memory_chosen": n_memory_chosen,
         }
 
     # ------------------------------------------------------------------

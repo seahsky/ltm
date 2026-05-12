@@ -42,6 +42,7 @@ class FrontierCandidate:
     bearing_rad: float           # heading delta (relative to agent yaw)
     cluster_size: int            # how many frontier cells voted for this
     raw_score: float             # planner's intrinsic score (higher = better)
+    source: str = "planner"      # "planner" (frontier cluster) or "memory" (LTM-injected)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

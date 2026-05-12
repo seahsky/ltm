@@ -26,7 +26,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -74,15 +74,53 @@ def _build_source(args):
 
     # live mode
     from .habitat_env import HabitatObjectNavSource
+    # "any" / "" disables the target-category filter so we see every episode in
+    # the dataset (needed when the ablation wants to fill minival with all
+    # available episodes, not just chair-targets).
+    target = args.target
+    if target is None or str(target).strip().lower() in {"", "any", "all"}:
+        target = None
+
+    # `--scene` accepts:
+    #   - a single id (legacy):   "00800-TEEsavR23oF"
+    #   - comma-separated list:   "00800-TEEsavR23oF,00802-wcojb4TFT35"
+    #   - "all" / "minival":      auto-discover from episodes content dir
+    scenes: List[str] = _resolve_scene_list(args.scene, args.episodes_path)
     return HabitatObjectNavSource(
-        scene_id=args.scene,
+        scene_id=scenes if len(scenes) > 1 else scenes[0],
         scene_dataset_path=args.scene_dataset_path,
         episodes_path=args.episodes_path,
         n_episodes=args.n_episodes,
         max_steps=args.max_steps,
-        target_category=args.target,
+        target_category=target,
         image_hw=(args.image_hw, args.image_hw),
     )
+
+
+def _resolve_scene_list(scene_arg: str, episodes_path: Optional[str]) -> list:
+    """Expand the --scene argument into a list of scene ids habitat can load."""
+    if "," in scene_arg:
+        return [s.strip() for s in scene_arg.split(",") if s.strip()]
+    if scene_arg.lower() in {"all", "minival", "auto"}:
+        # Auto-discover from the episodes content/ directory adjacent to the
+        # dataset json.gz (matches habitat-lab's ObjectNav layout).
+        ep_path = episodes_path
+        if not ep_path:
+            from .habitat_env import HabitatObjectNavSource
+            ep_path = HabitatObjectNavSource._default_episodes_path()
+        if not ep_path:
+            raise RuntimeError("--scene all requested but no episodes dataset on disk")
+        content_dir = os.path.join(os.path.dirname(ep_path), "content")
+        if not os.path.isdir(content_dir):
+            raise RuntimeError(f"--scene all requires {content_dir} to exist")
+        scenes = sorted(
+            os.path.splitext(os.path.splitext(f)[0])[0]
+            for f in os.listdir(content_dir) if f.endswith(".json.gz")
+        )
+        if not scenes:
+            raise RuntimeError(f"--scene all found no .json.gz files in {content_dir}")
+        return scenes
+    return [scene_arg]
 
 
 # ----------------------------------------------------------------------
@@ -112,11 +150,47 @@ def main(argv: Optional[list] = None) -> int:
                         help="Override CLIP device (mps / cpu / cuda)")
     parser.add_argument("--no-strict-pass", action="store_true",
                         help="Always exit 0 (don't fail on pass-condition misses)")
+    parser.add_argument("--setting", type=int, choices=[1, 2, 3], default=None,
+                        help="Ablation preset: "
+                             "1 = memory-off baseline (STM/LTM/rerank all disabled), "
+                             "2 = STM only (LTM + rerank disabled), "
+                             "3 = full system (default).")
+    parser.add_argument("--disable-stm", action="store_true",
+                        help="Skip per-episode keyframe buffering (overrides --setting).")
+    parser.add_argument("--disable-ltm", action="store_true",
+                        help="Skip consolidation, coarse seeding, and LTM retrieval (overrides --setting).")
+    parser.add_argument("--disable-rerank", action="store_true",
+                        help="Pass through the planner's raw top-1 instead of running the reranker (overrides --setting).")
 
     args = parser.parse_args(argv)
 
     if args.mode == "live" and not args.scene:
         parser.error("--scene is required in live mode")
+
+    # Resolve ablation toggles. --setting picks a preset; explicit per-toggle
+    # flags can additionally disable a module on top of the preset (so e.g.
+    # --setting 2 --disable-rerank is the same as --setting 2; and
+    # --disable-rerank alone leaves STM + consolidation on).
+    setting_presets = {
+        1: (True, True, True),
+        2: (False, True, True),
+        3: (False, False, False),
+    }
+    if args.setting is not None:
+        s_stm, s_ltm, s_rerank = setting_presets[args.setting]
+    else:
+        s_stm = s_ltm = s_rerank = False
+    disable_stm = bool(s_stm or args.disable_stm)
+    disable_ltm = bool(s_ltm or args.disable_ltm)
+    disable_rerank = bool(s_rerank or args.disable_rerank)
+
+    # Canonical setting label for the summary if the resolved combo matches a
+    # preset; otherwise None (custom mix).
+    resolved_setting: Optional[int] = None
+    for k, v in setting_presets.items():
+        if v == (disable_stm, disable_ltm, disable_rerank):
+            resolved_setting = k
+            break
 
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"[run_hm3d_pol] mode={args.mode} out_dir={args.out_dir}")
@@ -147,6 +221,15 @@ def main(argv: Optional[list] = None) -> int:
         cluster_every_n_episodes=3,
         consolidation_top_k=5,
         coarse_seed_categories=seed_cats,
+        disable_stm=disable_stm,
+        disable_ltm=disable_ltm,
+        disable_rerank=disable_rerank,
+        clip_encoder=clip_encoder,
+    )
+    print(
+        f"[run_hm3d_pol] ablation: setting={resolved_setting} "
+        f"disable_stm={disable_stm} disable_ltm={disable_ltm} "
+        f"disable_rerank={disable_rerank}"
     )
 
     # 5. source + runner.
@@ -161,6 +244,12 @@ def main(argv: Optional[list] = None) -> int:
         target_category=args.target,
         keyframe_every_m=args.keyframe_every,
         max_steps_per_episode=args.max_steps,
+        run_config={
+            "setting": resolved_setting,
+            "disable_stm": disable_stm,
+            "disable_ltm": disable_ltm,
+            "disable_rerank": disable_rerank,
+        },
     )
 
     summary = runner.run(args.n_episodes)

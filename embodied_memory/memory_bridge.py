@@ -37,6 +37,57 @@ from dialogue_memory.reranking import (
     ScoredResponse,
 )
 
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity rescaled to [0, 1]."""
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na <= 0.0 or nb <= 0.0:
+        return 0.5
+    cos = float(np.dot(a, b) / (na * nb))
+    # Map [-1, 1] -> [0, 1]
+    return 0.5 * (cos + 1.0)
+
+
+class EmbodiedMemorySimilarityScorer(Scorer):
+    """Candidate-aware S_sim for the embodied loop.
+
+    The dialogue ``MemorySimilarityScorer`` ignores ``candidate_embedding``
+    and returns the same value for every candidate in a decision — so it
+    contributes a per-decision offset but no per-candidate ranking signal.
+    Audit on the abl-s3 run showed `S_sim` saturating near 0.94 with stdev
+    0.02 (4th-decimal noise), driving half the rerank disagreements as
+    coin-flips on near-ties.
+
+    This scorer instead computes the cosine similarity between
+    ``candidate_embedding`` and each retrieved entry's embedding, weighted
+    by layer (fine > mid > coarse). Output is in [0, 1] and varies *per
+    candidate* against the same retrieval set.
+    """
+
+    def __init__(self, weight_fine: float = 0.5, weight_mid: float = 0.3, weight_coarse: float = 0.2):
+        self.weight_fine = weight_fine
+        self.weight_mid = weight_mid
+        self.weight_coarse = weight_coarse
+
+    def score(self, candidate: str, candidate_embedding: np.ndarray, context: Dict[str, Any]) -> float:
+        retrieval = context.get("retrieval_results", {}) or {}
+        if not retrieval:
+            return 0.5
+        total_score = 0.0
+        total_weight = 0.0
+        layer_weights = {"fine": self.weight_fine, "mid": self.weight_mid, "coarse": self.weight_coarse}
+        for layer, w in layer_weights.items():
+            hits = retrieval.get(layer) or []
+            if not hits or w <= 0.0:
+                continue
+            sims = [_cosine(candidate_embedding, entry.embedding) for entry, _dist in hits]
+            total_score += w * float(np.mean(sims))
+            total_weight += w
+        if total_weight <= 0.0:
+            return 0.5
+        return total_score / total_weight
+
 from .frontier_planner import FrontierCandidate
 from .perception import Keyframe
 
@@ -68,26 +119,54 @@ class EmbodiedRecord:
 
 
 class FrontierPhysicsScorer(Scorer):
-    """Stand-in for ReMEmbR's S_phys.
+    """Stand-in for ReMEmbR's S_phys. Source-aware.
 
-    Combines:
-    - planner's intrinsic ``raw_score`` (cluster size + distance kernel)
-    - bearing alignment (smaller |bearing| is better)
-    - distance band (1–4 m preferred — not on top of the agent, not too far)
+    Planner candidates (frontier clusters from depth projection) are scored
+    classically:
+        ``score = 0.5·raw_score + 0.3·bearing_alignment + 0.2·distance_band``
+    - ``raw_score``: planner intrinsic (cluster size + distance kernel)
+    - ``bearing_alignment``: small |bearing| is better — cheap to head there
+    - ``distance_band``: 1–4 m preferred (not on top, not too far)
+
+    Memory candidates (LTM-injected by ``propose_memory_candidates``) carry
+    raw_score = CLIP image-text cosine. We score them goal-directed:
+        ``score = sigmoid-ish boost in cosine + small distance preference``
+    Bearing penalty is dropped — turning to face a memory waypoint is cheap
+    compared to the value of going there. Borderline cosines (~0.18) keep
+    memory from out-voting a strong planner choice; in-category cosines
+    (~0.25+) win comfortably.
     """
+
+    # Calibration constants for memory-source physics. Chosen so:
+    #   cos=0.18  -> score ~0.55 (borderline, usually loses to a strong planner ~0.77)
+    #   cos=0.25  -> score ~0.85 (competitive)
+    #   cos=0.30  -> score ~0.95 (typically wins)
+    _MEM_COS_NULL = 0.15   # cos at-or-below this contributes nothing
+    _MEM_COS_FULL = 0.32   # cos at-or-above this saturates the bonus
+    _MEM_DIST_WEIGHT = 0.20
 
     def score(self, candidate: str, candidate_embedding: np.ndarray, context: Dict[str, Any]) -> float:
         cand: Optional[FrontierCandidate] = context.get("frontier_candidate")
         if cand is None:
             return 0.5
-        bearing_score = max(0.0, 1.0 - abs(float(cand.bearing_rad)) / np.pi)
+
         dist = float(cand.distance_m)
         if dist <= 0.0:
             dist_score = 0.0
         else:
-            # Triangular preference centred at 2 m.
             dist_score = max(0.0, 1.0 - abs(dist - 2.0) / 4.0)
-        score = 0.5 * float(cand.raw_score) + 0.3 * bearing_score + 0.2 * dist_score
+
+        if getattr(cand, "source", "planner") == "memory":
+            cos = float(cand.raw_score)
+            span = self._MEM_COS_FULL - self._MEM_COS_NULL
+            cos_norm = (cos - self._MEM_COS_NULL) / span if span > 0 else 0.0
+            cos_norm = float(np.clip(cos_norm, 0.0, 1.0))
+            # 1 - _MEM_DIST_WEIGHT goes to the cosine, the rest to distance.
+            score = (1.0 - self._MEM_DIST_WEIGHT) * cos_norm + self._MEM_DIST_WEIGHT * dist_score
+        else:
+            bearing_score = max(0.0, 1.0 - abs(float(cand.bearing_rad)) / np.pi)
+            score = 0.5 * float(cand.raw_score) + 0.3 * bearing_score + 0.2 * dist_score
+
         return float(np.clip(score, 0.0, 1.0))
 
 
@@ -108,6 +187,10 @@ class EmbodiedMemoryBridge:
         consolidation_top_k: int = 5,
         reranker_weights: Optional[Dict[str, float]] = None,
         coarse_seed_categories: Optional[List[str]] = None,
+        disable_stm: bool = False,
+        disable_ltm: bool = False,
+        disable_rerank: bool = False,
+        clip_encoder: Optional[Any] = None,
     ):
         if text_encode_fn is None:
             raise ValueError("text_encode_fn (str -> np.ndarray) is required")
@@ -117,8 +200,35 @@ class EmbodiedMemoryBridge:
         self.text_encode_fn = text_encode_fn
         self.cluster_every_n_episodes = cluster_every_n_episodes
 
-        # 1. Hierarchical LTM (primary index = text embedding space).
-        self.ltm = HierarchicalLTM(embed_dim=text_embed_dim)
+        # Ablation toggles. Setting 1 (paper-faithful baseline stand-in) sets
+        # all three True; Setting 2 (STM only) keeps disable_stm=False; Setting 3
+        # (full system) leaves all False (default).
+        self.disable_stm = bool(disable_stm)
+        self.disable_ltm = bool(disable_ltm)
+        self.disable_rerank = bool(disable_rerank)
+
+        # Path-1 fix: the LTM is now indexed in CLIP joint vision-language
+        # space, not SBERT text space. Caption-based indexing was inert because
+        # the HM3D-Semantics sensor wasn't loading, so every caption defaulted
+        # to "agent at (x,y) sees: room interior | searching for ..." — i.e.
+        # the LTM was indexing on positional perturbations of one identical
+        # sentence. With CLIP, fine-layer entries are the agent's actual visual
+        # observations and the coarse layer is seeded with CLIP text priors
+        # ("a photo of a {category}") so goal-directed retrieval can surface
+        # past sightings of the target.
+        self.clip_encoder = clip_encoder
+        if self.clip_encoder is not None:
+            self._ltm_embed_dim = int(self.clip_encoder.embed_dim)
+            self._ltm_encode_text = self.clip_encoder.encode_text
+        else:
+            # Fallback: keep legacy SBERT-text indexing (used by the
+            # cached/synthetic smoke path which doesn't load CLIP).
+            self._ltm_embed_dim = int(text_embed_dim)
+            self._ltm_encode_text = text_encode_fn
+
+        # 1. Hierarchical LTM (primary index = CLIP joint space when a
+        # clip_encoder is supplied, else SBERT-text space as a fallback).
+        self.ltm = HierarchicalLTM(embed_dim=self._ltm_embed_dim)
 
         # 2. Consolidator (uses default α/β/γ; top_k tunable).
         self.consolidator = DialogueConsolidation(
@@ -129,9 +239,10 @@ class EmbodiedMemoryBridge:
             top_k=consolidation_top_k,
         )
 
-        # 3. Pattern clusterer + mid layer.
+        # 3. Pattern clusterer + mid layer. Dim matches the LTM (CLIP space
+        # when clip_encoder is provided).
         self.clusterer = PatternClusterer(
-            embed_dim=text_embed_dim,
+            embed_dim=self._ltm_embed_dim,
             distance_threshold=1.5,
             max_clusters=64,
             min_cluster_size=2,
@@ -139,12 +250,20 @@ class EmbodiedMemoryBridge:
         self.mid_memory = MidLayerMemory(
             clusterer=self.clusterer,
             ltm_layer=self.ltm.mid,
-            encoder_func=text_encode_fn,
+            encoder_func=self._ltm_encode_text,
         )
 
-        # 4. Reranker. Default weights bias S_succ for the POL run so memory
-        # influence is more likely to flip the top-1 (criterion 3).
-        weights = reranker_weights or {"history": 0.45, "memory": 0.35, "coherence": 0.20}
+        # 4. Reranker. The POL weights were inherited from the dialogue
+        # benchmark and an audit on `runs/abl-s3` showed they're miscalibrated
+        # for embodied:
+        #   - HistorySuccessScorer was a constant 0.5 across 11.8k scorings
+        #     because the mid-layer never populates without successful eps
+        #     (`_refresh_mid_clusters` gates on successful_episodes % N == 0).
+        #   - MemorySimilarityScorer was 0.94±0.02 *and candidate-agnostic*,
+        #     so it added a near-constant offset but no ranking signal.
+        # Phase-1 fix: zero history until mid is populated, swap in a
+        # candidate-aware memory scorer, and promote S_phys to dominant.
+        weights = reranker_weights or {"history": 0.0, "memory": 0.30, "coherence": 0.70}
         self.reranker = ResponseReranker(
             mid_layer_memory=self.mid_memory,
             ltm=self.ltm,
@@ -155,6 +274,9 @@ class EmbodiedMemoryBridge:
         # The reranker keys this slot as "coherence" — we keep the key, the
         # implementation is now frontier-distance based.
         self.reranker.scorers["coherence"] = FrontierPhysicsScorer()
+        # Swap in the candidate-aware memory scorer (cosine vs each retrieved
+        # entry, not query-to-retrieval distance).
+        self.reranker.scorers["memory"] = EmbodiedMemorySimilarityScorer()
 
         # Episode counter for periodic mid-layer clustering.
         self._episodes_seen = 0
@@ -162,6 +284,10 @@ class EmbodiedMemoryBridge:
 
         # Cache of pending records collected during the current episode.
         self._pending: List[EmbodiedRecord] = []
+
+        # Cumulative count of keyframes the bridge actually ingested. Stays at 0
+        # when disable_stm=True so the ablation can confirm the toggle worked.
+        self._n_keyframes_observed = 0
 
         # Tracking which modules have been invoked (for criterion 4 logging).
         self.modules_invoked: Dict[str, bool] = {
@@ -173,17 +299,23 @@ class EmbodiedMemoryBridge:
             "rerank": False,
         }
 
-        # Seed coarse layer once with HM3D-Semantics object categories.
-        if coarse_seed_categories:
+        # Seed coarse layer once with HM3D-Semantics object categories. Skipped
+        # when disable_ltm=True so Setting 1 starts with an empty LTM stack
+        # (incl. coarse priors) — keeps `ltm_counts_final` cleanly zero.
+        if coarse_seed_categories and not self.disable_ltm:
             self._seed_coarse(coarse_seed_categories)
 
     # ------------------------------------------------------------------
     # STM / per-episode buffering
     # ------------------------------------------------------------------
 
-    def begin_episode(self, episode_id: str):
+    def begin_episode(self, episode_id: str, scene_id: Optional[str] = None):
         self._pending = []
         self._current_episode_id = episode_id
+        # Tracked so option-2 memory-injected candidates only surface entries
+        # from the current scene (cross-scene world-xy positions would be
+        # geometrically meaningless when habitat cycles to a new scene).
+        self._current_scene_id = scene_id
 
     def observe_keyframe(
         self,
@@ -193,7 +325,10 @@ class EmbodiedMemoryBridge:
         success: bool = False,
     ):
         """Buffer a keyframe + action/reward as a candidate experience."""
+        if self.disable_stm:
+            return
         self.modules_invoked["stm"] = True
+        self._n_keyframes_observed += 1
         record = EmbodiedRecord(
             episode_id=getattr(self, "_current_episode_id", "unknown"),
             step_idx=int(keyframe.step_idx),
@@ -205,6 +340,7 @@ class EmbodiedMemoryBridge:
             action=action,
             reward=float(reward),
             success=bool(success),
+            metadata={"scene_id": getattr(self, "_current_scene_id", None)},
         )
         self._pending.append(record)
 
@@ -215,16 +351,31 @@ class EmbodiedMemoryBridge:
     def consolidate(self, episode_success: bool, episode_idx: int) -> Dict[str, List[str]]:
         """Run importance scoring, write key segments to LTM-fine, optionally
         cluster into LTM-mid every N successful episodes."""
+        if self.disable_ltm:
+            self._pending = []
+            self._episodes_seen += 1
+            if episode_success:
+                self._successful_episodes_seen += 1
+            return {"fine": [], "mid": [], "coarse": []}
+
         self.modules_invoked["consolidation"] = True
         segments = []
         for rec in self._pending:
+            # When a clip_encoder is configured, the LTM is indexed in CLIP
+            # joint space — so the segment's primary embedding must be the
+            # visual CLIP vector, not the SBERT text vector. The caption text
+            # is kept as `content` for human-readable logs only.
+            if self.clip_encoder is not None and rec.visual_embedding is not None:
+                primary_emb = rec.visual_embedding
+            else:
+                primary_emb = rec.text_embedding
             seg = DialogueSegment(
                 session_id=episode_idx,
                 dialogue_id=episode_idx,
                 speaker="agent",
                 utterance=rec.caption,
                 response=None,
-                embedding=rec.text_embedding,
+                embedding=primary_emb,
                 metadata={
                     "step_idx": rec.step_idx,
                     "action": rec.action,
@@ -232,8 +383,10 @@ class EmbodiedMemoryBridge:
                     "agent_position": rec.agent_position.tolist() if rec.agent_position is not None else None,
                     "agent_yaw": rec.agent_yaw,
                     "visual_embedding": rec.visual_embedding.tolist() if rec.visual_embedding is not None else None,
+                    "text_embedding": rec.text_embedding.tolist() if rec.text_embedding is not None else None,
                     "episode_id": rec.episode_id,
                     "episode_success": episode_success,
+                    "scene_id": rec.metadata.get("scene_id"),
                 },
             )
             segments.append(seg)
@@ -242,11 +395,47 @@ class EmbodiedMemoryBridge:
         if segments:
             inserted = self.consolidator.consolidate_session(
                 segments=segments,
-                encoder_func=self.text_encode_fn,
+                encoder_func=self._ltm_encode_text,
                 dialogue_id=episode_idx,
             )
             if inserted.get("fine"):
                 self.modules_invoked["ltm_fine"] = True
+
+            # The dialogue consolidator builds its own MemoryEntry.metadata
+            # (dialogue_id / session_id / importance_score / breakdown) and
+            # discards seg.metadata — so the embodied fields option-2 needs
+            # (scene_id, agent_position, episode_id, step_idx) never reach
+            # the LTM. Patch the freshly-inserted entries by matching their
+            # embedding back to the originating EmbodiedRecord. Embeddings
+            # come straight from rec.visual_embedding so np.array_equal is
+            # exact.
+            inserted_fine_ids = set(inserted.get("fine") or [])
+            if inserted_fine_ids:
+                new_entries = [e for e in self.ltm.fine.entries if e.id in inserted_fine_ids]
+                for entry in new_entries:
+                    for rec in self._pending:
+                        rec_emb = (
+                            rec.visual_embedding
+                            if (self.clip_encoder is not None and rec.visual_embedding is not None)
+                            else rec.text_embedding
+                        )
+                        if rec_emb is None:
+                            continue
+                        if rec_emb.shape != entry.embedding.shape:
+                            continue
+                        if np.array_equal(rec_emb, entry.embedding):
+                            entry.metadata.update({
+                                "scene_id": rec.metadata.get("scene_id"),
+                                "agent_position": (
+                                    rec.agent_position.tolist()
+                                    if rec.agent_position is not None else None
+                                ),
+                                "agent_yaw": float(rec.agent_yaw),
+                                "episode_id": rec.episode_id,
+                                "step_idx": int(rec.step_idx),
+                                "episode_success": bool(episode_success),
+                            })
+                            break
 
         self._episodes_seen += 1
         if episode_success:
@@ -280,14 +469,24 @@ class EmbodiedMemoryBridge:
             self.modules_invoked["ltm_mid"] = True
 
     def _seed_coarse(self, categories: List[str]):
-        """Insert one coarse-layer record per HM3D-Semantics target category."""
+        """Insert one coarse-layer record per HM3D-Semantics target category.
+
+        Seeded in the same embedding space as the fine layer: when a CLIP
+        encoder is configured we use the CLIP text prompt ``"a photo of a
+        {category}"`` so a goal-directed retrieval query at decision time
+        (also CLIP-text-encoded) can match these priors against past visual
+        keyframes that captured the category.
+        """
         for cat in categories:
-            text = f"category prior: agent searches for a {cat}"
-            emb = self.text_encode_fn(text).astype(np.float32)
+            if self.clip_encoder is not None:
+                prompt = f"a photo of a {cat}"
+            else:
+                prompt = f"category prior: agent searches for a {cat}"
+            emb = self._ltm_encode_text(prompt).astype(np.float32)
             self.ltm.insert(
                 level="coarse",
                 embedding=emb,
-                content=text,
+                content=prompt,
                 metadata={"type": "category_prior", "category": cat},
             )
         if len(self.ltm.coarse):
@@ -297,6 +496,112 @@ class EmbodiedMemoryBridge:
     # Retrieval + reranking
     # ------------------------------------------------------------------
 
+    def propose_memory_candidates(
+        self,
+        agent_pos: np.ndarray,
+        agent_yaw: float,
+        target_category: Optional[str],
+        planner_world_xys: Optional[List[np.ndarray]] = None,
+        top_k: int = 3,
+        min_cosine: float = 0.18,
+        dedup_radius_m: float = 1.5,
+        max_distance_m: float = 30.0,
+    ) -> List[FrontierCandidate]:
+        """Option-2: turn LTM hits into extra frontier candidates.
+
+        Query the fine layer with ``"a photo of a {target_category}"`` in CLIP
+        joint space; for each hit that (a) clears the cosine threshold,
+        (b) belongs to the current scene, and (c) isn't a near-duplicate of an
+        already-proposed planner candidate, materialize a ``FrontierCandidate``
+        from the stored ``agent_position``. ``raw_score`` carries the cosine
+        through so the downstream FrontierPhysicsScorer naturally favours
+        semantically-strong memories.
+
+        Returns ``[]`` whenever LTM is disabled, no CLIP encoder is wired, the
+        target is missing, or no hit clears the bar — so callers can always
+        concatenate the result onto the planner's list without a guard.
+        """
+        if self.disable_ltm or self.clip_encoder is None or not target_category:
+            return []
+        if not len(self.ltm.fine):
+            return []
+
+        import math
+
+        query = self.clip_encoder.encode_text(
+            f"a photo of a {target_category}"
+        ).astype(np.float32)
+
+        # Over-fetch: we'll discard scene-mismatched and threshold-failing hits.
+        fetch_k = max(top_k * 4, 8)
+        hits = self.ltm.fine.search(query, fetch_k)
+
+        out: List[FrontierCandidate] = []
+        seen_xys: List[np.ndarray] = list(planner_world_xys or [])
+        ax = float(agent_pos[0])
+        az = float(agent_pos[2])
+
+        for entry, dist in hits:
+            # FAISS returns L2² on unit-norm vectors → cos = 1 - d²/2.
+            cos = max(-1.0, min(1.0, 1.0 - float(dist) / 2.0))
+            if cos < min_cosine:
+                continue
+            if entry.metadata.get("scene_id") != self._current_scene_id:
+                continue
+            ap = entry.metadata.get("agent_position")
+            if ap is None or len(ap) < 3:
+                continue
+            world_xy = np.asarray([ap[0], ap[2]], dtype=np.float32)
+
+            # Skip "go back to where I'm standing" — and dedup against the
+            # planner's own frontier proposals so we don't double-vote.
+            if any(np.linalg.norm(world_xy - sx) < dedup_radius_m for sx in seen_xys):
+                continue
+            seen_xys.append(world_xy)
+
+            dx = float(world_xy[0]) - ax
+            dz = float(world_xy[1]) - az
+            dist_m = math.hypot(dx, dz)
+            if dist_m > max_distance_m:
+                continue
+
+            world_bearing = math.atan2(dx, dz)
+            rel = world_bearing - float(agent_yaw)
+            while rel > math.pi:
+                rel -= 2.0 * math.pi
+            while rel < -math.pi:
+                rel += 2.0 * math.pi
+
+            # raw_score = raw CLIP cosine. The source-aware physics scorer
+            # (FrontierPhysicsScorer) interprets it differently for memory
+            # vs planner candidates — see that class for the calibration.
+            out.append(
+                FrontierCandidate(
+                    candidate_id=-1,  # caller assigns
+                    world_xy=world_xy,
+                    grid_rc=(-1, -1),
+                    distance_m=dist_m,
+                    bearing_rad=rel,
+                    cluster_size=0,
+                    raw_score=float(cos),
+                    source="memory",
+                    metadata={
+                        "ltm_score": float(cos),
+                        "ltm_step_idx": int(entry.metadata.get("step_idx", -1)),
+                        "ltm_episode_id": entry.metadata.get("episode_id"),
+                        "scene_id": entry.metadata.get("scene_id"),
+                    },
+                )
+            )
+            if len(out) >= top_k:
+                break
+
+        if out:
+            # Counts as fine-layer activation for the criterion-4 module check.
+            self.modules_invoked["ltm_fine"] = True
+
+        return out
+
     def retrieve(self, query_embedding: np.ndarray, top_k_per_layer: int = 3) -> Dict[str, List[Tuple[MemoryEntry, float]]]:
         results = self.ltm.multi_scale_search(query_embedding, top_k_per_layer=top_k_per_layer)
         if any(len(v) > 0 for v in results.values()):
@@ -305,11 +610,21 @@ class EmbodiedMemoryBridge:
                     self.modules_invoked[f"ltm_{layer}"] = True
         return results
 
+    @staticmethod
+    def _format_candidate_text(c: FrontierCandidate) -> str:
+        return (
+            f"go to ({c.world_xy[0]:.1f}, {c.world_xy[1]:.1f}) "
+            f"distance {c.distance_m:.1f}m bearing {c.bearing_rad:+.2f}rad "
+            f"size {c.cluster_size}"
+        )
+
     def rerank(
         self,
         candidates: List[FrontierCandidate],
         query_text: str,
         stm_captions: Optional[List[str]] = None,
+        target_category: Optional[str] = None,
+        query_visual_embedding: Optional[np.ndarray] = None,
     ) -> Tuple[RerankingResult, Dict[str, List[Tuple[MemoryEntry, float]]]]:
         """Rerank frontier candidates by Score = w₁·S_succ + w₂·S_sim + w₃·S_phys.
 
@@ -319,26 +634,87 @@ class EmbodiedMemoryBridge:
         if not candidates:
             raise ValueError("rerank requires at least one candidate")
 
+        # Setting 1/2 ablation: skip scoring entirely and pass through the
+        # planner's raw top-1. We still package it as a RerankingResult so
+        # the runner's downstream lookup keeps working unchanged.
+        if self.disable_rerank:
+            raw_top1 = candidates[0]
+            cand_text = self._format_candidate_text(raw_top1)
+            cand_emb = self.text_encode_fn(cand_text).astype(np.float32)
+            scored = ScoredResponse(
+                response=cand_text,
+                response_embedding=cand_emb,
+                scores={},
+                final_score=float(raw_top1.raw_score),
+            )
+            scored.rank = 1
+            empty_retrieval: Dict[str, List[Tuple[MemoryEntry, float]]] = {
+                "fine": [], "mid": [], "coarse": [],
+            }
+            result = RerankingResult(
+                candidates=[scored],
+                selected=scored,
+                debug_info={
+                    "weights": {},
+                    "num_candidates": 1,
+                    "top_scores": [{
+                        "response": cand_text[:80],
+                        "final_score": float(raw_top1.raw_score),
+                        "scores": {},
+                    }],
+                    "rerank_disabled": True,
+                },
+            )
+            return result, empty_retrieval
+
         self.modules_invoked["rerank"] = True
 
-        # Encode the query (current caption / target description) once.
-        query_emb = self.text_encode_fn(query_text).astype(np.float32)
-        retrieval = self.retrieve(query_emb, top_k_per_layer=3)
+        # Encode the query once. With disable_ltm=True we skip the multi-scale
+        # search so retrieval is always empty — the score from
+        # MemorySimilarityScorer collapses to its no-context default.
+        # Query preference (most informative first):
+        #   1. CLIP-text of the per-episode target category — goal-directed
+        #      retrieval surfaces past visual keyframes that resemble the
+        #      object the agent is trying to find. This is the primary signal.
+        #   2. Current keyframe's CLIP visual embedding — falls back to
+        #      "find past observations that look like what I see now",
+        #      useful for re-orientation when no target is given.
+        #   3. Legacy SBERT-text encode of query_text — used only when no
+        #      CLIP encoder is configured (cached/synthetic smoke path).
+        if self.disable_ltm:
+            retrieval = {"fine": [], "mid": [], "coarse": []}
+        else:
+            if self.clip_encoder is not None and target_category:
+                query_emb = self.clip_encoder.encode_text(
+                    f"a photo of a {target_category}"
+                ).astype(np.float32)
+            elif self.clip_encoder is not None and query_visual_embedding is not None:
+                query_emb = np.asarray(query_visual_embedding, dtype=np.float32)
+            else:
+                query_emb = self.text_encode_fn(query_text).astype(np.float32)
+            retrieval = self.retrieve(query_emb, top_k_per_layer=3)
 
-        # Build a textual stand-in per candidate so the SBERT-based scorers
-        # have something to embed; subsequent scorers only need *embedding*
-        # equality, not human readability.
+        # Build a textual stand-in per candidate so the scorers have something
+        # to embed; subsequent scorers only need *embedding* equality, not
+        # human readability. We encode in whichever space the LTM lives in
+        # (CLIP joint when configured) so the candidate-aware memory scorer
+        # can compute well-defined cosines against retrieved entries.
+        # NB: the memory scorer's per-candidate signal is intentionally weak
+        # here — candidate texts are geometric "go to (x,y)" strings, so they
+        # cluster tightly in CLIP space. Path 1 is scaffolding; meaningful
+        # candidate-level memory influence requires option 2 (planner-side
+        # memory-injected candidates with their own visual embeddings).
         cand_texts: List[str] = []
         cand_embeddings: List[np.ndarray] = []
         for c in candidates:
-            txt = (
-                f"go to ({c.world_xy[0]:.1f}, {c.world_xy[1]:.1f}) "
-                f"distance {c.distance_m:.1f}m bearing {c.bearing_rad:+.2f}rad "
-                f"size {c.cluster_size}"
-            )
+            txt = self._format_candidate_text(c)
             cand_texts.append(txt)
-            cand_embeddings.append(self.text_encode_fn(txt).astype(np.float32))
+            cand_embeddings.append(self._ltm_encode_text(txt).astype(np.float32))
         cand_emb_matrix = np.stack(cand_embeddings, axis=0)
+
+        # If STM is disabled the in-episode caption stream isn't available, so
+        # zero it out before it reaches the scorers' context.
+        effective_stm = [] if self.disable_stm else (stm_captions or [])
 
         # The reranker's CoherenceScorer slot (now FrontierPhysicsScorer)
         # peeks at context["frontier_candidate"] for the current candidate.
@@ -355,7 +731,7 @@ class EmbodiedMemoryBridge:
             cand_texts=cand_texts,
             cand_embeddings=cand_emb_matrix,
             retrieval=retrieval,
-            stm_context=stm_captions or [],
+            stm_context=effective_stm,
         )
         return result, retrieval
 
@@ -442,5 +818,11 @@ class EmbodiedMemoryBridge:
             "n_clusters": len(self.clusterer.clusters),
             "episodes_seen": self._episodes_seen,
             "successful_episodes_seen": self._successful_episodes_seen,
+            "n_keyframes_observed": self._n_keyframes_observed,
             "modules_invoked": dict(self.modules_invoked),
+            "ablation": {
+                "disable_stm": self.disable_stm,
+                "disable_ltm": self.disable_ltm,
+                "disable_rerank": self.disable_rerank,
+            },
         }

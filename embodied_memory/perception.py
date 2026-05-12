@@ -132,6 +132,25 @@ class CLIPKeyframeEncoder:
             feats = feats / feats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
         return feats.squeeze(0).detach().cpu().float().numpy()
 
+    def encode_text(self, text: str) -> np.ndarray:
+        """Encode a text string into the same joint CLIP space as encode().
+
+        Used by the embodied LTM to:
+        - seed the coarse layer with category priors ("a photo of a chair")
+        - build goal-directed queries at decision time (using the per-episode
+          target category) against a fine-layer indexed on visual embeddings.
+        """
+        self._lazy_load()
+        import torch
+        import open_clip
+
+        tokenizer = open_clip.get_tokenizer(self.model_name)
+        tokens = tokenizer([text]).to(self._device)
+        with torch.no_grad():
+            feats = self._model.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        return feats.squeeze(0).detach().cpu().float().numpy()
+
 
 # ----------------------------------------------------------------------
 # Semantic captioner

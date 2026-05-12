@@ -41,7 +41,7 @@ class HabitatObjectNavSource(EpisodeSource):
 
     def __init__(
         self,
-        scene_id: str,
+        scene_id,  # str | List[str]
         scene_dataset_path: Optional[str] = None,
         episodes_path: Optional[str] = None,
         n_episodes: int = 5,
@@ -49,7 +49,16 @@ class HabitatObjectNavSource(EpisodeSource):
         target_category: Optional[str] = "chair",
         image_hw: Tuple[int, int] = (256, 256),
     ):
-        self.scene_id = scene_id
+        # scene_id can be a single id (legacy) or a list — passed straight to
+        # habitat's `dataset.content_scenes`, which cycles episodes across all
+        # listed scenes. Keep the public attribute as a string for backwards
+        # compat (joined with commas) and stash the resolved list separately.
+        if isinstance(scene_id, (list, tuple)):
+            self._scene_ids: List[str] = [str(s) for s in scene_id]
+        else:
+            self._scene_ids = [str(scene_id)]
+        self.scene_id = ",".join(self._scene_ids)
+
         self.scene_dataset_path = scene_dataset_path or self._default_scene_dataset_path()
         self.episodes_path = episodes_path or self._default_episodes_path()
         self.n_episodes = n_episodes
@@ -145,11 +154,11 @@ class HabitatObjectNavSource(EpisodeSource):
             # name (e.g. ``TEEsavR23oF.json.gz``), not the prefixed form
             # (``00800-TEEsavR23oF``). Accept either input by stripping a
             # leading ``NNNNN-`` prefix when present.
-            bare_scene_id = self.scene_id
-            head, sep, tail = self.scene_id.partition("-")
-            if sep and head.isdigit():
-                bare_scene_id = tail
-            config.habitat.dataset.content_scenes = [bare_scene_id]
+            bare_scene_ids: List[str] = []
+            for sid in self._scene_ids:
+                head, sep, tail = sid.partition("-")
+                bare_scene_ids.append(tail if sep and head.isdigit() else sid)
+            config.habitat.dataset.content_scenes = bare_scene_ids
             config.habitat.environment.max_episode_steps = int(self.max_steps)
 
         self._env = habitat.Env(config=config)
@@ -198,9 +207,18 @@ class HabitatObjectNavSource(EpisodeSource):
             except Exception:
                 target_pos = None
 
+        # When multiple scenes are loaded, habitat cycles through them — tag
+        # each episode with the scene it actually came from (extracted from
+        # the episode's glb path) so paired analysis can join on it.
+        ep_scene = getattr(env.current_episode, "scene_id", None)
+        if isinstance(ep_scene, str) and ep_scene:
+            base = os.path.basename(ep_scene)
+            scene_label = base.split(".", 1)[0]
+        else:
+            scene_label = self._scene_ids[0]
         episode = Episode(
             episode_id=str(getattr(env.current_episode, "episode_id", episode_idx)),
-            scene_id=self.scene_id,
+            scene_id=scene_label,
             target_category=getattr(env.current_episode, "object_category", "unknown"),
             target_position=target_pos,
             metadata={"source": "habitat_live", "max_steps": self.max_steps},
