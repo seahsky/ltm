@@ -58,6 +58,12 @@ nosetests.xml
 runs/
 outputs/
 checkpoints/
+# Local model weights (VILA / LLaVA / Mistral / Llama) for ReMEmbR backbone.
+# Track only the README + download scripts inside models/.
+models/*
+!models/README.md
+!models/download_remembr_models.py
+!models/embodied/.gitkeep
 wandb/
 mlruns/
 lightning_logs/
