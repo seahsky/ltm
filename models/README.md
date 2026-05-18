@@ -61,7 +61,70 @@ every decision so you can never confuse a stub run with a real one.
 
 ## `embodied/`
 
-Reserved for **embodied-trained** predictor / scorer checkpoints
-produced by Step 3b of the Phase-2 plan (see CLAUDE.md). Empty until
-`dialogue_memory/train_predictor.py --embodied` or
-`train_scorer.py --embodied` has run on `runs/<dir>` data.
+Holds **embodied-trained** predictor / scorer checkpoints produced by the
+G3 trainers (see `Phase-2 readiness check.md`). The CLIs:
+
+```bash
+conda activate ltm-embodied
+
+# U_i predictor (surprise / forward-modeling head)
+python -m dialogue_memory.train_predictor \
+    --embodied runs/abl-s1 runs/abl-s2 runs/abl-s3 \
+    --encoder clip \
+    --out models/embodied/predictor.pt \
+    --epochs 5
+
+# R_i importance scorer (BCE on soft_spl since Phase-1 has 0 binary successes)
+python -m dialogue_memory.train_scorer \
+    --embodied runs/abl-s1 runs/abl-s2 runs/abl-s3 \
+    --encoder clip \
+    --label-mode soft_spl \
+    --out models/embodied/scorer.pt \
+    --epochs 5
+```
+
+`--encoder clip` is the operationally-correct choice — it embeds captions
+in the **same CLIP-512 joint space** that the embodied LTM is indexed in,
+so the trained heads compose with the rest of the pipeline.
+`--encoder sbert` (384-d) is supported for fast laptop smoke tests but
+its checkpoints don't compose with the CLIP-indexed bridge.
+
+Each CLI saves the best-val checkpoint to `--out` and can be reloaded via
+`PredictionTrainer.load()` / `ScorerTrainer.load()`.
+
+## Phase-2 operator runbook (CUDA host)
+
+These steps need a GPU box with ≥24 GB VRAM and the weights in §Download.
+
+```bash
+# G1: pull weights (~30 GB)
+python models/download_remembr_models.py
+
+# G2: single-episode smoke — confirms ReMEmbR is alive (stub_mode: false)
+python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
+    --setting 3 --n-episodes 1 --target any --out-dir runs/remembr-smoke
+
+# G3: train embodied predictor/scorer on Phase-1 episode JSONs (CPU-OK)
+python -m dialogue_memory.train_predictor --embodied runs/abl-s3 \
+    --encoder clip --out models/embodied/predictor.pt --epochs 5
+python -m dialogue_memory.train_scorer --embodied runs/abl-s3 \
+    --encoder clip --label-mode soft_spl \
+    --out models/embodied/scorer.pt --epochs 5
+
+# G4: full 3-setting ablation with real backbone
+for s in 1 2 3; do
+  python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
+    --setting $s --scene all --n-episodes 30 --target any \
+    --out-dir runs/abl-s${s}-remembr
+done
+python embodied_memory/scripts/analyze_ablation.py \
+    runs/abl-s1-remembr runs/abl-s2-remembr runs/abl-s3-remembr
+# Look for: "=== phase 2 gate === ... gate: PASS"
+
+# G5 (only if G4 produced ≥1 success): refresh affordance table on real runs
+python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
+    --setting 3 --scene all --n-episodes 30 --target any \
+    --affordance-from-runs runs/abl-s1-remembr runs/abl-s2-remembr \
+                           runs/abl-s3-remembr \
+    --out-dir runs/abl-s3-remembr-affordance
+```

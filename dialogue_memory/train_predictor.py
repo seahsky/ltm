@@ -322,3 +322,164 @@ def train_predictor(data_path: str,
             print(f"  -> 保存最佳模型 (loss = {best_val_loss:.4f})")
 
     return trainer
+
+
+# ----------------------------------------------------------------------
+# Embodied adapter — same trainer, fed by per-episode JSONs from runs/
+# ----------------------------------------------------------------------
+
+
+def _split_embodied_pairs_by_episode(pairs, val_split: float, seed: int = 42):
+    """Split EmbodiedPredictionDataset._pairs at the episode boundary so
+    same-episode (history → next) pairs don't leak across train/val."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for idx, (_, _, sample) in enumerate(pairs):
+        groups[(sample.scene_id, sample.episode_id)].append(idx)
+
+    keys = sorted(groups.keys())
+    rng = np.random.RandomState(seed)
+    rng.shuffle(keys)
+    n_val = max(1, int(len(keys) * val_split)) if val_split > 0 else 0
+    val_keys = set(keys[:n_val])
+
+    train_idx, val_idx = [], []
+    for k, idxs in groups.items():
+        (val_idx if k in val_keys else train_idx).extend(idxs)
+    return sorted(train_idx), sorted(val_idx)
+
+
+def train_predictor_embodied(run_dirs,
+                             encoder,
+                             epochs: int = 5,
+                             batch_size: int = 32,
+                             val_split: float = 0.2,
+                             max_history_len: int = 5,
+                             save_path: Optional[str] = None,
+                             seed: int = 42) -> PredictionTrainer:
+    """Train the prediction MLP on captions from embodied run dirs.
+
+    Probes the encoder once to discover ``embed_dim`` so the trainer
+    matches whatever encoder is supplied (CLIP-text → 512, SBERT-MiniLM
+    → 384, etc.).
+    """
+    from torch.utils.data import Subset
+    from embodied_memory.embodied_dataset import EmbodiedPredictionDataset
+
+    embed_dim = int(np.asarray(encoder.encode("probe"), dtype=np.float32).shape[-1])
+    print(f"encoder embed_dim probed: {embed_dim}")
+
+    full = EmbodiedPredictionDataset(run_dirs, encoder, max_history_len=max_history_len)
+    if len(full) == 0:
+        raise RuntimeError(f"no (history, next) pairs found in {list(run_dirs)}")
+
+    train_idx, val_idx = _split_embodied_pairs_by_episode(full._pairs, val_split, seed=seed)
+    print(f"pairs total={len(full)}  train={len(train_idx)}  val={len(val_idx)}")
+
+    train_loader = DataLoader(Subset(full, train_idx), batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(Subset(full, val_idx), batch_size=batch_size) if val_idx else None
+
+    trainer = PredictionTrainer(embed_dim=embed_dim)
+    best_val_loss = float('inf')
+
+    print(f"\n开始训练 (device: {trainer.device}) on embodied captions ...")
+    for epoch in range(epochs):
+        train_losses = []
+        for i, (history, target) in enumerate(train_loader):
+            loss = trainer.train_step(history, target)
+            train_losses.append(loss)
+            if (i + 1) % 50 == 0:
+                print(f"  Epoch {epoch+1}, Batch {i+1}, Loss: {np.mean(train_losses[-50:]):.4f}")
+
+        msg = f"Epoch {epoch+1}/{epochs}: Train Loss = {np.mean(train_losses):.4f}"
+        if val_loader is not None:
+            val_metrics = trainer.evaluate(val_loader)
+            msg += (f", Val Loss = {val_metrics['loss']:.4f}, "
+                    f"Val Surprise = {val_metrics['surprise']:.4f}")
+            improved = val_metrics['loss'] < best_val_loss
+            if improved:
+                best_val_loss = val_metrics['loss']
+        else:
+            improved = True
+        print(msg)
+
+        if improved and save_path:
+            trainer.save(save_path)
+            print(f"  -> saved checkpoint to {save_path}")
+
+    if save_path and not val_loader:
+        trainer.save(save_path)
+        print(f"  -> saved final checkpoint to {save_path}")
+
+    return trainer
+
+
+def _build_text_encoder(name: str):
+    if name == "clip":
+        from embodied_memory.perception import CLIPKeyframeEncoder
+
+        class _CLIPTextAdapter:
+            def __init__(self):
+                self._clip = CLIPKeyframeEncoder()
+            def encode(self, text: str):
+                return self._clip.encode_text(text)
+
+        return _CLIPTextAdapter()
+    if name == "sbert":
+        from .encoder import SentenceTransformerEncoder
+        return SentenceTransformerEncoder()
+    raise ValueError(f"unknown encoder: {name!r} (expected one of: clip, sbert)")
+
+
+def _cli(argv=None):
+    import argparse
+    import os
+
+    p = argparse.ArgumentParser(
+        description="Train the U_i predictor on MSC dialogue or embodied episode logs."
+    )
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--embodied", nargs="+", metavar="RUN_DIR",
+                     help="One or more runs/<dir>/ paths containing episode_*.json files.")
+    src.add_argument("--msc", metavar="JSON",
+                     help="Path to MSC grouped JSON for dialogue-side training.")
+    p.add_argument("--out", default=None,
+                   help="Where to save the best checkpoint (.pt). Required for --embodied.")
+    p.add_argument("--encoder", default="clip", choices=("clip", "sbert"),
+                   help="Text encoder for --embodied (clip = CLIP text tower 512-d, "
+                        "matches embodied LTM joint space).")
+    p.add_argument("--epochs", type=int, default=5)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--val-split", type=float, default=0.2)
+    p.add_argument("--max-history-len", type=int, default=5)
+    args = p.parse_args(argv)
+
+    if args.embodied:
+        if not args.out:
+            p.error("--out is required with --embodied")
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
+        encoder = _build_text_encoder(args.encoder)
+        train_predictor_embodied(
+            run_dirs=args.embodied,
+            encoder=encoder,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            val_split=args.val_split,
+            max_history_len=args.max_history_len,
+            save_path=args.out,
+        )
+        return 0
+
+    # MSC path
+    encoder = _build_text_encoder(args.encoder)
+    trainer = train_predictor(args.msc, encoder, epochs=args.epochs,
+                              batch_size=args.batch_size, val_split=args.val_split)
+    if args.out:
+        trainer.save(args.out)
+        print(f"  -> saved final checkpoint to {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli(sys.argv[1:]))

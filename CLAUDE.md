@@ -34,13 +34,15 @@ before any episode succeeds, so the Phase-1→Phase-2 gate as written (mean SPL
 is inert/harmful". See `runs/abl-s{1,2,3}/summary.json` for the latest numbers
 and `runs/abl-s{1,2,3}-v{1,2,3}/` for the development history.
 
-**What's still missing**: real **ReMEmbR backbone** (CLIP keyframes +
-frontier heuristic stand in for it today; that's why cosines cap at ~0.27 vs
-the 0.32 saturation point and binary success stays at 0), multi-scene
-lifelong eval beyond 2-scene minival, embodied-data training of
-`train_predictor` / `train_scorer`, coarse-layer affordance learning, and a
-fix for the consolidator's relevance term `R` ignoring `episode_success`
-(currently weights successful and failed episodes the same).
+**What's still missing**: operationally running the real **ReMEmbR backbone**
+on a CUDA host (the code path exists at `embodied_memory/remembr_backbone.py`
+and `--backbone remembr` is wired; weights aren't pulled yet — this is why
+cosines cap at ~0.27 vs the 0.32 saturation point and binary success stays
+at 0) and multi-scene lifelong eval beyond 2-scene minival. The remaining
+code seams (consolidator R-weighting of failed episodes, embodied-data
+training of `train_predictor` / `train_scorer`, coarse-layer affordance
+learning) are all wired in this branch — see `models/README.md`
+"Phase-2 operator runbook" for the exact commands.
 
 ## Next milestone
 

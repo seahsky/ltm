@@ -459,3 +459,188 @@ def train_scorer(data_path: str,
             print(f"  -> 保存最佳模型 (acc = {best_acc:.4f})")
 
     return trainer, {'train': train_stats, 'val': val_stats}
+
+
+# ----------------------------------------------------------------------
+# Embodied adapter — scores captions from runs/<dir>/episode_*.json
+# ----------------------------------------------------------------------
+
+
+def _split_embodied_samples_by_episode(samples_list, val_split: float, seed: int = 42):
+    """Episode-level train/val split for the embodied scorer dataset.
+
+    Same motivation as the predictor split: within-episode caption
+    similarity is high enough that step-level random splits leak.
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for idx, s in enumerate(samples_list):
+        groups[(s.scene_id, s.episode_id)].append(idx)
+
+    keys = sorted(groups.keys())
+    rng = np.random.RandomState(seed)
+    rng.shuffle(keys)
+    n_val = max(1, int(len(keys) * val_split)) if val_split > 0 else 0
+    val_keys = set(keys[:n_val])
+
+    train_idx, val_idx = [], []
+    for k, idxs in groups.items():
+        (val_idx if k in val_keys else train_idx).extend(idxs)
+    return sorted(train_idx), sorted(val_idx)
+
+
+def train_scorer_embodied(run_dirs,
+                          encoder,
+                          label_mode: str = "soft_spl",
+                          epochs: int = 5,
+                          batch_size: int = 64,
+                          val_split: float = 0.2,
+                          keep_per_episode_top_k: Optional[int] = None,
+                          save_path: Optional[str] = None,
+                          seed: int = 42) -> Tuple[ScorerTrainer, Dict]:
+    """Train the importance scorer on captions from embodied run dirs.
+
+    For Phase-1 runs HM3D-ObjectNav had 0 binary successes, so default
+    label_mode here is ``soft_spl`` (continuous regression target in
+    [0,1]; BCELoss accepts continuous targets and reduces to
+    cross-entropy of the soft label).
+    """
+    from torch.utils.data import Subset
+    from embodied_memory.embodied_dataset import EmbodiedImportanceDataset
+
+    embed_dim = int(np.asarray(encoder.encode("probe"), dtype=np.float32).shape[-1])
+    print(f"encoder embed_dim probed: {embed_dim}")
+
+    full = EmbodiedImportanceDataset(
+        run_dirs, encoder,
+        label_mode=label_mode,
+        keep_per_episode_top_k=keep_per_episode_top_k,
+    )
+    if len(full) == 0:
+        raise RuntimeError(f"no caption samples found in {list(run_dirs)}")
+
+    stats = full.get_stats()
+    print(f"dataset stats: {stats}")
+    if label_mode == "success" and stats["positive"] == 0:
+        print("WARNING: label_mode=success but 0 positive rows — model will collapse.")
+
+    train_idx, val_idx = _split_embodied_samples_by_episode(full._samples, val_split, seed=seed)
+    print(f"samples total={len(full)}  train={len(train_idx)}  val={len(val_idx)}")
+
+    train_loader = DataLoader(Subset(full, train_idx), batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(Subset(full, val_idx), batch_size=batch_size) if val_idx else None
+
+    trainer = ScorerTrainer(embed_dim=embed_dim)
+    best_metric = float('-inf')
+
+    print(f"\n开始训练 (device: {trainer.device}) on embodied captions ...")
+    for epoch in range(epochs):
+        train_losses = []
+        for i, (emb, label) in enumerate(train_loader):
+            loss = trainer.train_step(emb, label)
+            train_losses.append(loss)
+            if (i + 1) % 50 == 0:
+                print(f"  Epoch {epoch+1}, Batch {i+1}, Loss: {np.mean(train_losses[-50:]):.4f}")
+
+        msg = f"Epoch {epoch+1}/{epochs}: Train Loss = {np.mean(train_losses):.4f}"
+        if val_loader is not None:
+            val_metrics = trainer.evaluate(val_loader)
+            # For soft labels, accuracy from a 0.5 threshold is not a great
+            # signal — track val loss (lower is better) as the save criterion
+            # instead. Negate so larger = better, matching best_metric semantics.
+            metric = -val_metrics['loss']
+            msg += (f", Val Loss = {val_metrics['loss']:.4f}, "
+                    f"Val Acc = {val_metrics['accuracy']:.4f}")
+            improved = metric > best_metric
+            if improved:
+                best_metric = metric
+        else:
+            improved = True
+        print(msg)
+
+        if improved and save_path:
+            trainer.save(save_path)
+            print(f"  -> saved checkpoint to {save_path}")
+
+    if save_path and not val_loader:
+        trainer.save(save_path)
+        print(f"  -> saved final checkpoint to {save_path}")
+
+    return trainer, stats
+
+
+def _build_text_encoder(name: str):
+    if name == "clip":
+        from embodied_memory.perception import CLIPKeyframeEncoder
+
+        class _CLIPTextAdapter:
+            def __init__(self):
+                self._clip = CLIPKeyframeEncoder()
+            def encode(self, text: str):
+                return self._clip.encode_text(text)
+
+        return _CLIPTextAdapter()
+    if name == "sbert":
+        from .encoder import SentenceTransformerEncoder
+        return SentenceTransformerEncoder()
+    raise ValueError(f"unknown encoder: {name!r} (expected one of: clip, sbert)")
+
+
+def _cli(argv=None):
+    import argparse
+    import os
+
+    p = argparse.ArgumentParser(
+        description="Train the R_i importance scorer on MSC dialogue or embodied episode logs."
+    )
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--embodied", nargs="+", metavar="RUN_DIR",
+                     help="One or more runs/<dir>/ paths containing episode_*.json files.")
+    src.add_argument("--msc", metavar="JSON",
+                     help="Path to MSC grouped JSON for dialogue-side training.")
+    p.add_argument("--out", default=None,
+                   help="Where to save the best checkpoint (.pt). Required for --embodied.")
+    p.add_argument("--encoder", default="clip", choices=("clip", "sbert"),
+                   help="Text encoder for --embodied (clip matches embodied LTM joint space).")
+    p.add_argument("--label-mode", default="soft_spl",
+                   choices=("success", "spl", "soft_spl"),
+                   help="Embodied label semantics. Default soft_spl because Phase-1 "
+                        "has 0 binary successes; success/spl labels will collapse.")
+    p.add_argument("--keep-per-episode-top-k", type=int, default=None,
+                   help="Optional per-episode subsample (uniform stride) to reduce "
+                        "the long tail of nearly-identical captions.")
+    p.add_argument("--epochs", type=int, default=5)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--val-split", type=float, default=0.2)
+    args = p.parse_args(argv)
+
+    if args.embodied:
+        if not args.out:
+            p.error("--out is required with --embodied")
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
+        encoder = _build_text_encoder(args.encoder)
+        train_scorer_embodied(
+            run_dirs=args.embodied,
+            encoder=encoder,
+            label_mode=args.label_mode,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            val_split=args.val_split,
+            keep_per_episode_top_k=args.keep_per_episode_top_k,
+            save_path=args.out,
+        )
+        return 0
+
+    # MSC path
+    encoder = _build_text_encoder(args.encoder)
+    trainer, _ = train_scorer(args.msc, encoder, epochs=args.epochs,
+                              batch_size=args.batch_size, val_split=args.val_split)
+    if args.out:
+        trainer.save(args.out)
+        print(f"  -> saved final checkpoint to {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli(sys.argv[1:]))
