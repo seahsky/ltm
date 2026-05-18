@@ -147,7 +147,7 @@ class ReMEmbRBuilder:
             return
         try:
             import torch
-            from transformers import AutoProcessor, LlavaNextForConditionalGeneration
+            from transformers import AutoProcessor, AutoModelForVision2Seq
         except ImportError as e:
             if self.config.strict:
                 raise RuntimeError(
@@ -160,7 +160,7 @@ class ReMEmbRBuilder:
         dtype = getattr(torch, self.config.captioner_dtype, torch.float16)
         try:
             self._processor = AutoProcessor.from_pretrained(self.config.captioner_model)
-            self._model = LlavaNextForConditionalGeneration.from_pretrained(
+            self._model = AutoModelForVision2Seq.from_pretrained(
                 self.config.captioner_model, torch_dtype=dtype, device_map=device
             ).eval()
             self._device = device
@@ -215,8 +215,10 @@ class ReMEmbRBuilder:
         """One forward pass of the local VLM. Lazy-loaded; returns a single
         sentence English caption.
 
-        LLaVA-Next produces (prompt, image) -> string. We strip the prompt
-        from the output and return the first sentence.
+        Uses ``processor.apply_chat_template`` so the same code path serves
+        any HF VLM that ships a chat template — LLaVA-Next, LLaVA-1.5,
+        SmolVLM (Idefics3), Qwen2-VL, etc. The model class is resolved
+        via ``AutoModelForVision2Seq``.
         """
         import torch
         from PIL import Image
@@ -224,22 +226,26 @@ class ReMEmbRBuilder:
         if rgb.dtype != np.uint8:
             rgb = rgb.astype(np.uint8)
         img = Image.fromarray(rgb)
-        full_prompt = (
-            f"[INST] <image>\n{prompt} [/INST]"
-        )
-        inputs = self._processor(
-            text=full_prompt, images=img, return_tensors="pt"
-        ).to(self._device)
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": prompt},
+            ],
+        }]
+        text = self._processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = self._processor(text=text, images=img, return_tensors="pt").to(self._device)
+        n_input = inputs["input_ids"].shape[-1]
         with torch.no_grad():
             out = self._model.generate(
                 **inputs,
                 max_new_tokens=self.config.max_caption_tokens,
                 do_sample=False,
             )
-        decoded = self._processor.batch_decode(out, skip_special_tokens=True)[0]
-        if "[/INST]" in decoded:
-            decoded = decoded.split("[/INST]")[-1]
-        # First sentence only.
+        new_tokens = out[0, n_input:]
+        decoded = self._processor.batch_decode(
+            new_tokens.unsqueeze(0), skip_special_tokens=True
+        )[0]
         for term in (". ", "\n"):
             idx = decoded.find(term)
             if idx > 0:
