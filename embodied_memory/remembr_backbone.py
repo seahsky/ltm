@@ -421,6 +421,15 @@ class ReMEmbRPlanner:
         self._lazy_load_llm()
         trace = PlannerTrace(goal=str(goal), stub_mode=self.stub_mode)
 
+        # Grounded pre-LLM STOP check: if ReMEmbR's flat memory already holds
+        # a recent observation whose caption matches the goal AND lies within
+        # the success radius of the agent's current xz, short-circuit the LLM
+        # and emit a stop candidate. Runner converts this to action=0.
+        stop_cand = self._maybe_stop(goal, agent_pose, trace)
+        if stop_cand is not None:
+            self._last_trace = trace
+            return [stop_cand]
+
         if self.stub_mode:
             candidates = self._stub_propose(goal, agent_pose, agent_yaw, max_candidates, trace)
         else:
@@ -428,6 +437,72 @@ class ReMEmbRPlanner:
 
         self._last_trace = trace
         return candidates
+
+    # ------------------------------------------------------------------
+    # grounded STOP check
+    # ------------------------------------------------------------------
+
+    # Cosine threshold for goal-vs-caption match in CLIP joint space. Set
+    # conservatively above the retrieve_from_text default (0.18) to keep
+    # false STOPs rare.
+    STOP_COS_THRESHOLD: float = float(os.environ.get("REMEMBR_STOP_COS", "0.25"))
+    # Max xz distance (m) between the matching observation and the agent's
+    # current position. HM3D ObjectNav success radius is 1.0 m; add slack
+    # for keyframe-position quantisation.
+    STOP_DIST_THRESHOLD: float = float(os.environ.get("REMEMBR_STOP_DIST", "1.5"))
+
+    def _maybe_stop(
+        self,
+        goal: str,
+        agent_pose: np.ndarray,
+        trace: "PlannerTrace",
+    ) -> Optional[FrontierCandidate]:
+        """Emit a stop candidate iff a goal-matching past observation lies
+        within the success radius of the agent's current position."""
+        try:
+            hits = self.builder.retrieve_from_text(goal, top_k=5, min_cosine=self.STOP_COS_THRESHOLD)
+        except Exception:
+            return None
+        if not hits:
+            return None
+        ax, _, az = float(agent_pose[0]), float(agent_pose[1]), float(agent_pose[2])
+        best: Optional[Tuple[MemoryRecord, float, float]] = None
+        for rec, cos in hits:
+            rx, _, rz = float(rec.position[0]), float(rec.position[1]), float(rec.position[2])
+            dist = math.hypot(rx - ax, rz - az)
+            if dist <= self.STOP_DIST_THRESHOLD:
+                if best is None or cos > best[1]:
+                    best = (rec, cos, dist)
+        if best is None:
+            return None
+        rec, cos, dist = best
+        self._candidate_counter += 1
+        trace.tool_calls.append({
+            "tool": "stop_check",
+            "goal": str(goal),
+            "cos": float(cos),
+            "dist_m": float(dist),
+            "matched_caption": rec.caption[:120],
+        })
+        trace.chosen_xyz = [ax, float(agent_pose[1]), az]
+        trace.confidence = float(cos)
+        return FrontierCandidate(
+            candidate_id=self._candidate_counter + 90_000,
+            world_xy=np.array([ax, az], dtype=np.float32),
+            grid_rc=(-1, -1),
+            distance_m=0.0,
+            bearing_rad=0.0,
+            cluster_size=0,
+            raw_score=float(cos),
+            source="stop",
+            metadata={
+                "stop_signal": True,
+                "stop_cos": float(cos),
+                "stop_dist_m": float(dist),
+                "stop_reason": "goal_match_near_agent",
+                "matched_caption": rec.caption[:120],
+            },
+        )
 
     # ------------------------------------------------------------------
     # stub propose — used when weights are absent

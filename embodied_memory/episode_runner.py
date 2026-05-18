@@ -48,6 +48,7 @@ class RunSummary:
     retrieval_hits: int = 0           # rerank calls that retrieved >= 1 LTM record
     n_memory_candidates: int = 0      # total LTM-injected candidates surfaced
     n_memory_chosen: int = 0          # decisions where reranker picked a memory candidate
+    n_stop_signals: int = 0           # decisions where backbone emitted a grounded STOP
     n_keyframes_observed: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
     ablation: Dict[str, Any] = field(default_factory=dict)
@@ -66,6 +67,7 @@ class RunSummary:
             "retrieval_hits": self.retrieval_hits,
             "n_memory_candidates": self.n_memory_candidates,
             "n_memory_chosen": self.n_memory_chosen,
+            "n_stop_signals": self.n_stop_signals,
             "n_keyframes_observed": self.n_keyframes_observed,
             "modules_invoked": self.modules_invoked,
             "ablation": self.ablation,
@@ -144,6 +146,7 @@ class EpisodeRunner:
             summary.retrieval_hits += int(ep_metrics.get("retrieval_hits", 0))
             summary.n_memory_candidates += int(ep_metrics.get("n_memory_candidates", 0))
             summary.n_memory_chosen += int(ep_metrics.get("n_memory_chosen", 0))
+            summary.n_stop_signals += int(ep_metrics.get("n_stop_signals", 0))
             # Per-episode row used by analyze_ablation.py to pair runs.
             summary.episodes.append({
                 "episode_idx": ep_idx,
@@ -159,6 +162,7 @@ class EpisodeRunner:
                 "retrieval_hits": int(ep_metrics.get("retrieval_hits", 0)),
                 "n_memory_candidates": int(ep_metrics.get("n_memory_candidates", 0)),
                 "n_memory_chosen": int(ep_metrics.get("n_memory_chosen", 0)),
+                "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
             })
 
@@ -201,6 +205,7 @@ class EpisodeRunner:
         retrieval_hits = 0
         n_memory_candidates = 0
         n_memory_chosen = 0
+        n_stop_signals = 0
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
 
@@ -232,6 +237,15 @@ class EpisodeRunner:
                     # change the action vs vanilla planner top-1?".
                     raw_top1 = cands[0]
 
+                    # Grounded STOP short-circuit: if the backbone emitted a
+                    # stop_signal candidate, force-select it before rerank so
+                    # nothing can outscore it. The runner's action-derivation
+                    # block downstream sees stop_signal and emits ACTION_STOP.
+                    stop_cand = next(
+                        (c for c in cands if c.metadata.get("stop_signal", False)),
+                        None,
+                    )
+
                     # Option-2: extend the candidate pool with LTM-derived
                     # waypoints (locations of past observations that look like
                     # the target category in CLIP joint space). Scene-filtered
@@ -260,8 +274,12 @@ class EpisodeRunner:
                     if any(len(v) > 0 for v in retrieval.values()):
                         retrieval_hits += 1
 
-                    chosen_idx = self._chosen_candidate_index(rerank_result, all_cands)
-                    chosen = all_cands[chosen_idx]
+                    if stop_cand is not None:
+                        chosen = stop_cand
+                        n_stop_signals += 1
+                    else:
+                        chosen_idx = self._chosen_candidate_index(rerank_result, all_cands)
+                        chosen = all_cands[chosen_idx]
                     if chosen.candidate_id != raw_top1.candidate_id:
                         rerank_disagreements += 1
                     if chosen.source == "memory":
@@ -299,6 +317,10 @@ class EpisodeRunner:
             # Convert candidate → action.
             if current_candidate is None:
                 action = ACTION_FORWARD
+            elif current_candidate.metadata.get("stop_signal", False):
+                # ReMEmbR's grounded STOP fired: goal-matching observation
+                # lies within the success radius of the agent. Emit action=0.
+                action = ACTION_STOP
             else:
                 action = self.planner.step_controller(
                     current_candidate, step.agent_state.rotation_yaw
@@ -372,6 +394,7 @@ class EpisodeRunner:
         ep_log["retrieval_hits"] = retrieval_hits
         ep_log["n_memory_candidates"] = n_memory_candidates
         ep_log["n_memory_chosen"] = n_memory_chosen
+        ep_log["n_stop_signals"] = n_stop_signals
         ep_log["bridge_stats_after"] = self.bridge.stats()
 
         return ep_log, {
@@ -384,6 +407,7 @@ class EpisodeRunner:
             "retrieval_hits": retrieval_hits,
             "n_memory_candidates": n_memory_candidates,
             "n_memory_chosen": n_memory_chosen,
+            "n_stop_signals": n_stop_signals,
         }
 
     # ------------------------------------------------------------------
