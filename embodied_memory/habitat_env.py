@@ -161,6 +161,13 @@ class HabitatObjectNavSource(EpisodeSource):
             config.habitat.dataset.content_scenes = bare_scene_ids
             config.habitat.environment.max_episode_steps = int(self.max_steps)
 
+            # Override habitat-sim's GPU device selection when the host's EGL
+            # stack has no CUDA-aware device (e.g. compute-only containers
+            # that ship Mesa software EGL but no libEGL_nvidia.so). Default
+            # 0 matches habitat-lab's normal CUDA+EGL interop path.
+            gpu_dev = int(os.environ.get("HABITAT_SIM_GPU_DEVICE_ID", "0"))
+            config.habitat.simulator.habitat_sim_v0.gpu_device_id = gpu_dev
+
         self._env = habitat.Env(config=config)
         return self._env
 
