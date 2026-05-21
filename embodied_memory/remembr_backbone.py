@@ -710,13 +710,41 @@ class ReMEmbRPlanner:
         return []
 
     def _format_chat(self, sys_prompt: str, user_prompt: str, history: List[str]) -> str:
-        """Mistral/Llama-style chat template. We keep formatting simple."""
-        h = "\n".join(history)
-        return f"<s>[INST] <<SYS>>\n{sys_prompt}\n<</SYS>>\n\n{user_prompt}\n{h} [/INST]"
+        """Build messages and apply the tokenizer's native chat template.
+
+        ``history`` alternates [assistant_reply, tool_result, assistant_reply, ...].
+        Tool results are surfaced to the LLM as user turns so the next reply
+        attends to them as fresh input.
+
+        Falls back to merging the system prompt into the first user turn for
+        models whose template doesn't support a separate ``system`` role
+        (e.g. Gemma, some Llama-2 templates).
+        """
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        for i, turn in enumerate(history):
+            role = "assistant" if i % 2 == 0 else "user"
+            messages.append({"role": role, "content": turn})
+        try:
+            return self._tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception:
+            merged = f"{sys_prompt}\n\n{user_prompt}"
+            fallback: List[Dict[str, str]] = [{"role": "user", "content": merged}]
+            for i, turn in enumerate(history):
+                role = "assistant" if i % 2 == 0 else "user"
+                fallback.append({"role": role, "content": turn})
+            return self._tokenizer.apply_chat_template(
+                fallback, tokenize=False, add_generation_prompt=True
+            )
 
     def _llm_complete(self, prompt: str) -> str:
         import torch
         inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
+        n_input = inputs["input_ids"].shape[-1]
         with torch.no_grad():
             out = self._llm.generate(
                 **inputs,
@@ -725,11 +753,8 @@ class ReMEmbRPlanner:
                 temperature=0.0,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
-        decoded = self._tokenizer.decode(out[0], skip_special_tokens=True)
-        # Strip the prompt prefix.
-        if "[/INST]" in decoded:
-            decoded = decoded.split("[/INST]")[-1]
-        return decoded.strip()
+        new_tokens = out[0, n_input:]
+        return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
 # ----------------------------------------------------------------------

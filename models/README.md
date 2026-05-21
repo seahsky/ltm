@@ -16,7 +16,35 @@ Total: ~30 GB VRAM in fp16. Both can be quantized (bitsandbytes 4-bit) for
 a ~12 GB total at the cost of some captioning quality. The runner pulls
 the model ids from environment variables, so you can swap to a smaller
 captioner (e.g. `llava-hf/llava-1.5-7b-hf`) or planner
-(`meta-llama/Meta-Llama-3-8B-Instruct`) without code changes.
+(`meta-llama/Meta-Llama-3-8B-Instruct`) without code changes. See
+**Lightweight backbone pair** below for the validated sub-24 GB combo.
+
+## Lightweight backbone pair (single 24 GB GPU)
+
+For budget-constrained runs (e.g. a single L4) you can swap both models
+to a smaller Qwen pair that fits fp16 on one 24 GB GPU:
+
+| Role | Model | Approx VRAM (fp16) | Disk |
+|---|---|---|---|
+| Captioner | `Qwen/Qwen2-VL-2B-Instruct` | ~5 GB | ~4.5 GB |
+| Planner   | `Qwen/Qwen2.5-3B-Instruct` | ~6 GB | ~6 GB |
+
+Total: ~11 GB VRAM fp16, ~10 GB disk. Both share the Qwen tokenizer
+family (`<|im_start|>` chat template), so there's no per-model
+template-handling code — the planner's `_format_chat` uses
+`tokenizer.apply_chat_template()` and works for any HF chat-tuned LLM.
+
+```bash
+export REMEMBR_CAPTIONER_MODEL=Qwen/Qwen2-VL-2B-Instruct
+export REMEMBR_PLANNER_MODEL=Qwen/Qwen2.5-3B-Instruct
+# dtypes default to float16 — no change needed
+```
+
+**Caveat.** This is a different experiment from the default 7B+7B fp16
+backbone. The Phase-2 ablation report in `PHASE2_ABLATION_REPORT.md`
+uses the default pair; the Qwen pair produces a separate baseline. Both
+are scientifically valid — the small-pair run additionally shows
+whether the LTM gain holds with a 5× smaller backbone.
 
 ## Environment variables
 
@@ -128,3 +156,40 @@ python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
                            runs/abl-s3-remembr \
     --out-dir runs/abl-s3-remembr-affordance
 ```
+
+## Phase-2 operator runbook — lightweight pair (single 24 GB GPU)
+
+Same flow as above but with the Qwen pair from §Lightweight backbone
+pair. Fits comfortably on a single L4. Disk pull is ~10 GB instead of
+~30 GB.
+
+```bash
+conda activate ltm-embodied
+export REMEMBR_CAPTIONER_MODEL=Qwen/Qwen2-VL-2B-Instruct
+export REMEMBR_PLANNER_MODEL=Qwen/Qwen2.5-3B-Instruct
+
+# L1: pull weights (~10 GB)
+python models/download_remembr_models.py
+
+# L2: single-episode smoke — validates template + tokenizer compat on
+# the new pair before burning a full ablation pass.
+python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
+    --setting 3 --n-episodes 1 --target any --out-dir runs/remembr-smoke-qwen
+# Confirm runs/remembr-smoke-qwen/episode_000.json shows stub_mode: false
+# and at least one parsed TOOL: or ANSWER: line in trace.tool_calls.
+
+# L3: full 3-setting ablation, ~5-8 hr per pass on a single L4.
+for s in 1 2 3; do
+  python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
+    --setting $s --scene all --n-episodes 30 --target any \
+    --out-dir runs/abl-s${s}-qwen
+done
+python embodied_memory/scripts/analyze_ablation.py \
+    runs/abl-s1-qwen runs/abl-s2-qwen runs/abl-s3-qwen
+```
+
+If the smoke at L2 emits `kind: unparseable` for every turn, the small
+LLM is drifting from the `TOOL: ...` / `ANSWER: ...` line format —
+either add a one-shot exemplar to `sys_prompt` in
+`remembr_backbone._llm_propose`, or bump `REMEMBR_MAX_TOOL_CALLS` so
+the planner has more retries before the stub fallback engages.
