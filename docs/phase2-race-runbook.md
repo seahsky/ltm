@@ -39,7 +39,7 @@ RACE portal. Once the workspace boots:
 # Setup
 cd ~ && git clone <your-repo-url> ltm && cd ltm
 git checkout phase2-readiness
-conda env create -f environment.yml  # or however ltm-embodied is built
+conda env create -f embodied_memory/environment.yml
 conda activate ltm-embodied
 
 # Persist the lightweight pair env vars
