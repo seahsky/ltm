@@ -237,3 +237,201 @@ If Phase-2 gate fails on C1 (still 0 successes in S1):
 | `embodied_memory/episode_runner.py` | STOP short-circuit + counters (commit `509dbc8`) |
 | `scripts/run_phase2_ablation.sh` | Repeatable ablation driver |
 | `embodied_memory/scripts/analyze_ablation.py` | Paired bootstrap + Phase-2 gate |
+
+---
+
+# Run 2 — Qwen lightweight pair on RACE (2026-05-22)
+
+**Date:** 2026-05-22 → 2026-05-23
+**Branch:** `phase2-readiness`
+**Pod:** RACE G15 (g6.2xlarge: 1×NVIDIA L4, 4 CPU, 32 GB RAM, $1.27/hr)
+**Backbone:** Qwen2-VL-2B-Instruct captioner + Qwen2.5-3B-Instruct planner
+**Run dirs:** `runs/abl-s{1,2,3}-qwen`
+**Gate file:** `runs/phase2-qwen-gate.txt`
+**Wall-clock:** ~3 h (smoke chase + 90-episode ablation). **Cost:** ~$3.81.
+
+## TL;DR
+
+Re-ran the same 3-setting ablation with a lightweight Qwen pair, post the
+`509dbc8` STOP fix. **The gate FAILED again — but for a different reason
+than Run 1.** STOP now emits (n_stop_signals=30 in S3 — one per episode),
+so binary SPL is no longer zero by construction. However, STOP triggers
+*too eagerly* on the first allowed step, the planner can't produce useful
+waypoints (Qwen2.5-3B regurgitates the prompt's "Current position" as its
+ANSWER), and the agent doesn't translate (mean steps 9.6–9.7 across all
+90 episodes). Three layered bugs sit between the wired-up backbone and a
+gate-passing run.
+
+| Criterion | Result | Detail |
+|---|---|---|
+| **C1** backbone alive | ❌ FAIL | `n_success(S1) = 0` — agent never reaches goal |
+| **C2** memory helps soft | ❌ FAIL | Δsoft = **−0.0054**, 90% CI [−0.026, +0.019], p=0.687 |
+| **C3** memory helps hard | ❌ stretch FAIL | Δspl = 0.000 (still zero, but for new reasons) |
+| **gate** | **FAIL** | requires C1 ∧ C2 |
+
+## Results
+
+### Aggregate (over 30 paired episodes)
+
+| Run | success | mean SPL | soft_SPL | mean_steps | rerank dis. | mem chosen |
+|---|---|---|---|---|---|---|
+| `abl-s1-qwen` | 0/30 | 0.0000 | **0.0279** | 9.60 | 0 | 0 |
+| `abl-s2-qwen` | 0/30 | 0.0000 | 0.0279 | 9.60 | 0 | 0 |
+| `abl-s3-qwen` | 0/30 | 0.0000 | **0.0225** | 9.73 | 21 | 21 |
+
+S1 and S2 are bit-identical in every aggregate metric — same harness
+sanity check as Run 1 (with rerank+LTM off, STM has no observable effect).
+
+### Paired bootstrap (S3 − S1, n=5000)
+
+| Metric | Mean | 90% CI | p (one-sided) |
+|---|---|---|---|
+| spl | 0.0000 | [0, 0] | 1.000 |
+| **soft_spl** | **−0.0054** | [−0.026, +0.019] | 0.687 |
+| n_steps | +0.133 | [+0.033, +0.267] | — |
+
+S3 soft_SPL is *slightly worse* than S1 (sign flipped from Run 1's
++0.012). Memory injection cost ~0.13 extra steps per episode without
+recouping any SPL.
+
+## Diagnostics — three layered bugs (chronological)
+
+Iteratively patched during the smoke chase before kicking off the full
+ablation. Each patch fixed the previous failure mode and exposed the next.
+
+### Bug 1 — Grounded STOP fires at step 0 (`REMEMBR_STOP_COS=0.25` too low)
+
+**Observation.** First smoke (`runs/remembr-smoke-qwen/`): episode ended
+at `n_steps=1` with `n_stop_signals=1`, agent 8.4 m from the chair.
+
+**Root cause.** `_maybe_stop` queries `builder.retrieve_from_text(goal,
+min_cosine=0.25)` and checks the matching record's xz against the agent's
+current xz. But the very first keyframe is ingested at the agent's start
+pose (`episode_runner.py:223`), so the geometric guard (`dist ≤ 1.5 m`)
+trivially passes for the just-ingested record. And the underlying cosine
+is **CLIP-text-vs-CLIP-text** of the Qwen caption against the goal word
+— not image-vs-text — which easily clears 0.7 when the caption merely
+*mentions* the goal class. The 0.25 threshold lets entry-shot captions
+auto-STOP the agent before navigation begins.
+
+**Patch (`2f2d141`).** Added `STOP_MIN_STEP` env-knob (default 8) so STOP
+can't fire until the agent has actually walked, and excluded
+current-step records from the candidate pool (`rec.timestep >=
+current_step` filter). Wired `current_step` through `propose()`.
+
+### Bug 2 — Qwen2.5-3B regurgitates `Current position` as `ANSWER`
+
+**Observation.** With Bug 1 patched, smoke went to `n_steps=21` but
+`dist_to_goal=8.48 m` (worse than 8.41 m start). Per-decision dump
+showed every LLM-proposed candidate at the agent's exact starting xy
+(−0.227, −17.772) — i.e. zero displacement.
+
+**Root cause.** The prompt is `"Goal: find a chair. Current position:
+x=-0.23, ... Pick a waypoint (x, z)."` At temperature 0, Qwen2.5-3B
+echoes the same x and z back as `ANSWER: x=-0.23, z=-17.77,
+confidence=0.5`. The parse succeeds — it's a valid line — but the
+"waypoint" is the agent's own position, so the step_controller has a
+zero-displacement candidate and can't move forward.
+
+**Patch (`bd60288`).** Added a regurgitation guard in `_llm_propose`:
+reject ANSWERs within `REMEMBR_MIN_WAYPOINT_DIST` (default 0.5 m) of
+the agent's pose and fall through to `_stub_propose`. Mirror filter in
+`_stub_propose` so retrieve_from_text hits co-located with the agent
+also get skipped. When both paths produce nothing, the existing 1.5 m
+forward-walk fallback kicks in.
+
+### Bug 3 — Step controller doesn't escape collisions
+
+**Observation.** With Bugs 1+2 patched and `STOP_MIN_STEP=50` forcing 50
+steps of exploration, the agent still moved **0.04 m total** across 51
+actions. `dist_to_goal` unchanged from the previous smoke.
+
+**Root cause (unpatched).** The step_controller emits FORWARD when the
+candidate's bearing is aligned, but Habitat blocks FORWARD on collision
+without signaling it back up the stack. The agent's starting yaw (2.75
+rad ≈ 158°) faces a wall in scene `wcojb4TFT35`, so every FORWARD
+action no-ops while still counting toward `n_steps`. The controller
+never tries TURN-then-FORWARD to escape. This is below the layer of
+env-var tuning; it requires either collision-aware control or a
+randomized-exploration fallback when the agent fails to translate for
+N consecutive steps.
+
+We did **not** patch Bug 3 — judgment call: out of session scope, no
+plausible env-knob fix, and the ablation produces meaningful paired
+data even with the stall (every setting hits the wall identically).
+
+## Comparison to Run 1 (Mistral pair on JarvisLabs)
+
+| Aspect | Run 1 (Mistral 7B, A100) | Run 2 (Qwen pair, L4) |
+|---|---|---|
+| Captioner | LLaVA-v1.6-Mistral-7B | Qwen2-VL-2B-Instruct |
+| Planner | Mistral-7B-Instruct-v0.3 | Qwen2.5-3B-Instruct |
+| Agent reached goals? | Yes — within 0.59 m (sofa), 1.46 m (bed) | No — stalled at start |
+| STOP path emits? | No (controller had no STOP branch) | Yes (the `509dbc8` fix works) |
+| Episode steps | 249 / 250 (timeout) | 9.6 / 250 (premature STOP) |
+| C1 fails because | Action pipeline has no STOP | Agent doesn't navigate |
+| S3 − S1 soft_SPL | +0.0124 (positive, not significant) | −0.0054 (negative, not significant) |
+| Cost | ~$4 (JarvisLabs A100) | ~$3.81 (RACE L4) |
+
+**Key takeaway.** The bigger Mistral 7B planner produced useful waypoints
+in Run 1 — the agent navigated, found objects, walked past them due to
+the missing STOP path. The lightweight Qwen 3B planner cannot. The
+controller-stall bug (Bug 3) is independent of the planner choice but
+matters more in Run 2 because the agent can't escape the start wall on
+its own.
+
+## What's next (in priority order)
+
+### 1. Replace the Qwen2.5-3B planner — highest leverage
+
+Empirically the Qwen2.5-3B planner regurgitates positions and can't pick
+useful waypoints. The original ReMEmbR paper uses Mistral 7B / Llama 3.1
+8B; Run 1 confirms a 7B-class planner navigates competently. Next session
+should pull **Qwen2.5-7B-Instruct** (~14 GB fp16, fits on the L4 with
+captioner offloaded or swapped to Qwen2-VL-2B kept in fp16) and re-run.
+Expected cost: ~$6–10 (3 h ablation × $1.27/hr + ~$2 setup).
+
+### 2. Patch the controller-stall (Bug 3)
+
+Independent of backbone. Two cheap-ish options:
+- Detect "agent did not translate for N consecutive FORWARD actions" and
+  inject a TURN_LEFT or TURN_RIGHT to break out of the wall.
+- Use `step.info.get('collision', False)` if Habitat surfaces it, and
+  re-pick from the candidate list when colliding.
+Either approach lifts Run 1's near-misses (sofa 0.59 m, bed 1.46 m)
+into actual binary successes once paired with a working planner.
+
+### 3. Reconsider grounded STOP signal source
+
+The STOP path is correct in intent but uses **CLIP-text-vs-text** cosine
+of the Qwen caption, which is too permissive (a passing mention of the
+goal class clears 0.7). The bridge already maintains a **CLIP-image** LTM
+(per `CLAUDE.md`); `_maybe_stop` should probably query *that* index
+(image-vs-text cosine ~0.20–0.35) rather than the builder's caption-text
+index. This is a refactor, not an env-var change.
+
+### 4. Defer until 1+2 land
+
+G3 (predictor/scorer training on real Phase-2 successes), G5 (affordance
+refresh), and HM3D `val` scale-up are all gated on a passing C1. Don't
+schedule them until S1 produces ≥1 success on val_mini.
+
+## Tuning knobs added in this session
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `REMEMBR_STOP_MIN_STEP` | 8 | Don't allow grounded STOP before step N |
+| `REMEMBR_MIN_WAYPOINT_DIST` | 0.5 m | Reject LLM ANSWERs / memory hits within N m of agent (regurgitation guard) |
+
+Pre-existing knobs documented in Run 1 (`REMEMBR_STOP_COS`, `REMEMBR_STOP_DIST`) still apply.
+
+## File index (Run 2)
+
+| Path | Purpose |
+|---|---|
+| `runs/abl-s{1,2,3}-qwen/` | Per-episode JSONs + summary.json from the Qwen ablation |
+| `runs/phase2-qwen-gate.txt` | Analyzer stdout including the gate read |
+| `runs/remembr-smoke-qwen*/` | Smoke runs from the layered-bug chase (not committed) |
+| `embodied_memory/remembr_backbone.py` | Bug 1 + Bug 2 patches (commits `2f2d141`, `bd60288`) |
+| `embodied_memory/episode_runner.py` | `current_step` threaded through `propose()` (`2f2d141`) |
+| `docs/phase2-race-runbook.md` | RACE bring-up runbook (env-path fix in `000d2a2`) |

@@ -1,0 +1,176 @@
+{
+  "episode_idx": 5,
+  "episode_id": "3",
+  "scene_id": "wcojb4TFT35",
+  "target_category": "sofa",
+  "started_at": 1779454811.6237466,
+  "steps": [
+    {
+      "step_idx": 0,
+      "action": null,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -2.79229998588562,
+        0.06803999841213226,
+        -10.139060020446777
+      ],
+      "agent_yaw": -0.828123893707283,
+      "caption": "agent at (-2.8, -10.1) sees: room interior | searching for any"
+    },
+    {
+      "step_idx": 5,
+      "action": 1,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -1.8714667558670044,
+        0.10053898394107819,
+        -10.984387397766113
+      ],
+      "agent_yaw": -0.828123893707283,
+      "caption": "agent at (-1.9, -11.0) sees: room interior | searching for any"
+    },
+    {
+      "step_idx": 10,
+      "action": 0,
+      "reward": 0.0,
+      "done": true,
+      "agent_pos": [
+        -1.590489149093628,
+        0.027383089065551758,
+        -11.242325782775879
+      ],
+      "agent_yaw": -0.828123893707283,
+      "caption": "agent at (-1.6, -11.2) sees: room interior | searching for any"
+    }
+  ],
+  "decisions": [
+    {
+      "step_idx": 0,
+      "raw_top1_id": 50001,
+      "raw_top1_world_xy": [
+        -3.8972959518432617,
+        -9.124671936035156
+      ],
+      "raw_top1_score": 0.1,
+      "chosen_id": 50001,
+      "chosen_world_xy": [
+        -3.8972959518432617,
+        -9.124671936035156
+      ],
+      "chosen_source": "remembr",
+      "chosen_final_score": 0.1,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 50001,
+          "world_xy": [
+            -3.8972959518432617,
+            -9.124671936035156
+          ],
+          "distance_m": 1.5,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.1,
+          "source": "remembr"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-3.9, -9.1) distance 1.5m bearing +0.00rad size 0",
+          "final_score": 0.1,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    },
+    {
+      "step_idx": 9,
+      "raw_top1_id": 90002,
+      "raw_top1_world_xy": [
+        -1.590489149093628,
+        -11.242325782775879
+      ],
+      "raw_top1_score": 0.7141279578208923,
+      "chosen_id": 90002,
+      "chosen_world_xy": [
+        -1.590489149093628,
+        -11.242325782775879
+      ],
+      "chosen_source": "stop",
+      "chosen_final_score": 0.7141279578208923,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 90002,
+          "world_xy": [
+            -1.590489149093628,
+            -11.242325782775879
+          ],
+          "distance_m": 0.0,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.7141279578208923,
+          "source": "stop"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-1.6, -11.2) distance 0.0m bearing +0.00rad size 0",
+          "final_score": 0.7141279578208923,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    }
+  ],
+  "finished_at": 1779454812.0677993,
+  "n_steps": 10,
+  "success": false,
+  "spl": 0.0,
+  "soft_spl": 0.0,
+  "distance_to_goal": 8.195101737976074,
+  "rerank_calls": 2,
+  "rerank_disagreements": 0,
+  "retrieval_hits": 0,
+  "n_memory_candidates": 0,
+  "n_memory_chosen": 0,
+  "n_stop_signals": 1,
+  "bridge_stats_after": {
+    "ltm_counts": {
+      "fine": 0,
+      "mid": 0,
+      "coarse": 0
+    },
+    "n_clusters": 0,
+    "episodes_seen": 6,
+    "successful_episodes_seen": 0,
+    "n_keyframes_observed": 0,
+    "modules_invoked": {
+      "stm": false,
+      "consolidation": false,
+      "ltm_fine": false,
+      "ltm_mid": false,
+      "ltm_coarse": false,
+      "rerank": false
+    },
+    "ablation": {
+      "disable_stm": true,
+      "disable_ltm": true,
+      "disable_rerank": true
+    },
+    "affordance_table_size": 0,
+    "affordance_categories": []
+  }
+}

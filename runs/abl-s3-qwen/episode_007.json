@@ -1,0 +1,286 @@
+{
+  "episode_idx": 7,
+  "episode_id": "14",
+  "scene_id": "wcojb4TFT35",
+  "target_category": "bed",
+  "started_at": 1779454884.6728566,
+  "steps": [
+    {
+      "step_idx": 0,
+      "action": null,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -1.7565499544143677,
+        0.5715100169181824,
+        -12.177889823913574
+      ],
+      "agent_yaw": 2.6518546397575653,
+      "caption": "agent at (-1.8, -12.2) sees: room interior | searching for any"
+    },
+    {
+      "step_idx": 5,
+      "action": 1,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -2.135806083679199,
+        0.49946337938308716,
+        -12.165043830871582
+      ],
+      "agent_yaw": 1.6046560025379106,
+      "caption": "agent at (-2.1, -12.2) sees: room interior | searching for any"
+    },
+    {
+      "step_idx": 10,
+      "action": 0,
+      "reward": 0.0,
+      "done": true,
+      "agent_pos": [
+        -2.135806083679199,
+        0.49946337938308716,
+        -12.165043830871582
+      ],
+      "agent_yaw": 1.6046560025379106,
+      "caption": "agent at (-2.1, -12.2) sees: room interior | searching for any"
+    }
+  ],
+  "decisions": [
+    {
+      "step_idx": 0,
+      "raw_top1_id": 50001,
+      "raw_top1_world_xy": [
+        -1.0509579181671143,
+        -13.50157356262207
+      ],
+      "raw_top1_score": 0.1,
+      "chosen_id": 1003,
+      "chosen_world_xy": [
+        0.3561300039291382,
+        -12.352049827575684
+      ],
+      "chosen_source": "memory",
+      "chosen_final_score": 0.6636785739158159,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 3,
+      "candidates": [
+        {
+          "id": 50001,
+          "world_xy": [
+            -1.0509579181671143,
+            -13.50157356262207
+          ],
+          "distance_m": 1.5,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.1,
+          "source": "remembr"
+        },
+        {
+          "id": 1001,
+          "world_xy": [
+            -0.2435816526412964,
+            -17.73101043701172
+          ],
+          "distance_m": 5.755538343698667,
+          "bearing_rad": 0.22374060802954165,
+          "cluster_size": 0,
+          "raw_score": 0.25174224376678467,
+          "source": "memory"
+        },
+        {
+          "id": 1002,
+          "world_xy": [
+            -0.5478799939155579,
+            -7.373499870300293
+          ],
+          "distance_m": 4.9540938525417975,
+          "bearing_rad": -2.405393085930188,
+          "cluster_size": 0,
+          "raw_score": 0.2502162456512451,
+          "source": "memory"
+        },
+        {
+          "id": 1003,
+          "world_xy": [
+            0.3561300039291382,
+            -12.352049827575684
+          ],
+          "distance_m": 2.119846294725612,
+          "bearing_rad": -0.9988087062207149,
+          "cluster_size": 0,
+          "raw_score": 0.2481905221939087,
+          "source": "memory"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (0.4, -12.4) distance 2.1m bearing -1.00rad size 0",
+          "final_score": 0.6636785739158159,
+          "scores": {
+            "memory": 0.6814068743277888,
+            "coherence": 0.6560807308821133
+          }
+        },
+        {
+          "response": "go to (-1.1, -13.5) distance 1.5m bearing +0.00rad size 0",
+          "final_score": 0.572769609707136,
+          "scores": {
+            "memory": 0.68423203235712,
+            "coherence": 0.525
+          }
+        },
+        {
+          "response": "go to (-0.5, -7.4) distance 5.0m bearing -2.41rad size 0",
+          "final_score": 0.5720350964861547,
+          "scores": {
+            "memory": 0.6843475933445634,
+            "coherence": 0.5239011692611224
+          }
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 3,
+        "mid": 0,
+        "coarse": 3
+      }
+    },
+    {
+      "step_idx": 9,
+      "raw_top1_id": 90002,
+      "raw_top1_world_xy": [
+        -2.135806083679199,
+        -12.165043830871582
+      ],
+      "raw_top1_score": 0.7974967956542969,
+      "chosen_id": 90002,
+      "chosen_world_xy": [
+        -2.135806083679199,
+        -12.165043830871582
+      ],
+      "chosen_source": "stop",
+      "chosen_final_score": 0.6944573559473621,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 3,
+      "candidates": [
+        {
+          "id": 90002,
+          "world_xy": [
+            -2.135806083679199,
+            -12.165043830871582
+          ],
+          "distance_m": 0.0,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.7974967956542969,
+          "source": "stop"
+        },
+        {
+          "id": 1001,
+          "world_xy": [
+            -1.3337600231170654,
+            -13.755200386047363
+          ],
+          "distance_m": 1.7809760675628812,
+          "bearing_rad": 1.0697897321020653,
+          "cluster_size": 0,
+          "raw_score": 0.25558173656463623,
+          "source": "memory"
+        },
+        {
+          "id": 1002,
+          "world_xy": [
+            -0.2435816526412964,
+            -17.73101043701172
+          ],
+          "distance_m": 5.87881770070172,
+          "bearing_rad": 1.2092310327283364,
+          "cluster_size": 0,
+          "raw_score": 0.25174224376678467,
+          "source": "memory"
+        },
+        {
+          "id": 1003,
+          "world_xy": [
+            -0.5478799939155579,
+            -7.373499870300293
+          ],
+          "distance_m": 5.047811683555484,
+          "bearing_rad": -1.28464487256982,
+          "cluster_size": 0,
+          "raw_score": 0.2502162456512451,
+          "source": "memory"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-2.1, -12.2) distance 0.0m bearing +0.00rad size 0",
+          "final_score": 0.6944573559473621,
+          "scores": {
+            "memory": 0.6844449248945272,
+            "coherence": 0.6987483978271485
+          }
+        },
+        {
+          "response": "go to (-1.3, -13.8) distance 1.8m bearing +1.07rad size 0",
+          "final_score": 0.68499585231486,
+          "scores": {
+            "memory": 0.6828767610849171,
+            "coherence": 0.6859040342705499
+          }
+        },
+        {
+          "response": "go to (-0.5, -7.4) distance 5.0m bearing -1.28rad size 0",
+          "final_score": 0.5684703945801837,
+          "scores": {
+            "memory": 0.6833990006095899,
+            "coherence": 0.5192152777104381
+          }
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 3,
+        "mid": 0,
+        "coarse": 3
+      }
+    }
+  ],
+  "finished_at": 1779454885.8644903,
+  "n_steps": 10,
+  "success": false,
+  "spl": 0.0,
+  "soft_spl": 0.0,
+  "distance_to_goal": 6.062670707702637,
+  "rerank_calls": 2,
+  "rerank_disagreements": 1,
+  "retrieval_hits": 2,
+  "n_memory_candidates": 6,
+  "n_memory_chosen": 1,
+  "n_stop_signals": 1,
+  "bridge_stats_after": {
+    "ltm_counts": {
+      "fine": 23,
+      "mid": 0,
+      "coarse": 10
+    },
+    "n_clusters": 0,
+    "episodes_seen": 8,
+    "successful_episodes_seen": 0,
+    "n_keyframes_observed": 23,
+    "modules_invoked": {
+      "stm": true,
+      "consolidation": true,
+      "ltm_fine": true,
+      "ltm_mid": false,
+      "ltm_coarse": true,
+      "rerank": true
+    },
+    "ablation": {
+      "disable_stm": false,
+      "disable_ltm": false,
+      "disable_rerank": false
+    },
+    "affordance_table_size": 0,
+    "affordance_categories": []
+  }
+}

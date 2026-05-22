@@ -1,0 +1,207 @@
+{
+  "episode_idx": 18,
+  "episode_id": "1",
+  "scene_id": "TEEsavR23oF",
+  "target_category": "plant",
+  "started_at": 1779454851.1546607,
+  "steps": [
+    {
+      "step_idx": 0,
+      "action": null,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -1.3601499795913696,
+        0.1633799970149994,
+        -3.780630111694336
+      ],
+      "agent_yaw": -1.9253348815248048,
+      "caption": "agent at (-1.4, -3.8) sees: room interior | searching for any"
+    },
+    {
+      "step_idx": 5,
+      "action": 1,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -1.347001075744629,
+        0.16337794065475464,
+        -3.7757625579833984
+      ],
+      "agent_yaw": -1.9253348815248048,
+      "caption": "agent at (-1.3, -3.8) sees: room interior | searching for any"
+    }
+  ],
+  "decisions": [
+    {
+      "step_idx": 0,
+      "raw_top1_id": 50001,
+      "raw_top1_world_xy": [
+        -2.766860246658325,
+        -4.301366806030273
+      ],
+      "raw_top1_score": 0.1,
+      "chosen_id": 50001,
+      "chosen_world_xy": [
+        -2.766860246658325,
+        -4.301366806030273
+      ],
+      "chosen_source": "remembr",
+      "chosen_final_score": 0.1,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 50001,
+          "world_xy": [
+            -2.766860246658325,
+            -4.301366806030273
+          ],
+          "distance_m": 1.5,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.1,
+          "source": "remembr"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-2.8, -4.3) distance 1.5m bearing +0.00rad size 0",
+          "final_score": 0.1,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    },
+    {
+      "step_idx": 7,
+      "raw_top1_id": 50002,
+      "raw_top1_world_xy": [
+        -2.753711223602295,
+        -4.296499252319336
+      ],
+      "raw_top1_score": 0.1,
+      "chosen_id": 50002,
+      "chosen_world_xy": [
+        -2.753711223602295,
+        -4.296499252319336
+      ],
+      "chosen_source": "remembr",
+      "chosen_final_score": 0.1,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 50002,
+          "world_xy": [
+            -2.753711223602295,
+            -4.296499252319336
+          ],
+          "distance_m": 1.5,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.1,
+          "source": "remembr"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-2.8, -4.3) distance 1.5m bearing +0.00rad size 0",
+          "final_score": 0.1,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    },
+    {
+      "step_idx": 8,
+      "raw_top1_id": 90003,
+      "raw_top1_world_xy": [
+        -1.347001075744629,
+        -3.7757625579833984
+      ],
+      "raw_top1_score": 0.8015983700752258,
+      "chosen_id": 90003,
+      "chosen_world_xy": [
+        -1.347001075744629,
+        -3.7757625579833984
+      ],
+      "chosen_source": "stop",
+      "chosen_final_score": 0.8015983700752258,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 90003,
+          "world_xy": [
+            -1.347001075744629,
+            -3.7757625579833984
+          ],
+          "distance_m": 0.0,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.8015983700752258,
+          "source": "stop"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-1.3, -3.8) distance 0.0m bearing +0.00rad size 0",
+          "final_score": 0.8015983700752258,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    }
+  ],
+  "finished_at": 1779454851.5758228,
+  "n_steps": 9,
+  "success": false,
+  "spl": 0.0,
+  "soft_spl": 0.0,
+  "distance_to_goal": 21.03691864013672,
+  "rerank_calls": 3,
+  "rerank_disagreements": 0,
+  "retrieval_hits": 0,
+  "n_memory_candidates": 0,
+  "n_memory_chosen": 0,
+  "n_stop_signals": 1,
+  "bridge_stats_after": {
+    "ltm_counts": {
+      "fine": 0,
+      "mid": 0,
+      "coarse": 0
+    },
+    "n_clusters": 0,
+    "episodes_seen": 19,
+    "successful_episodes_seen": 0,
+    "n_keyframes_observed": 50,
+    "modules_invoked": {
+      "stm": true,
+      "consolidation": false,
+      "ltm_fine": false,
+      "ltm_mid": false,
+      "ltm_coarse": false,
+      "rerank": false
+    },
+    "ablation": {
+      "disable_stm": false,
+      "disable_ltm": true,
+      "disable_rerank": true
+    },
+    "affordance_table_size": 0,
+    "affordance_categories": []
+  }
+}

@@ -1,0 +1,46 @@
+=== runs ===
+  abl-s1-qwen: setting=1 ablation={'disable_stm': True, 'disable_ltm': True, 'disable_rerank': True, 'backbone': 'remembr', 'setting': 1} n_episodes=30
+  abl-s2-qwen: setting=2 ablation={'disable_stm': False, 'disable_ltm': True, 'disable_rerank': True, 'backbone': 'remembr', 'setting': 2} n_episodes=30
+  abl-s3-qwen: setting=3 ablation={'disable_stm': False, 'disable_ltm': False, 'disable_rerank': False, 'backbone': 'remembr', 'setting': 3} n_episodes=30
+
+=== per-setting aggregate (over paired episodes) ===
+run                       setting n_paired  n_total   mean_SPL   soft_SPL   success  mean_steps  rerank_dis  retr_hits
+abl-s1-qwen                     1       30       30     0.0000     0.0279    0.0000        9.60           0          0
+abl-s2-qwen                     2       30       30     0.0000     0.0279    0.0000        9.60           0          0
+abl-s3-qwen                     3       30       30     0.0000     0.0225    0.0000        9.73          21         66
+
+=== paired deltas (b - a), bootstrap n=5000, CI=95% ===
+comparison (b - a)               metric         mean         lo         hi     n
+abl-s2-qwen - abl-s1-qwen        spl          0.0000     0.0000     0.0000    30
+abl-s2-qwen - abl-s1-qwen        soft_spl     0.0000     0.0000     0.0000    30
+abl-s2-qwen - abl-s1-qwen        success      0.0000     0.0000     0.0000    30
+abl-s2-qwen - abl-s1-qwen        n_steps      0.0000     0.0000     0.0000    30
+abl-s3-qwen - abl-s1-qwen        spl          0.0000     0.0000     0.0000    30
+abl-s3-qwen - abl-s1-qwen        soft_spl    -0.0054    -0.0291     0.0253    30
+abl-s3-qwen - abl-s1-qwen        success      0.0000     0.0000     0.0000    30
+abl-s3-qwen - abl-s1-qwen        n_steps      0.1333     0.0333     0.2667    30
+abl-s1-qwen - abl-s2-qwen        spl          0.0000     0.0000     0.0000    30
+abl-s1-qwen - abl-s2-qwen        soft_spl     0.0000     0.0000     0.0000    30
+abl-s1-qwen - abl-s2-qwen        success      0.0000     0.0000     0.0000    30
+abl-s1-qwen - abl-s2-qwen        n_steps      0.0000     0.0000     0.0000    30
+abl-s3-qwen - abl-s2-qwen        spl          0.0000     0.0000     0.0000    30
+abl-s3-qwen - abl-s2-qwen        soft_spl    -0.0054    -0.0291     0.0253    30
+abl-s3-qwen - abl-s2-qwen        success      0.0000     0.0000     0.0000    30
+abl-s3-qwen - abl-s2-qwen        n_steps      0.1333     0.0333     0.2667    30
+abl-s1-qwen - abl-s3-qwen        spl          0.0000     0.0000     0.0000    30
+abl-s1-qwen - abl-s3-qwen        soft_spl     0.0054    -0.0253     0.0291    30
+abl-s1-qwen - abl-s3-qwen        success      0.0000     0.0000     0.0000    30
+abl-s1-qwen - abl-s3-qwen        n_steps     -0.1333    -0.2667    -0.0333    30
+abl-s2-qwen - abl-s3-qwen        spl          0.0000     0.0000     0.0000    30
+abl-s2-qwen - abl-s3-qwen        soft_spl     0.0054    -0.0253     0.0291    30
+abl-s2-qwen - abl-s3-qwen        success      0.0000     0.0000     0.0000    30
+abl-s2-qwen - abl-s3-qwen        n_steps     -0.1333    -0.2667    -0.0333    30
+
+=== phase 2 gate ===
+  C1 backbone alive:    n_success(setting 1) = 0  (FAIL)
+  C2 memory helps soft: soft_SPL delta (S3 - S1) mean=-0.0054  90% CI=[-0.0258, +0.0194]  one-sided p=0.687  (FAIL)
+  C3 memory helps hard: SPL delta (S3 - S1)      mean=+0.0000  90% CI=[+0.0000, +0.0000]  one-sided p=1.000  (FAIL, stretch)
+  gate: FAIL  (require C1 and C2; C3 is stretch)
+  → backbone isn't reaching goals. Audit the ReMEmbR planner / max_steps
+    budget / scene difficulty before declaring Phase 2 done.
+

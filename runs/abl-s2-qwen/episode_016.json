@@ -1,0 +1,176 @@
+{
+  "episode_idx": 16,
+  "episode_id": "7",
+  "scene_id": "TEEsavR23oF",
+  "target_category": "chair",
+  "started_at": 1779454850.2649438,
+  "steps": [
+    {
+      "step_idx": 0,
+      "action": null,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -6.844940185546875,
+        3.1633799076080322,
+        -4.9137701988220215
+      ],
+      "agent_yaw": -0.2129426535194376,
+      "caption": "agent at (-6.8, -4.9) sees: room interior | searching for any"
+    },
+    {
+      "step_idx": 5,
+      "action": 1,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -6.637561798095703,
+        3.1633780002593994,
+        -5.872880458831787
+      ],
+      "agent_yaw": -0.2129426535194376,
+      "caption": "agent at (-6.6, -5.9) sees: room interior | searching for any"
+    },
+    {
+      "step_idx": 10,
+      "action": 0,
+      "reward": 0.0,
+      "done": true,
+      "agent_pos": [
+        -6.637561798095703,
+        3.1633780002593994,
+        -5.872880458831787
+      ],
+      "agent_yaw": -0.2129426535194376,
+      "caption": "agent at (-6.6, -5.9) sees: room interior | searching for any"
+    }
+  ],
+  "decisions": [
+    {
+      "step_idx": 0,
+      "raw_top1_id": 50001,
+      "raw_top1_world_xy": [
+        -7.161945819854736,
+        -3.44765043258667
+      ],
+      "raw_top1_score": 0.1,
+      "chosen_id": 50001,
+      "chosen_world_xy": [
+        -7.161945819854736,
+        -3.44765043258667
+      ],
+      "chosen_source": "remembr",
+      "chosen_final_score": 0.1,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 50001,
+          "world_xy": [
+            -7.161945819854736,
+            -3.44765043258667
+          ],
+          "distance_m": 1.5,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.1,
+          "source": "remembr"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-7.2, -3.4) distance 1.5m bearing +0.00rad size 0",
+          "final_score": 0.1,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    },
+    {
+      "step_idx": 9,
+      "raw_top1_id": 90002,
+      "raw_top1_world_xy": [
+        -6.637561798095703,
+        -5.872880458831787
+      ],
+      "raw_top1_score": 0.7685885429382324,
+      "chosen_id": 90002,
+      "chosen_world_xy": [
+        -6.637561798095703,
+        -5.872880458831787
+      ],
+      "chosen_source": "stop",
+      "chosen_final_score": 0.7685885429382324,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 90002,
+          "world_xy": [
+            -6.637561798095703,
+            -5.872880458831787
+          ],
+          "distance_m": 0.0,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.7685885429382324,
+          "source": "stop"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-6.6, -5.9) distance 0.0m bearing +0.00rad size 0",
+          "final_score": 0.7685885429382324,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    }
+  ],
+  "finished_at": 1779454850.6963446,
+  "n_steps": 10,
+  "success": false,
+  "spl": 0.0,
+  "soft_spl": 0.0,
+  "distance_to_goal": 4.715177536010742,
+  "rerank_calls": 2,
+  "rerank_disagreements": 0,
+  "retrieval_hits": 0,
+  "n_memory_candidates": 0,
+  "n_memory_chosen": 0,
+  "n_stop_signals": 1,
+  "bridge_stats_after": {
+    "ltm_counts": {
+      "fine": 0,
+      "mid": 0,
+      "coarse": 0
+    },
+    "n_clusters": 0,
+    "episodes_seen": 17,
+    "successful_episodes_seen": 0,
+    "n_keyframes_observed": 45,
+    "modules_invoked": {
+      "stm": true,
+      "consolidation": false,
+      "ltm_fine": false,
+      "ltm_mid": false,
+      "ltm_coarse": false,
+      "rerank": false
+    },
+    "ablation": {
+      "disable_stm": false,
+      "disable_ltm": true,
+      "disable_rerank": true
+    },
+    "affordance_table_size": 0,
+    "affordance_categories": []
+  }
+}

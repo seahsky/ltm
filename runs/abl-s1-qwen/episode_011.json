@@ -1,0 +1,163 @@
+{
+  "episode_idx": 11,
+  "episode_id": "1",
+  "scene_id": "wcojb4TFT35",
+  "target_category": "chair",
+  "started_at": 1779454814.242337,
+  "steps": [
+    {
+      "step_idx": 0,
+      "action": null,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -0.19588999450206757,
+        0.19492000341415405,
+        -0.051580000668764114
+      ],
+      "agent_yaw": -0.20960280897086747,
+      "caption": "agent at (-0.2, -0.1) sees: room interior | searching for any"
+    },
+    {
+      "step_idx": 5,
+      "action": 1,
+      "reward": 0.0,
+      "done": false,
+      "agent_pos": [
+        -0.17401710152626038,
+        0.19491982460021973,
+        -0.1544012725353241
+      ],
+      "agent_yaw": -0.20960280897086747,
+      "caption": "agent at (-0.2, -0.2) sees: room interior | searching for any"
+    }
+  ],
+  "decisions": [
+    {
+      "step_idx": 0,
+      "raw_top1_id": 50001,
+      "raw_top1_world_xy": [
+        -0.5079970955848694,
+        1.4155904054641724
+      ],
+      "raw_top1_score": 0.1,
+      "chosen_id": 50001,
+      "chosen_world_xy": [
+        -0.5079970955848694,
+        1.4155904054641724
+      ],
+      "chosen_source": "remembr",
+      "chosen_final_score": 0.1,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 50001,
+          "world_xy": [
+            -0.5079970955848694,
+            1.4155904054641724
+          ],
+          "distance_m": 1.5,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.1,
+          "source": "remembr"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-0.5, 1.4) distance 1.5m bearing +0.00rad size 0",
+          "final_score": 0.1,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    },
+    {
+      "step_idx": 8,
+      "raw_top1_id": 90002,
+      "raw_top1_world_xy": [
+        -0.17401710152626038,
+        -0.1544012725353241
+      ],
+      "raw_top1_score": 0.7685885429382324,
+      "chosen_id": 90002,
+      "chosen_world_xy": [
+        -0.17401710152626038,
+        -0.1544012725353241
+      ],
+      "chosen_source": "stop",
+      "chosen_final_score": 0.7685885429382324,
+      "n_planner_candidates": 1,
+      "n_memory_candidates": 0,
+      "candidates": [
+        {
+          "id": 90002,
+          "world_xy": [
+            -0.17401710152626038,
+            -0.1544012725353241
+          ],
+          "distance_m": 0.0,
+          "bearing_rad": 0.0,
+          "cluster_size": 0,
+          "raw_score": 0.7685885429382324,
+          "source": "stop"
+        }
+      ],
+      "rerank_top": [
+        {
+          "response": "go to (-0.2, -0.2) distance 0.0m bearing +0.00rad size 0",
+          "final_score": 0.7685885429382324,
+          "scores": {}
+        }
+      ],
+      "retrieval_counts": {
+        "fine": 0,
+        "mid": 0,
+        "coarse": 0
+      }
+    }
+  ],
+  "finished_at": 1779454814.5955348,
+  "n_steps": 9,
+  "success": false,
+  "spl": 0.0,
+  "soft_spl": 0.016809950330128665,
+  "distance_to_goal": 4.460093021392822,
+  "rerank_calls": 2,
+  "rerank_disagreements": 0,
+  "retrieval_hits": 0,
+  "n_memory_candidates": 0,
+  "n_memory_chosen": 0,
+  "n_stop_signals": 1,
+  "bridge_stats_after": {
+    "ltm_counts": {
+      "fine": 0,
+      "mid": 0,
+      "coarse": 0
+    },
+    "n_clusters": 0,
+    "episodes_seen": 12,
+    "successful_episodes_seen": 0,
+    "n_keyframes_observed": 0,
+    "modules_invoked": {
+      "stm": false,
+      "consolidation": false,
+      "ltm_fine": false,
+      "ltm_mid": false,
+      "ltm_coarse": false,
+      "rerank": false
+    },
+    "ablation": {
+      "disable_stm": true,
+      "disable_ltm": true,
+      "disable_rerank": true
+    },
+    "affordance_table_size": 0,
+    "affordance_categories": []
+  }
+}
