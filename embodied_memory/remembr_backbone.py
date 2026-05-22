@@ -549,11 +549,18 @@ class ReMEmbRPlanner:
 
         out: List[FrontierCandidate] = []
         ax, az = float(agent_pose[0]), float(agent_pose[2])
+        # Reject records co-located with the agent — those produce zero-
+        # displacement candidates that the controller can't act on. The agent
+        # also hasn't moved yet if the only records are from steps where it
+        # was at the current pose.
+        min_waypoint_dist = float(os.environ.get("REMEMBR_MIN_WAYPOINT_DIST", "0.5"))
         for rec, cos in hits:
             xyz = rec.position
             dx = float(xyz[0]) - ax
             dz = float(xyz[2]) - az
             dist = math.hypot(dx, dz)
+            if dist < min_waypoint_dist:
+                continue
             bearing = _rel_bearing(dx, dz, agent_yaw)
             self._candidate_counter += 1
             out.append(
@@ -680,6 +687,17 @@ class ReMEmbRPlanner:
         x_target, z_target, conf = answer_xz
         dx, dz = x_target - ax, z_target - az
         dist = math.hypot(dx, dz)
+        # Regurgitation guard: small planners (Qwen2.5-3B at temperature 0)
+        # often echo the prompt's "Current position" back as their ANSWER.
+        # That produces a zero-displacement waypoint and the controller can't
+        # move forward. Treat sub-0.5 m "stay here" answers as bogus and use
+        # the stub's forward-walk fallback so the agent at least explores.
+        if dist < float(os.environ.get("REMEMBR_MIN_WAYPOINT_DIST", "0.5")):
+            trace.tool_calls.append({
+                "tool": "answer_rejected_regurgitation",
+                "x": float(x_target), "z": float(z_target), "dist": float(dist),
+            })
+            return self._stub_propose(goal, agent_pose, agent_yaw, max_candidates, trace)
         bearing = _rel_bearing(dx, dz, agent_yaw)
         self._candidate_counter += 1
         primary = FrontierCandidate(
