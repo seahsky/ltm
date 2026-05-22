@@ -432,6 +432,7 @@ class EpisodeRunner:
             goal=ep.target_category or self.target_category,
             agent_pose=step.agent_state.position,
             agent_yaw=step.agent_state.rotation_yaw,
+            current_step=int(step.step_idx),
         )
 
     def _build_keyframe(self, step: Step) -> Keyframe:

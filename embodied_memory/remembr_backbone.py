@@ -416,6 +416,7 @@ class ReMEmbRPlanner:
         agent_pose: np.ndarray,
         agent_yaw: float,
         max_candidates: int = 3,
+        current_step: int = 0,
     ) -> List[FrontierCandidate]:
         """Return up to ``max_candidates`` waypoints toward the goal."""
         self._lazy_load_llm()
@@ -425,7 +426,7 @@ class ReMEmbRPlanner:
         # a recent observation whose caption matches the goal AND lies within
         # the success radius of the agent's current xz, short-circuit the LLM
         # and emit a stop candidate. Runner converts this to action=0.
-        stop_cand = self._maybe_stop(goal, agent_pose, trace)
+        stop_cand = self._maybe_stop(goal, agent_pose, trace, current_step=current_step)
         if stop_cand is not None:
             self._last_trace = trace
             return [stop_cand]
@@ -442,23 +443,34 @@ class ReMEmbRPlanner:
     # grounded STOP check
     # ------------------------------------------------------------------
 
-    # Cosine threshold for goal-vs-caption match in CLIP joint space. Set
-    # conservatively above the retrieve_from_text default (0.18) to keep
-    # false STOPs rare.
+    # Cosine threshold for goal-vs-caption match in CLIP joint space. The
+    # builder stores CLIP-text embeddings of Qwen-VL captions, so this is
+    # caption-text-vs-goal-text — easily clears 0.7 when the caption mentions
+    # the goal word at all. Hold the bar high so a passing mention in the
+    # caption doesn't trigger a false STOP.
     STOP_COS_THRESHOLD: float = float(os.environ.get("REMEMBR_STOP_COS", "0.25"))
     # Max xz distance (m) between the matching observation and the agent's
     # current position. HM3D ObjectNav success radius is 1.0 m; add slack
     # for keyframe-position quantisation.
     STOP_DIST_THRESHOLD: float = float(os.environ.get("REMEMBR_STOP_DIST", "1.5"))
+    # Minimum step before STOP may fire. The very first keyframe is ingested
+    # at the agent's start pose, so the geometric guard above passes trivially
+    # — without a step floor, an entry-shot caption mentioning the goal class
+    # auto-STOPs the agent at step 0 with success radius irrelevant.
+    STOP_MIN_STEP: int = int(os.environ.get("REMEMBR_STOP_MIN_STEP", "8"))
 
     def _maybe_stop(
         self,
         goal: str,
         agent_pose: np.ndarray,
         trace: "PlannerTrace",
+        current_step: int = 0,
     ) -> Optional[FrontierCandidate]:
         """Emit a stop candidate iff a goal-matching past observation lies
         within the success radius of the agent's current position."""
+        # Step floor: don't allow STOP until the agent has actually explored.
+        if current_step < self.STOP_MIN_STEP:
+            return None
         try:
             hits = self.builder.retrieve_from_text(goal, top_k=5, min_cosine=self.STOP_COS_THRESHOLD)
         except Exception:
@@ -468,6 +480,12 @@ class ReMEmbRPlanner:
         ax, _, az = float(agent_pose[0]), float(agent_pose[1]), float(agent_pose[2])
         best: Optional[Tuple[MemoryRecord, float, float]] = None
         for rec, cos in hits:
+            # Exclude the current-step's just-ingested keyframe — its position
+            # equals the agent's pose by construction, so it trivially passes
+            # the geometric guard. STOP must be triggered by a strictly older
+            # observation that the agent has returned to (or stayed near).
+            if rec.timestep >= current_step:
+                continue
             rx, _, rz = float(rec.position[0]), float(rec.position[1]), float(rec.position[2])
             dist = math.hypot(rx - ax, rz - az)
             if dist <= self.STOP_DIST_THRESHOLD:
