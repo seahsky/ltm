@@ -305,3 +305,52 @@ costs trend past that without a gate read, stop and escalate.
 - `embodied_memory/scripts/analyze_ablation.py` — gate logic
 - `embodied_memory/scripts/diagnose_stop.py` — action histogram
 - `models/download_remembr_models.py` — honors `REMEMBR_*_MODEL` env vars
+
+---
+
+## Run-4 amendment (2026-05-23)
+
+After Run 3 (this runbook's named session) failed the smoke gate at the
+movement layer (0.04 m total across 21 steps), the immediate next session
+**did not** take the runbook-recommended Option 1 (bridge-CLIP-image STOP
+refactor for `_maybe_stop`). Instead it picked the deferred **Option 2a**
+from §"What's next" §2: inject 2–3 frontier-planner candidates into the
+LLM proposal pool when `backbone=remembr`.
+
+### Why Option 2a over Option 1
+
+Run 3 showed C1 was gated by **movement**, not STOP precision. With
+`STOP_COS=0.40` + `STOP_MIN_STEP=20` already in place, the smoke logged
+zero false STOPs. The bridge-CLIP STOP refactor only helps once the agent
+is near a goal — Run 3 never got there. Obstacle-aware proposals are the
+direct lever for movement.
+
+### Where it lands in the code
+
+Single-seam change in
+`embodied_memory/episode_runner.py::_propose_candidates`. The `remembr`
+branch now concatenates up to `REMEMBR_FRONTIER_INJECT=3` frontier-planner
+candidates onto the LLM output, de-duped against existing LLM picks by
+`REMEMBR_MIN_WAYPOINT_DIST` (default 0.5 m). STOP short-circuit is
+preserved: if the LLM emitted a `stop_signal` candidate, it returns alone.
+
+The 3-setting (memory off / STM / full) protocol is unchanged. Frontier
+injection is applied uniformly across all settings — the same way
+`509dbc8` (Run 1 → Run 2 STOP fix) and `117028d` / `6265870` (Run 2 → Run
+3 controller patches) were applied uniformly.
+
+### Status when this amendment landed
+
+Code change + module-level sanity test passing locally. **No RACE
+execution yet.** The full operator runbook for the paid run lives in
+`PHASE2_ABLATION_REPORT.md`'s Run-4 section. The original Phase-1 through
+Phase-4 structure of *this* runbook still applies verbatim for the next
+session — Run 4 only changes what code is checked in before Phase 1.
+
+### Bridge-CLIP-image STOP refactor — still deferred
+
+If Run 4 succeeds at the movement layer (smoke passes `path_traveled ≥
+4 m` and `n_frontier_chosen ≥ 1`) but fails C1 because the agent doesn't
+STOP at goals, the bridge-CLIP STOP refactor becomes the next session's
+lever. That's the original Option 1 from this runbook's §"What's next",
+now scoped one layer up.

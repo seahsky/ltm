@@ -44,6 +44,8 @@ class EpisodeRow:
     n_steps: int
     rerank_disagreements: int
     retrieval_hits: int
+    n_memory_chosen: int = 0
+    n_frontier_chosen: int = 0
 
 
 @dataclass
@@ -75,6 +77,8 @@ def _coerce_episode(raw: Dict[str, Any]) -> Optional[EpisodeRow]:
         n_steps=int(raw.get("n_steps", 0)),
         rerank_disagreements=int(raw.get("rerank_disagreements", 0)),
         retrieval_hits=int(raw.get("retrieval_hits", 0)),
+        n_memory_chosen=int(raw.get("n_memory_chosen", 0)),
+        n_frontier_chosen=int(raw.get("n_frontier_chosen", 0)),
     )
 
 
@@ -193,11 +197,13 @@ def print_per_setting_summary(runs: List[RunData], paired_keys: List[Tuple[str, 
     print("=== per-setting aggregate (over paired episodes) ===")
     print(f"{'run':<25} {'setting':>7} {'n_paired':>8} {'n_total':>8} "
           f"{'mean_SPL':>10} {'soft_SPL':>10} {'success':>9} {'mean_steps':>11} "
-          f"{'rerank_dis':>11} {'retr_hits':>10}")
+          f"{'rerank_dis':>11} {'retr_hits':>10} {'mem_chosen':>11} {'front_chosen':>13}")
     for r in runs:
         m = per_run_means(r, paired_keys)
         rerank_dis_total = sum(r.episodes[k].rerank_disagreements for k in paired_keys) if paired_keys else 0
         retr_hits_total = sum(r.episodes[k].retrieval_hits for k in paired_keys) if paired_keys else 0
+        mem_chosen_total = sum(r.episodes[k].n_memory_chosen for k in paired_keys) if paired_keys else 0
+        front_chosen_total = sum(r.episodes[k].n_frontier_chosen for k in paired_keys) if paired_keys else 0
         print(
             f"{r.name:<25} {str(r.setting):>7} {int(m.get('n_paired', 0)):>8d} "
             f"{int(m.get('n_total', 0)):>8d} "
@@ -205,7 +211,8 @@ def print_per_setting_summary(runs: List[RunData], paired_keys: List[Tuple[str, 
             f"{m.get('soft_spl', float('nan')):>10.4f} "
             f"{m.get('success', float('nan')):>9.4f} "
             f"{m.get('n_steps', float('nan')):>11.2f} "
-            f"{rerank_dis_total:>11d} {retr_hits_total:>10d}"
+            f"{rerank_dis_total:>11d} {retr_hits_total:>10d} "
+            f"{mem_chosen_total:>11d} {front_chosen_total:>13d}"
         )
     print()
 

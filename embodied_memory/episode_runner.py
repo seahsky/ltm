@@ -48,6 +48,7 @@ class RunSummary:
     retrieval_hits: int = 0           # rerank calls that retrieved >= 1 LTM record
     n_memory_candidates: int = 0      # total LTM-injected candidates surfaced
     n_memory_chosen: int = 0          # decisions where reranker picked a memory candidate
+    n_frontier_chosen: int = 0        # decisions where reranker picked a frontier-injected candidate
     n_stop_signals: int = 0           # decisions where backbone emitted a grounded STOP
     n_keyframes_observed: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
@@ -67,6 +68,7 @@ class RunSummary:
             "retrieval_hits": self.retrieval_hits,
             "n_memory_candidates": self.n_memory_candidates,
             "n_memory_chosen": self.n_memory_chosen,
+            "n_frontier_chosen": self.n_frontier_chosen,
             "n_stop_signals": self.n_stop_signals,
             "n_keyframes_observed": self.n_keyframes_observed,
             "modules_invoked": self.modules_invoked,
@@ -116,6 +118,14 @@ class EpisodeRunner:
         self.remembr_builder = remembr_builder
         self.remembr_planner = remembr_planner
 
+        # Run 4: obstacle-aware proposal pool. When backbone=remembr, the LLM
+        # planner is pose-aware but obstacle-blind (Run 3 finding: every
+        # forward sector in scene wcojb4TFT35 is wall, but the LLM still
+        # proposes "1.5 m ahead"). Inject up to N frontier-planner candidates
+        # alongside the LLM's so the rerank can prefer reachable options.
+        # Env-tunable so the cap can shift without a constructor change.
+        self.n_frontier_inject: int = int(os.environ.get("REMEMBR_FRONTIER_INJECT", "3"))
+
         os.makedirs(out_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -146,6 +156,7 @@ class EpisodeRunner:
             summary.retrieval_hits += int(ep_metrics.get("retrieval_hits", 0))
             summary.n_memory_candidates += int(ep_metrics.get("n_memory_candidates", 0))
             summary.n_memory_chosen += int(ep_metrics.get("n_memory_chosen", 0))
+            summary.n_frontier_chosen += int(ep_metrics.get("n_frontier_chosen", 0))
             summary.n_stop_signals += int(ep_metrics.get("n_stop_signals", 0))
             # Per-episode row used by analyze_ablation.py to pair runs.
             summary.episodes.append({
@@ -162,6 +173,7 @@ class EpisodeRunner:
                 "retrieval_hits": int(ep_metrics.get("retrieval_hits", 0)),
                 "n_memory_candidates": int(ep_metrics.get("n_memory_candidates", 0)),
                 "n_memory_chosen": int(ep_metrics.get("n_memory_chosen", 0)),
+                "n_frontier_chosen": int(ep_metrics.get("n_frontier_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
             })
@@ -205,6 +217,7 @@ class EpisodeRunner:
         retrieval_hits = 0
         n_memory_candidates = 0
         n_memory_chosen = 0
+        n_frontier_chosen = 0
         n_stop_signals = 0
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
@@ -284,7 +297,11 @@ class EpisodeRunner:
                         rerank_disagreements += 1
                     if chosen.source == "memory":
                         n_memory_chosen += 1
+                    if chosen.source == "frontier":
+                        n_frontier_chosen += 1
                     current_candidate = chosen
+
+                    n_frontier_in_pool = sum(1 for c in cands if c.source == "frontier")
 
                     ep_log["decisions"].append({
                         "step_idx": int(step.step_idx),
@@ -297,6 +314,7 @@ class EpisodeRunner:
                         "chosen_final_score": float(rerank_result.selected.final_score)
                         if rerank_result.selected else None,
                         "n_planner_candidates": len(cands),
+                        "n_frontier_candidates": n_frontier_in_pool,
                         "n_memory_candidates": len(mem_cands),
                         "candidates": [
                             {
@@ -394,6 +412,7 @@ class EpisodeRunner:
         ep_log["retrieval_hits"] = retrieval_hits
         ep_log["n_memory_candidates"] = n_memory_candidates
         ep_log["n_memory_chosen"] = n_memory_chosen
+        ep_log["n_frontier_chosen"] = n_frontier_chosen
         ep_log["n_stop_signals"] = n_stop_signals
         ep_log["bridge_stats_after"] = self.bridge.stats()
 
@@ -407,6 +426,7 @@ class EpisodeRunner:
             "retrieval_hits": retrieval_hits,
             "n_memory_candidates": n_memory_candidates,
             "n_memory_chosen": n_memory_chosen,
+            "n_frontier_chosen": n_frontier_chosen,
             "n_stop_signals": n_stop_signals,
         }
 
@@ -422,18 +442,50 @@ class EpisodeRunner:
         memory through the LLM agent loop in ``ReMEmbRPlanner``. Memory
         injection from ``EmbodiedMemoryBridge.propose_memory_candidates`` is
         layered on identically in both branches by the caller.
+
+        For the ``remembr`` backbone, also inject up to ``n_frontier_inject``
+        obstacle-aware candidates from the frontier planner. Run 3 showed the
+        7B planner is pose-aware but obstacle-blind, so the rerank pool needs
+        a reachable alternative when the LLM's "1.5 m ahead" pick is wall.
+        STOP short-circuit is preserved: if the LLM emitted a stop_signal
+        candidate, return it alone without dilution.
         """
         if self.backbone == "frontier":
             return self.planner.propose(
                 step.agent_state.position, step.agent_state.rotation_yaw
             )
         # remembr
-        return self.remembr_planner.propose(
+        llm_cands = self.remembr_planner.propose(
             goal=ep.target_category or self.target_category,
             agent_pose=step.agent_state.position,
             agent_yaw=step.agent_state.rotation_yaw,
             current_step=int(step.step_idx),
         )
+        # Preserve STOP short-circuit (runner force-selects this downstream).
+        if llm_cands and llm_cands[0].metadata.get("stop_signal", False):
+            return llm_cands
+        if self.n_frontier_inject <= 0:
+            return llm_cands
+
+        frontier_cands = self.planner.propose(
+            step.agent_state.position, step.agent_state.rotation_yaw
+        )
+        frontier_cands = frontier_cands[: self.n_frontier_inject]
+        for fc in frontier_cands:
+            fc.source = "frontier"
+
+        # De-dup: drop frontier candidates within MIN_WAYPOINT_DIST of any LLM
+        # candidate, so identical "1.5 m forward" picks don't crowd the pool.
+        min_dist = float(os.environ.get("REMEMBR_MIN_WAYPOINT_DIST", "0.5"))
+        llm_xys = [c.world_xy for c in llm_cands]
+        keep: List[FrontierCandidate] = []
+        for fc in frontier_cands:
+            if all(
+                float(np.linalg.norm(fc.world_xy - xy)) > min_dist for xy in llm_xys
+            ):
+                keep.append(fc)
+
+        return llm_cands + keep
 
     def _build_keyframe(self, step: Step) -> Keyframe:
         # Cached mode may have already produced a caption + embeddings.

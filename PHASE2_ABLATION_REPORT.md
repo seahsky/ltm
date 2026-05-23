@@ -675,3 +675,160 @@ Qwen-7B + text-vs-text STOP path until the bridge-CLIP-image refactor lands.
 | `runs/remembr-smoke-replan/` | Third smoke (force-replan + raised STOP thresholds) — n_steps=21, path=0.04m |
 | `embodied_memory/frontier_planner.py` | Phase 0 escape (`117028d`) + force-replan (`6265870`) |
 | `docs/phase3-qwen7b-runbook.md` | Source-of-truth runbook for this session (`824caff`) |
+
+---
+
+# Run 4 — Obstacle-aware proposal pool (prep, 2026-05-23)
+
+**Date:** 2026-05-23 (local implementation; no RACE run executed yet)
+**Branch:** `phase2-readiness`
+**Pod:** _(none — pre-flight code change + sanity tests only)_
+**Backbone:** Qwen2-VL-2B-Instruct captioner + Qwen2.5-7B-Instruct planner (same as Run 3)
+**Run dirs (planned):** `runs/abl-s{1,2,3}-frontier`
+**Status:** **Prep complete — RACE execution deferred to a future session.**
+
+## TL;DR
+
+Run 3 left the agent stalled because the Qwen-7B LLM planner is pose-aware
+but **obstacle-blind**: every "1.5 m ahead at current yaw" proposal in scene
+`wcojb4TFT35` is wall. The Phase-0 collision-escape (`117028d`) and force-
+replan (`6265870`) patches work mechanically, but each re-plan re-picks
+another wall point. The architectural cause is in
+`episode_runner._propose_candidates`: with `--backbone remembr`, candidate
+generation routes **entirely** to the LLM — the frontier planner's
+occupancy-grid-aware candidates are never in the proposal pool that gets
+reranked.
+
+Run 4 lands a single-seam fix: when `backbone=remembr`, inject up to
+**`REMEMBR_FRONTIER_INJECT=3`** frontier candidates onto the LLM output,
+de-duped against existing LLM picks by **`REMEMBR_MIN_WAYPOINT_DIST`**
+(default 0.5 m). STOP short-circuit is preserved: if the LLM emitted a
+`stop_signal` candidate, it returns alone — no dilution. Counters
+(`n_frontier_chosen`, `n_frontier_candidates`) are now logged per
+decision and aggregated into the run summary so the analyzer can show
+how often frontier picks actually steered the agent.
+
+This is the previously-deferred "Option 2a" from the Run-3 writeup
+(`PHASE2_ABLATION_REPORT.md` Run 3 → What's next §2), picked over the
+runbook-recommended bridge-CLIP STOP refactor because Run 3 showed C1 is
+gated by **movement** (0.04 m total), not STOP precision (the
+`STOP_COS=0.40` stopgap already eliminated false STOPs).
+
+## What we ran
+
+**Code change only.** No RACE provisioning, no live ablation. The full
+operator runbook for the paid run lives in the Run-4 plan body
+(implementation-then-RACE plan executed against this branch).
+
+Patches landed locally and unit-tested with the same module-level sanity
+pattern used by `117028d` (faiss-free, importlib-loaded directly):
+
+| File | Change |
+|---|---|
+| `embodied_memory/episode_runner.py` | `_propose_candidates`: in `remembr` branch, merge frontier-planner candidates onto LLM output (cap=`REMEMBR_FRONTIER_INJECT`, de-dup=`REMEMBR_MIN_WAYPOINT_DIST`). STOP short-circuit preserved. New `n_frontier_chosen` counter per episode and `n_frontier_candidates` per decision. |
+| `embodied_memory/scripts/test_propose_candidates.py` | 5-case sanity test (stub-and-load): STOP short-circuit, merge, de-dup, n_inject=0 disable, frontier-backbone unchanged. All cases pass locally. |
+| `embodied_memory/scripts/analyze_ablation.py` | Surfaced `n_memory_chosen` and `n_frontier_chosen` totals in the per-setting summary table. Gate logic (C1 ∧ C2) unchanged. |
+| `docs/phase3-qwen7b-runbook.md` | Run-4 amendment appended (deferred-Option-2a chosen; movement-first reasoning recorded). |
+
+## Sanity-test output (local)
+
+```
+$ python embodied_memory/scripts/test_propose_candidates.py
+Run-4 _propose_candidates sanity tests
+  case (a) STOP short-circuit: OK
+  case (b) frontier injected (no overlap): OK
+  case (c) de-dup within 0.5 m: OK
+  case (d) n_frontier_inject=0 disables injection: OK
+  case (e) frontier backbone unchanged: OK
+All cases passed.
+```
+
+## Why this and not the bridge-CLIP STOP refactor
+
+Run 3's failure mode was **0.04 m total movement** across 21 steps — the
+agent never navigated. The bridge-CLIP STOP refactor (the runbook's
+recommended Option 1) addresses STOP precision once the agent is near a
+goal; it does not address "can't escape the start wall". With Run 3's
+`STOP_COS=0.40` + `STOP_MIN_STEP=20` stopgap, no false STOPs fired in the
+smoke. Movement is the next bottleneck. Obstacle-aware proposals are the
+direct lever.
+
+The bridge-CLIP STOP refactor remains the next session's lever **if** Run 4
+flips C1 from FAIL ("agent doesn't navigate") to FAIL ("agent navigates
+but doesn't STOP"). That outcome would mean we moved one architectural
+layer deeper — the same step-of-diagnosis pattern Runs 1/2/3 followed.
+
+## Setting protocol — unchanged
+
+The 3-setting protocol (memory off / STM / full) is preserved verbatim.
+Frontier injection is a backbone-side change applied **uniformly** across
+all 3 settings, same as the `509dbc8` STOP fix (Run 1 → Run 2) and the
+`117028d` / `6265870` controller patches (Run 2 → Run 3). The S1 vs S3
+contrast still isolates the memory pipeline; the new candidate path lifts
+the floor for every setting.
+
+## Operator runbook (next session)
+
+The full RACE bring-up + smoke + ablation flow is documented inline in
+the Run-4 plan body. Key headers:
+
+1. **Phase 0 — local sanity (free).** Already done in this prep; the
+   commits in this branch satisfy the gate.
+2. **Phase 1 — RACE bring-up** (~$0.40). Same RACE G15 bring-up as Run 3;
+   `STOP_COS=0.40 STOP_MIN_STEP=20` stopgap stays in place.
+3. **Phase 2 — Smoke gate** (~$0.40). Escalated pass conditions vs Run 3:
+   `n_steps > 50`, `path_traveled ≥ 4 m`, `dist_to_goal < starting − 2 m`,
+   `n_frontier_chosen ≥ 1`. If `n_frontier_chosen=0` for the whole smoke,
+   the merge logic is wrong — diagnose locally before paying again.
+4. **Phase 3 — Full ablation** (~$6–10). Same 3-setting × 30-episode
+   protocol so paired bootstrap stays valid.
+5. **Phase 4 — Gate read.** Analyzer surfaces `n_frontier_chosen`
+   alongside the existing C1/C2 read.
+
+## Expected branches at the next gate read
+
+- **PASS (C1 ∧ C2).** Phase-2 milestone done. G3 trainers, G5 affordance
+  refresh, val scale-up become schedulable (separate sessions).
+- **FAIL C1 only — agent now navigates but doesn't STOP at goals.** This
+  is the cleanest outcome: it would mean Run 4 cleared the wall and the
+  next session is the **bridge-CLIP-image STOP refactor** (the deferred
+  Option 1).
+- **FAIL C2 only — S1 succeeds but memory adds no soft-SPL.** Disambiguate
+  with a seed-perturbed S3 rerun or inspect the rerank scoring floor on
+  memory candidates.
+
+## Cost ceiling
+
+| Phase | Best | Worst |
+|---|---|---|
+| Implementation + local tests | $0 | $0 |
+| RACE bring-up | $0.40 | $1 |
+| Smoke (1–3×) | $0.40 | $2 |
+| Full ablation | $6 | $10 |
+| Buffer | $0 | $4 |
+| **Total** | **$7** | **$17** |
+
+Fits inside the ~$17 remaining Phase-2 envelope. Hard cap stays at the
+Run-3 carry-over: stop and escalate if costs trend past **$17 without a
+gate read**.
+
+## Tuning knobs added this run
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `REMEMBR_FRONTIER_INJECT` | 3 | Max frontier candidates injected per decision (`backbone=remembr` only). Set to 0 to disable. |
+
+Pre-existing knobs from Runs 1–3 (`REMEMBR_STOP_COS`, `REMEMBR_STOP_DIST`,
+`REMEMBR_STOP_MIN_STEP`, `REMEMBR_MIN_WAYPOINT_DIST`) all still apply;
+`REMEMBR_MIN_WAYPOINT_DIST` is now also the de-dup radius for the
+frontier-injection path.
+
+## File index (Run 4)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/episode_runner.py` | Run-4 frontier injection + counters |
+| `embodied_memory/scripts/test_propose_candidates.py` | 5-case sanity test (stub-and-load, faiss-free) |
+| `embodied_memory/scripts/analyze_ablation.py` | `n_memory_chosen` + `n_frontier_chosen` surfaced |
+| `docs/phase3-qwen7b-runbook.md` | Run-4 amendment block at the bottom |
+
