@@ -140,6 +140,8 @@ class FrontierPlanner:
         self._step_count = 0
         self._pos_history: List[np.ndarray] = []
         self._candidate_counter = 0
+        self._last_action: Optional[int] = None
+        self._escape_toggle: bool = False
 
     # ------------------------------------------------------------------
     # public API
@@ -151,6 +153,8 @@ class FrontierPlanner:
         self._step_count = 0
         self._pos_history = []
         self._candidate_counter = 0
+        self._last_action = None
+        self._escape_toggle = False
 
     def update(self, depth: np.ndarray, agent_pos: np.ndarray, agent_yaw: float):
         """Splat depth into the grid. Cheap raycast: for each column take the
@@ -258,14 +262,36 @@ class FrontierPlanner:
         more than ~15° off, else move forward. The runner re-plans every
         ``decision_period`` steps regardless, so this only needs to be
         roughly correct.
+
+        Collision-escape: if we just told the agent to move FORWARD and the
+        last 3 logged positions barely moved (<0.1 m bbox diagonal), the
+        agent is stalled against geometry. Override with an alternating
+        TURN so the next planner tick sees a different bearing.
         """
         bearing = candidate.bearing_rad
         deg15 = math.radians(15.0)
         if bearing > deg15:
-            return ACTION_TURN_LEFT
-        if bearing < -deg15:
-            return ACTION_TURN_RIGHT
-        return ACTION_FORWARD
+            action = ACTION_TURN_LEFT
+        elif bearing < -deg15:
+            action = ACTION_TURN_RIGHT
+        else:
+            action = ACTION_FORWARD
+
+        if (
+            action == ACTION_FORWARD
+            and self._last_action == ACTION_FORWARD
+            and len(self._pos_history) >= 3
+        ):
+            recent = np.stack(self._pos_history[-3:], axis=0)
+            bbox_diag = float(
+                np.linalg.norm(recent.max(axis=0) - recent.min(axis=0))
+            )
+            if bbox_diag < 0.1:
+                action = ACTION_TURN_LEFT if self._escape_toggle else ACTION_TURN_RIGHT
+                self._escape_toggle = not self._escape_toggle
+
+        self._last_action = action
+        return action
 
     # ------------------------------------------------------------------
     # internals
