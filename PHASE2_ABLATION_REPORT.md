@@ -435,3 +435,243 @@ Pre-existing knobs documented in Run 1 (`REMEMBR_STOP_COS`, `REMEMBR_STOP_DIST`)
 | `embodied_memory/remembr_backbone.py` | Bug 1 + Bug 2 patches (commits `2f2d141`, `bd60288`) |
 | `embodied_memory/episode_runner.py` | `current_step` threaded through `propose()` (`2f2d141`) |
 | `docs/phase2-race-runbook.md` | RACE bring-up runbook (env-path fix in `000d2a2`) |
+
+---
+
+# Run 3 — Qwen2.5-7B planner swap on RACE (2026-05-23)
+
+**Date:** 2026-05-23
+**Branch:** `phase2-readiness`
+**Pod:** RACE G15 (g6.2xlarge: 1×NVIDIA L4 24 GB, 4 CPU, 32 GB RAM, $1.27/hr)
+**Backbone:** Qwen2-VL-2B-Instruct captioner + **Qwen2.5-7B-Instruct planner** (the swap)
+**Run dirs:** `runs/remembr-smoke-qwen7b/`, `runs/remembr-smoke-trace/`, `runs/remembr-smoke-replan/`
+**Wall-clock:** ~2 h (smoke chase only — no full ablation). **Cost:** ~$2.
+
+## TL;DR
+
+Swapped the regurgitating Qwen2.5-3B planner from Run 2 for Qwen2.5-7B-Instruct
+on the L4, hoping a bigger planner would produce useful waypoints. Per the
+Run 2 writeup, also landed the Bug 3 controller-stall patch (Phase 0 of the
+Phase-3 runbook) before bring-up. **The smoke gate failed 3 of 4 conditions
+and we did not run the full ablation**, in line with the Phase-3 runbook's
+"defer to a future session" branch when controller stall stays unfixed by
+mechanical patches.
+
+The Qwen-7B planner did **not** regurgitate — it produces pose-aware
+waypoints that differ as the agent's yaw changes. But it is **obstacle-blind**:
+it proposes "1.5 m ahead" relative to whatever yaw the agent currently has,
+and the entire forward sector in scene `wcojb4TFT35` is wall. The mechanical
+collision-escape works (TURN fires when stalled) but the runner's bearing
+re-compute immediately re-targets the agent back into the wall. Adding a
+force-replan flag broke the +/−30° oscillation but exposed the deeper issue:
+with `--backbone remembr`, `_propose_candidates` routes entirely to the LLM —
+the frontier planner's obstacle-aware candidates aren't in the proposal
+pool at all.
+
+| Smoke gate condition | Smoke 3 result | Status |
+|---|---|---|
+| Crash-free | run completed cleanly | PASS |
+| `n_steps > 30` | 21 | FAIL |
+| `path_traveled ≥ 2 m` | **0.04 m** | FAIL |
+| `dist_to_goal < starting dist` | 8.38 m (unchanged from start) | FAIL |
+
+Full ablation gate (C1 ∧ C2) was not measured — we triaged at the smoke
+gate per the runbook's explicit stop rule.
+
+## What we ran
+
+Three smoke iterations on the same `--scene all --setting 3 --n-episodes 1
+--target any` config. Each $0.40 / ~10 min wall-clock.
+
+| Smoke | Config | n_steps | path | n_stop | First-failure mode |
+|---|---|---|---|---|---|
+| `remembr-smoke-qwen7b` | defaults | 9 | 0.04 m | 1 | False STOP at step 9 |
+| `remembr-smoke-trace` | tracer prints in `step_controller` | 9 | 0.04 m | 1 | Confirmed escape fires; re-align undoes |
+| `remembr-smoke-replan` | `STOP_COS=0.40`, `STOP_MIN_STEP=20`, force-replan landed | 21 | 0.04 m | 1 | LLM oscillates between two blocked waypoints |
+
+No full 3-setting ablation was launched.
+
+## Diagnostics — three findings (chronological)
+
+### Finding 1 — Phase 0 collision-escape patch works at the mechanical level
+
+**Patch (`117028d`).** `step_controller` tracks `_last_action` and a toggle.
+If the agent picks FORWARD twice in a row and the last 3 logged positions
+have a bbox diagonal < 0.1 m, override with an alternating TURN. Verified
+locally with a 6-case sanity test (toggle correctness, no-regression on
+empty history, no-fire when not stalled).
+
+**Tracer evidence (`runs/remembr-smoke-trace/`).** Smoke 2 added inline
+`print()` calls to confirm runtime behavior. The escape fires exactly as
+designed at internal step 3 (bbox=0.044) and step 6 (bbox=0.000):
+
+```
+t=1: FWD (no last)
+t=2: FWD (last=FWD, len=2, precond not met)
+t=3: precond met, bbox=0.044, ESCAPE → TURN_RIGHT (action=3)   ← patch fired
+t=4: bearing now +30°, candidate forces TURN_LEFT (action=2)   ← re-align undoes escape
+t=5: FWD (last=TURN, no escape precond)
+t=6: precond met, bbox=0.000, ESCAPE → TURN_LEFT (action=2)
+t=7: bearing now -30°, candidate forces TURN_RIGHT (action=3)  ← undone again
+t=8: FWD
+```
+
+**Why escape didn't translate to navigation.** The runner's bearing
+recompute at `episode_runner.py:337-348` runs after every `env.step` and
+overwrites `candidate.bearing_rad` to point at the candidate's world_xy
+relative to the **new** yaw. After escape rotates the agent −30°, the
+candidate is now +30° off-axis; the next `step_controller` call sees
+that bearing and emits TURN_LEFT to re-align — cancelling the escape.
+Net yaw drift across the episode: ≈ 0°.
+
+### Finding 2 — Force-replan breaks the oscillation but not the loop
+
+**Patch (`6265870`).** Added `_force_replan: bool` to `FrontierPlanner`.
+Set it in the escape branch; `is_decision_step()` honors and clears it.
+Locally verified with a 5-case sanity test.
+
+**Effect on smoke 3.** `n_steps` climbed from 9 → 21. The runner's
+`_propose_candidates` is now called every time escape fires, so the LLM
+is re-prompted at the new yaw. Decision count went from 3 to 17. But the
+LLM oscillates between two waypoints:
+
+```
+d0: (0.34, -19.16)    ← LLM picks "1.5m ahead"
+d1: (0.94, -18.65)    ← after escape, LLM picks "1.5m ahead at new yaw"
+d2: (0.33, -19.12)    ← same first point
+d3: (0.94, -18.65)    ← same second point
+d4-d7: alternate between the same two points
+```
+
+Both points are ~1.5 m from the start in slightly different rotated
+directions. Both are wall. The agent rotates ±30° chasing each, gets
+blocked, escapes, re-plans, picks the other — and the cycle holds.
+
+### Finding 3 — The 7B LLM is pose-aware but obstacle-blind
+
+The Qwen-7B planner **does** react to agent pose (different waypoints at
+different yaws — this is the substantive improvement over Run 2's Qwen-3B,
+which regurgitated the agent's exact position). But the LLM's prompt
+contains no depth, no collision history, no occupancy info. It treats every
+re-prompt as a fresh "where should the agent go?" query and answers with a
+target in the agent's general forward sector. When the entire forward
+sector is wall, no amount of re-prompting at rotated yaws produces a
+reachable target.
+
+The frontier planner **does** have the occupancy grid — `update()` raycasts
+depth every step into a top-down map, and `_extract_frontier_cells()`
+finds FREE-adjacent-to-UNKNOWN cells (canonical exploration frontiers).
+But with `--backbone remembr`, `_propose_candidates` (`episode_runner.py:431`)
+routes entirely to `self.remembr_planner.propose(...)` — the frontier
+candidates aren't proposed, aren't reranked, aren't available to the runner.
+
+This is the runbook's documented FAIL-C1 §3 ("planner is exploring but
+not goal-directed") with the goal-directedness intact and the *exploration*
+missing.
+
+### Finding 4 — STOP_COS=0.25 is too permissive for text-vs-text (carried over from Run 2)
+
+Smoke 1 false-STOPped at step 9 with the agent 8.38 m from the chair. The
+captions in this scene are generic ("agent at (-0.2, -17.8) sees: room
+interior | searching for any" — semantic captioner falls back to a constant
+because HM3D-Semantics annotations aren't installed) and CLIP-text-vs-text
+cosine of "chair" against that string clears 0.25 on grammatical baseline
+alone. Raising to `REMEMBR_STOP_COS=0.40` and `REMEMBR_STOP_MIN_STEP=20`
+cleanly prevented the false STOP in smoke 3.
+
+This is consistent with Run 2's Bug 1 diagnosis. The Phase-3 runbook's
+deferred "bridge-CLIP-image-LTM refactor for `_maybe_stop`" is the proper
+fix; the env-var tightening is a stopgap.
+
+## Patches landed this session
+
+| Commit | File | Change |
+|---|---|---|
+| `117028d` | `embodied_memory/frontier_planner.py` | `step_controller` collision-escape: alternate TURN when last 3 positions stalled |
+| `6265870` | `embodied_memory/frontier_planner.py` | `is_decision_step()` honors `_force_replan` flag set by escape |
+
+Both verified locally with module-level sanity tests before push (faiss
+not installed locally, so importlib loads the planner module directly).
+
+## Comparison to Runs 1 and 2
+
+| Aspect | Run 1 (Mistral 7B, A100) | Run 2 (Qwen 3B, L4) | Run 3 (Qwen 7B, L4) |
+|---|---|---|---|
+| Captioner | LLaVA-v1.6-Mistral-7B | Qwen2-VL-2B | Qwen2-VL-2B |
+| Planner | Mistral-7B-Instruct-v0.3 | Qwen2.5-3B-Instruct | **Qwen2.5-7B-Instruct** |
+| Planner regurgitates? | No | Yes (current position as ANSWER) | **No (pose-aware)** |
+| Planner obstacle-aware? | (n/a — agent navigated) | (n/a — couldn't get past start) | **No (forward-sector-blind)** |
+| Bug 3 controller stall | Unpatched (didn't bite at A100 scene) | Unpatched | **Patched (`117028d` + `6265870`)** |
+| Agent reached goals? | Yes — 0.59 m sofa, 1.46 m bed | No — stalled at start | No — moves 0.04 m |
+| Smoke `n_steps` typical | 249 (timeout) | 9.6 | 21 |
+| Failure mode (root) | No STOP path in action pipeline | Planner can't pick useful waypoints | Planner picks pose-aware but obstacle-blind waypoints |
+| Cost this run | ~$4 | ~$3.81 | **~$2 (smoke only, no ablation)** |
+
+Pattern across the three runs: the Phase-2 backbone has a sequence of
+load-bearing failures that surface in order as each prior failure is
+patched out. Run 1 exposed the missing STOP. Run 2 exposed the small-
+planner regurgitation and (later) the controller stall. Run 3 patches
+the controller stall and exposes that the LLM-only proposal pool is
+obstacle-blind regardless of planner size. Each run advanced the
+diagnosis one architectural layer deeper.
+
+## What's next (in priority order)
+
+### 1. Bridge-CLIP-image-LTM refactor for `_maybe_stop`
+
+The runbook's explicit next step ("§What this runbook deliberately does
+NOT do"). The STOP path currently queries text-vs-text (Qwen caption vs
+goal word), which has a high grammatical-baseline cosine and false-fires
+on generic captions. The bridge already maintains a CLIP-image LTM (per
+`CLAUDE.md`); `_maybe_stop` should query that index for image-vs-text
+cosine (~0.20–0.35 in practice) instead. Out of scope for this session.
+
+### 2. Obstacle-aware proposals for the LLM-driven backbone
+
+Three sub-options, each architectural and each out of the Phase-3 runbook's
+authorized scope:
+
+- **Inject frontier candidates into the LLM rerank pool.** When
+  `backbone=remembr`, also include 2–3 frontier-planner candidates so the
+  rerank scoring can prefer obstacle-aware options. Departs from the paper-
+  faithful ReMEmbR architecture (`CLAUDE.md` describes memory→frontier
+  injection, not the reverse); a new ablation setting (e.g. S3+) would be
+  the cleaner test.
+- **Feed prior-action / collision history into the LLM prompt.** Tell the
+  7B "the last 5 FORWARDs no-op'd" and let it reason. Prompt-engineering
+  change; risks regurgitation regression.
+- **Route to frontier planner when `_is_stuck` fires repeatedly.** Smallest
+  hack but a planner swap mid-episode; ablation reading muddies.
+
+The runbook explicitly rules out planner swaps at this stage. Defer all
+three to a follow-up session.
+
+### 3. Defer G3 / G5 / val scale-up
+
+Still gated on a passing C1, which is still gated on the agent producing
+any non-zero binary success — not yet possible on `val_mini` with the
+current backbone. No change from Run 2's "What's next."
+
+## Tuning knobs used this session
+
+No new env vars were added. The pre-existing knobs from Runs 1+2 carried
+the smoke-3 configuration:
+
+| Env var | Value used | Why |
+|---|---|---|
+| `REMEMBR_STOP_COS` | 0.40 (was 0.25) | Text-vs-text baseline cosine prevents 0.25 from being a meaningful gate |
+| `REMEMBR_STOP_MIN_STEP` | 20 (was 8) | Defense-in-depth against false STOP in the early steps |
+| `REMEMBR_MIN_WAYPOINT_DIST` | 0.5 (default) | Run 2's regurgitation guard; not stressed in Run 3 (7B doesn't regurgitate) |
+
+The `STOP_COS=0.40 / STOP_MIN_STEP=20` combination held empirically for
+Qwen-7B + text-vs-text STOP path until the bridge-CLIP-image refactor lands.
+
+## File index (Run 3)
+
+| Path | Purpose |
+|---|---|
+| `runs/remembr-smoke-qwen7b/` | First smoke (default thresholds; false STOP at step 9) |
+| `runs/remembr-smoke-trace/` | Second smoke with tracer prints — confirmed Phase 0 patch fires twice but re-align undoes |
+| `runs/remembr-smoke-replan/` | Third smoke (force-replan + raised STOP thresholds) — n_steps=21, path=0.04m |
+| `embodied_memory/frontier_planner.py` | Phase 0 escape (`117028d`) + force-replan (`6265870`) |
+| `docs/phase3-qwen7b-runbook.md` | Source-of-truth runbook for this session (`824caff`) |
