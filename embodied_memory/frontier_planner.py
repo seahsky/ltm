@@ -142,6 +142,7 @@ class FrontierPlanner:
         self._candidate_counter = 0
         self._last_action: Optional[int] = None
         self._escape_toggle: bool = False
+        self._force_replan: bool = False
 
     # ------------------------------------------------------------------
     # public API
@@ -155,6 +156,7 @@ class FrontierPlanner:
         self._candidate_counter = 0
         self._last_action = None
         self._escape_toggle = False
+        self._force_replan = False
 
     def update(self, depth: np.ndarray, agent_pos: np.ndarray, agent_yaw: float):
         """Splat depth into the grid. Cheap raycast: for each column take the
@@ -205,6 +207,9 @@ class FrontierPlanner:
 
     def is_decision_step(self) -> bool:
         if self._step_count == 0:
+            return True
+        if self._force_replan:
+            self._force_replan = False
             return True
         if self._step_count % self.decision_period == 0:
             return True
@@ -289,6 +294,11 @@ class FrontierPlanner:
             if bbox_diag < 0.1:
                 action = ACTION_TURN_LEFT if self._escape_toggle else ACTION_TURN_RIGHT
                 self._escape_toggle = not self._escape_toggle
+                # Force a fresh LLM proposal on the next iteration so the
+                # runner's bearing-recompute can't immediately re-align the
+                # candidate and undo this TURN. Without this, the agent
+                # oscillates ±30° forever (see Phase 3 smoke trace).
+                self._force_replan = True
 
         self._last_action = action
         return action
