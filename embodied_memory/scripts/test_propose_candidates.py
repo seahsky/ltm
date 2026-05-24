@@ -252,13 +252,69 @@ def case_f_propose_diverse_compass_fallback():
     for c in out:
         assert c.metadata.get("fallback") == "compass", \
             f"expected compass fallback, got {c.metadata}"
+        # Empty grid → no FREE/OCCUPIED data → raw_score should be the
+        # 0.7 unknown-baseline (Run-4 smoke-3 behavior preserved).
+        assert abs(c.raw_score - 0.7) < 1e-6, \
+            f"empty-grid compass should score 0.7, got {c.raw_score}"
     # Pairwise xy distances must be > 0.5 m so de-dup against a forward LLM
     # pick cannot wipe out all three.
     import itertools
     for a, b in itertools.combinations(out, 2):
         d = float(np.linalg.norm(a.world_xy - b.world_xy))
         assert d > 0.5, f"compass cands too close: {a.world_xy} vs {b.world_xy} ({d:.3f} m)"
-    print("  case (f) propose_diverse compass fallback (k=3, all > 0.5 m apart): OK")
+    print("  case (f) propose_diverse compass fallback (k=3, baseline 0.7): OK")
+
+
+def case_g_compass_occupancy_aware():
+    """When the grid has FREE cells in one direction and OCCUPIED in
+    another, the compass picks must score the FREE direction strictly
+    higher than the OCCUPIED direction."""
+    from embodied_memory.frontier_planner import (
+        CELL_FREE, CELL_OCCUPIED, FrontierPlanner,
+    )
+    fp = FrontierPlanner()
+    fp.reset()
+
+    # Agent at world (0, 0); yaw=0 means forward is +z (per the
+    # (sin θ, cos θ) convention).
+    # Paint FREE cells along the +z ray (forward, offset=0).
+    # Paint OCCUPIED cells along the +y plane = -z direction (offset=π).
+    import math as _math
+    ax, az = 0.0, 0.0
+    for i in range(1, 22):  # cover ~2 m at 0.1 m resolution
+        rr = i * fp.grid.resolution_m
+        # forward (yaw=0, +z): FREE
+        r, c = fp.grid.world_to_grid(ax, az + rr)
+        fp.grid.mark(r, c, CELL_FREE)
+        # backward (yaw=π, -z): OCCUPIED
+        r, c = fp.grid.world_to_grid(ax, az - rr)
+        fp.grid.mark(r, c, CELL_OCCUPIED)
+        # sides (yaw=±π/2): UNKNOWN (leave default)
+
+    # k=2 isolates the {forward, backward} axis without polluting from
+    # the 2π/3 fan; both picks lie at exact offsets 0 and π.
+    out = fp._compass_fallback(
+        np.array([ax, 0.0, az], dtype=np.float32),
+        agent_yaw=0.0,
+        k=2,
+    )
+    assert len(out) == 2, f"expected 2 cands, got {len(out)}"
+    fwd, bwd = out[0], out[1]
+    assert fwd.metadata["offset_rad"] == 0.0, \
+        f"first cand should be offset=0, got {fwd.metadata}"
+    assert abs(fwd.metadata["offset_rad"] - 0.0) < 1e-6
+    assert abs(bwd.metadata["offset_rad"] - _math.pi) < 1e-6
+    # Forward (all FREE): raw_score should saturate near 1.0.
+    assert fwd.raw_score > 0.95, \
+        f"FREE-direction compass should score near 1.0, got {fwd.raw_score:.3f}"
+    # Backward (all OCCUPIED): raw_score should be near 0.2.
+    assert bwd.raw_score < 0.3, \
+        f"OCCUPIED-direction compass should score near 0.2, got {bwd.raw_score:.3f}"
+    # And the spread must be huge so the rerank actually prefers FREE.
+    assert (fwd.raw_score - bwd.raw_score) > 0.5, \
+        f"spread {fwd.raw_score - bwd.raw_score:.3f} too small"
+    print(f"  case (g) compass occupancy-aware "
+          f"(FREE={fwd.raw_score:.3f}, OCC={bwd.raw_score:.3f}): OK")
 
 
 def main() -> int:
@@ -269,6 +325,7 @@ def main() -> int:
     case_d_zero_inject()
     case_e_frontier_backbone_unchanged()
     case_f_propose_diverse_compass_fallback()
+    case_g_compass_occupancy_aware()
     print("All cases passed.")
     return 0
 

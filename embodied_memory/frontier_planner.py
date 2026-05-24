@@ -415,11 +415,28 @@ class FrontierPlanner:
         """Emit k candidates at evenly-spaced angles around the agent at a
         fixed 1.5 m distance. Offset 0 is forward; for k=3 the offsets are
         ``[0, 2π/3, 4π/3]`` so two of the three picks lie behind the agent
-        — useful for escaping start-wall stalls."""
+        — useful for escaping start-wall stalls.
+
+        Run-5 smoke 6 fix: the raw_score is now occupancy-aware. Each
+        compass ray samples the agent's 2 m FOV in the grid and scores
+        on the FREE-vs-OCCUPIED ratio:
+
+            raw_score = clip(0.7 + 0.3·frac_free − 0.5·frac_occupied, 0, 1)
+
+        - All FREE: 1.0 (clearly winning over LLM real at 0.725)
+        - All UNKNOWN: 0.7 (matches Run-4 smoke-3 baseline)
+        - All OCCUPIED: 0.2 (loses to LLM stub at 0.1 by coherence)
+        - Mix biased toward FREE → above baseline; biased toward
+          OCCUPIED → below baseline. The rerank's stable-sort tie-break
+          stops dominating when frac differs across ray directions.
+        """
         if k <= 0:
             return []
         out: List[FrontierCandidate] = []
         target_dist = 1.5
+        # Scan a bit past the waypoint so cells just beyond the target also
+        # count — gives a stronger signal than scanning only to the target.
+        scan_dist = target_dist + 0.5
         ax, az = float(agent_pos[0]), float(agent_pos[2])
         offsets = [i * (2.0 * math.pi / max(1, k)) for i in range(k)]
         for off in offsets:
@@ -427,6 +444,12 @@ class FrontierPlanner:
             x = ax + math.sin(theta) * target_dist
             z = az + math.cos(theta) * target_dist
             r, c = self.grid.world_to_grid(x, z)
+            frac_free, frac_occ = self._ray_occupancy_fractions(
+                ax, az, theta, scan_dist
+            )
+            raw_score = float(
+                np.clip(0.7 + 0.3 * frac_free - 0.5 * frac_occ, 0.0, 1.0)
+            )
             self._candidate_counter += 1
             out.append(
                 FrontierCandidate(
@@ -436,17 +459,52 @@ class FrontierPlanner:
                     distance_m=target_dist,
                     bearing_rad=_wrap_pi(off),
                     cluster_size=0,
-                    # 0.7 chosen against FrontierPhysicsScorer's planner
-                    # path (`0.5·raw + 0.3·bearing + 0.2·dist`): coherence
-                    # ≈ 0.625 at bearing=2π/3 vs LLM-stub forward's 0.525
-                    # (wins) and real-LLM forward's ~0.725 (loses).
-                    # Compass beats a stuck stub-forward LLM but yields to
-                    # a confident, parseable LLM ANSWER.
-                    raw_score=0.7,
-                    metadata={"fallback": "compass", "offset_rad": float(off)},
+                    raw_score=raw_score,
+                    metadata={
+                        "fallback": "compass",
+                        "offset_rad": float(off),
+                        "frac_free": float(frac_free),
+                        "frac_occupied": float(frac_occ),
+                    },
                 )
             )
         return out
+
+    def _ray_occupancy_fractions(
+        self,
+        ax: float,
+        az: float,
+        theta: float,
+        max_dist: float,
+    ) -> Tuple[float, float]:
+        """Sample grid cells along the ray from (ax, az) at angle theta
+        out to ``max_dist`` meters. Returns (frac_free, frac_occupied)
+        across in-bounds samples. Skips cell 0 (agent's own position).
+
+        Uses the same yaw convention as ``OccupancyGrid.update`` —
+        ``(sin θ, cos θ)`` as the forward direction in (x, z) — so the
+        scan is consistent with what's been splatted into the grid.
+        """
+        n_samples = max(1, int(max_dist / self.grid.resolution_m))
+        n_free = 0
+        n_occupied = 0
+        n_in_bounds = 0
+        for i in range(1, n_samples + 1):  # skip i=0 = agent's own cell
+            rr = i * self.grid.resolution_m
+            x = ax + math.sin(theta) * rr
+            z = az + math.cos(theta) * rr
+            r, c = self.grid.world_to_grid(x, z)
+            if not self.grid.in_bounds(r, c):
+                continue
+            n_in_bounds += 1
+            state = int(self.grid.grid[r, c])
+            if state == CELL_FREE:
+                n_free += 1
+            elif state == CELL_OCCUPIED:
+                n_occupied += 1
+        if n_in_bounds == 0:
+            return 0.0, 0.0
+        return n_free / n_in_bounds, n_occupied / n_in_bounds
 
 
 def _wrap_pi(angle: float) -> float:
