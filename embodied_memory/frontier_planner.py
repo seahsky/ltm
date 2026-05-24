@@ -161,6 +161,65 @@ def _snap_to_free(
     return None
 
 
+def _reachable_mask(
+    grid_array: np.ndarray,
+    start_rc: Tuple[int, int],
+    inflate_radius_cells: int = 1,
+) -> np.ndarray:
+    """Boolean mask of cells reachable from ``start_rc`` over FREE+UNKNOWN with
+    OCCUPIED inflated-blocked and the start force-cleared — identical
+    traversability and no-corner-cut rules to :func:`astar` (Run-6.1).
+
+    The Run-6 census showed A* returns no-path ~92% of steps: the chosen
+    frontier sits outside the agent's connected free/unknown component (1-cell
+    inflation over a noisy depth grid fragments the space). This flood lets the
+    planner (a) keep only reachable frontiers and (b) pick a reachable sub-goal
+    toward an unreachable frontier instead of straight-lining into the wall.
+    """
+    from collections import deque
+
+    n_rows, n_cols = grid_array.shape
+    reach = np.zeros((n_rows, n_cols), dtype=bool)
+    sr, sc = int(start_rc[0]), int(start_rc[1])
+    if not (0 <= sr < n_rows and 0 <= sc < n_cols):
+        return reach
+    blocked = _inflate_occupied(grid_array, inflate_radius_cells)
+    blocked[sr, sc] = False
+    reach[sr, sc] = True
+    dq = deque([(sr, sc)])
+    ortho = ((-1, 0), (1, 0), (0, -1), (0, 1))
+    diag = ((-1, -1), (-1, 1), (1, -1), (1, 1))
+    while dq:
+        r, c = dq.popleft()
+        for dr, dc in ortho:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < n_rows and 0 <= nc < n_cols and not reach[nr, nc] and not blocked[nr, nc]:
+                reach[nr, nc] = True
+                dq.append((nr, nc))
+        for dr, dc in diag:
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < n_rows and 0 <= nc < n_cols) or reach[nr, nc] or blocked[nr, nc]:
+                continue
+            if blocked[r, nc] or blocked[nr, c]:
+                continue  # no diagonal corner-cutting (matches astar)
+            reach[nr, nc] = True
+            dq.append((nr, nc))
+    return reach
+
+
+def _nearest_reachable(
+    reach: np.ndarray, target_rc: Tuple[int, int]
+) -> Optional[Tuple[int, int]]:
+    """Reachable cell closest (Euclidean) to ``target_rc``, or None if the mask
+    is empty. Used to pick a reachable sub-goal toward an unreachable frontier."""
+    rs, cs = np.nonzero(reach)
+    if rs.size == 0:
+        return None
+    d2 = (rs - int(target_rc[0])) ** 2 + (cs - int(target_rc[1])) ** 2
+    i = int(np.argmin(d2))
+    return (int(rs[i]), int(cs[i]))
+
+
 def astar(
     grid_array: np.ndarray,
     start_rc: Tuple[int, int],
@@ -359,8 +418,9 @@ class FrontierPlanner:
             "replan_scheduled": 0,   # is_decision_step via step % decision_period
             "replan_forced": 0,      # is_decision_step via _force_replan
             "replan_stuck": 0,       # is_decision_step via _is_stuck()
-            "astar_path": 0,         # step_controller A* returned a usable path
-            "astar_fallback": 0,     # A* no-goal/no-path → straight-line bearing
+            "astar_path": 0,              # A* reached the chosen frontier
+            "astar_reachable_fallback": 0,  # frontier unreachable → A* to nearest reachable cell
+            "astar_fallback": 0,          # boxed in → last-resort straight-line bearing
             "collision_escape": 0,   # FORWARD-stall override (alternating TURN)
         }
 
@@ -539,6 +599,22 @@ class FrontierPlanner:
                     raw_score=raw_score,
                 )
             )
+        # Reachability filter (Run-6.1): drop frontiers A* can't route to from
+        # here so the rerank chooses among reachable options. One flood over the
+        # same traversable grid A* uses. Keep all if none are reachable (don't
+        # strand the rerank) — the step controller's reachable-fallback then
+        # still steers toward the nearest reachable cell.
+        start_rc = self.grid.world_to_grid(ax, az)
+        reach = _reachable_mask(self.grid.grid, start_rc, self.inflate_radius_cells)
+        blocked = _inflate_occupied(self.grid.grid, self.inflate_radius_cells)
+        reachable = []
+        for c in candidates:
+            g = _snap_to_free(blocked, c.grid_rc, max_radius=5)
+            if g is not None and reach[g[0], g[1]]:
+                reachable.append(c)
+        if reachable:
+            candidates = reachable
+
         # Sort by intrinsic score desc.
         candidates.sort(key=lambda c: c.raw_score, reverse=True)
         return candidates[: self.n_candidates]
@@ -610,43 +686,84 @@ class FrontierPlanner:
         az: float,
         agent_yaw: float,
     ) -> int:
-        """Action toward the next A* waypoint, or straight-line fallback.
+        """Action toward the next A* waypoint.
 
         Routes from the agent cell to the candidate cell over the occupancy
-        grid, then steers toward a waypoint ~``lookahead_m`` along that path
-        (clamped to the path end). On no path, falls back to the straight-line
-        bearing and forces a replan.
+        grid and steers toward a waypoint ~``lookahead_m`` along that path. When
+        the chosen frontier is unreachable on the inflated grid (no goal-snap or
+        A* no-path — the Run-6 census found this on ~92% of steps), route
+        instead to the nearest *reachable* cell toward it (Run-6.1): collision-
+        aware progress into reachable space, rather than straight-lining into
+        the wall the frontier sits behind. Only when the agent is genuinely
+        boxed into a single cell does it degrade to the old straight-line
+        bearing + force-replan.
         """
         start_rc = self.grid.world_to_grid(ax, az)
         # Snap the goal off any wall it landed on so A* has a reachable target.
         blocked = _inflate_occupied(self.grid.grid, self.inflate_radius_cells)
         goal_rc = _snap_to_free(blocked, candidate.grid_rc, max_radius=5)
-        if goal_rc is None:
-            return self._straight_line_fallback(candidate)
+        path = None
+        if goal_rc is not None:
+            path = astar(
+                self.grid.grid,
+                start_rc,
+                goal_rc,
+                inflate_radius_cells=self.inflate_radius_cells,
+                unknown_cost=self.unknown_cost,
+                max_expansions=self.astar_max_expansions,
+            )
+        if path and len(path) >= 2:
+            self._stats["astar_path"] += 1
+            return self._steer_along(path, ax, az, agent_yaw)
+        # Chosen frontier unreachable → head to the nearest reachable cell.
+        return self._reachable_fallback_action(candidate, start_rc, ax, az, agent_yaw)
 
-        path = astar(
-            self.grid.grid,
-            start_rc,
-            goal_rc,
-            inflate_radius_cells=self.inflate_radius_cells,
-            unknown_cost=self.unknown_cost,
-            max_expansions=self.astar_max_expansions,
-        )
-        if not path or len(path) < 2:
-            # No route, or already on the goal cell → straight-line bearing.
-            return self._straight_line_fallback(candidate)
-
+    def _steer_along(
+        self, path: List[Tuple[int, int]], ax: float, az: float, agent_yaw: float
+    ) -> int:
+        """Steer toward a ~``lookahead_m`` waypoint on an A* path (clamped to
+        the path end), via the greedy ±15° rule."""
         n_ahead = max(1, int(round(self.lookahead_m / self.grid.resolution_m)))
         wp = path[min(n_ahead, len(path) - 1)]
         wx, wz = self.grid.grid_to_world(wp[0], wp[1])
         bearing_rel = _wrap_pi(math.atan2(wx - ax, wz - az) - agent_yaw)
-        self._stats["astar_path"] += 1
         return self._bearing_to_action(bearing_rel)
 
+    def _reachable_fallback_action(
+        self,
+        candidate: FrontierCandidate,
+        start_rc: Tuple[int, int],
+        ax: float,
+        az: float,
+        agent_yaw: float,
+    ) -> int:
+        """Chosen frontier is unreachable: flood the reachable component and A*
+        to the reachable cell nearest the frontier, steering there (Run-6.1).
+        We do NOT force a replan — the sub-goal recedes toward the frontier as
+        the agent advances and re-observes, opening the pocket — so the runner
+        commits to this heading instead of re-reranking every step. Degrades to
+        the old straight-line bearing only if the agent is boxed into one cell."""
+        reach = _reachable_mask(self.grid.grid, start_rc, self.inflate_radius_cells)
+        sub_rc = _nearest_reachable(reach, candidate.grid_rc)
+        if sub_rc is not None and sub_rc != (int(start_rc[0]), int(start_rc[1])):
+            path = astar(
+                self.grid.grid,
+                start_rc,
+                sub_rc,
+                inflate_radius_cells=self.inflate_radius_cells,
+                unknown_cost=self.unknown_cost,
+                max_expansions=self.astar_max_expansions,
+            )
+            if path and len(path) >= 2:
+                self._stats["astar_reachable_fallback"] += 1
+                return self._steer_along(path, ax, az, agent_yaw)
+        return self._straight_line_fallback(candidate)
+
     def _straight_line_fallback(self, candidate: FrontierCandidate) -> int:
-        """Old straight-line bearing controller, used when A* finds no path.
-        Forces a replan so the runner re-picks a (hopefully reachable)
-        candidate next tick instead of re-driving into the same wall."""
+        """Last-resort straight-line bearing controller, used only when the
+        agent is boxed into a single reachable cell. Forces a replan so the
+        runner re-picks a candidate next tick instead of re-driving into the
+        same wall."""
         self._force_replan = True
         self._stats["astar_fallback"] += 1
         return self._bearing_to_action(candidate.bearing_rad)

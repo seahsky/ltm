@@ -219,6 +219,7 @@ def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
         "action_turn_val": int(ep.get("action_turn", 0)),
         "action_stop_val": int(ep.get("action_stop", 0)),
         "astar_path_val": int(ep.get("astar_path", 0)),
+        "astar_reach_fb_val": int(ep.get("astar_reachable_fallback", 0)),
         "astar_fallback_val": int(ep.get("astar_fallback", 0)),
         "collision_escape_val": int(ep.get("collision_escape", 0)),
         "replan_scheduled_val": int(ep.get("replan_scheduled", 0)),
@@ -422,7 +423,7 @@ def _print_controller_block(reports: List[Tuple[str, Dict[str, Any]]]) -> None:
     All-zero columns mean the run predates this instrumentation."""
     if not any(
         r["action_turn_val"] or r["astar_path_val"] or r["astar_fallback_val"]
-        or r["replan_forced_val"] or r["replan_stuck_val"]
+        or r["astar_reach_fb_val"] or r["replan_forced_val"] or r["replan_stuck_val"]
         for _, r in reports
     ):
         print()
@@ -432,22 +433,24 @@ def _print_controller_block(reports: List[Tuple[str, Dict[str, Any]]]) -> None:
     print()
     print("  --- controller census (Run-6: action mix / A* outcome / replan trigger) ---")
     print(f"  {'ep':>3} | {'fwd':>4} {'turn':>4} {'stop':>4} | "
-          f"{'astar_ok':>8} {'astar_fb':>8} {'coll_esc':>8} | "
+          f"{'astar_ok':>8} {'reach_fb':>8} {'line_fb':>7} {'coll_esc':>8} | "
           f"{'sched':>5} {'force':>5} {'stuck':>5}")
     for ep_path, r in reports:
         ep_idx = os.path.basename(ep_path).replace("episode_", "").replace(".json", "")
         print(
             f"  {ep_idx:>3} | {r['action_forward_val']:>4d} {r['action_turn_val']:>4d} "
             f"{r['action_stop_val']:>4d} | {r['astar_path_val']:>8d} "
-            f"{r['astar_fallback_val']:>8d} {r['collision_escape_val']:>8d} | "
+            f"{r['astar_reach_fb_val']:>8d} {r['astar_fallback_val']:>7d} "
+            f"{r['collision_escape_val']:>8d} | "
             f"{r['replan_scheduled_val']:>5d} {r['replan_forced_val']:>5d} "
             f"{r['replan_stuck_val']:>5d}"
         )
     print()
-    print("  read: force≫stuck + high astar_fb → A* no-path replan loop (target")
-    print("        unreachable on grid). coll_esc high → geometry stall grid misses.")
-    print("        stuck≫force + astar_ok high → turning reads as stuck. fwd≪turn")
-    print("        always → 30°-turn vs ±15°-deadband oscillation.")
+    print("  read (Run-6.1): astar_ok + reach_fb should dominate and line_fb→~0;")
+    print("        reach_fb = chosen frontier unreachable, routed to nearest reachable")
+    print("        cell (collision-aware). line_fb high → still boxed in (de-noise /")
+    print("        relax inflation). force should drop as reach_fb does not force-replan.")
+    print("        fwd≫turn and path↑ = the wedge is broken.")
 
 
 def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]) -> bool:

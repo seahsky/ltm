@@ -538,7 +538,8 @@ def case_oracle_short_circuit():
         grid_stats=lambda: grid,
         controller_stats=lambda: {
             "replan_scheduled": 0, "replan_forced": 0, "replan_stuck": 0,
-            "astar_path": 0, "astar_fallback": 0, "collision_escape": 0,
+            "astar_path": 0, "astar_reachable_fallback": 0,
+            "astar_fallback": 0, "collision_escape": 0,
         },
         is_decision_step=lambda: True,
     )
@@ -742,7 +743,8 @@ def case_controller_stats_counters():
     fp.reset(agent_pos=agent_pos)
     assert fp.controller_stats() == {
         "replan_scheduled": 0, "replan_forced": 0, "replan_stuck": 0,
-        "astar_path": 0, "astar_fallback": 0, "collision_escape": 0,
+        "astar_path": 0, "astar_reachable_fallback": 0,
+        "astar_fallback": 0, "collision_escape": 0,
     }, f"counters not zeroed on reset: {fp.controller_stats()}"
     ar, ac = fp.grid.world_to_grid(0.0, 0.0)
 
@@ -757,6 +759,8 @@ def case_controller_stats_counters():
     fp.step_controller(boxed, agent_pos, agent_yaw=0.0)
     assert fp.controller_stats()["astar_fallback"] == 1, "fallback not counted"
     assert fp.controller_stats()["astar_path"] == 0, "path miscounted on no-path"
+    assert fp.controller_stats()["astar_reachable_fallback"] == 0, \
+        "boxed-into-one-cell must straight-line, not reachable-fallback"
 
     # (2) A* path found → astar_path increments. Open the grid around a goal.
     fp.grid.grid[ar - 1:ar + 10, ac - 5:ac + 6] = CELL_FREE
@@ -787,6 +791,75 @@ def case_controller_stats_counters():
           f"(fallback/path/forced/sched/stuck all tally): OK")
 
 
+def case_astar_reachable_fallback():
+    """Run-6.1: an unreachable (walled-off) frontier must NOT straight-line into
+    the wall. The controller routes to the nearest reachable cell toward it
+    (collision-aware) and does not force a replan (commits to the heading)."""
+    from embodied_memory.frontier_planner import (
+        FrontierPlanner, FrontierCandidate, CELL_FREE, CELL_OCCUPIED,
+        ACTION_FORWARD, ACTION_TURN_LEFT, ACTION_TURN_RIGHT,
+    )
+
+    fp = FrontierPlanner()
+    agent_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    fp.reset(agent_pos=agent_pos)
+    ar, ac = fp.grid.world_to_grid(0.0, 0.0)
+    # Agent sits in a large open FREE area (reachable). The goal is inside a
+    # sealed room (3x3 FREE interior ringed by OCCUPIED) — no FREE/UNKNOWN path
+    # in, so A* to it returns no-path even though UNKNOWN is traversable.
+    fp.grid.grid[ar - 6:ar + 14, ac - 8:ac + 9] = CELL_FREE
+    rr, rcc = ar + 9, ac
+    fp.grid.grid[rr - 2:rr + 3, rcc - 2:rcc + 3] = CELL_OCCUPIED  # 5x5 ring
+    fp.grid.grid[rr - 1:rr + 2, rcc - 1:rcc + 2] = CELL_FREE      # 3x3 interior
+    goal_rc = (rr, rcc)  # sealed room center
+    cand = FrontierCandidate(
+        candidate_id=1,
+        world_xy=np.array(fp.grid.grid_to_world(*goal_rc), dtype=np.float32),
+        grid_rc=goal_rc, distance_m=1.2, bearing_rad=0.0,
+        cluster_size=1, raw_score=1.0,
+    )
+    fp._force_replan = False
+    action = fp.step_controller(cand, agent_pos, agent_yaw=0.0)
+    s = fp.controller_stats()
+    assert s["astar_reachable_fallback"] == 1, \
+        f"unreachable goal should route to nearest reachable cell; stats={s}"
+    assert s["astar_fallback"] == 0, \
+        "must not straight-line when reachable space toward the goal exists"
+    assert action in (ACTION_FORWARD, ACTION_TURN_LEFT, ACTION_TURN_RIGHT), \
+        f"expected a collision-aware action; got {action}"
+    assert fp._force_replan is False, "reachable fallback must NOT force a replan"
+    print("  case astar_reachable_fallback (routes to nearest reachable cell): OK")
+
+
+def case_propose_reachability_filter():
+    """Run-6.1: propose() drops frontiers unreachable from the agent (keeping
+    all only if none are reachable). With a near reachable frontier and a far
+    walled-off one, every returned candidate must be reachable."""
+    from embodied_memory.frontier_planner import (
+        FrontierPlanner, CELL_FREE, CELL_OCCUPIED,
+        _reachable_mask, _inflate_occupied, _snap_to_free,
+    )
+
+    fp = FrontierPlanner()
+    agent_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    fp.reset(agent_pos=agent_pos)
+    ar, ac = fp.grid.world_to_grid(0.0, 0.0)
+    g = fp.grid.grid
+    g[ar - 3:ar + 4, ac - 3:ac + 4] = CELL_FREE      # near region (reachable)
+    g[ar - 3:ar + 4, ac + 8:ac + 13] = CELL_FREE     # far region (walled off)
+    g[:, ac + 6:ac + 8] = CELL_OCCUPIED              # solid separating wall
+    cands = fp.propose(agent_pos, agent_yaw=0.0)
+    assert cands, "propose returned nothing"
+    start_rc = fp.grid.world_to_grid(0.0, 0.0)
+    reach = _reachable_mask(g, start_rc, fp.inflate_radius_cells)
+    blocked = _inflate_occupied(g, fp.inflate_radius_cells)
+    for c in cands:
+        sg = _snap_to_free(blocked, c.grid_rc, max_radius=5)
+        assert sg is not None and reach[sg[0], sg[1]], \
+            f"propose returned an unreachable candidate at {c.grid_rc}"
+    print(f"  case propose_reachability_filter ({len(cands)} reachable cands): OK")
+
+
 def main() -> int:
     print("Run-4/Run-5 sanity tests")
     case_a_stop_short_circuit()
@@ -812,6 +885,8 @@ def main() -> int:
     case_astar_lookahead_waypoint()
     case_controller_fallback_on_none()
     case_controller_stats_counters()
+    case_astar_reachable_fallback()
+    case_propose_reachability_filter()
     print("All cases passed.")
     return 0
 
