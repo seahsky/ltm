@@ -976,6 +976,37 @@ confirm 0 success; the gate cannot pass until the controller can translate.
 That decision keeps us well inside the cost envelope (only ~30 min of G15 time
 spent on the whole diagnostic).
 
+### Next session — collision-aware step controller (pick up here)
+
+The binding constraint is now `frontier_planner.step_controller`: it converts a
+chosen frontier into a single action by **straight-line bearing only** (turn to
+face the candidate, then `move_forward`), with no routing around obstacles. When
+the straight line crosses geometry the agent collides, the bbox<0.1 m
+collision-escape toggles a turn, `force_replan` re-picks, and it oscillates in
+place — 0.5 m over 249 steps. The oracle clears the same starts by following the
+**navmesh**.
+
+Concrete next lever (develop + validate **locally**, faiss/habitat-free, the same
+way the densified splat was — `embodied_memory/scripts/test_propose_candidates.py`):
+
+1. **Grid A\* (preferred, self-contained).** Add an A\* / BFS over the
+   `OccupancyGrid` (FREE+UNKNOWN traversable, OCCUPIED blocked) from the agent
+   cell to the chosen frontier cell; `step_controller` emits the action toward
+   the **next waypoint on that path**, not the straight-line bearing. Unit-test:
+   a synthetic grid with a wall gap → the path must route through the gap and the
+   first action must not drive into the wall.
+2. **Navmesh fallback (cheap sanity only).** `sim.pathfinder` is already exposed
+   via `get_sim()` (for the oracle), but using it in the planner couples the
+   stand-in to Habitat; grid A\* keeps it self-contained and is the better fit
+   for the LTM thesis.
+3. **Then** re-smoke with `scripts/race-smoke.sh` — oracle is already green, so
+   only the `remembr --setting 3` escape check needs re-running. Only after
+   `path_traveled ≥ 4 m` clears do the false-STOP refactor and the full 3×30
+   ablation become worthwhile.
+
+Do **not** re-run the oracle or the full ablation to start — the oracle answer
+(navigable) and the depth/grid fix are settled. Start at the controller.
+
 ## What we ran (code)
 
 **Code change only.** No RACE provisioning, no live ablation/smoke. The RACE

@@ -100,16 +100,14 @@ fi
 echo
 echo "Ready."
 echo
-echo "Run-5 oracle smoke (model-free env check — run this first):"
-echo "  for sc in TEEsavR23oF wcojb4TFT35; do"
-echo "    python -m embodied_memory.run_hm3d_pol --mode live --backbone oracle \\"
-echo "        --setting 1 --scene \$sc --n-episodes 2 --target any --no-strict-pass \\"
-echo "        --out-dir runs/oracle-smoke-\$sc"
-echo "    python embodied_memory/scripts/verify_smoke_gate.py runs/oracle-smoke-\$sc"
-echo "  done"
+echo "Prefer the one-shot driver — it does pull -> setup -> pre-verify -> run ->"
+echo "post-verify in a single command (paste the whole output back):"
 echo
-echo "Run-5 densified-grid escape check (full stack, after oracle passes):"
-echo "  python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \\"
-echo "      --setting 3 --scene wcojb4TFT35 --n-episodes 2 --target any \\"
-echo "      --out-dir runs/remembr-dense-smoke"
-echo "  python embodied_memory/scripts/verify_smoke_gate.py runs/remembr-dense-smoke"
+echo "  # Oracle env check (model-free, both scenes):"
+echo "  bash scripts/race-smoke.sh --backbone oracle --setting 1 \\"
+echo "      --scenes \"TEEsavR23oF wcojb4TFT35\" --n-episodes 2 --target any \\"
+echo "      --no-strict-pass --tag oracle-smoke"
+echo
+echo "  # Densified-grid escape check (full stack):"
+echo "  bash scripts/race-smoke.sh --backbone remembr --setting 3 \\"
+echo "      --scenes wcojb4TFT35 --n-episodes 2 --target any --tag remembr-dense"
