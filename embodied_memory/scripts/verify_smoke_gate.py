@@ -48,6 +48,7 @@ import glob
 import json
 import math
 import os
+import statistics
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -94,6 +95,65 @@ def _displacement(steps: List[Dict[str, Any]]) -> float:
     if len(pts) < 2:
         return 0.0
     return math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+
+
+def _decision_metrics(decisions: List[Dict[str, Any]], n_steps: int) -> Dict[str, Any]:
+    """Quantify replan-thrash from the per-decision log (Run-6 diagnostic).
+
+    Run-6 fixed the start-wall freeze (agent now moves all N steps) but path
+    stayed low with ~0 net progress. Hypothesis: the runner re-plans almost
+    every step and the rerank flips the steering target each time, so the
+    controller turns to chase a moving target instead of translating. Each
+    decision logs the step it fired on, the raw planner top-1 id, the chosen
+    id, and the chosen world_xy — enough to test that directly:
+
+      - n_decisions / decision_rate: how often the runner re-planned. With
+        ``decision_period=10`` an un-stuck agent re-plans ~n_steps/10 times; a
+        rate near 1.0 means ``is_decision_step()`` is True nearly every step
+        (``_is_stuck()`` firing, since turning-in-place is <0.1 m of travel).
+      - median inter-decision gap (steps): intended gap is decision_period
+        (default 10). A median of 1 confirms stuck-triggered replan every step.
+      - disagree_frac: chosen != raw planner top-1 (rerank overrode the pick).
+      - distinct_target_frac: unique chosen targets (0.25 m-rounded) / decisions.
+      - mean_target_jump_m: mean straight-line move of the steering target
+        between consecutive decisions. Large + erratic == target flipping.
+    """
+    n = len(decisions)
+    out: Dict[str, Any] = {
+        "n_decisions": n,
+        "decision_rate": (n / n_steps) if n_steps else 0.0,
+        "median_gap": float("nan"),
+        "disagree_frac": float("nan"),
+        "distinct_target_frac": float("nan"),
+        "mean_target_jump_m": float("nan"),
+    }
+    if n == 0:
+        return out
+    steps = [int(d.get("step_idx", 0)) for d in decisions]
+    gaps = [steps[i + 1] - steps[i] for i in range(len(steps) - 1)]
+    if gaps:
+        out["median_gap"] = float(statistics.median(gaps))
+    disagree = sum(
+        1 for d in decisions
+        if int(d.get("chosen_id", -1)) != int(d.get("raw_top1_id", -2))
+    )
+    out["disagree_frac"] = disagree / n
+    targets = []
+    for d in decisions:
+        xy = d.get("chosen_world_xy")
+        if xy and len(xy) >= 2:
+            targets.append((float(xy[0]), float(xy[1])))
+    if targets:
+        rounded = {(round(x / 0.25), round(y / 0.25)) for x, y in targets}
+        out["distinct_target_frac"] = len(rounded) / len(targets)
+        jumps = [
+            math.hypot(targets[i + 1][0] - targets[i][0],
+                       targets[i + 1][1] - targets[i][1])
+            for i in range(len(targets) - 1)
+        ]
+        if jumps:
+            out["mean_target_jump_m"] = sum(jumps) / len(jumps)
+    return out
 
 
 def _detect_backbone(run_dir: str) -> Optional[str]:
@@ -153,6 +213,7 @@ def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
         "spl_val": float(ep.get("spl", 0.0)),
         "n_frontier_total_val": n_frontier_total,
         "n_decisions_val": len(decisions),
+        "decision_metrics": _decision_metrics(decisions, n_steps),
         # metadata
         "scene_id": ep.get("scene_id"),
         "target_category": ep.get("target_category"),
@@ -196,6 +257,9 @@ def _print_report(run_dir: str, r: Dict[str, Any]) -> bool:
 
     gates_passed = all(r[k] for k, _ in GATES)
     print(f"  gate: {_fmt_passfail(gates_passed)}")
+
+    _print_thrash_block([(f"episode_{r.get('episode_id', '?')}", r)])
+
     if not gates_passed:
         print()
         print("  Diagnostic hints (from Run-4 plan):")
@@ -307,6 +371,31 @@ def _load_episode(path: str):
         return None, f"parse failed: {e}"
 
 
+def _print_thrash_block(reports: List[Tuple[str, Dict[str, Any]]]) -> None:
+    """Replan/target-stability diagnostic (Run-6). Reads the per-decision log
+    to show *why* path stays low despite continuous motion: how often the
+    runner re-plans and whether the steering target flips each time."""
+    print()
+    print("  --- decision-thrash (Run-6: replan / target stability) ---")
+    print(f"  {'ep':>3} {'decis':>6} {'rate':>5} {'medgap':>6} "
+          f"{'disagree':>8} {'distinct':>8} {'jump_m':>7}")
+    for ep_path, r in reports:
+        ep_idx = os.path.basename(ep_path).replace("episode_", "").replace(".json", "")
+        m = r["decision_metrics"]
+        print(
+            f"  {ep_idx:>3} {m['n_decisions']:>6d} {m['decision_rate']:>5.2f} "
+            f"{m['median_gap']:>6.1f} {m['disagree_frac'] * 100:>7.0f}% "
+            f"{m['distinct_target_frac'] * 100:>7.0f}% {m['mean_target_jump_m']:>7.2f}"
+        )
+    print()
+    print("  read: medgap≈1 (intended decision_period=10) → is_decision_step() is")
+    print("        True ~every step; _is_stuck() reads turning-in-place (<0.1 m of")
+    print("        xy travel) as stuck → replan. High disagree/distinct/jump_m →")
+    print("        the rerank flips the steering target each decision, so the ±15°")
+    print("        controller turns to chase a moving target instead of translating.")
+    print("        Fix: rotation-aware _is_stuck() and/or commit to current_candidate.")
+
+
 def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]) -> bool:
     """Multi-episode summary table + roll-up gate.
 
@@ -357,6 +446,9 @@ def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]
           f"{_fmt_passfail(nav_any)}")
     overall = arch_pass and nav_any
     print(f"  gate: {_fmt_passfail(overall)}")
+
+    _print_thrash_block(reports)
+
     if not overall:
         print()
         print("  Diagnostic hints:")
