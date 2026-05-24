@@ -15,6 +15,7 @@ dependencies:
       - torch>=2.2
       - torchvision
       - transformers>=4.40
+      - accelerate  # required by from_pretrained(device_map=...) for the ReMEmbR backbone; without it the captioner/planner silently fall back to stub mode
       - sentence-transformers
       - open-clip-torch
       - pillow
