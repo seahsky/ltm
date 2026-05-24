@@ -228,6 +228,7 @@ def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
         # ReMEmbR backbone certification (Phase-2). None on non-remembr runs.
         "remembr_stub_mode_val": ep.get("remembr_stub_mode"),
         "remembr_sample_caption_val": ep.get("remembr_sample_caption"),
+        "remembr_stop_event_val": ep.get("remembr_stop_event"),
         # metadata
         "scene_id": ep.get("scene_id"),
         "target_category": ep.get("target_category"),
@@ -478,6 +479,16 @@ def _print_remembr_block(reports: List[Tuple[str, Dict[str, Any]]]) -> None:
             any_stub = True
         cap_s = (cap[:72] + "…") if isinstance(cap, str) and len(cap) > 73 else cap
         print(f"  {ep_idx:>3}  backbone={status:<4}  sample_caption: {cap_s!r}")
+        se = r.get("remembr_stop_event_val")
+        if isinstance(se, dict):
+            mc = se.get("matched_caption")
+            mc_s = (mc[:56] + "…") if isinstance(mc, str) and len(mc) > 57 else mc
+            cos = se.get("stop_cos")
+            dist = se.get("stop_dist_m")
+            cos_s = f"{cos:.3f}" if isinstance(cos, (int, float)) else cos
+            dist_s = f"{dist:.2f}m" if isinstance(dist, (int, float)) else dist
+            print(f"       STOP@step{se.get('step')}: cos={cos_s} dist={dist_s} "
+                  f"matched={mc_s!r}")
     print()
     if any_stub:
         print("  *** WARNING: at least one episode ran in STUB mode — NOT real")

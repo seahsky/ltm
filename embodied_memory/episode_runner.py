@@ -263,6 +263,9 @@ class EpisodeRunner:
         # Run-6 instrumentation: action mix over the episode (non-oracle path).
         action_counts = {ACTION_STOP: 0, ACTION_FORWARD: 0,
                          ACTION_TURN_LEFT: 0, ACTION_TURN_RIGHT: 0}
+        # First grounded-STOP event (cosine / matched caption) — set when the
+        # ReMEmbR backbone emits a stop_signal candidate. Phase-2 STOP tuning.
+        stop_event: Optional[Dict[str, Any]] = None
 
         # Initial observation: update map, build keyframe at step 0. The oracle
         # path skips the perception/memory preamble entirely (no bridge, no
@@ -347,6 +350,15 @@ class EpisodeRunner:
                     if stop_cand is not None:
                         chosen = stop_cand
                         n_stop_signals += 1
+                        # Capture WHY the real backbone STOPped (cosine + matched
+                        # caption + distance) so we can tell a correct STOP from a
+                        # premature one and tune REMEMBR_STOP_COS for the ablation.
+                        stop_event = {
+                            "step": int(step.step_idx),
+                            "stop_cos": stop_cand.metadata.get("stop_cos"),
+                            "stop_dist_m": stop_cand.metadata.get("stop_dist_m"),
+                            "matched_caption": stop_cand.metadata.get("matched_caption"),
+                        }
                     else:
                         chosen_idx = self._chosen_candidate_index(rerank_result, all_cands)
                         chosen = all_cands[chosen_idx]
@@ -496,6 +508,7 @@ class EpisodeRunner:
                 "remembr_builder_stub": bool(self.remembr_builder.stub_mode),
                 "remembr_n_records": len(recs),
                 "remembr_sample_caption": recs[len(recs) // 2].caption if recs else None,
+                "remembr_stop_event": stop_event,
             }
 
         ep_log["finished_at"] = time.time()
