@@ -408,6 +408,15 @@ checked in before Phase 1 and runs the two cheap smokes above before Phase 3.
 
 ### Status when this amendment landed
 
-Code change + 13-case module-level sanity suite passing locally. **No RACE
-execution yet** (CUDA-host operator step). Run-3 stopgap
-(`REMEMBR_STOP_COS=0.40 REMEMBR_STOP_MIN_STEP=20`) stays in place for smoke B.
+Code change + 13-case module-level sanity suite passing locally.
+
+**RACE smoke executed 2026-05-24 (see `PHASE2_ABLATION_REPORT.md` Run-5
+results).** Three-step read: (1) oracle PASS — env is navigable (4/4 success,
+SPL≤0.94); (2) found+fixed `normalize_depth=True` (depth was [0,1] not meters)
+— densified the grid ~200× (`cells_free` 4 → 800–3500); (3) densified smoke
+*still* fails the nav gate — with STOP disabled the agent moves ~0.5 m over 249
+steps and wedges. **Bottleneck has moved to the straight-line step controller**
+(no collision-aware path planning); the next lever is A\*/navmesh-following
+stepping, developed locally. Full 3×30 ablation deliberately NOT run (0 movement
+→ 0 success). Run-3 stopgap (`REMEMBR_STOP_COS=0.40 REMEMBR_STOP_MIN_STEP=20`)
+remains for any future smoke, but is moot until the agent can translate.

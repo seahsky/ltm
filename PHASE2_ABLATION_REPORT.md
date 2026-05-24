@@ -834,12 +834,12 @@ frontier-injection path.
 
 # Run 5 — Oracle diagnostic + occupancy-grid densification (prep, 2026-05-24)
 
-**Date:** 2026-05-24 (local implementation; RACE smoke deferred to operator bring-up)
+**Date:** 2026-05-24 (local implementation + RACE G15 smoke executed same day)
 **Branch:** `phase2-readiness`
-**Pod:** _(none — local code change + faiss/habitat-free sanity tests only)_
-**Commits:** `a26b1b6` (densified splat + `grid_stats`), `f713119` (oracle backbone + grid logging + tests)
-**Run dirs (planned):** `runs/oracle-smoke-{TEEsavR23oF,wcojb4TFT35}`, `runs/remembr-dense-smoke`
-**Status:** **Prep complete — RACE smoke + full ablation deferred (cost-gated, CUDA host).**
+**Pod:** RACE G15 (g6.2xlarge, 1×L4 24 GB), ~30 min instance time
+**Commits:** `a26b1b6` (densified splat + `grid_stats`), `f713119` (oracle backbone + grid logging + tests), `5b0c496` (metric-depth fix), `41e8501` (grid cols in verify)
+**Run dirs:** `runs/oracle-smoke-{TEEsavR23oF,wcojb4TFT35}`, `runs/remembr-dense-smoke`, `runs/remembr-dense-nostop`
+**Status:** **Oracle PASS (env navigable) + `normalize_depth` bug found & fixed (grid densified ~200×). Densified smoke STILL fails the nav gate — bottleneck has moved to the straight-line step controller (agent wedges at start). Full ablation NOT run — would be 0-success until the controller is fixed.**
 
 ## TL;DR
 
@@ -872,7 +872,111 @@ Research notes that did **not** make the cut: no goal-bearing scorer term
 the goal-direction answer), and no collision flag in `info` (the `Collisions`
 measure is off in `objectnav_hm3d.yaml`; the bbox<0.1 m stall heuristic stays).
 
-## What we ran
+## RACE results (G15, 2026-05-24) — what the smokes actually told us
+
+The smoke ran on RACE G15 after the local prep. It produced a clean,
+three-step diagnostic chain. **Each step moved the bottleneck one layer deeper.**
+
+### Step 1 — Oracle: the environment is navigable (decisive)
+
+`--backbone oracle` (model-free, ~$0) on both scenes, 2 episodes each:
+
+| scene | target | success | dist_to_goal | spl | n_steps |
+|---|---|---|---|---|---|
+| TEEsavR23oF | plant | ✅ | 0.04 m | 0.942 | 126 |
+| TEEsavR23oF | sofa | ✅ | 0.03 m | 0.215 | 102 |
+| wcojb4TFT35 | bed | ✅ | 0.06 m | 0.689 | 28 |
+| wcojb4TFT35 | chair | ✅ | 0.02 m | 0.889 | 42 |
+
+**4/4 success, SPL up to 0.94.** This kills the "env/episode is broken"
+hypothesis: spawns are reachable, goal coords are right, the discrete action
+space works. The 0-success wall across Runs 1–4 is **our pipeline**, not the
+environment. (The bridge pass-conditions print FAIL on the oracle path —
+expected, there is no bridge; that's why we run `--no-strict-pass`. The real
+read is the `verify_smoke_gate.py` oracle gate = PASS.)
+
+### Step 2 — `normalize_depth` bug: the splat was strangled (found & fixed)
+
+The oracle path still runs `planner.update()`, so its `grid_*` counts are real
+data on real Habitat depth — and they were **inverted**: `cells_free≈4` vs
+`cells_occupied` in the hundreds (local synthetic test produced the opposite,
+601 free / 29 occupied). Root cause: HM3D ObjectNav's depth sensor defaults to
+**`normalize_depth=True`**, returning depth in **[0, 1]** (confirmed live:
+`max=0.61`, `mean=0.14`), not meters. Normalized depth collapses every ray's
+ground range (a 3 m wall reads ~0.3), so the height gate marked nearly every
+endpoint OCCUPIED and carved almost no FREE cells — the densification could
+*never* take. This is exactly the assumption the plan flagged ("verify
+`normalize_depth` is false at smoke time").
+
+Fix (`5b0c496`): set `depth_sensor.normalize_depth = False` in the
+`habitat_env` sensor override. Re-running the oracle smoke confirmed the grid
+densified **~200×**:
+
+| scene/ep | g_free before → after | g_front before → after |
+|---|---|---|
+| TEE plant (126 steps) | 77 → **2593** | 21 → 782 |
+| TEE sofa (102 steps) | 85 → **3465** | 34 → 1303 |
+| wcojb bed (28 steps) | 4 → **804** | 3 → 396 |
+| wcojb chair (42 steps) | 4 → **1343** | 4 → 432 |
+
+This was a genuine bug throttling Runs 1–4: the frontier planner literally had
+~4 navigable cells to work with on `wcojb4TFT35`.
+
+### Step 3 — Densified smoke: grid fixed, but the controller wedges (new bottleneck)
+
+`--backbone remembr --setting 3` on `wcojb4TFT35`, 2 episodes. The full memory
+stack came alive for the first time — **all 5 bridge pass-conditions PASS**
+(fine layer non-empty, rerank always retrieves, memory influences, all four
+modules, no crash), `n_frontier_chosen=27`, `rerank_disagreements=27`. But the
+nav gate FAILED: both episodes STOPped at step 21 (`STOP_MIN_STEP=20`), 2.85 m /
+5.77 m from goal — a **false STOP** firing on a distant sighting.
+
+Re-running with `REMEMBR_STOP_MIN_STEP=9999` (STOP disabled) ran the full 249
+steps and gave the decisive read:
+
+| ep | target | n_steps | path_traveled | dist_to_goal | g_free | g_front |
+|---|---|---|---|---|---|---|
+| 0 | bed | 249 | **0.34 m** | 2.85 m | 224 | 111 |
+| 1 | chair | 249 | **0.55 m** | 5.77 m | 197 | 80 |
+
+`distance_to_goal`, `path_traveled`, **and every grid stat are byte-identical
+to the 21-step run** (`d2g=2.8474531173706055` in both). The agent moves
+~0.3–0.5 m out of the start, then **wedges and never moves or observes anything
+new for the remaining ~228 steps** — the occupancy grid never grows past 224
+cells. With the grid now dense (`g_free=224`, not the old 4) and STOP disabled,
+the agent *still* can't translate.
+
+**Diagnosis:** the bottleneck is now the **step controller**, not the grid (now
+dense), the env (oracle proved navigable), or STOP (disabled, still stalls).
+`frontier_planner.step_controller` steers by **straight-line bearing with no
+collision-aware path planning** (explicitly out-of-scope in the module
+docstring). The chosen frontier candidates are reachable in principle — the
+oracle walks out of these exact starts — but the straight line to them crosses
+geometry, so `move_forward` collides, the collision-escape toggles a turn,
+`force_replan` picks another frontier on the same wall, and the agent
+oscillates in place. The oracle succeeds precisely because it follows the
+**navmesh**, not a straight line.
+
+### Decision-tree branch fired
+
+"Oracle reaches goal but densified smoke still stalls → env fine, our
+perception/planner still the bottleneck." Critically, `cells_free` is **not**
+tiny (224, not 4) — so it is *not* "densification didn't take". The next lever
+is the **step controller**, to be developed **locally**, not on RACE:
+
+- Replace straight-line bearing stepping with **A\* over the occupancy grid** to
+  the chosen frontier (or follow `pathfinder`/navmesh like the oracle does), so
+  the agent routes *around* obstacles instead of wedging.
+- Then the deferred bridge-CLIP-image STOP refactor addresses the false-STOP
+  (stops too eagerly on distant sightings; fires the instant `STOP_MIN_STEP`
+  allows, 2.8–5.8 m from goal).
+
+**Full 3×30 ablation NOT run.** With ~0.5 m of movement it would burn $6–10 to
+confirm 0 success; the gate cannot pass until the controller can translate.
+That decision keeps us well inside the cost envelope (only ~30 min of G15 time
+spent on the whole diagnostic).
+
+## What we ran (code)
 
 **Code change only.** No RACE provisioning, no live ablation/smoke. The RACE
 bring-up is a CUDA-host operator step (`docs/phase3-qwen7b-runbook.md` Phase 1);
