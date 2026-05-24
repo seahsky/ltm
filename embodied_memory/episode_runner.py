@@ -199,6 +199,8 @@ class EpisodeRunner:
                 "replan_scheduled": int(ep_metrics.get("replan_scheduled", 0)),
                 "replan_forced": int(ep_metrics.get("replan_forced", 0)),
                 "replan_stuck": int(ep_metrics.get("replan_stuck", 0)),
+                "remembr_stub_mode": ep_metrics.get("remembr_stub_mode"),
+                "remembr_sample_caption": ep_metrics.get("remembr_sample_caption"),
             })
 
         # Finalize summary. The oracle backbone runs without a memory bridge,
@@ -480,6 +482,21 @@ class EpisodeRunner:
             "replan_forced": controller_stats["replan_forced"],
             "replan_stuck": controller_stats["replan_stuck"],
         }
+        # ReMEmbR backbone certification (Phase-2): record whether the real
+        # weights actually loaded, so a long ablation self-certifies and
+        # analyze_ablation can refuse a silent-stub run. Every prior run was
+        # stub (missing accelerate); never trust a remembr run that doesn't say
+        # remembr_stub_mode=false. The sample caption lets us eyeball real VLM
+        # output ("a bedroom with...") vs the stub ("stub-caption step=N").
+        remembr_log: Dict[str, Any] = {}
+        if self.backbone == "remembr":
+            recs = self.remembr_builder.records
+            remembr_log = {
+                "remembr_stub_mode": bool(self.remembr_planner.stub_mode),
+                "remembr_builder_stub": bool(self.remembr_builder.stub_mode),
+                "remembr_n_records": len(recs),
+                "remembr_sample_caption": recs[len(recs) // 2].caption if recs else None,
+            }
 
         ep_log["finished_at"] = time.time()
         ep_log["n_steps"] = int(step.step_idx)
@@ -499,6 +516,7 @@ class EpisodeRunner:
         ep_log["grid_cells_unknown"] = grid_stats["cells_unknown"]
         ep_log["grid_frontier_cells"] = grid_stats["frontier_cells"]
         ep_log.update(controller_log)
+        ep_log.update(remembr_log)
         ep_log["bridge_stats_after"] = (
             self.bridge.stats() if self.bridge is not None else {}
         )
@@ -520,6 +538,7 @@ class EpisodeRunner:
             "grid_cells_unknown": grid_stats["cells_unknown"],
             "grid_frontier_cells": grid_stats["frontier_cells"],
             **controller_log,
+            **remembr_log,
         }
 
     # ------------------------------------------------------------------

@@ -225,6 +225,9 @@ def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
         "replan_scheduled_val": int(ep.get("replan_scheduled", 0)),
         "replan_forced_val": int(ep.get("replan_forced", 0)),
         "replan_stuck_val": int(ep.get("replan_stuck", 0)),
+        # ReMEmbR backbone certification (Phase-2). None on non-remembr runs.
+        "remembr_stub_mode_val": ep.get("remembr_stub_mode"),
+        "remembr_sample_caption_val": ep.get("remembr_sample_caption"),
         # metadata
         "scene_id": ep.get("scene_id"),
         "target_category": ep.get("target_category"),
@@ -271,6 +274,7 @@ def _print_report(run_dir: str, r: Dict[str, Any]) -> bool:
 
     _print_thrash_block([(f"episode_{r.get('episode_id', '?')}", r)])
     _print_controller_block([(f"episode_{r.get('episode_id', '?')}", r)])
+    _print_remembr_block([(f"episode_{r.get('episode_id', '?')}", r)])
 
     if not gates_passed:
         print()
@@ -453,6 +457,36 @@ def _print_controller_block(reports: List[Tuple[str, Dict[str, Any]]]) -> None:
     print("        fwd≫turn and path↑ = the wedge is broken.")
 
 
+def _print_remembr_block(reports: List[Tuple[str, Dict[str, Any]]]) -> None:
+    """ReMEmbR backbone certification (Phase-2). Reports whether the real
+    Qwen weights loaded (``remembr_stub_mode: false``) and shows a sample
+    caption so a stub run ("stub-caption step=N") can never be mistaken for a
+    real one ("a bedroom with a bed and ..."). Silent stub fallback hid for the
+    whole project once — this block makes it impossible to miss in a smoke."""
+    vals = [r.get("remembr_stub_mode_val") for _, r in reports]
+    if all(v is None for v in vals):
+        return  # not a remembr run (oracle/frontier) — nothing to certify
+    print()
+    print("  --- ReMEmbR backbone (Phase-2 certification) ---")
+    any_stub = False
+    for ep_path, r in reports:
+        ep_idx = os.path.basename(ep_path).replace("episode_", "").replace(".json", "")
+        stub = r.get("remembr_stub_mode_val")
+        cap = r.get("remembr_sample_caption_val")
+        status = "REAL" if stub is False else ("STUB" if stub else "n/a")
+        if stub:
+            any_stub = True
+        cap_s = (cap[:72] + "…") if isinstance(cap, str) and len(cap) > 73 else cap
+        print(f"  {ep_idx:>3}  backbone={status:<4}  sample_caption: {cap_s!r}")
+    print()
+    if any_stub:
+        print("  *** WARNING: at least one episode ran in STUB mode — NOT real")
+        print("      ReMEmbR. Captions are placeholders; do not report this as a")
+        print("      paper-faithful result. Check accelerate / weights / VRAM.")
+    else:
+        print("  backbone REAL on all episodes (stub_mode=false). Paper-faithful.")
+
+
 def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]) -> bool:
     """Multi-episode summary table + roll-up gate.
 
@@ -506,6 +540,7 @@ def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]
 
     _print_thrash_block(reports)
     _print_controller_block(reports)
+    _print_remembr_block(reports)
 
     if not overall:
         print()

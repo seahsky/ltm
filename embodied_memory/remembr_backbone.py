@@ -50,6 +50,22 @@ import numpy as np
 from .frontier_planner import FrontierCandidate
 
 
+def _warn_stub(role: str, detail: str) -> None:
+    """Loudly announce a stub fallback on stderr. Silent stub fallback hid for
+    the entire project once (missing ``accelerate`` → every ``--backbone
+    remembr`` run was stub); a visible warning makes that impossible to miss.
+    Fires at most once per role per process (lazy-load short-circuits after)."""
+    import sys
+
+    print(
+        f"WARNING(stub_mode=True): ReMEmbR {role} falling back to STUB — {detail}. "
+        f"Captions/proposals will be deterministic placeholders, NOT real model "
+        f"output. Set REMEMBR_STRICT=1 to surface the full error.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 # ----------------------------------------------------------------------
 # config + records
 # ----------------------------------------------------------------------
@@ -153,6 +169,7 @@ class ReMEmbRBuilder:
                 raise RuntimeError(
                     "transformers / torch are required for ReMEmbR captioner"
                 ) from e
+            _warn_stub("captioner", "transformers/torch not importable")
             self._stub_mode = True
             return
 
@@ -169,6 +186,7 @@ class ReMEmbRBuilder:
                 raise RuntimeError(
                     f"Failed to load captioner {self.config.captioner_model}: {e}"
                 ) from e
+            _warn_stub("captioner", f"{self.config.captioner_model}: {e}")
             self._stub_mode = True
 
     # ------------------------------------------------------------------
@@ -388,6 +406,7 @@ class ReMEmbRPlanner:
         except ImportError as e:
             if self.config.strict:
                 raise RuntimeError("transformers / torch are required for ReMEmbR planner") from e
+            _warn_stub("planner", "transformers/torch not importable")
             self._stub_mode = True
             return
 
@@ -404,6 +423,7 @@ class ReMEmbRPlanner:
                 raise RuntimeError(
                     f"Failed to load planner {self.config.planner_model}: {e}"
                 ) from e
+            _warn_stub("planner", f"{self.config.planner_model}: {e}")
             self._stub_mode = True
 
     # ------------------------------------------------------------------
