@@ -130,6 +130,15 @@ class HabitatObjectNavSource(EpisodeSource):
             sim_sensors.rgb_sensor.width = w
             sim_sensors.depth_sensor.height = h
             sim_sensors.depth_sensor.width = w
+            # HM3D ObjectNav's depth sensor defaults to normalize_depth=True,
+            # which returns depth in [0,1] (depth_m / max_depth) rather than
+            # meters. The frontier planner's occupancy splat assumes *metric*
+            # depth — normalized depth collapses every ray's ground range
+            # (a 3 m wall reads ~0.3), so the height gate marks nearly every
+            # endpoint OCCUPIED and carves almost no FREE cells (Run-5 oracle
+            # smoke: cells_free≈4 on wcojb4TFT35). Return true meters so the
+            # densified splat and height gate work as designed.
+            sim_sensors.depth_sensor.normalize_depth = False
 
             if "semantic_sensor" not in sim_sensors:
                 sim_sensors.semantic_sensor = HabitatSimSemanticSensorConfig()
