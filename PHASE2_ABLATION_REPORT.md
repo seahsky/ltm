@@ -1122,3 +1122,198 @@ past **$17 without a gate read**.
 | `embodied_memory/scripts/test_propose_candidates.py` | 5 new Run-5 sanity cases |
 | `docs/phase3-qwen7b-runbook.md` | Run-5 amendment block at the bottom |
 
+---
+
+# Run 6 — Collision-aware step controller, grid A\* (prep, 2026-05-24)
+
+**Date:** 2026-05-24 (local implementation + sanity tests only; no RACE run executed)
+**Branch:** `phase2-readiness`
+**Pod:** _(none — CPU-only laptop; faiss/habitat-free implementation + tests)_
+**Backbone:** unchanged (Qwen2-VL-2B captioner + Qwen2.5-7B planner on RACE; backbone-agnostic change)
+**Run dirs (planned):** `runs/remembr-astar-smoke`, then `runs/abl-s{1,2,3}-astar`
+**Status:** **Prep complete — grid A\* step controller landed and unit-tested locally (21/21 sanity cases green). RACE smoke deferred to the next operator session.**
+
+## TL;DR
+
+Run 5 isolated the bottleneck to `frontier_planner.step_controller`: it steered
+by **straight-line bearing only** (turn to face the chosen frontier, then
+`move_forward`), with no routing around obstacles. On HM3D the straight line to
+a *reachable* frontier crosses geometry, so `move_forward` collides, the
+bbox<0.1 m escape toggles a turn, `force_replan` re-picks another wall-facing
+frontier, and the agent oscillates in place — ~0.5 m over 249 steps. The oracle
+clears the same starts because it follows the **navmesh**, routing *around*
+obstacles.
+
+Run 6 replaces the straight-line controller with **grid A\*** over the
+`OccupancyGrid` (the Run-5 "Next session" lever). `step_controller` now runs A\*
+from the agent cell to the chosen frontier cell — **FREE + UNKNOWN traversable,
+OCCUPIED inflated-and-blocked** — and steers toward a **short-lookahead
+waypoint** (~0.4 m) on that path. The agent routes around obstacles instead of
+wedging. Self-contained pure numpy/stdlib (no Habitat coupling), so it keeps
+the LTM stand-in independent of the simulator and loads in the faiss/habitat-
+free sanity harness.
+
+This is the previously-deferred grid-A\* path from the Run-5 writeup, picked
+over the navmesh fallback because navmesh couples the planner to Habitat. It is
+a **movement** fix; the false-STOP (bridge-CLIP-image) refactor and the full
+3×30 ablation stay gated on it clearing the wedge first.
+
+## What we ran
+
+**Code change only.** No RACE provisioning, no live smoke/ablation. Patches
+landed on `phase2-readiness` and verified with the same module-level sanity
+pattern used since `117028d` (importlib-loaded, `sys.modules`-stubbed,
+faiss/habitat-free).
+
+| File | Change |
+|---|---|
+| `embodied_memory/frontier_planner.py` | New module-level `astar()` (8-connectivity, no diagonal corner-cutting, octile heuristic, `unknown_cost` penalty, `max_expansions` cap), `_inflate_occupied()` (numpy obstacle dilation, no scipy), `_snap_to_free()` (BFS-ring goal snap). `step_controller(candidate, agent_pos, agent_yaw)` rewritten to A\*-route + steer toward a `lookahead_m` waypoint; `_astar_action` / `_bearing_to_action` / `_straight_line_fallback` helpers. New `__init__` knobs `lookahead_m=0.4`, `inflate_radius_cells=1`, `unknown_cost=1.5`, `astar_max_expansions=20000`. Collision-escape kept as a safety net. Module docstring updated (collision-aware control no longer out-of-scope). |
+| `embodied_memory/episode_runner.py` | One-line caller change at the `step_controller` call site — passes `step.agent_state.position`. Bearing recompute left as-is (now harmless, since the controller no longer steers by `bearing_rad` on the A\* path — this also defangs Run-3's "recompute undoes the escape turn" oscillation). |
+| `embodied_memory/scripts/test_propose_candidates.py` | 8 new Run-6 sanity cases (13 → 21). All pass locally. |
+
+### A\* design (aggressive passability profile)
+
+- **Connectivity:** 8-conn with a no-corner-cutting guard (a diagonal is legal
+  only when both shared orthogonal neighbours are unblocked) — smoother bearings
+  than 4-conn's ±45° staircase, no clipping obstacle corners.
+- **Traversability:** OCCUPIED (inflated by 1 cell ≈ 0.1 m for agent radius)
+  blocked; FREE cost 1/√2; **UNKNOWN traversable** at `unknown_cost=1.5`× so the
+  search prefers observed-free corridors but still crosses unobserved space when
+  that's the only route (self-correcting: a wrongly-optimistic UNKNOWN cell
+  flips OCCUPIED on collision and the next per-step replan routes around it).
+- **Lookahead:** steer toward the cell ~0.4 m (4 cells) along the path, clamped
+  to the path end — smooths heading vs the jittery immediate-next cell without
+  cutting far corners.
+- **Robustness:** the agent's own (start) cell is force-cleared in the blocked
+  mask so standing next to a wall never self-blocks the planner (the single most
+  important detail — without it A\* freezes worse than straight-line). Goal cells
+  on/next to a wall are snapped to the nearest passable cell. A `max_expansions`
+  cap bounds the rare passable-but-trapped-goal full-grid exhaustion. No path →
+  straight-line fallback + `force_replan`.
+
+## Sanity-test output (local)
+
+```
+$ python embodied_memory/scripts/test_propose_candidates.py
+Run-4/Run-5 sanity tests
+  ... (13 prior cases) ...
+  case astar_routes_through_gap: OK
+  case astar_none_when_walled_off: OK
+  case astar_inflation_seals_one_cell_gap: OK
+  case astar_goal_occupied_snaps: OK
+  case astar_start_equals_goal: OK
+  case astar_first_action_not_into_wall: OK
+  case astar_lookahead_waypoint: OK
+  case controller_fallback_on_none: OK
+All cases passed.
+```
+
+The headline cases: `astar_routes_through_gap` (path goes through a wall's
+single gap, never steps on OCCUPIED), `astar_first_action_not_into_wall` (with
+the goal straight ahead behind a wall whose only gap is offset, the controller
+emits a TURN toward the gap, not FORWARD into the wall — the exact failure mode
+Run 5 diagnosed), `astar_inflation_seals_one_cell_gap` (1-cell inflation seals a
+1-cell gap, proving the agent-radius clearance), and `controller_fallback_on_none`
+(no path → straight-line bearing + `_force_replan`).
+
+### Performance (local micro-benchmark, 200×200 grid)
+
+Per-step A\* on a realistic dense local map (~11k FREE cells, scattered
+clutter), goals ~3 m out:
+
+| Scenario | Time |
+|---|---|
+| Reachable goal | mean **0.73 ms**, max 3.3 ms |
+| Passable-but-trapped goal (full exhaustion), uncapped | 209 ms |
+| Same, `max_expansions=20000` | 107 ms |
+
+Recompute-every-step is comfortably cheap against the per-step Habitat render +
+LLM planner inference (seconds). Real frontier goals are reachable by
+construction (a frontier cell is FREE *adjacent to UNKNOWN*, so it always has a
+passable neighbour), so the trapped-goal tail rarely fires; the cap bounds it
+regardless.
+
+## Why this and not the bridge-CLIP STOP refactor
+
+Run 5's failure was **~0.5 m total movement** — the agent never navigated. The
+bridge-CLIP-image STOP refactor addresses STOP *precision* once the agent is
+near a goal; it does nothing for "can't escape the start wall". The Run-3
+`STOP_COS=0.40 / STOP_MIN_STEP=20` stopgap already suppresses false STOPs in the
+smoke. Movement is the binding constraint; A\* is the direct lever. Same
+step-of-diagnosis pattern as Runs 1→5: each run patches the current load-bearing
+failure and (we expect) exposes the next.
+
+## Setting protocol — unchanged
+
+The 3-setting protocol (memory off / STM / full) is preserved verbatim. The A\*
+controller is a backbone-side change applied **uniformly** across all 3
+settings, exactly like the `509dbc8` STOP fix and the `117028d`/`6265870`/Run-4
+controller patches. The S1 vs S3 contrast still isolates the memory pipeline;
+the new controller lifts the movement floor for every setting.
+
+## Operator runbook (next session)
+
+1. **Phase 0 — local sanity (free).** Done in this prep; `python
+   embodied_memory/scripts/test_propose_candidates.py` → "All cases passed." (21).
+2. **Phase 1 — RACE bring-up** (~$0.40). Standard RACE G15 per
+   `docs/phase3-qwen7b-runbook.md` Phase 1. Keep `REMEMBR_STOP_COS=0.40
+   REMEMBR_STOP_MIN_STEP=20`.
+3. **Phase 2 — Movement smoke** (~$0.40). Single scene, full stack:
+   ```bash
+   REMEMBR_STOP_COS=0.40 REMEMBR_STOP_MIN_STEP=20 \
+   python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
+       --setting 3 --scene wcojb4TFT35 --n-episodes 2 --target any \
+       --out-dir runs/remembr-astar-smoke
+   ```
+   **Pass condition:** `path_traveled ≥ 4 m` (vs the ~0.5 m wedge). If the agent
+   still moves <2 m, diagnose locally (grid stats, A\* path on a dumped grid) —
+   do **not** re-pay until it clears. The oracle is already green; do not re-run it.
+4. **Phase 3 — Full ablation** (~$6–10). Same 3×30×250 protocol so paired
+   bootstrap stays valid: `PHASE2_OUT_SUFFIX=-astar bash scripts/run_phase2_ablation.sh`.
+5. **Phase 4 — Gate read.** `analyze_ablation.py` for C1∧C2.
+
+## Expected branches at the next gate read
+
+- **Movement smoke passes (`path_traveled ≥ 4 m`).** Run the full ablation.
+- **Full gate PASS (C1 ∧ C2).** Phase-2 milestone done; G3/G5/val scale-up
+  become schedulable.
+- **FAIL C1 only — agent now navigates but doesn't STOP at goals.** The cleanest
+  outcome: it means A\* cleared the wall and the next session is the deferred
+  **bridge-CLIP-image STOP refactor**. One architectural layer deeper, same as
+  the Run-1→5 progression.
+- **Smoke still wedges (<2 m).** A\* picked an unreachable target or the grid is
+  too sparse at that start; inspect dumped `grid_*` + the A\* path locally.
+
+## Cost ceiling
+
+| Phase | Best | Worst |
+|---|---|---|
+| Implementation + local tests | $0 | $0 |
+| RACE bring-up + movement smoke | $0.50 | $2 |
+| Full ablation (if smoke clears) | $6 | $10 |
+| Buffer | $0 | $4 |
+| **Total** | **$6.50** | **$16** |
+
+Hard cap unchanged: stop and escalate if costs trend past **$17 without a gate read**.
+
+## Tuning knobs added this run
+
+| Ctor param | Default | Purpose |
+|---|---|---|
+| `FrontierPlanner.lookahead_m` | 0.4 | Distance along the A\* path to the steering waypoint (smooths bearing). |
+| `FrontierPlanner.inflate_radius_cells` | 1 | OCCUPIED dilation for agent radius (1 cell ≈ 0.1 m clearance). 2 = ~full radius but risks sealing tight doorways. |
+| `FrontierPlanner.unknown_cost` | 1.5 | UNKNOWN-cell traversal penalty (>1 prefers observed-free routes; keeps unexplored space passable). |
+| `FrontierPlanner.astar_max_expansions` | 20000 | A\* node-expansion cap; bounds the trapped-goal worst case (→ straight-line fallback). |
+
+No new env vars; the Run-1..5 knobs (`REMEMBR_STOP_COS`, `REMEMBR_STOP_DIST`,
+`REMEMBR_STOP_MIN_STEP`, `REMEMBR_MIN_WAYPOINT_DIST`, `REMEMBR_FRONTIER_INJECT`)
+all still apply.
+
+## File index (Run 6)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/frontier_planner.py` | `astar()` + `_inflate_occupied()` + `_snap_to_free()`; A\* `step_controller` + helpers; new ctor knobs |
+| `embodied_memory/episode_runner.py` | `step_controller` call site passes `agent_pos` |
+| `embodied_memory/scripts/test_propose_candidates.py` | 8 new Run-6 A\* sanity cases (13 → 21) |
+

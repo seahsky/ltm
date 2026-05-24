@@ -7,13 +7,15 @@ cells) and clusters them into K subgoal candidates per decision step.
 
 Decision cadence: every N steps (default 10), or when the agent has been
 "stuck" (low position delta over the last few steps). Between decisions the
-runner just keeps executing the previously-chosen subgoal via a greedy step
-controller (move toward the candidate; turn if blocked).
+runner keeps executing the previously-chosen subgoal via the step
+controller, which runs A* over the occupancy grid to the subgoal and steers
+toward a short-lookahead waypoint on that path (Run-6 collision-aware
+control), so the agent routes around obstacles instead of wedging on the
+straight-line bearing.
 
 Out of scope for this slice:
 - learned planner / VLM planner
 - proper SLAM (we just splat depth as cones in the agent frame)
-- collision-aware path planning (we use straight-line bearing)
 """
 
 from __future__ import annotations
@@ -95,6 +97,179 @@ class OccupancyGrid:
 
 
 # ----------------------------------------------------------------------
+# A* grid path planning (Run-6: collision-aware step controller)
+# ----------------------------------------------------------------------
+
+
+def _inflate_occupied(grid_array: np.ndarray, radius_cells: int = 1) -> np.ndarray:
+    """Boolean mask of OCCUPIED cells dilated by ``radius_cells`` (8-conn).
+
+    The agent has physical extent (~0.18 m radius in Habitat) while the grid is
+    0.1 m/cell, so an A* path that hugs an OCCUPIED cell still collides.
+    Inflating the obstacle mask by one cell keeps the path ~0.1 m off walls.
+    Pure-numpy dilation (OR of 8 shifted copies) so the faiss/habitat-free test
+    harness loads this module without scipy.
+    """
+    occ = grid_array == CELL_OCCUPIED
+    if radius_cells <= 0:
+        return occ
+    out = occ.copy()
+    for _ in range(radius_cells):
+        cur = out
+        nxt = cur.copy()
+        nxt[1:, :] |= cur[:-1, :]
+        nxt[:-1, :] |= cur[1:, :]
+        nxt[:, 1:] |= cur[:, :-1]
+        nxt[:, :-1] |= cur[:, 1:]
+        nxt[1:, 1:] |= cur[:-1, :-1]
+        nxt[1:, :-1] |= cur[:-1, 1:]
+        nxt[:-1, 1:] |= cur[1:, :-1]
+        nxt[:-1, :-1] |= cur[1:, 1:]
+        out = nxt
+    return out
+
+
+def _snap_to_free(
+    blocked_mask: np.ndarray,
+    rc: Tuple[int, int],
+    max_radius: int = 5,
+) -> Optional[Tuple[int, int]]:
+    """Nearest non-blocked cell to ``rc`` within ``max_radius`` cells, or None.
+
+    Frontier medians (and LTM-injected picks) can land on or next to a wall;
+    after inflation that cell reads blocked and A* would refuse it as a goal.
+    Snap to the closest passable cell (BFS rings, nearest-by-Euclidean within a
+    ring) so the planner has a reachable target.
+    """
+    n_rows, n_cols = blocked_mask.shape
+    r0, c0 = int(rc[0]), int(rc[1])
+    if 0 <= r0 < n_rows and 0 <= c0 < n_cols and not blocked_mask[r0, c0]:
+        return (r0, c0)
+    for rad in range(1, max_radius + 1):
+        best: Optional[Tuple[int, Tuple[int, int]]] = None
+        for dr in range(-rad, rad + 1):
+            for dc in range(-rad, rad + 1):
+                if max(abs(dr), abs(dc)) != rad:  # ring perimeter only
+                    continue
+                rr, cc = r0 + dr, c0 + dc
+                if 0 <= rr < n_rows and 0 <= cc < n_cols and not blocked_mask[rr, cc]:
+                    d2 = dr * dr + dc * dc
+                    if best is None or d2 < best[0]:
+                        best = (d2, (rr, cc))
+        if best is not None:
+            return best[1]
+    return None
+
+
+def astar(
+    grid_array: np.ndarray,
+    start_rc: Tuple[int, int],
+    goal_rc: Tuple[int, int],
+    *,
+    inflate_radius_cells: int = 1,
+    unknown_cost: float = 1.5,
+    allow_diagonal: bool = True,
+    max_expansions: Optional[int] = None,
+) -> Optional[List[Tuple[int, int]]]:
+    """A* over the occupancy array; inclusive cell path ``[start, ..., goal]``.
+
+    FREE + UNKNOWN cells are traversable, OCCUPIED (inflated) cells are blocked.
+    8-connected with a no-corner-cutting guard (a diagonal step is legal only
+    when both shared orthogonal neighbours are unblocked). Octile heuristic
+    (admissible/consistent for unit/√2 step costs).
+
+    UNKNOWN cells are passable but cost ``unknown_cost``× a FREE step, so the
+    search prefers observed-free corridors yet still crosses unobserved space
+    when that is the only route. Such a path self-corrects: a wrongly-optimistic
+    UNKNOWN cell flips OCCUPIED on collision and the next per-step replan routes
+    around it.
+
+    The agent's own (start) cell is force-cleared in the blocked mask, so
+    standing next to a wall — where inflation would otherwise seal the start —
+    never strands the planner. Returns None if no path (including a fully
+    blocked goal, or if ``max_expansions`` is reached first — bounds the rare
+    case of a passable-but-trapped goal forcing a full-grid exhaustion).
+    """
+    import heapq
+
+    n_rows, n_cols = grid_array.shape
+    sr, sc = int(start_rc[0]), int(start_rc[1])
+    gr, gc = int(goal_rc[0]), int(goal_rc[1])
+    if not (0 <= sr < n_rows and 0 <= sc < n_cols):
+        return None
+    if not (0 <= gr < n_rows and 0 <= gc < n_cols):
+        return None
+
+    blocked = _inflate_occupied(grid_array, inflate_radius_cells)
+    blocked[sr, sc] = False  # never self-block the agent's own cell
+    if blocked[gr, gc]:
+        return None
+    if (sr, sc) == (gr, gc):
+        return [(sr, sc)]
+
+    sqrt2 = math.sqrt(2.0)
+    if allow_diagonal:
+        # (dr, dc, base_cost, orthogonal-neighbour guards for corner-cut)
+        moves = [
+            (-1, 0, 1.0, ()),
+            (1, 0, 1.0, ()),
+            (0, -1, 1.0, ()),
+            (0, 1, 1.0, ()),
+            (-1, -1, sqrt2, ((-1, 0), (0, -1))),
+            (-1, 1, sqrt2, ((-1, 0), (0, 1))),
+            (1, -1, sqrt2, ((1, 0), (0, -1))),
+            (1, 1, sqrt2, ((1, 0), (0, 1))),
+        ]
+    else:
+        moves = [(-1, 0, 1.0, ()), (1, 0, 1.0, ()), (0, -1, 1.0, ()), (0, 1, 1.0, ())]
+
+    def _h(r: int, c: int) -> float:
+        dr, dc = abs(r - gr), abs(c - gc)
+        return (dr + dc) + (sqrt2 - 2.0) * min(dr, dc)
+
+    def _cell_cost(r: int, c: int) -> float:
+        return unknown_cost if grid_array[r, c] == CELL_UNKNOWN else 1.0
+
+    open_heap: List[Tuple[float, int, Tuple[int, int]]] = []
+    counter = 0
+    heapq.heappush(open_heap, (_h(sr, sc), counter, (sr, sc)))
+    g_score: Dict[Tuple[int, int], float] = {(sr, sc): 0.0}
+    came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    closed = set()
+
+    while open_heap:
+        _, _, cur = heapq.heappop(open_heap)
+        if cur == (gr, gc):
+            path = [cur]
+            while cur in came_from:
+                cur = came_from[cur]
+                path.append(cur)
+            path.reverse()
+            return path
+        if cur in closed:
+            continue
+        closed.add(cur)
+        if max_expansions is not None and len(closed) > max_expansions:
+            return None
+        cr, cc = cur
+        for dr, dc, base, guards in moves:
+            nr, nc = cr + dr, cc + dc
+            if not (0 <= nr < n_rows and 0 <= nc < n_cols):
+                continue
+            if blocked[nr, nc]:
+                continue
+            if guards and any(blocked[cr + g[0], cc + g[1]] for g in guards):
+                continue  # no diagonal corner-cutting
+            tentative = g_score[cur] + base * _cell_cost(nr, nc)
+            if tentative < g_score.get((nr, nc), float("inf")):
+                came_from[(nr, nc)] = cur
+                g_score[(nr, nc)] = tentative
+                counter += 1
+                heapq.heappush(open_heap, (tentative + _h(nr, nc), counter, (nr, nc)))
+    return None
+
+
+# ----------------------------------------------------------------------
 # Frontier planner
 # ----------------------------------------------------------------------
 
@@ -125,6 +300,10 @@ class FrontierPlanner:
         grid_res_m: float = 0.1,
         camera_height_m: float = 0.88,
         obstacle_min_h: float = 0.3,
+        lookahead_m: float = 0.4,
+        inflate_radius_cells: int = 1,
+        unknown_cost: float = 1.5,
+        astar_max_expansions: int = 20000,
     ):
         self.decision_period = decision_period
         self.n_candidates = n_candidates
@@ -132,6 +311,17 @@ class FrontierPlanner:
         self.stuck_window = stuck_window
         self.forward_fov_deg = forward_fov_deg
         self.max_depth_m = max_depth_m
+        # A* step controller (Run-6). lookahead_m: how far along the A* path the
+        # steering waypoint sits (smooths bearing vs the jittery next cell).
+        # inflate_radius_cells: obstacle dilation for agent radius (1 cell ≈
+        # 0.1 m clearance). unknown_cost: UNKNOWN-cell penalty (>1 prefers
+        # observed-free routes while keeping unexplored space passable).
+        self.lookahead_m = lookahead_m
+        self.inflate_radius_cells = inflate_radius_cells
+        self.unknown_cost = unknown_cost
+        # Bound A* worst case (a passable-but-trapped goal can otherwise force a
+        # full-grid exhaustion ~190 ms); on the cap, fall back to straight-line.
+        self.astar_max_expansions = astar_max_expansions
         # Height gate for the depth splat (Run-5 densification): a back-
         # projected endpoint counts as an obstacle only if it rises more than
         # ``obstacle_min_h`` above the floor. ``camera_height_m`` is the agent
@@ -324,27 +514,36 @@ class FrontierPlanner:
         candidates.sort(key=lambda c: c.raw_score, reverse=True)
         return candidates[: self.n_candidates]
 
-    def step_controller(self, candidate: FrontierCandidate, agent_yaw: float) -> int:
-        """Convert a chosen candidate into a single discrete action.
+    def step_controller(
+        self,
+        candidate: FrontierCandidate,
+        agent_pos: np.ndarray,
+        agent_yaw: float,
+    ) -> int:
+        """Convert a chosen candidate into a single discrete action via
+        collision-aware A* over the occupancy grid (Run-6).
 
-        Tiny greedy controller: turn toward the candidate's bearing if we're
-        more than ~15° off, else move forward. The runner re-plans every
-        ``decision_period`` steps regardless, so this only needs to be
-        roughly correct.
+        Earlier slices steered by straight-line bearing to the candidate; on
+        HM3D the straight line to a reachable frontier routinely crosses
+        geometry, so ``move_forward`` collided and the agent wedged at the
+        start wall (Phase-2 Runs 1–5, oracle proved the env navigable). We now
+        run A* from the agent's cell to the candidate's cell over the grid
+        (FREE + UNKNOWN traversable, OCCUPIED inflated-and-blocked) and steer
+        toward a short-lookahead waypoint on that path — the agent routes
+        *around* obstacles, like the navmesh oracle does.
 
-        Collision-escape: if we just told the agent to move FORWARD and the
-        last 3 logged positions barely moved (<0.1 m bbox diagonal), the
-        agent is stalled against geometry. Override with an alternating
-        TURN so the next planner tick sees a different bearing.
+        Falls back to the straight-line bearing (and forces a replan) when A*
+        finds no path, so a transiently unreachable candidate degrades to the
+        old behaviour rather than freezing.
+
+        Collision-escape is kept as a safety net: if we just told the agent to
+        move FORWARD and the last 3 logged positions barely moved (<0.1 m bbox
+        diagonal), the agent is stalled against geometry the grid hasn't
+        captured (sub-cell, or grid-vs-navmesh disagreement). Override with an
+        alternating TURN and force a replan.
         """
-        bearing = candidate.bearing_rad
-        deg15 = math.radians(15.0)
-        if bearing > deg15:
-            action = ACTION_TURN_LEFT
-        elif bearing < -deg15:
-            action = ACTION_TURN_RIGHT
-        else:
-            action = ACTION_FORWARD
+        ax, az = float(agent_pos[0]), float(agent_pos[2])
+        action = self._astar_action(candidate, ax, az, agent_yaw)
 
         if (
             action == ACTION_FORWARD
@@ -358,14 +557,67 @@ class FrontierPlanner:
             if bbox_diag < 0.1:
                 action = ACTION_TURN_LEFT if self._escape_toggle else ACTION_TURN_RIGHT
                 self._escape_toggle = not self._escape_toggle
-                # Force a fresh LLM proposal on the next iteration so the
-                # runner's bearing-recompute can't immediately re-align the
-                # candidate and undo this TURN. Without this, the agent
-                # oscillates ±30° forever (see Phase 3 smoke trace).
+                # Force a fresh proposal next tick so the runner's bearing-
+                # recompute can't re-align the candidate and undo this TURN.
                 self._force_replan = True
 
         self._last_action = action
         return action
+
+    def _bearing_to_action(self, bearing_rel: float) -> int:
+        """Greedy ±15° rule: turn toward the bearing if off-axis, else FORWARD."""
+        deg15 = math.radians(15.0)
+        if bearing_rel > deg15:
+            return ACTION_TURN_LEFT
+        if bearing_rel < -deg15:
+            return ACTION_TURN_RIGHT
+        return ACTION_FORWARD
+
+    def _astar_action(
+        self,
+        candidate: FrontierCandidate,
+        ax: float,
+        az: float,
+        agent_yaw: float,
+    ) -> int:
+        """Action toward the next A* waypoint, or straight-line fallback.
+
+        Routes from the agent cell to the candidate cell over the occupancy
+        grid, then steers toward a waypoint ~``lookahead_m`` along that path
+        (clamped to the path end). On no path, falls back to the straight-line
+        bearing and forces a replan.
+        """
+        start_rc = self.grid.world_to_grid(ax, az)
+        # Snap the goal off any wall it landed on so A* has a reachable target.
+        blocked = _inflate_occupied(self.grid.grid, self.inflate_radius_cells)
+        goal_rc = _snap_to_free(blocked, candidate.grid_rc, max_radius=5)
+        if goal_rc is None:
+            return self._straight_line_fallback(candidate)
+
+        path = astar(
+            self.grid.grid,
+            start_rc,
+            goal_rc,
+            inflate_radius_cells=self.inflate_radius_cells,
+            unknown_cost=self.unknown_cost,
+            max_expansions=self.astar_max_expansions,
+        )
+        if not path or len(path) < 2:
+            # No route, or already on the goal cell → straight-line bearing.
+            return self._straight_line_fallback(candidate)
+
+        n_ahead = max(1, int(round(self.lookahead_m / self.grid.resolution_m)))
+        wp = path[min(n_ahead, len(path) - 1)]
+        wx, wz = self.grid.grid_to_world(wp[0], wp[1])
+        bearing_rel = _wrap_pi(math.atan2(wx - ax, wz - az) - agent_yaw)
+        return self._bearing_to_action(bearing_rel)
+
+    def _straight_line_fallback(self, candidate: FrontierCandidate) -> int:
+        """Old straight-line bearing controller, used when A* finds no path.
+        Forces a replan so the runner re-picks a (hopefully reachable)
+        candidate next tick instead of re-driving into the same wall."""
+        self._force_replan = True
+        return self._bearing_to_action(candidate.bearing_rad)
 
     def grid_stats(self) -> Dict[str, int]:
         """Occupancy-grid census for run instrumentation (Run-5).

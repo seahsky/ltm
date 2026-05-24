@@ -381,7 +381,9 @@ class EpisodeRunner:
                 action = ACTION_STOP
             else:
                 action = self.planner.step_controller(
-                    current_candidate, step.agent_state.rotation_yaw
+                    current_candidate,
+                    step.agent_state.position,
+                    step.agent_state.rotation_yaw,
                 )
 
             # Step the env.

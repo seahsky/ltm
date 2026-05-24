@@ -549,6 +549,181 @@ def case_oracle_short_circuit():
     print("  case oracle_short_circuit (no bridge/propose deref, grid logged): OK")
 
 
+# ----------------------------------------------------------------------
+# Run-6: collision-aware step controller (grid A*)
+# ----------------------------------------------------------------------
+
+
+def case_astar_routes_through_gap():
+    """A* must route through a wall's single gap, never stepping on OCCUPIED."""
+    from embodied_memory.frontier_planner import astar, CELL_FREE, CELL_OCCUPIED
+
+    g = np.full((8, 8), CELL_FREE, dtype=np.uint8)
+    g[4, 0:8] = CELL_OCCUPIED
+    g[4, 6] = CELL_FREE  # single gap
+    path = astar(g, (1, 1), (6, 1), inflate_radius_cells=0)
+    assert path is not None, "no path found through the gap"
+    assert (4, 6) in path, f"path did not route through the gap: {path}"
+    assert all(g[r, c] != CELL_OCCUPIED for (r, c) in path), \
+        f"path stepped on an OCCUPIED cell: {path}"
+    assert path[0] == (1, 1) and path[-1] == (6, 1)
+    print("  case astar_routes_through_gap: OK")
+
+
+def case_astar_none_when_walled_off():
+    """A* returns None when the goal is fully enclosed by OCCUPIED cells."""
+    from embodied_memory.frontier_planner import astar, CELL_FREE, CELL_OCCUPIED
+
+    g = np.full((8, 8), CELL_FREE, dtype=np.uint8)
+    g[2, 2:6] = CELL_OCCUPIED
+    g[6, 2:6] = CELL_OCCUPIED
+    g[2:7, 2] = CELL_OCCUPIED
+    g[2:7, 5] = CELL_OCCUPIED
+    assert astar(g, (0, 0), (4, 3), inflate_radius_cells=0) is None, \
+        "walled-off goal must be unreachable"
+    print("  case astar_none_when_walled_off: OK")
+
+
+def case_astar_inflation_seals_one_cell_gap():
+    """1-cell obstacle inflation seals a 1-cell gap (agent-radius clearance)."""
+    from embodied_memory.frontier_planner import astar, CELL_FREE, CELL_OCCUPIED
+
+    g = np.full((8, 8), CELL_FREE, dtype=np.uint8)
+    g[4, 0:8] = CELL_OCCUPIED
+    g[4, 4] = CELL_FREE  # 1-cell gap
+    assert astar(g, (1, 4), (6, 4), inflate_radius_cells=0) is not None, \
+        "gap should be passable without inflation"
+    assert astar(g, (1, 4), (6, 4), inflate_radius_cells=1) is None, \
+        "1-cell inflation should seal the 1-cell gap"
+    print("  case astar_inflation_seals_one_cell_gap: OK")
+
+
+def case_astar_goal_occupied_snaps():
+    """_snap_to_free redirects an OCCUPIED goal to the nearest FREE cell."""
+    from embodied_memory.frontier_planner import (
+        _inflate_occupied, _snap_to_free, CELL_FREE, CELL_OCCUPIED,
+    )
+
+    g = np.full((8, 8), CELL_FREE, dtype=np.uint8)
+    g[3, 3] = CELL_OCCUPIED
+    blocked = _inflate_occupied(g, 0)
+    snapped = _snap_to_free(blocked, (3, 3), max_radius=5)
+    assert snapped is not None, "snap found no free cell"
+    assert g[snapped[0], snapped[1]] == CELL_FREE, "snapped cell is not FREE"
+    assert max(abs(snapped[0] - 3), abs(snapped[1] - 3)) <= 5, "snap exceeded radius"
+    print("  case astar_goal_occupied_snaps: OK")
+
+
+def case_astar_start_equals_goal():
+    """Degenerate start==goal returns a single-cell path; no crash."""
+    from embodied_memory.frontier_planner import astar, CELL_FREE
+
+    g = np.full((8, 8), CELL_FREE, dtype=np.uint8)
+    path = astar(g, (3, 3), (3, 3))
+    assert path == [(3, 3)], f"expected [(3,3)], got {path}"
+    print("  case astar_start_equals_goal: OK")
+
+
+def case_astar_first_action_not_into_wall():
+    """step_controller must TURN toward an offset gap, not FORWARD into a wall
+    that sits straight ahead of the agent."""
+    from embodied_memory.frontier_planner import (
+        FrontierPlanner, FrontierCandidate, CELL_FREE, CELL_OCCUPIED,
+        ACTION_TURN_LEFT, ACTION_TURN_RIGHT,
+    )
+
+    fp = FrontierPlanner()
+    agent_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    fp.reset(agent_pos=agent_pos)
+    ar, ac = fp.grid.world_to_grid(0.0, 0.0)  # forward (yaw=0) is +z → +row
+    # Free room ahead, a full-width wall 5 cells ahead, a 3-cell gap offset to
+    # +col (survives the default 1-cell inflation as a 1-cell effective gap).
+    fp.grid.grid[ar - 2:ar + 12, ac - 8:ac + 10] = CELL_FREE
+    wall_r = ar + 5
+    fp.grid.grid[wall_r, :] = CELL_OCCUPIED
+    fp.grid.grid[wall_r, ac + 5:ac + 8] = CELL_FREE
+    goal_rc = (ar + 9, ac)  # straight ahead, beyond the wall
+    cand = FrontierCandidate(
+        candidate_id=1,
+        world_xy=np.array(fp.grid.grid_to_world(*goal_rc), dtype=np.float32),
+        grid_rc=goal_rc,
+        distance_m=0.9,
+        bearing_rad=0.0,  # straight-line controller would FORWARD into the wall
+        cluster_size=1,
+        raw_score=1.0,
+    )
+    action = fp.step_controller(cand, agent_pos, agent_yaw=0.0)
+    assert action in (ACTION_TURN_LEFT, ACTION_TURN_RIGHT), \
+        f"A* should turn toward the gap, not drive into the wall; got {action}"
+    print("  case astar_first_action_not_into_wall: OK")
+
+
+def case_astar_lookahead_waypoint():
+    """The ~0.4 m (4-cell) lookahead must not cut a far corner: on a straight
+    leg with the bend 6 cells away, the controller goes FORWARD."""
+    from embodied_memory.frontier_planner import (
+        FrontierPlanner, FrontierCandidate, CELL_FREE, CELL_OCCUPIED,
+        ACTION_FORWARD,
+    )
+
+    # inflate=0 so the 1-cell corridor stays passable and the path is exact.
+    fp = FrontierPlanner(inflate_radius_cells=0)
+    agent_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    fp.reset(agent_pos=agent_pos)
+    ar, ac = fp.grid.world_to_grid(0.0, 0.0)
+    # Box, then carve an L: straight forward 6 cells (col ac), bend right.
+    fp.grid.grid[ar - 1:ar + 8, ac - 3:ac + 8] = CELL_OCCUPIED
+    fp.grid.grid[ar:ar + 7, ac] = CELL_FREE        # vertical leg
+    fp.grid.grid[ar + 6, ac:ac + 6] = CELL_FREE    # horizontal leg (the bend)
+    goal_rc = (ar + 6, ac + 5)
+    cand = FrontierCandidate(
+        candidate_id=1,
+        world_xy=np.array(fp.grid.grid_to_world(*goal_rc), dtype=np.float32),
+        grid_rc=goal_rc,
+        distance_m=1.0,
+        bearing_rad=0.0,
+        cluster_size=1,
+        raw_score=1.0,
+    )
+    action = fp.step_controller(cand, agent_pos, agent_yaw=0.0)
+    assert action == ACTION_FORWARD, \
+        f"lookahead cut the far corner instead of going straight; got {action}"
+    print("  case astar_lookahead_waypoint: OK")
+
+
+def case_controller_fallback_on_none():
+    """When A* finds no path, step_controller falls back to the straight-line
+    bearing and forces a replan."""
+    from embodied_memory.frontier_planner import (
+        FrontierPlanner, FrontierCandidate, CELL_FREE, CELL_OCCUPIED,
+        ACTION_TURN_LEFT,
+    )
+
+    fp = FrontierPlanner()
+    agent_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    fp.reset(agent_pos=agent_pos)
+    ar, ac = fp.grid.world_to_grid(0.0, 0.0)
+    # Seal the agent in a 3x3 FREE pocket → no route to anywhere outside.
+    fp.grid.grid[ar - 2:ar + 3, ac - 2:ac + 3] = CELL_OCCUPIED
+    fp.grid.grid[ar - 1:ar + 2, ac - 1:ac + 2] = CELL_FREE
+    goal_rc = (ar + 10, ac + 10)  # unreachable (UNKNOWN, but agent is boxed in)
+    cand = FrontierCandidate(
+        candidate_id=1,
+        world_xy=np.array([5.0, 5.0], dtype=np.float32),
+        grid_rc=goal_rc,
+        distance_m=1.0,
+        bearing_rad=float(np.deg2rad(40.0)),  # >15° → straight-line TURN_LEFT
+        cluster_size=1,
+        raw_score=1.0,
+    )
+    fp._force_replan = False
+    action = fp.step_controller(cand, agent_pos, agent_yaw=0.0)
+    assert action == ACTION_TURN_LEFT, \
+        f"fallback should use straight-line bearing (40°→TURN_LEFT); got {action}"
+    assert fp._force_replan is True, "A*-None fallback must force a replan"
+    print("  case controller_fallback_on_none: OK")
+
+
 def main() -> int:
     print("Run-4/Run-5 sanity tests")
     case_a_stop_short_circuit()
@@ -564,6 +739,15 @@ def main() -> int:
     case_grid_stats_schema()
     case_oracle_action_map()
     case_oracle_short_circuit()
+    # Run-6: collision-aware step controller (grid A*)
+    case_astar_routes_through_gap()
+    case_astar_none_when_walled_off()
+    case_astar_inflation_seals_one_cell_gap()
+    case_astar_goal_occupied_snaps()
+    case_astar_start_equals_goal()
+    case_astar_first_action_not_into_wall()
+    case_astar_lookahead_waypoint()
+    case_controller_fallback_on_none()
     print("All cases passed.")
     return 0
 
