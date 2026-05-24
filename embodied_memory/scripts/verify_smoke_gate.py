@@ -140,6 +140,10 @@ def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
         # oracle-gate keys
         "reached_goal": reached_goal,
         "oracle_no_goal_val": bool(ep.get("oracle_no_goal", False)),
+        # grid census (Run-5 densification instrumentation)
+        "grid_free_val": int(ep.get("grid_cells_free", 0)),
+        "grid_occupied_val": int(ep.get("grid_cells_occupied", 0)),
+        "grid_frontier_val": int(ep.get("grid_frontier_cells", 0)),
         # info-only
         "displacement_val": displacement,
         "dist_to_goal_val": d2g,
@@ -183,6 +187,8 @@ def _print_report(run_dir: str, r: Dict[str, Any]) -> bool:
     d2g_s = f"{d2g:.2f} m" if isinstance(d2g, (int, float)) else str(d2g)
     print(f"  displacement (start→end):  {r['displacement_val']:.2f} m")
     print(f"  dist_to_goal (final):      {d2g_s}")
+    print(f"  grid free/occupied/front:  {r['grid_free_val']} / "
+          f"{r['grid_occupied_val']} / {r['grid_frontier_val']}")
     print(f"  n_stop_signals:            {r['n_stop_signals_val']}")
     print(f"  success / spl / soft_spl:  {r['success_val']} / "
           f"{r['spl_val']:.3f} / {r['soft_spl_val']:.3f}")
@@ -240,6 +246,8 @@ def _print_report_oracle(run_dir: str, r: Dict[str, Any]) -> bool:
           f"(success or dist_to_goal < {ORACLE_GOAL_RADIUS_M:.1f} m)")
     print(f"        success={r['success_val']}  dist_to_goal={d2g_s}  "
           f"n_steps={r['n_steps_val']}  spl={r['spl_val']:.3f}")
+    print(f"        grid: free={r['grid_free_val']}  occupied={r['grid_occupied_val']}  "
+          f"frontier={r['grid_frontier_val']}")
     if r["oracle_no_goal_val"]:
         print("  WARNING: oracle_no_goal=True — episode had no target_position; "
               "agent STOPed at step 0. Data issue, not a navigation result.")
@@ -259,8 +267,9 @@ def _print_multi_summary_oracle(
     print(f"  run_dir: {run_dir}")
     print(f"  episodes: {len(reports)}")
     print()
-    hdr = (f"  {'ep':>3} {'scene':<18} {'tgt':<10} {'success':>7} {'d2g_m':>7} "
-           f"{'steps':>5} {'spl':>6} {'no_goal':>7}  reached")
+    hdr = (f"  {'ep':>3} {'scene':<16} {'tgt':<9} {'succ':>5} {'d2g_m':>6} "
+           f"{'steps':>5} {'spl':>6} {'g_free':>6} {'g_occ':>6} {'g_front':>7} "
+           f"{'no_goal':>7}  reached")
     print(hdr)
     any_reached = False
     for ep_path, r in reports:
@@ -269,13 +278,14 @@ def _print_multi_summary_oracle(
         d2g_s = f"{d2g:6.2f}" if isinstance(d2g, (int, float)) else "   n/a"
         reached = r["reached_goal"]
         any_reached = any_reached or reached
-        scene = (r.get("scene_id") or "?")[:18]
-        tgt = (r.get("target_category") or "?")[:10]
+        scene = (r.get("scene_id") or "?")[:16]
+        tgt = (r.get("target_category") or "?")[:9]
         ng = "yes" if r["oracle_no_goal_val"] else "no"
         print(
-            f"  {ep_idx:>3} {scene:<18} {tgt:<10} {str(r['success_val']):>7} "
-            f"{d2g_s} {r['n_steps_val']:>5d} {r['spl_val']:>6.3f} {ng:>7}  "
-            f"{_fmt_passfail(reached)}"
+            f"  {ep_idx:>3} {scene:<16} {tgt:<9} {str(r['success_val']):>5} "
+            f"{d2g_s} {r['n_steps_val']:>5d} {r['spl_val']:>6.3f} "
+            f"{r['grid_free_val']:>6d} {r['grid_occupied_val']:>6d} "
+            f"{r['grid_frontier_val']:>7d} {ng:>7}  {_fmt_passfail(reached)}"
         )
     print()
     print("  --- roll-up gate ---")
@@ -311,7 +321,8 @@ def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]
     print(f"  episodes: {len(reports)}")
     print()
     hdr = (f"  {'ep':>3} {'scene':<18} {'tgt':<10} {'steps':>5} {'path_m':>7} "
-           f"{'d2g_m':>7} {'front_chosen':>13} {'stops':>5} {'crash':>5}  arch  nav")
+           f"{'d2g_m':>7} {'fchosen':>7} {'g_free':>6} {'g_front':>7} "
+           f"{'crash':>5}  arch  nav")
     print(hdr)
     arch_total = 0
     nav_any = False
@@ -333,7 +344,8 @@ def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]
         tgt = (r.get("target_category") or "?")[:10]
         print(
             f"  {ep_idx:>3} {scene:<18} {tgt:<10} {n_steps:>5d} {path_v:>7.2f} "
-            f"{d2g_s} {n_fc:>13d} {n_stop:>5d} {crash:>5}  "
+            f"{d2g_s} {n_fc:>7d} {r['grid_free_val']:>6d} "
+            f"{r['grid_frontier_val']:>7d} {crash:>5}  "
             f"{_fmt_passfail(arch_ep)} {_fmt_passfail(nav_ep)}"
         )
     print()
