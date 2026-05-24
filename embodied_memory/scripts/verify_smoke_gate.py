@@ -1,34 +1,44 @@
 #!/usr/bin/env python3
 """
-Verify a Run-4 smoke-gate run.
+Verify a smoke-gate run (Run-4 movement gate, or Run-5 oracle gate).
 
-Reads ``<run_dir>/episode_000.json`` and evaluates the gating conditions
-from the Run-4 plan's smoke gate table:
+Two gate flavours, selected by ``--backbone`` or auto-detected from the run's
+``summary.json`` (``ablation.backbone``):
+
+**Movement gate** (``frontier`` / ``remembr`` backbones) — the Run-4 table:
 
   - crash-free        (JSON parses, top-level keys present)
   - n_steps           > 50
   - path_traveled     ≥ 4 m
   - n_frontier_chosen ≥ 1
 
-``dist_to_goal`` and ``n_stop_signals`` are reported as info only, per
-the Run-4 plan (informative but not gating).
+  ``dist_to_goal`` and ``n_stop_signals`` are info only. The per-step JSON
+  doesn't carry ``distance_to_goal`` (the serializer drops ``step.info``), so
+  the plan's "dist_to_goal < starting − 2 m" check is reported as a derived
+  ``displacement`` (start→end straight-line) without a hard pass/fail —
+  ``path_traveled ≥ 4 m`` is the canonical movement gate in its place.
 
-The per-step JSON doesn't carry ``distance_to_goal`` (the serializer
-drops ``step.info``), so the plan's "dist_to_goal < starting − 2 m"
-check is reported as a derived ``displacement`` (start→end straight-line)
-without a hard pass/fail — ``path_traveled ≥ 4 m`` is the canonical
-movement gate in its place.
+**Oracle gate** (``oracle`` backbone — Run-5 diagnostic) — the
+ShortestPathFollower bypasses per-step keyframe logging, so ``path_traveled``
+and ``n_frontier_chosen`` are always 0 and meaningless here. The gate is
+instead "did a perfect planner reach the goal?":
+
+  - crash-free
+  - reached_goal      (success, or dist_to_goal < 1.0 m)
+
+  PASS → env is navigable, the pipeline is the bottleneck. FAIL on every
+  episode → env/episode/action-space is broken (unreachable spawn, wrong goal
+  coords, action-space mismatch) and no planner/perception fix matters.
 
 Usage::
 
-    python embodied_memory/scripts/verify_smoke_gate.py [run_dir]
+    python embodied_memory/scripts/verify_smoke_gate.py [run_dir] [--backbone ...]
 
-Defaults ``run_dir`` to ``runs/remembr-smoke-frontier``. Exits 0 if all
-gating conditions pass, 1 otherwise — safe to chain after the smoke
-command::
+Defaults ``run_dir`` to ``runs/remembr-smoke-frontier``. Exits 0 if the gate
+passes, 1 otherwise — safe to chain after the smoke command::
 
-    python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr ... \\
-        && python embodied_memory/scripts/verify_smoke_gate.py
+    python -m embodied_memory.run_hm3d_pol --mode live --backbone oracle ... \\
+        && python embodied_memory/scripts/verify_smoke_gate.py runs/oracle-smoke-...
 """
 
 from __future__ import annotations
@@ -39,7 +49,12 @@ import json
 import math
 import os
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# Oracle reached-goal radius — matches the ShortestPathFollower goal_radius and
+# ObjectNav success distance used by the oracle backbone.
+ORACLE_GOAL_RADIUS_M = 1.0
 
 
 GATES: List[Tuple[str, str]] = [
@@ -81,6 +96,20 @@ def _displacement(steps: List[Dict[str, Any]]) -> float:
     return math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
 
 
+def _detect_backbone(run_dir: str) -> Optional[str]:
+    """Read the run's backbone from ``summary.json`` (``ablation.backbone``),
+    so the verifier can auto-select the oracle vs movement gate. Returns None
+    if summary.json is absent/unreadable or carries no backbone."""
+    path = os.path.join(run_dir, "summary.json")
+    try:
+        with open(path) as f:
+            summary = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    bb = (summary.get("ablation") or {}).get("backbone")
+    return str(bb) if bb else None
+
+
 def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
     steps = ep.get("steps") or []
     decisions = ep.get("decisions") or []
@@ -93,8 +122,14 @@ def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
         int(d.get("n_frontier_candidates", 0)) for d in decisions
     )
 
+    # Oracle reached-goal: success, or final distance_to_goal within the radius.
+    d2g = ep.get("distance_to_goal")
+    reached_goal = bool(ep.get("success", False)) or (
+        isinstance(d2g, (int, float)) and float(d2g) < ORACLE_GOAL_RADIUS_M
+    )
+
     return {
-        # gating
+        # movement-gate keys
         "crash_free": True,  # if we got here, JSON parsed and keys read
         "n_steps_val": n_steps,
         "n_steps": n_steps > 50,
@@ -102,9 +137,12 @@ def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
         "path_traveled": path_traveled >= 4.0,
         "n_frontier_chosen_val": n_frontier_chosen,
         "n_frontier_chosen": n_frontier_chosen >= 1,
+        # oracle-gate keys
+        "reached_goal": reached_goal,
+        "oracle_no_goal_val": bool(ep.get("oracle_no_goal", False)),
         # info-only
         "displacement_val": displacement,
-        "dist_to_goal_val": ep.get("distance_to_goal"),
+        "dist_to_goal_val": d2g,
         "n_stop_signals_val": int(ep.get("n_stop_signals", 0)),
         "success_val": bool(ep.get("success", False)),
         "soft_spl_val": float(ep.get("soft_spl", 0.0)),
@@ -169,6 +207,84 @@ def _print_report(run_dir: str, r: Dict[str, Any]) -> bool:
                   "floor never picks frontier. Inspect decisions[*]"
                   ".n_frontier_candidates in the JSON.")
     return gates_passed
+
+
+def _oracle_read(reached: bool) -> List[str]:
+    """The decision-tree read for the oracle gate (Run-5 plan)."""
+    if reached:
+        return [
+            "  Read: env is navigable with a perfect planner → the pipeline is",
+            "        the bottleneck, not the environment. Proceed to the",
+            "        densified-grid `remembr` smoke (escape check).",
+        ]
+    return [
+        "  Read: oracle did NOT reach the goal → env/episode/action-space is",
+        "        likely broken (unreachable spawn pocket, wrong goal coords, or",
+        "        discrete action-space mismatch). No planner/perception fix",
+        "        matters until this is resolved — pivot to env debugging.",
+    ]
+
+
+def _print_report_oracle(run_dir: str, r: Dict[str, Any]) -> bool:
+    print("=== oracle smoke verify ===")
+    print(f"  run_dir:        {run_dir}")
+    print(f"  scene_id:       {r.get('scene_id')}")
+    print(f"  episode_id:     {r.get('episode_id')}")
+    print(f"  target:         {r.get('target_category')}")
+    print()
+    print("  --- gating (oracle: perfect-planner reachability) ---")
+    print(f"  [{_fmt_passfail(r['crash_free'])}] crash-free")
+    d2g = r["dist_to_goal_val"]
+    d2g_s = f"{d2g:.2f} m" if isinstance(d2g, (int, float)) else str(d2g)
+    print(f"  [{_fmt_passfail(r['reached_goal'])}] reached_goal "
+          f"(success or dist_to_goal < {ORACLE_GOAL_RADIUS_M:.1f} m)")
+    print(f"        success={r['success_val']}  dist_to_goal={d2g_s}  "
+          f"n_steps={r['n_steps_val']}  spl={r['spl_val']:.3f}")
+    if r["oracle_no_goal_val"]:
+        print("  WARNING: oracle_no_goal=True — episode had no target_position; "
+              "agent STOPed at step 0. Data issue, not a navigation result.")
+    print()
+    gate = r["crash_free"] and r["reached_goal"]
+    print(f"  gate: {_fmt_passfail(gate)}")
+    print()
+    for line in _oracle_read(r["reached_goal"]):
+        print(line)
+    return gate
+
+
+def _print_multi_summary_oracle(
+    run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]
+) -> bool:
+    print("=== oracle smoke verify (multi-episode) ===")
+    print(f"  run_dir: {run_dir}")
+    print(f"  episodes: {len(reports)}")
+    print()
+    hdr = (f"  {'ep':>3} {'scene':<18} {'tgt':<10} {'success':>7} {'d2g_m':>7} "
+           f"{'steps':>5} {'spl':>6} {'no_goal':>7}  reached")
+    print(hdr)
+    any_reached = False
+    for ep_path, r in reports:
+        ep_idx = os.path.basename(ep_path).replace("episode_", "").replace(".json", "")
+        d2g = r["dist_to_goal_val"]
+        d2g_s = f"{d2g:6.2f}" if isinstance(d2g, (int, float)) else "   n/a"
+        reached = r["reached_goal"]
+        any_reached = any_reached or reached
+        scene = (r.get("scene_id") or "?")[:18]
+        tgt = (r.get("target_category") or "?")[:10]
+        ng = "yes" if r["oracle_no_goal_val"] else "no"
+        print(
+            f"  {ep_idx:>3} {scene:<18} {tgt:<10} {str(r['success_val']):>7} "
+            f"{d2g_s} {r['n_steps_val']:>5d} {r['spl_val']:>6.3f} {ng:>7}  "
+            f"{_fmt_passfail(reached)}"
+        )
+    print()
+    print("  --- roll-up gate ---")
+    print(f"  navigable (any episode reached goal): {_fmt_passfail(any_reached)}")
+    print(f"  gate: {_fmt_passfail(any_reached)}")
+    print()
+    for line in _oracle_read(any_reached):
+        print(line)
+    return any_reached
 
 
 def _load_episode(path: str):
@@ -259,7 +375,18 @@ def main(argv=None) -> int:
         default=None,
         help="single episode index (default: scan all episode_*.json in run_dir)",
     )
+    parser.add_argument(
+        "--backbone",
+        choices=["frontier", "remembr", "oracle"],
+        default=None,
+        help="Gate flavour. Default: auto-detect from summary.json "
+             "(ablation.backbone). 'oracle' switches to the reached-goal gate; "
+             "everything else uses the n_steps/path/frontier movement gate.",
+    )
     args = parser.parse_args(argv)
+
+    backbone = args.backbone or _detect_backbone(args.run_dir)
+    is_oracle = backbone == "oracle"
 
     if args.episode is not None:
         ep_path = os.path.join(args.run_dir, f"episode_{args.episode:03d}.json")
@@ -268,7 +395,8 @@ def main(argv=None) -> int:
             print(f"ERROR: {err}")
             return 2
         report = _evaluate(ep)
-        ok = _print_report(args.run_dir, report)
+        printer = _print_report_oracle if is_oracle else _print_report
+        ok = printer(args.run_dir, report)
         return 0 if ok else 1
 
     # multi-episode: scan all
@@ -287,11 +415,13 @@ def main(argv=None) -> int:
         reports.append((p, _evaluate(ep)))
 
     if len(reports) == 1:
-        # Single-episode dir — defer to the legacy single-episode report.
-        ok = _print_report(args.run_dir, reports[0][1])
+        # Single-episode dir — defer to the single-episode report.
+        printer = _print_report_oracle if is_oracle else _print_report
+        ok = printer(args.run_dir, reports[0][1])
         return 0 if ok else 1
 
-    ok = _print_multi_summary(args.run_dir, reports)
+    summarizer = _print_multi_summary_oracle if is_oracle else _print_multi_summary
+    ok = summarizer(args.run_dir, reports)
     return 0 if ok else 1
 
 
