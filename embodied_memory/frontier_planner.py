@@ -123,6 +123,8 @@ class FrontierPlanner:
         max_depth_m: float = 5.0,
         grid_size_m: float = 20.0,
         grid_res_m: float = 0.1,
+        camera_height_m: float = 0.88,
+        obstacle_min_h: float = 0.3,
     ):
         self.decision_period = decision_period
         self.n_candidates = n_candidates
@@ -130,6 +132,14 @@ class FrontierPlanner:
         self.stuck_window = stuck_window
         self.forward_fov_deg = forward_fov_deg
         self.max_depth_m = max_depth_m
+        # Height gate for the depth splat (Run-5 densification): a back-
+        # projected endpoint counts as an obstacle only if it rises more than
+        # ``obstacle_min_h`` above the floor. ``camera_height_m`` is the agent
+        # eye height above the floor; ``_floor_y`` is fixed at episode start in
+        # ``reset()`` (agent_y - camera_height_m).
+        self.camera_height_m = camera_height_m
+        self.obstacle_min_h = obstacle_min_h
+        self._floor_y = -camera_height_m
 
         self.grid = OccupancyGrid(
             resolution_m=grid_res_m,
@@ -171,11 +181,28 @@ class FrontierPlanner:
             ax, az = float(agent_pos[0]), float(agent_pos[2])
             half = self.grid.size_m / 2.0
             self.grid.origin_xy = (ax - half, az - half)
+            # Fix the floor reference for the height gate at the agent's start.
+            self._floor_y = float(agent_pos[1]) - self.camera_height_m
 
     def update(self, depth: np.ndarray, agent_pos: np.ndarray, agent_yaw: float):
-        """Splat depth into the grid. Cheap raycast: for each column take the
-        closest depth, mark cells along the ray as FREE up to it, and the
-        endpoint as OCCUPIED."""
+        """Splat depth into the occupancy grid via a multi-row per-pixel
+        projection with a height gate (Run-5 densification).
+
+        The previous implementation splatted a single middle-row scanline
+        subsampled to 64 columns. At eye height that scanline mostly hit
+        walls/furniture and missed floor openings/doorways, so too few FREE
+        cells were carved and frontiers clustered against walls — the agent
+        had no navigable subgoal and barely moved. We now back-project a
+        subsampled grid of pixels (both axes), march FREE along each ray's
+        ground range, and gate the endpoint on world height: low endpoints
+        are floor (FREE, walkable — this is what fills doorways/openings),
+        high endpoints are obstacles (OCCUPIED).
+
+        Geometry assumes a square sensor (so vfov == hfov), planar Habitat
+        depth, and pitch == 0 (the planner only emits yaw actions 0–3), so
+        the pinhole intrinsics reduce to ``f_px = (w/2)/tan(hfov/2)`` and the
+        world height of a pixel is ``world_h ≈ agent_y + Yc``.
+        """
         self._step_count += 1
         self._pos_history.append(np.asarray(agent_pos, dtype=np.float32))
         if len(self._pos_history) > max(self.stuck_window * 2, 32):
@@ -183,41 +210,64 @@ class FrontierPlanner:
 
         if depth is None or depth.size == 0:
             return
-
-        # Use a single horizontal scanline (middle row) to keep this CPU-cheap.
+        if depth.ndim == 3 and depth.shape[-1] == 1:  # (H, W, 1) → (H, W)
+            depth = depth[..., 0]
         h, w = depth.shape[-2], depth.shape[-1]
-        scan = depth[h // 2] if depth.ndim == 2 else depth[h // 2, :]
-        if scan.ndim == 2:  # safety, in case depth was (H, W, 1)
-            scan = scan[:, 0]
 
-        # Map column index → bearing in [-fov/2, fov/2] relative to agent yaw.
-        fov = math.radians(self.forward_fov_deg)
-        bearings = np.linspace(-fov / 2.0, fov / 2.0, num=w)
-        # Habitat yaw=0 looks along -z by default; +x is to the right.
-        # We model agent forward as the unit vector (sin(yaw), cos(yaw)) in (x, z).
-        # Each ray bearing rotates forward by `b`.
-        ax, az = float(agent_pos[0]), float(agent_pos[2])
-        for col in range(0, w, max(1, w // 64)):  # subsample columns
-            d = float(scan[col])
-            if not np.isfinite(d) or d <= 0.05:
-                continue
-            d = min(d, self.max_depth_m)
-            theta = agent_yaw + bearings[col]
-            # March along the ray, marking FREE up to (d - res), OCCUPIED at d.
-            steps = int(d / self.grid.resolution_m)
-            for s in range(steps):
-                rr = (s + 0.5) * self.grid.resolution_m
-                x = ax + math.sin(theta) * rr
-                z = az + math.cos(theta) * rr
+        # Pinhole intrinsics from horizontal FOV on a square sensor.
+        hfov = math.radians(self.forward_fov_deg)
+        f_px = (w / 2.0) / math.tan(hfov / 2.0)
+        cx = w / 2.0
+        cy = h / 2.0
+
+        # Habitat yaw=0 looks along +z under our (sin θ, cos θ) forward model;
+        # +x is to the right. agent_y feeds the height gate, _floor_y is fixed.
+        ax, ay, az = float(agent_pos[0]), float(agent_pos[1]), float(agent_pos[2])
+        floor_y = self._floor_y
+        res = self.grid.resolution_m
+
+        # Subsample both axes to ≤~1k pixels/step. Coarsen the steps if the
+        # per-step time regresses (see Run-5 plan, Change 2).
+        row_step = max(1, h // 28)
+        col_step = max(1, w // 28)
+
+        for row in range(0, h, row_step):
+            depth_row = depth[row]
+            yc_term = (cy - row) / f_px
+            for col in range(0, w, col_step):
+                d = float(depth_row[col])
+                if not math.isfinite(d) or d <= 0.05:
+                    continue
+                d = min(d, self.max_depth_m)
+                Xc = d * (col - cx) / f_px          # right offset (camera frame)
+                Yc = d * yc_term                    # up offset (camera frame)
+                g = math.hypot(Xc, d)               # ground range (Zc == d)
+                if g < res:
+                    continue
+                theta = agent_yaw + math.atan2(Xc, d)
+                sin_t = math.sin(theta)
+                cos_t = math.cos(theta)
+                # March FREE up to (g - res); occupied cells stay sticky.
+                n_free = int((g - res) / res)
+                for s in range(n_free):
+                    rr = (s + 0.5) * res
+                    x = ax + sin_t * rr
+                    z = az + cos_t * rr
+                    r, c = self.grid.world_to_grid(x, z)
+                    if self.grid.in_bounds(r, c) and self.grid.grid[r, c] != CELL_OCCUPIED:
+                        self.grid.mark(r, c, CELL_FREE)
+                # Endpoint: gate on world height. Obstacles win over FREE so a
+                # wall is never erased by a floor ray that overshoots it.
+                world_h = ay + Yc
+                x = ax + sin_t * g
+                z = az + cos_t * g
                 r, c = self.grid.world_to_grid(x, z)
-                if self.grid.in_bounds(r, c) and self.grid.grid[r, c] != CELL_OCCUPIED:
+                if not self.grid.in_bounds(r, c):
+                    continue
+                if (world_h - floor_y) > self.obstacle_min_h:
+                    self.grid.mark(r, c, CELL_OCCUPIED)
+                elif self.grid.grid[r, c] != CELL_OCCUPIED:
                     self.grid.mark(r, c, CELL_FREE)
-            # Endpoint: occupied.
-            x = ax + math.sin(theta) * d
-            z = az + math.cos(theta) * d
-            r, c = self.grid.world_to_grid(x, z)
-            if self.grid.in_bounds(r, c):
-                self.grid.mark(r, c, CELL_OCCUPIED)
 
     def is_decision_step(self) -> bool:
         if self._step_count == 0:
@@ -316,6 +366,27 @@ class FrontierPlanner:
 
         self._last_action = action
         return action
+
+    def grid_stats(self) -> Dict[str, int]:
+        """Occupancy-grid census for run instrumentation (Run-5).
+
+        Returns four int counts: FREE / OCCUPIED / UNKNOWN cells (which sum to
+        ``n * n``) plus ``frontier_cells`` (FREE cells with an UNKNOWN
+        4-neighbor; a subset of FREE, not part of the sum). Makes a smoke run
+        interpretable — if ``cells_free`` is still tiny the densification
+        didn't take.
+        """
+        g = self.grid.grid
+        free = int(np.count_nonzero(g == CELL_FREE))
+        occupied = int(np.count_nonzero(g == CELL_OCCUPIED))
+        unknown = int(np.count_nonzero(g == CELL_UNKNOWN))
+        frontier = len(self._extract_frontier_cells())
+        return {
+            "cells_free": free,
+            "cells_occupied": occupied,
+            "cells_unknown": unknown,
+            "frontier_cells": frontier,
+        }
 
     # ------------------------------------------------------------------
     # internals
