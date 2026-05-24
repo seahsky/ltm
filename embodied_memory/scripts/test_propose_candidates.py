@@ -536,6 +536,10 @@ def case_oracle_short_circuit():
         reset=lambda agent_pos=None: None,
         update=lambda *a, **kw: None,
         grid_stats=lambda: grid,
+        controller_stats=lambda: {
+            "replan_scheduled": 0, "replan_forced": 0, "replan_stuck": 0,
+            "astar_path": 0, "astar_fallback": 0, "collision_escape": 0,
+        },
         is_decision_step=lambda: True,
     )
 
@@ -724,6 +728,65 @@ def case_controller_fallback_on_none():
     print("  case controller_fallback_on_none: OK")
 
 
+def case_controller_stats_counters():
+    """Run-6 instrumentation: controller_stats() separates the replan trigger
+    (scheduled / forced / stuck) and the A* outcome (path vs fallback) so a
+    stable-target-but-stuck episode is distinguishable from target-flipping.
+    Counters must start at zero, count behavior only, and never gate it."""
+    from embodied_memory.frontier_planner import (
+        FrontierPlanner, FrontierCandidate, CELL_FREE, CELL_OCCUPIED,
+    )
+
+    fp = FrontierPlanner()
+    agent_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    fp.reset(agent_pos=agent_pos)
+    assert fp.controller_stats() == {
+        "replan_scheduled": 0, "replan_forced": 0, "replan_stuck": 0,
+        "astar_path": 0, "astar_fallback": 0, "collision_escape": 0,
+    }, f"counters not zeroed on reset: {fp.controller_stats()}"
+    ar, ac = fp.grid.world_to_grid(0.0, 0.0)
+
+    # (1) A* no-path → astar_fallback increments, astar_path does not.
+    fp.grid.grid[ar - 2:ar + 3, ac - 2:ac + 3] = CELL_OCCUPIED
+    fp.grid.grid[ar - 1:ar + 2, ac - 1:ac + 2] = CELL_FREE  # 3x3 sealed pocket
+    boxed = FrontierCandidate(
+        candidate_id=1, world_xy=np.array([5.0, 5.0], dtype=np.float32),
+        grid_rc=(ar + 10, ac + 10), distance_m=1.0, bearing_rad=0.2,
+        cluster_size=1, raw_score=1.0,
+    )
+    fp.step_controller(boxed, agent_pos, agent_yaw=0.0)
+    assert fp.controller_stats()["astar_fallback"] == 1, "fallback not counted"
+    assert fp.controller_stats()["astar_path"] == 0, "path miscounted on no-path"
+
+    # (2) A* path found → astar_path increments. Open the grid around a goal.
+    fp.grid.grid[ar - 1:ar + 10, ac - 5:ac + 6] = CELL_FREE
+    reachable = FrontierCandidate(
+        candidate_id=2, world_xy=np.array(fp.grid.grid_to_world(ar + 6, ac), dtype=np.float32),
+        grid_rc=(ar + 6, ac), distance_m=0.6, bearing_rad=0.0,
+        cluster_size=1, raw_score=1.0,
+    )
+    fp.step_controller(reachable, agent_pos, agent_yaw=0.0)
+    assert fp.controller_stats()["astar_path"] == 1, "A* path not counted"
+
+    # (3) replan-trigger breakdown: forced, scheduled, stuck each tallied once.
+    fp2 = FrontierPlanner(decision_period=10, stuck_window=4, stuck_radius_m=0.1)
+    fp2.reset(agent_pos=agent_pos)
+    fp2._step_count = 3            # not 0, not a period multiple
+    fp2._force_replan = True
+    assert fp2.is_decision_step() is True
+    assert fp2.controller_stats()["replan_forced"] == 1, "forced replan not counted"
+    fp2._step_count = 10           # period multiple
+    assert fp2.is_decision_step() is True
+    assert fp2.controller_stats()["replan_scheduled"] == 1, "scheduled not counted"
+    fp2._step_count = 7            # not period multiple, not forced
+    fp2._pos_history = [agent_pos.copy() for _ in range(4)]  # no travel → stuck
+    assert fp2.is_decision_step() is True
+    assert fp2.controller_stats()["replan_stuck"] == 1, "stuck replan not counted"
+
+    print("  case controller_stats_counters "
+          f"(fallback/path/forced/sched/stuck all tally): OK")
+
+
 def main() -> int:
     print("Run-4/Run-5 sanity tests")
     case_a_stop_short_circuit()
@@ -748,6 +811,7 @@ def main() -> int:
     case_astar_first_action_not_into_wall()
     case_astar_lookahead_waypoint()
     case_controller_fallback_on_none()
+    case_controller_stats_counters()
     print("All cases passed.")
     return 0
 

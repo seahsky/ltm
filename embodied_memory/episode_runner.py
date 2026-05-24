@@ -29,6 +29,8 @@ from .episode_source import Episode, EpisodeSource, Step
 from .frontier_planner import (
     ACTION_FORWARD,
     ACTION_STOP,
+    ACTION_TURN_LEFT,
+    ACTION_TURN_RIGHT,
     FrontierCandidate,
     FrontierPlanner,
 )
@@ -187,6 +189,15 @@ class EpisodeRunner:
                 "grid_cells_occupied": int(ep_metrics.get("grid_cells_occupied", 0)),
                 "grid_cells_unknown": int(ep_metrics.get("grid_cells_unknown", 0)),
                 "grid_frontier_cells": int(ep_metrics.get("grid_frontier_cells", 0)),
+                "action_forward": int(ep_metrics.get("action_forward", 0)),
+                "action_turn": int(ep_metrics.get("action_turn", 0)),
+                "action_stop": int(ep_metrics.get("action_stop", 0)),
+                "astar_path": int(ep_metrics.get("astar_path", 0)),
+                "astar_fallback": int(ep_metrics.get("astar_fallback", 0)),
+                "collision_escape": int(ep_metrics.get("collision_escape", 0)),
+                "replan_scheduled": int(ep_metrics.get("replan_scheduled", 0)),
+                "replan_forced": int(ep_metrics.get("replan_forced", 0)),
+                "replan_stuck": int(ep_metrics.get("replan_stuck", 0)),
             })
 
         # Finalize summary. The oracle backbone runs without a memory bridge,
@@ -246,6 +257,9 @@ class EpisodeRunner:
         n_stop_signals = 0
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
+        # Run-6 instrumentation: action mix over the episode (non-oracle path).
+        action_counts = {ACTION_STOP: 0, ACTION_FORWARD: 0,
+                         ACTION_TURN_LEFT: 0, ACTION_TURN_RIGHT: 0}
 
         # Initial observation: update map, build keyframe at step 0. The oracle
         # path skips the perception/memory preamble entirely (no bridge, no
@@ -387,6 +401,7 @@ class EpisodeRunner:
                 )
 
             # Step the env.
+            action_counts[action] = action_counts.get(action, 0) + 1
             step = self.source.step(action)
             self.planner.update(
                 step.depth, step.agent_state.position, step.agent_state.rotation_yaw
@@ -447,6 +462,22 @@ class EpisodeRunner:
         # Occupancy-grid census (Run-5 instrumentation) — makes the smoke
         # interpretable next to n_frontier_chosen.
         grid_stats = self.planner.grid_stats()
+        # Controller census (Run-6 instrumentation) — replan-trigger breakdown,
+        # A* path-vs-fallback, collision-escape, and action mix. Distinguishes a
+        # force-replan loop from a stuck loop from a geometry stall.
+        controller_stats = self.planner.controller_stats()
+        action_turn = action_counts[ACTION_TURN_LEFT] + action_counts[ACTION_TURN_RIGHT]
+        controller_log = {
+            "action_forward": action_counts[ACTION_FORWARD],
+            "action_turn": action_turn,
+            "action_stop": action_counts[ACTION_STOP],
+            "astar_path": controller_stats["astar_path"],
+            "astar_fallback": controller_stats["astar_fallback"],
+            "collision_escape": controller_stats["collision_escape"],
+            "replan_scheduled": controller_stats["replan_scheduled"],
+            "replan_forced": controller_stats["replan_forced"],
+            "replan_stuck": controller_stats["replan_stuck"],
+        }
 
         ep_log["finished_at"] = time.time()
         ep_log["n_steps"] = int(step.step_idx)
@@ -465,6 +496,7 @@ class EpisodeRunner:
         ep_log["grid_cells_occupied"] = grid_stats["cells_occupied"]
         ep_log["grid_cells_unknown"] = grid_stats["cells_unknown"]
         ep_log["grid_frontier_cells"] = grid_stats["frontier_cells"]
+        ep_log.update(controller_log)
         ep_log["bridge_stats_after"] = (
             self.bridge.stats() if self.bridge is not None else {}
         )
@@ -485,6 +517,7 @@ class EpisodeRunner:
             "grid_cells_occupied": grid_stats["cells_occupied"],
             "grid_cells_unknown": grid_stats["cells_unknown"],
             "grid_frontier_cells": grid_stats["frontier_cells"],
+            **controller_log,
         }
 
     # ------------------------------------------------------------------

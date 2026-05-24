@@ -214,6 +214,16 @@ def _evaluate(ep: Dict[str, Any]) -> Dict[str, Any]:
         "n_frontier_total_val": n_frontier_total,
         "n_decisions_val": len(decisions),
         "decision_metrics": _decision_metrics(decisions, n_steps),
+        # controller census (Run-6 instrumentation; 0 on older runs)
+        "action_forward_val": int(ep.get("action_forward", 0)),
+        "action_turn_val": int(ep.get("action_turn", 0)),
+        "action_stop_val": int(ep.get("action_stop", 0)),
+        "astar_path_val": int(ep.get("astar_path", 0)),
+        "astar_fallback_val": int(ep.get("astar_fallback", 0)),
+        "collision_escape_val": int(ep.get("collision_escape", 0)),
+        "replan_scheduled_val": int(ep.get("replan_scheduled", 0)),
+        "replan_forced_val": int(ep.get("replan_forced", 0)),
+        "replan_stuck_val": int(ep.get("replan_stuck", 0)),
         # metadata
         "scene_id": ep.get("scene_id"),
         "target_category": ep.get("target_category"),
@@ -259,6 +269,7 @@ def _print_report(run_dir: str, r: Dict[str, Any]) -> bool:
     print(f"  gate: {_fmt_passfail(gates_passed)}")
 
     _print_thrash_block([(f"episode_{r.get('episode_id', '?')}", r)])
+    _print_controller_block([(f"episode_{r.get('episode_id', '?')}", r)])
 
     if not gates_passed:
         print()
@@ -396,6 +407,49 @@ def _print_thrash_block(reports: List[Tuple[str, Dict[str, Any]]]) -> None:
     print("        Fix: rotation-aware _is_stuck() and/or commit to current_candidate.")
 
 
+def _print_controller_block(reports: List[Tuple[str, Dict[str, Any]]]) -> None:
+    """Controller census (Run-6 instrumentation): action mix, A* path-vs-
+    fallback, collision-escape, and the replan-trigger breakdown. This is what
+    separates the candidate root causes of a stable-target-but-stuck episode:
+      - repl_force ≫ repl_stuck + many astar_fb  → A* no-path force-replan loop
+        (chosen target unreachable on the grid; fix = reachable candidates).
+      - coll_esc high                            → geometry stall the grid
+        misses (grid-vs-navmesh mismatch; fix = navmesh/clearance, not replan).
+      - repl_stuck ≫ repl_force, astar_ok high   → turning-in-place reads as
+        stuck (fix = rotation-aware _is_stuck).
+      - fwd ≪ turn always                         → ±15° deadband vs 30° turn
+        oscillation (fix = controller smoothing / commitment).
+    All-zero columns mean the run predates this instrumentation."""
+    if not any(
+        r["action_turn_val"] or r["astar_path_val"] or r["astar_fallback_val"]
+        or r["replan_forced_val"] or r["replan_stuck_val"]
+        for _, r in reports
+    ):
+        print()
+        print("  --- controller census --- (run predates Run-6 instrumentation; "
+              "re-run the smoke to populate)")
+        return
+    print()
+    print("  --- controller census (Run-6: action mix / A* outcome / replan trigger) ---")
+    print(f"  {'ep':>3} | {'fwd':>4} {'turn':>4} {'stop':>4} | "
+          f"{'astar_ok':>8} {'astar_fb':>8} {'coll_esc':>8} | "
+          f"{'sched':>5} {'force':>5} {'stuck':>5}")
+    for ep_path, r in reports:
+        ep_idx = os.path.basename(ep_path).replace("episode_", "").replace(".json", "")
+        print(
+            f"  {ep_idx:>3} | {r['action_forward_val']:>4d} {r['action_turn_val']:>4d} "
+            f"{r['action_stop_val']:>4d} | {r['astar_path_val']:>8d} "
+            f"{r['astar_fallback_val']:>8d} {r['collision_escape_val']:>8d} | "
+            f"{r['replan_scheduled_val']:>5d} {r['replan_forced_val']:>5d} "
+            f"{r['replan_stuck_val']:>5d}"
+        )
+    print()
+    print("  read: force≫stuck + high astar_fb → A* no-path replan loop (target")
+    print("        unreachable on grid). coll_esc high → geometry stall grid misses.")
+    print("        stuck≫force + astar_ok high → turning reads as stuck. fwd≪turn")
+    print("        always → 30°-turn vs ±15°-deadband oscillation.")
+
+
 def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]) -> bool:
     """Multi-episode summary table + roll-up gate.
 
@@ -448,6 +502,7 @@ def _print_multi_summary(run_dir: str, reports: List[Tuple[str, Dict[str, Any]]]
     print(f"  gate: {_fmt_passfail(overall)}")
 
     _print_thrash_block(reports)
+    _print_controller_block(reports)
 
     if not overall:
         print()

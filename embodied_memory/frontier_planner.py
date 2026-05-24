@@ -343,10 +343,33 @@ class FrontierPlanner:
         self._last_action: Optional[int] = None
         self._escape_toggle: bool = False
         self._force_replan: bool = False
+        # Run-6 diagnostic counters (instrumentation only; never gate behavior).
+        # Separate the replan-every-step driver (force-replan vs stuck vs
+        # scheduled) and the A* outcome so a stable-target-but-stuck episode is
+        # distinguishable from target-flipping. Zeroed per-episode in reset().
+        self._stats = self._zero_stats()
 
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _zero_stats() -> Dict[str, int]:
+        return {
+            "replan_scheduled": 0,   # is_decision_step via step % decision_period
+            "replan_forced": 0,      # is_decision_step via _force_replan
+            "replan_stuck": 0,       # is_decision_step via _is_stuck()
+            "astar_path": 0,         # step_controller A* returned a usable path
+            "astar_fallback": 0,     # A* no-goal/no-path → straight-line bearing
+            "collision_escape": 0,   # FORWARD-stall override (alternating TURN)
+        }
+
+    def controller_stats(self) -> Dict[str, int]:
+        """Per-episode controller census (Run-6 instrumentation). Distinguishes
+        a force-replan loop (astar_fallback high) from a stuck loop
+        (replan_stuck high) from genuine geometry stalls (collision_escape
+        high). Action mix is counted in the runner, not here."""
+        return dict(self._stats)
 
     def reset(self, agent_pos: Optional[np.ndarray] = None):
         """Clear the grid and per-episode state.
@@ -367,6 +390,7 @@ class FrontierPlanner:
         self._last_action = None
         self._escape_toggle = False
         self._force_replan = False
+        self._stats = self._zero_stats()
         if agent_pos is not None:
             ax, az = float(agent_pos[0]), float(agent_pos[2])
             half = self.grid.size_m / 2.0
@@ -464,10 +488,15 @@ class FrontierPlanner:
             return True
         if self._force_replan:
             self._force_replan = False
+            self._stats["replan_forced"] += 1
             return True
         if self._step_count % self.decision_period == 0:
+            self._stats["replan_scheduled"] += 1
             return True
-        return self._is_stuck()
+        stuck = self._is_stuck()
+        if stuck:
+            self._stats["replan_stuck"] += 1
+        return stuck
 
     def _is_stuck(self) -> bool:
         if len(self._pos_history) < self.stuck_window:
@@ -560,6 +589,7 @@ class FrontierPlanner:
                 # Force a fresh proposal next tick so the runner's bearing-
                 # recompute can't re-align the candidate and undo this TURN.
                 self._force_replan = True
+                self._stats["collision_escape"] += 1
 
         self._last_action = action
         return action
@@ -610,6 +640,7 @@ class FrontierPlanner:
         wp = path[min(n_ahead, len(path) - 1)]
         wx, wz = self.grid.grid_to_world(wp[0], wp[1])
         bearing_rel = _wrap_pi(math.atan2(wx - ax, wz - az) - agent_yaw)
+        self._stats["astar_path"] += 1
         return self._bearing_to_action(bearing_rel)
 
     def _straight_line_fallback(self, candidate: FrontierCandidate) -> int:
@@ -617,6 +648,7 @@ class FrontierPlanner:
         Forces a replan so the runner re-picks a (hopefully reachable)
         candidate next tick instead of re-driving into the same wall."""
         self._force_replan = True
+        self._stats["astar_fallback"] += 1
         return self._bearing_to_action(candidate.bearing_rad)
 
     def grid_stats(self) -> Dict[str, int]:
