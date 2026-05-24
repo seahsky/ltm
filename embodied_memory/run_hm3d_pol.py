@@ -202,12 +202,15 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--disable-rerank", action="store_true",
                         help="Pass through the planner's raw top-1 instead of running the reranker (overrides --setting).")
     parser.add_argument("--backbone", type=str, default="frontier",
-                        choices=["frontier", "remembr"],
+                        choices=["frontier", "remembr", "oracle"],
                         help="Primary candidate generator. 'frontier' uses the "
                              "Phase-1 CLIP+occupancy-grid stand-in (default). "
                              "'remembr' uses a local VLM captioner + LLM agent "
                              "planner; falls back to deterministic stubs when "
-                             "model weights are unavailable.")
+                             "model weights are unavailable. 'oracle' is the "
+                             "Run-5 diagnostic: a ShortestPathFollower steers "
+                             "straight to the goal, bypassing all memory/model "
+                             "loads (answers 'is this env navigable at all?').")
     parser.add_argument("--affordance-from-runs", type=str, nargs="+", default=None,
                         help="Build a per-(category, room) success-rate table "
                              "from prior runs/<dir>/ JSONs and condition coarse-"
@@ -248,52 +251,63 @@ def main(argv: Optional[list] = None) -> int:
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"[run_hm3d_pol] mode={args.mode} out_dir={args.out_dir}")
 
-    # 1. text encoder.
-    text_encode_fn, text_dim = _build_text_encoder(args.text_encoder)
-
-    # 2. perception.
-    clip_encoder = CLIPKeyframeEncoder(device=args.clip_device)
-    captioner = SemanticCaptioner()
-
-    # 3. planner.
+    # Planner is always built — the oracle still logs occupancy-grid stats.
     planner = FrontierPlanner(
         decision_period=args.decision_period,
         n_candidates=args.n_candidates,
     )
 
-    # 4. memory bridge — seed coarse layer with a small HM3D-Semantics
-    # category set so coarse retrieval is non-empty from step 0.
-    seed_cats = [
-        "chair", "sofa", "couch", "bed", "table", "tv_monitor", "toilet",
-        "plant", "sink", "refrigerator",
-    ]
-    # Optional: build the affordance table before constructing the bridge so
-    # _seed_coarse can condition coarse-layer prompts on the top success room.
-    affordance_table = None
-    if args.affordance_from_runs:
-        affordance_table = EmbodiedMemoryBridge.build_affordance_table(
-            run_dirs=list(args.affordance_from_runs),
-        )
-        n_pairs = sum(len(v) for v in affordance_table.values())
-        print(
-            f"[run_hm3d_pol] affordance table: "
-            f"{len(affordance_table)} categories, {n_pairs} (cat, room) pairs "
-            f"from {len(args.affordance_from_runs)} run dir(s)"
-        )
+    if args.backbone == "oracle":
+        # Oracle diagnostic: bypass every model load. The ShortestPathFollower
+        # only needs the goal + the sim, so the smoke starts in seconds with
+        # no CLIP / captioner / text encoder / memory bridge.
+        text_encode_fn, text_dim = None, 0
+        clip_encoder = None
+        captioner = None
+        bridge = None
+        print("[run_hm3d_pol] backbone=oracle: skipping CLIP / captioner / "
+              "text-encoder / memory-bridge loads (bridge=None)")
+    else:
+        # 1. text encoder.
+        text_encode_fn, text_dim = _build_text_encoder(args.text_encoder)
 
-    bridge = EmbodiedMemoryBridge(
-        text_embed_dim=text_dim,
-        visual_embed_dim=clip_encoder.embed_dim,
-        text_encode_fn=text_encode_fn,
-        cluster_every_n_episodes=3,
-        consolidation_top_k=5,
-        coarse_seed_categories=seed_cats,
-        disable_stm=disable_stm,
-        disable_ltm=disable_ltm,
-        disable_rerank=disable_rerank,
-        clip_encoder=clip_encoder,
-        affordance_table=affordance_table,
-    )
+        # 2. perception.
+        clip_encoder = CLIPKeyframeEncoder(device=args.clip_device)
+        captioner = SemanticCaptioner()
+
+        # 3. memory bridge — seed coarse layer with a small HM3D-Semantics
+        # category set so coarse retrieval is non-empty from step 0.
+        seed_cats = [
+            "chair", "sofa", "couch", "bed", "table", "tv_monitor", "toilet",
+            "plant", "sink", "refrigerator",
+        ]
+        # Optional: build the affordance table before constructing the bridge so
+        # _seed_coarse can condition coarse-layer prompts on the top success room.
+        affordance_table = None
+        if args.affordance_from_runs:
+            affordance_table = EmbodiedMemoryBridge.build_affordance_table(
+                run_dirs=list(args.affordance_from_runs),
+            )
+            n_pairs = sum(len(v) for v in affordance_table.values())
+            print(
+                f"[run_hm3d_pol] affordance table: "
+                f"{len(affordance_table)} categories, {n_pairs} (cat, room) pairs "
+                f"from {len(args.affordance_from_runs)} run dir(s)"
+            )
+
+        bridge = EmbodiedMemoryBridge(
+            text_embed_dim=text_dim,
+            visual_embed_dim=clip_encoder.embed_dim,
+            text_encode_fn=text_encode_fn,
+            cluster_every_n_episodes=3,
+            consolidation_top_k=5,
+            coarse_seed_categories=seed_cats,
+            disable_stm=disable_stm,
+            disable_ltm=disable_ltm,
+            disable_rerank=disable_rerank,
+            clip_encoder=clip_encoder,
+            affordance_table=affordance_table,
+        )
     print(
         f"[run_hm3d_pol] ablation: backbone={args.backbone} "
         f"setting={resolved_setting} disable_stm={disable_stm} "

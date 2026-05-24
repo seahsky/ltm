@@ -88,6 +88,11 @@ class EpisodeSource:
     def close(self) -> None:
         pass
 
+    def get_sim(self):
+        """Return the underlying simulator if the source has one (live Habitat),
+        else None. Used by the oracle backbone's ShortestPathFollower."""
+        return None
+
     # Convenience: iterate fully scripted episodes (cached mode shortcut).
     def iter_steps(self, episode_idx: int) -> Iterator[Step]:
         """For cached sources only: replay an episode without action input."""

@@ -81,6 +81,14 @@ def _bootstrap():
                     ["CLIPKeyframeEncoder", "Keyframe", "SemanticCaptioner"])
     _stub_submodule("embodied_memory.remembr_backbone",
                     ["ReMEmbRBuilder", "ReMEmbRPlanner"])
+    # habitat_env stub: only its _ACTION_NAMES list is needed (by the oracle
+    # action map); the real module imports AgentState which the episode_source
+    # stub doesn't provide, so we can't load it here.
+    hab = types.ModuleType("embodied_memory.habitat_env")
+    hab._ACTION_NAMES = [
+        "stop", "move_forward", "turn_left", "turn_right", "look_up", "look_down",
+    ]
+    sys.modules["embodied_memory.habitat_env"] = hab
     # Real frontier_planner — pure-Python, no heavy deps.
     fp = _load_file_as("embodied_memory.frontier_planner",
                        _EMB_DIR / "frontier_planner.py")
@@ -358,8 +366,191 @@ def case_h_grid_recenters_on_reset():
     print(f"  case (h) grid recenters on reset (origin={fp.grid.origin_xy}): OK")
 
 
+# ----------------------------------------------------------------------
+# Run-5 cases: densified depth splat + grid stats + oracle backbone
+# ----------------------------------------------------------------------
+
+
+# Intrinsics the densified splat derives from hfov=79° on a square 256 sensor.
+# f_px = (w/2)/tan(hfov/2); cx = cy = 128. Tests below pick rows/depths so the
+# height gate lands cleanly on either side of obstacle_min_h (=0.3 m), given the
+# default camera_height_m (=0.88 m) → floor_y = agent_y - 0.88.
+
+
+def case_densify_grid():
+    """Run-5 Change 2: the multi-row per-pixel splat must carve far more FREE
+    cells than the old single eye-level scanline, and expose frontier cells.
+
+    Baseline mimics the old behavior: only the eye-level band is valid, and it
+    sees a near wall (short rays). Dense adds far floor rows (long rays)."""
+    from embodied_memory.frontier_planner import FrontierPlanner
+
+    agent_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+    # Baseline: only an eye-level band (rows 110-145) sees a near wall at 0.6 m.
+    depth_base = np.zeros((256, 256), dtype=np.float32)
+    depth_base[110:146, :] = 0.6
+    fp_base = FrontierPlanner()
+    fp_base.reset(agent_pos=agent_pos)
+    fp_base.update(depth_base, agent_pos, agent_yaw=0.0)
+    base_free = fp_base.grid_stats()["cells_free"]
+
+    # Dense: same near wall PLUS far floor rows (146-255) at 4.0 m.
+    depth_dense = depth_base.copy()
+    depth_dense[146:256, :] = 4.0
+    fp = FrontierPlanner()
+    fp.reset(agent_pos=agent_pos)
+    fp.update(depth_dense, agent_pos, agent_yaw=0.0)
+    stats = fp.grid_stats()
+    dense_free = stats["cells_free"]
+
+    assert dense_free > 200, f"dense splat carved too few FREE cells: {dense_free}"
+    assert dense_free > base_free * 3, \
+        f"dense free ({dense_free}) not >> single-row baseline ({base_free})"
+    assert stats["frontier_cells"] > 0, \
+        f"densified grid exposed no frontier cells: {stats}"
+    print(f"  case densify_grid (base_free={base_free}, dense_free={dense_free}, "
+          f"frontier={stats['frontier_cells']}): OK")
+
+
+def case_height_gate():
+    """Run-5 Change 2: the endpoint height gate marks floor (low world_h) FREE
+    and obstacles (high world_h) OCCUPIED.
+
+    A far floor band sits well below obstacle_min_h → FREE-only endpoints.
+    An eye-level band sits at camera height (0.88 m > 0.3 m) → OCCUPIED."""
+    from embodied_memory.frontier_planner import FrontierPlanner
+
+    agent_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+    # Far floor band (rows 175-185 look downward) → low world_h → FREE.
+    depth_floor = np.zeros((256, 256), dtype=np.float32)
+    depth_floor[175:186, :] = 2.0
+    fp_floor = FrontierPlanner()
+    fp_floor.reset(agent_pos=agent_pos)
+    fp_floor.update(depth_floor, agent_pos, agent_yaw=0.0)
+    s_floor = fp_floor.grid_stats()
+    assert s_floor["cells_occupied"] == 0, \
+        f"floor band must produce no OCCUPIED cells, got {s_floor['cells_occupied']}"
+    assert s_floor["cells_free"] > 0, "floor band produced no FREE cells"
+
+    # Eye-level band (rows 150-160) at camera height → OCCUPIED.
+    depth_wall = np.zeros((256, 256), dtype=np.float32)
+    depth_wall[150:161, :] = 2.0
+    fp_wall = FrontierPlanner()
+    fp_wall.reset(agent_pos=agent_pos)
+    fp_wall.update(depth_wall, agent_pos, agent_yaw=0.0)
+    s_wall = fp_wall.grid_stats()
+    assert s_wall["cells_occupied"] > 0, \
+        f"eye-level band must produce OCCUPIED cells, got {s_wall}"
+    print(f"  case height_gate (floor_occ={s_floor['cells_occupied']}, "
+          f"wall_occ={s_wall['cells_occupied']}): OK")
+
+
+def case_grid_stats_schema():
+    """Run-5 Change 3: grid_stats() exposes four int keys; the free/occupied/
+    unknown census sums to the full grid (n*n = 40000 at 20 m / 0.1 m)."""
+    from embodied_memory.frontier_planner import FrontierPlanner
+
+    fp = FrontierPlanner()
+    fp.reset(agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32))
+    fp.update(
+        np.full((256, 256), 3.0, dtype=np.float32),
+        np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        agent_yaw=0.0,
+    )
+    stats = fp.grid_stats()
+    assert set(stats.keys()) == {
+        "cells_free", "cells_occupied", "cells_unknown", "frontier_cells",
+    }, f"unexpected grid_stats keys: {sorted(stats.keys())}"
+    for k, v in stats.items():
+        assert isinstance(v, int), f"{k} is not int: {type(v)}"
+    n = fp.grid.n
+    total = stats["cells_free"] + stats["cells_occupied"] + stats["cells_unknown"]
+    assert total == n * n, f"census {total} != n*n ({n * n})"
+    print(f"  case grid_stats_schema (n*n={n * n}, free={stats['cells_free']}): OK")
+
+
+def case_oracle_action_map():
+    """Run-5 Change 1: _oracle_action maps the follower's return to the
+    discrete action id. Names go through _ACTION_NAMES.index; None → STOP."""
+    r = EpisodeRunner.__new__(EpisodeRunner)
+    r.backbone = "oracle"
+    r._oracle_goal_radius = 1.0
+    holder = {"next": None}
+    # follower already set → _oracle_action must not try to build one (which
+    # would dereference r.source); mirrors the _make_runner sentinel pattern.
+    r.follower = SimpleNamespace(get_next_action=lambda goal: holder["next"])
+    ep = SimpleNamespace(target_position=np.array([1.0, 0.0, 1.0], dtype=np.float32))
+    expected = {"move_forward": 1, "turn_left": 2, "stop": 0, None: 0}
+    for name, want in expected.items():
+        holder["next"] = name
+        got = r._oracle_action(ep)
+        assert got == want, f"follower→{name!r} should map to {want}, got {got}"
+    # No goal → STOP without touching the follower.
+    r.follower = SimpleNamespace(
+        get_next_action=lambda goal: (_ for _ in ()).throw(AssertionError("called")))
+    assert r._oracle_action(SimpleNamespace(target_position=None)) == 0
+    print("  case oracle_action_map (move_forward/turn_left/stop/None → 1/2/0/0): OK")
+
+
+def case_oracle_short_circuit():
+    """Run-5 Change 1: with backbone='oracle' and bridge=None, _run_episode's
+    oracle branch never calls _propose_candidates or dereferences the bridge,
+    and still logs grid stats."""
+    r = EpisodeRunner.__new__(EpisodeRunner)
+    r.backbone = "oracle"
+    r.bridge = None
+    r.clip_encoder = None
+    r.captioner = None
+    r.max_steps_per_episode = 3
+    r.keyframe_every_m = 5
+    r.follower = None
+    r._oracle_goal_radius = 1.0
+
+    propose_calls: list = []
+    r._propose_candidates = lambda *a, **kw: propose_calls.append(1) or []
+    oracle_calls: list = []
+    r._oracle_action = lambda ep: oracle_calls.append(1) or 0  # ACTION_STOP
+
+    agent_state = SimpleNamespace(
+        position=np.zeros(3, dtype=np.float32), rotation_yaw=0.0)
+    depth = np.zeros((4, 4), dtype=np.float32)
+    step0 = SimpleNamespace(step_idx=0, depth=depth, rgb=None, semantic=None,
+                            agent_state=agent_state, action=None, reward=0.0,
+                            done=False, info={})
+    step1 = SimpleNamespace(step_idx=1, depth=depth, rgb=None, semantic=None,
+                            agent_state=agent_state, action=0, reward=0.0,
+                            done=True,
+                            info={"success": False, "distance_to_goal": 5.0,
+                                  "spl": 0.0})
+    ep = SimpleNamespace(episode_id="e0", scene_id="s0",
+                         target_category="chair",
+                         target_position=np.array([1.0, 0.0, 1.0], dtype=np.float32),
+                         success=False, spl=0.0)
+    r.source = SimpleNamespace(reset=lambda idx: (step0, ep),
+                               step=lambda a: step1)
+    grid = {"cells_free": 0, "cells_occupied": 0,
+            "cells_unknown": 40000, "frontier_cells": 0}
+    r.planner = SimpleNamespace(
+        reset=lambda agent_pos=None: None,
+        update=lambda *a, **kw: None,
+        grid_stats=lambda: grid,
+        is_decision_step=lambda: True,
+    )
+
+    ep_log, ep_metrics = r._run_episode(0)
+    assert not propose_calls, "oracle must NOT call _propose_candidates"
+    assert oracle_calls, "oracle must call _oracle_action"
+    assert ep_metrics["success"] is False
+    assert ep_log["grid_cells_unknown"] == 40000, \
+        f"grid stats not logged: {ep_log.get('grid_cells_unknown')}"
+    assert ep_log["bridge_stats_after"] == {}, "None bridge must log empty stats"
+    print("  case oracle_short_circuit (no bridge/propose deref, grid logged): OK")
+
+
 def main() -> int:
-    print("Run-4 _propose_candidates sanity tests")
+    print("Run-4/Run-5 sanity tests")
     case_a_stop_short_circuit()
     case_b_frontier_injected()
     case_c_dedup_close_frontier()
@@ -368,6 +559,11 @@ def main() -> int:
     case_f_propose_diverse_compass_fallback()
     case_g_compass_occupancy_aware()
     case_h_grid_recenters_on_reset()
+    case_densify_grid()
+    case_height_gate()
+    case_grid_stats_schema()
+    case_oracle_action_map()
+    case_oracle_short_circuit()
     print("All cases passed.")
     return 0
 

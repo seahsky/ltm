@@ -108,9 +108,16 @@ class EpisodeRunner:
         self.keyframe_every_m = keyframe_every_m
         self.max_steps_per_episode = max_steps_per_episode
         self.run_config = dict(run_config or {})
-        if backbone not in ("frontier", "remembr"):
-            raise ValueError(f"backbone must be 'frontier' or 'remembr'; got {backbone!r}")
+        if backbone not in ("frontier", "remembr", "oracle"):
+            raise ValueError(
+                f"backbone must be 'frontier', 'remembr', or 'oracle'; got {backbone!r}"
+            )
         self.backbone = backbone
+        # Oracle backbone (Run-5 diagnostic): a ShortestPathFollower steers
+        # straight to the episode goal, bypassing the candidate/scorer/memory
+        # machinery. Lazily constructed per-episode in _init_oracle_follower.
+        self.follower = None
+        self._oracle_goal_radius = 1.0
         # ReMEmbR pair is required for backbone='remembr' but optional otherwise
         # so the frontier-only path keeps its constructor signature simple.
         if backbone == "remembr" and (remembr_builder is None or remembr_planner is None):
@@ -176,12 +183,17 @@ class EpisodeRunner:
                 "n_frontier_chosen": int(ep_metrics.get("n_frontier_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
+                "grid_cells_free": int(ep_metrics.get("grid_cells_free", 0)),
+                "grid_cells_occupied": int(ep_metrics.get("grid_cells_occupied", 0)),
+                "grid_cells_unknown": int(ep_metrics.get("grid_cells_unknown", 0)),
+                "grid_frontier_cells": int(ep_metrics.get("grid_frontier_cells", 0)),
             })
 
-        # Finalize summary.
-        bridge_stats = self.bridge.stats()
-        summary.ltm_counts_final = bridge_stats["ltm_counts"]
-        summary.modules_invoked = bridge_stats["modules_invoked"]
+        # Finalize summary. The oracle backbone runs without a memory bridge,
+        # so guard every dereference and fall back to empty stats.
+        bridge_stats = self.bridge.stats() if self.bridge is not None else {}
+        summary.ltm_counts_final = bridge_stats.get("ltm_counts", {})
+        summary.modules_invoked = bridge_stats.get("modules_invoked", {})
         summary.n_keyframes_observed = int(bridge_stats.get("n_keyframes_observed", 0))
         summary.ablation = {
             **bridge_stats.get("ablation", {}),
@@ -198,9 +210,11 @@ class EpisodeRunner:
     # ------------------------------------------------------------------
 
     def _run_episode(self, ep_idx: int):
+        is_oracle = self.backbone == "oracle"
         step, ep = self.source.reset(ep_idx)
         self.planner.reset(agent_pos=step.agent_state.position)
-        self.bridge.begin_episode(ep.episode_id, scene_id=ep.scene_id)
+        if self.bridge is not None:
+            self.bridge.begin_episode(ep.episode_id, scene_id=ep.scene_id)
 
         ep_log: Dict[str, Any] = {
             "episode_idx": ep_idx,
@@ -212,6 +226,17 @@ class EpisodeRunner:
             "decisions": [],
         }
 
+        # Oracle with no goal would silently STOP at step 0; flag it loudly so
+        # the empty path isn't mistaken for a real navigation failure.
+        if is_oracle and getattr(ep, "target_position", None) is None:
+            warn = (
+                f"[oracle] episode {ep_idx} (id={ep.episode_id}) has NO goal "
+                f"(target_position is None) — agent STOPs immediately; this is "
+                f"NOT a navigation result."
+            )
+            print("!" * 78 + f"\n{warn}\n" + "!" * 78)
+            ep_log["oracle_no_goal"] = True
+
         rerank_calls = 0
         rerank_disagreements = 0
         retrieval_hits = 0
@@ -222,25 +247,40 @@ class EpisodeRunner:
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
 
-        # Initial observation: update map, build keyframe at step 0.
+        # Initial observation: update map, build keyframe at step 0. The oracle
+        # path skips the perception/memory preamble entirely (no bridge, no
+        # CLIP, no captioner) — it only needs the goal and the follower.
         self.planner.update(step.depth, step.agent_state.position, step.agent_state.rotation_yaw)
-        keyframe = self._build_keyframe(step)
-        self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
-        stm_captions.append(keyframe.caption)
-        ep_log["steps"].append(self._serialize_step(step, keyframe))
+        if not is_oracle:
+            keyframe = self._build_keyframe(step)
+            self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
+            stm_captions.append(keyframe.caption)
+            ep_log["steps"].append(self._serialize_step(step, keyframe))
 
-        # Reset ReMEmbR per-episode state and index the initial keyframe.
-        if self.backbone == "remembr":
-            self.remembr_builder.reset()
-            self.remembr_planner.reset()
-            self.remembr_builder.caption_and_index(
-                rgb=step.rgb,
-                agent_position=step.agent_state.position,
-                timestep=int(step.step_idx),
-            )
+            # Reset ReMEmbR per-episode state and index the initial keyframe.
+            if self.backbone == "remembr":
+                self.remembr_builder.reset()
+                self.remembr_planner.reset()
+                self.remembr_builder.caption_and_index(
+                    rgb=step.rgb,
+                    agent_position=step.agent_state.position,
+                    timestep=int(step.step_idx),
+                )
 
         # Loop.
         for t in range(1, self.max_steps_per_episode):
+            if is_oracle:
+                # Oracle short-circuit: steer straight to the goal, bypassing
+                # candidate proposal, memory injection, and rerank entirely.
+                action = self._oracle_action(ep)
+                step = self.source.step(action)
+                self.planner.update(
+                    step.depth, step.agent_state.position, step.agent_state.rotation_yaw
+                )
+                if step.done:
+                    break
+                continue
+
             # Decide whether to re-plan.
             if self.planner.is_decision_step() or current_candidate is None:
                 cands = self._propose_candidates(step, ep)
@@ -395,11 +435,16 @@ class EpisodeRunner:
         ep.spl = spl
 
         # Stamp success on the most-recent observed keyframe so the segment
-        # the consolidator sees can be flagged successful.
-        if success and self.bridge._pending:  # noqa: SLF001 — controlled use
-            self.bridge._pending[-1].success = True  # noqa: SLF001
+        # the consolidator sees can be flagged successful. Skipped on the
+        # oracle path (no bridge).
+        if self.bridge is not None:
+            if success and self.bridge._pending:  # noqa: SLF001 — controlled use
+                self.bridge._pending[-1].success = True  # noqa: SLF001
+            self.bridge.consolidate(episode_success=success, episode_idx=ep_idx)
 
-        self.bridge.consolidate(episode_success=success, episode_idx=ep_idx)
+        # Occupancy-grid census (Run-5 instrumentation) — makes the smoke
+        # interpretable next to n_frontier_chosen.
+        grid_stats = self.planner.grid_stats()
 
         ep_log["finished_at"] = time.time()
         ep_log["n_steps"] = int(step.step_idx)
@@ -414,7 +459,13 @@ class EpisodeRunner:
         ep_log["n_memory_chosen"] = n_memory_chosen
         ep_log["n_frontier_chosen"] = n_frontier_chosen
         ep_log["n_stop_signals"] = n_stop_signals
-        ep_log["bridge_stats_after"] = self.bridge.stats()
+        ep_log["grid_cells_free"] = grid_stats["cells_free"]
+        ep_log["grid_cells_occupied"] = grid_stats["cells_occupied"]
+        ep_log["grid_cells_unknown"] = grid_stats["cells_unknown"]
+        ep_log["grid_frontier_cells"] = grid_stats["frontier_cells"]
+        ep_log["bridge_stats_after"] = (
+            self.bridge.stats() if self.bridge is not None else {}
+        )
 
         return ep_log, {
             "success": success,
@@ -428,6 +479,10 @@ class EpisodeRunner:
             "n_memory_chosen": n_memory_chosen,
             "n_frontier_chosen": n_frontier_chosen,
             "n_stop_signals": n_stop_signals,
+            "grid_cells_free": grid_stats["cells_free"],
+            "grid_cells_occupied": grid_stats["cells_occupied"],
+            "grid_cells_unknown": grid_stats["cells_unknown"],
+            "grid_frontier_cells": grid_stats["frontier_cells"],
         }
 
     # ------------------------------------------------------------------
@@ -492,6 +547,61 @@ class EpisodeRunner:
                 keep.append(fc)
 
         return llm_cands + keep
+
+    # ------------------------------------------------------------------
+    # oracle backbone (Run-5 diagnostic)
+    # ------------------------------------------------------------------
+
+    def _init_oracle_follower(self, ep) -> None:
+        """Lazily build a Habitat ShortestPathFollower for the episode goal.
+
+        Reaches the underlying habitat-sim Simulator through the source's
+        ``get_sim()`` accessor. Leaves ``self.follower = None`` if the source
+        has no sim (e.g. cached mode), in which case the oracle just STOPs.
+        """
+        from habitat.tasks.nav.shortest_path_follower import ShortestPathFollower
+
+        sim = self.source.get_sim()
+        if sim is None:
+            self.follower = None
+            return
+        self.follower = ShortestPathFollower(
+            sim, goal_radius=self._oracle_goal_radius, return_one_hot=False
+        )
+
+    def _oracle_action(self, ep) -> int:
+        """Next action toward the episode goal via the ShortestPathFollower.
+
+        Maps the follower's return to a discrete action id:
+          - ``None`` (at goal / no path)  → ACTION_STOP
+          - action name (str)             → ``_ACTION_NAMES.index(name)``
+          - action id (int)               → passed through (already matches
+            ``_ACTION_NAMES`` ordering for stop/forward/turn_left/turn_right)
+        A missing goal STOPs immediately (the no-goal case is flagged loudly
+        in ``_run_episode`` so it isn't read as a navigation failure).
+        """
+        from .frontier_planner import ACTION_STOP
+
+        goal = getattr(ep, "target_position", None)
+        if goal is None:
+            return ACTION_STOP
+        if self.follower is None:
+            self._init_oracle_follower(ep)
+            if self.follower is None:
+                return ACTION_STOP
+
+        raw = self.follower.get_next_action(goal)
+        if raw is None:
+            return ACTION_STOP
+        if isinstance(raw, str):
+            from .habitat_env import _ACTION_NAMES
+            try:
+                return _ACTION_NAMES.index(raw)
+            except ValueError:
+                return ACTION_STOP
+        if isinstance(raw, (int, np.integer)):
+            return int(raw)
+        return ACTION_STOP
 
     def _build_keyframe(self, step: Step) -> Keyframe:
         # Cached mode may have already produced a caption + embeddings.

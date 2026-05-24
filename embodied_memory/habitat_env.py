@@ -259,6 +259,13 @@ class HabitatObjectNavSource(EpisodeSource):
                 pass
             self._env = None
 
+    def get_sim(self):
+        """Return the underlying habitat-sim Simulator (for the oracle
+        ShortestPathFollower), or None if the env hasn't been built yet."""
+        if self._env is None:
+            return None
+        return getattr(self._env, "sim", None) or getattr(self._env, "_sim", None)
+
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
