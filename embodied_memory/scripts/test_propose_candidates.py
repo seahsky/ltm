@@ -155,7 +155,7 @@ def case_a_stop_short_circuit():
     def _no_call(*a, **kw):
         sentinel.append(("called", a, kw))
         return []
-    r.planner = SimpleNamespace(propose=_no_call)
+    r.planner = SimpleNamespace(propose_diverse=_no_call)
     out = r._propose_candidates(_make_step(), _make_ep())
     assert out == [stop], f"expected [stop], got {out}"
     assert not sentinel, f"frontier planner must not be called on STOP, got {sentinel}"
@@ -175,7 +175,7 @@ def case_b_frontier_injected():
         _make_cand(12, 3.0, 3.0, source="planner"),
     ]
     r.remembr_planner = SimpleNamespace(propose=lambda **kw: llm)
-    r.planner = SimpleNamespace(propose=lambda *a, **kw: frontier)
+    r.planner = SimpleNamespace(propose_diverse=lambda *a, **kw: frontier)
     out = r._propose_candidates(_make_step(), _make_ep())
     assert len(out) == len(llm) + len(frontier), \
         f"expected {len(llm) + len(frontier)} cands, got {len(out)}"
@@ -199,7 +199,7 @@ def case_c_dedup_close_frontier():
         _make_cand(12, 1.0, 1.4, source="planner"),   # 0.4 m from LLM — drop
     ]
     r.remembr_planner = SimpleNamespace(propose=lambda **kw: llm)
-    r.planner = SimpleNamespace(propose=lambda *a, **kw: frontier)
+    r.planner = SimpleNamespace(propose_diverse=lambda *a, **kw: frontier)
     out = r._propose_candidates(_make_step(), _make_ep())
     assert len(out) == 2, \
         f"expected 2 cands, got {len(out)}: {[(c.candidate_id, c.source) for c in out]}"
@@ -215,7 +215,7 @@ def case_d_zero_inject():
     llm = [_make_cand(1, 5.0, 0.0, source="remembr")]
     sentinel = []
     r.remembr_planner = SimpleNamespace(propose=lambda **kw: llm)
-    r.planner = SimpleNamespace(propose=lambda *a, **kw: sentinel.append(("called",)) or [])
+    r.planner = SimpleNamespace(propose_diverse=lambda *a, **kw: sentinel.append(("called",)) or [])
     out = r._propose_candidates(_make_step(), _make_ep())
     assert out == llm, f"expected just LLM cands, got {out}"
     assert not sentinel, \
@@ -237,6 +237,30 @@ def case_e_frontier_backbone_unchanged():
     print("  case (e) frontier backbone unchanged: OK")
 
 
+def case_f_propose_diverse_compass_fallback():
+    """FrontierPlanner.propose_diverse must emit k compass candidates when
+    the occupancy grid has nothing real to offer (random_walk fallback)."""
+    from embodied_memory.frontier_planner import FrontierPlanner
+    fp = FrontierPlanner()
+    fp.reset()
+    out = fp.propose_diverse(
+        np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        agent_yaw=0.0,
+        k=3,
+    )
+    assert len(out) == 3, f"expected 3 compass candidates, got {len(out)}"
+    for c in out:
+        assert c.metadata.get("fallback") == "compass", \
+            f"expected compass fallback, got {c.metadata}"
+    # Pairwise xy distances must be > 0.5 m so de-dup against a forward LLM
+    # pick cannot wipe out all three.
+    import itertools
+    for a, b in itertools.combinations(out, 2):
+        d = float(np.linalg.norm(a.world_xy - b.world_xy))
+        assert d > 0.5, f"compass cands too close: {a.world_xy} vs {b.world_xy} ({d:.3f} m)"
+    print("  case (f) propose_diverse compass fallback (k=3, all > 0.5 m apart): OK")
+
+
 def main() -> int:
     print("Run-4 _propose_candidates sanity tests")
     case_a_stop_short_circuit()
@@ -244,6 +268,7 @@ def main() -> int:
     case_c_dedup_close_frontier()
     case_d_zero_inject()
     case_e_frontier_backbone_unchanged()
+    case_f_propose_diverse_compass_fallback()
     print("All cases passed.")
     return 0
 

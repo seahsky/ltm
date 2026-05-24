@@ -373,6 +373,74 @@ class FrontierPlanner:
             metadata={"fallback": "random_walk"},
         )
 
+    # ------------------------------------------------------------------
+    # diversity-aware propose (Run 4)
+    # ------------------------------------------------------------------
+
+    def propose_diverse(
+        self,
+        agent_pos: np.ndarray,
+        agent_yaw: float,
+        k: int = 3,
+    ) -> List[FrontierCandidate]:
+        """Return up to k directionally-diverse candidates.
+
+        Built for the Run-4 injection path in ``EpisodeRunner``: a single
+        "1.5 m forward" candidate gets killed by the 0.5 m de-dup against
+        the LLM's matching forward pick, leaving zero frontier candidates
+        in the pool. When the occupancy grid has no real frontier cells,
+        emit a compass fan around the agent so at least the side picks
+        survive de-dup. When real cells exist but fewer than k, top up
+        with compass picks for the missing slots.
+        """
+        cands: List[FrontierCandidate] = list(self.propose(agent_pos, agent_yaw))
+        # If propose() only had the random-walk fallback to offer, swap it
+        # wholesale for a compass fan — the single forward pick is exactly
+        # what we want to de-dup against.
+        if len(cands) == 1 and cands[0].metadata.get("fallback") == "random_walk":
+            return self._compass_fallback(agent_pos, agent_yaw, k=k)
+        if len(cands) < k:
+            cands.extend(self._compass_fallback(agent_pos, agent_yaw, k=k - len(cands)))
+        return cands[:k]
+
+    def _compass_fallback(
+        self,
+        agent_pos: np.ndarray,
+        agent_yaw: float,
+        k: int = 3,
+    ) -> List[FrontierCandidate]:
+        """Emit k candidates at evenly-spaced angles around the agent at a
+        fixed 1.5 m distance. Offset 0 is forward; for k=3 the offsets are
+        ``[0, 2π/3, 4π/3]`` so two of the three picks lie behind the agent
+        — useful for escaping start-wall stalls."""
+        if k <= 0:
+            return []
+        out: List[FrontierCandidate] = []
+        target_dist = 1.5
+        ax, az = float(agent_pos[0]), float(agent_pos[2])
+        offsets = [i * (2.0 * math.pi / max(1, k)) for i in range(k)]
+        for off in offsets:
+            theta = agent_yaw + off
+            x = ax + math.sin(theta) * target_dist
+            z = az + math.cos(theta) * target_dist
+            r, c = self.grid.world_to_grid(x, z)
+            self._candidate_counter += 1
+            out.append(
+                FrontierCandidate(
+                    candidate_id=self._candidate_counter,
+                    world_xy=np.array([x, z], dtype=np.float32),
+                    grid_rc=(r, c),
+                    distance_m=target_dist,
+                    bearing_rad=_wrap_pi(off),
+                    cluster_size=0,
+                    # Slightly above random_walk's 0.1 so the rerank's raw
+                    # tie-break doesn't keep choosing the LLM's stub pick.
+                    raw_score=0.2,
+                    metadata={"fallback": "compass", "offset_rad": float(off)},
+                )
+            )
+        return out
+
 
 def _wrap_pi(angle: float) -> float:
     while angle > math.pi:

@@ -467,10 +467,16 @@ class EpisodeRunner:
         if self.n_frontier_inject <= 0:
             return llm_cands
 
-        frontier_cands = self.planner.propose(
-            step.agent_state.position, step.agent_state.rotation_yaw
+        # propose_diverse swaps the single random-walk fallback for a compass
+        # fan of N candidates when the occupancy grid is sparse. Run-4 smoke 1
+        # showed plain propose() returns a single 1.5 m-forward candidate that
+        # de-dups against the LLM's matching forward pick, zeroing out the
+        # injection pool. propose_diverse keeps the side picks alive.
+        frontier_cands = self.planner.propose_diverse(
+            step.agent_state.position,
+            step.agent_state.rotation_yaw,
+            k=self.n_frontier_inject,
         )
-        frontier_cands = frontier_cands[: self.n_frontier_inject]
         for fc in frontier_cands:
             fc.source = "frontier"
 
