@@ -399,8 +399,11 @@ class FrontierPlanner:
         # what we want to de-dup against.
         if len(cands) == 1 and cands[0].metadata.get("fallback") == "random_walk":
             return self._compass_fallback(agent_pos, agent_yaw, k=k)
-        if len(cands) < k:
-            cands.extend(self._compass_fallback(agent_pos, agent_yaw, k=k - len(cands)))
+        # Don't mix real-cluster candidates with compass top-ups: the
+        # FrontierPhysicsScorer's bearing-alignment term would let
+        # compass candidates (raw=0.7) outscore lower-rated real clusters
+        # at off-axis bearings. Pure separation keeps the semantics
+        # straightforward — real frontier info beats fallback compass.
         return cands[:k]
 
     def _compass_fallback(
@@ -433,9 +436,13 @@ class FrontierPlanner:
                     distance_m=target_dist,
                     bearing_rad=_wrap_pi(off),
                     cluster_size=0,
-                    # Slightly above random_walk's 0.1 so the rerank's raw
-                    # tie-break doesn't keep choosing the LLM's stub pick.
-                    raw_score=0.2,
+                    # 0.7 chosen against FrontierPhysicsScorer's planner
+                    # path (`0.5·raw + 0.3·bearing + 0.2·dist`): coherence
+                    # ≈ 0.625 at bearing=2π/3 vs LLM-stub forward's 0.525
+                    # (wins) and real-LLM forward's ~0.725 (loses).
+                    # Compass beats a stuck stub-forward LLM but yields to
+                    # a confident, parseable LLM ANSWER.
+                    raw_score=0.7,
                     metadata={"fallback": "compass", "offset_rad": float(off)},
                 )
             )
