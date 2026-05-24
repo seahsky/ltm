@@ -354,3 +354,60 @@ If Run 4 succeeds at the movement layer (smoke passes `path_traveled ≥
 STOP at goals, the bridge-CLIP STOP refactor becomes the next session's
 lever. That's the original Option 1 from this runbook's §"What's next",
 now scoped one layer up.
+
+## Run-5 amendment (2026-05-24)
+
+Run 4's prep landed the obstacle-aware proposal pool but the agent still
+hadn't been shown to move (it was never RACE-executed). Run 5 lands two
+complementary levers before the next paid bring-up, plus a decisive
+diagnostic, all verified faiss/habitat-free locally. Commits `a26b1b6`
+(densified splat + `grid_stats`) and `f713119` (oracle + grid logging + tests).
+
+### Two levers + a diagnostic
+
+1. **Densified depth splat** (`frontier_planner.py::update`). The old single
+   middle-row scanline (64 cols) sat at eye height, hit walls, and carved too
+   few FREE cells, so frontiers clustered against walls and the agent had no
+   navigable subgoal. Replaced with a multi-row (~28×28) per-pixel
+   back-projection from `hfov=79°` pinhole intrinsics + a **height gate**
+   (`camera_height_m=0.88`, `obstacle_min_h=0.3`): march FREE along each ray's
+   ground range, mark the endpoint OCCUPIED only if it rises >0.3 m above the
+   floor (set in `reset(agent_pos)`), else FREE — so floor/doorways become
+   walkable. Local sanity: 926 FREE cells vs 26 for the old scanline (35×).
+2. **`grid_stats()` instrumentation** logged per episode
+   (`grid_cells_{free,occupied,unknown}`, `grid_frontier_cells`) so the next
+   smoke is interpretable — if `cells_free` is still tiny, densification didn't
+   take and we iterate locally, not on RACE.
+3. **`--backbone oracle`** (decisive diagnostic). A `ShortestPathFollower`
+   steers straight to the goal, bypassing all candidate/scorer/memory/model
+   loads (`bridge=None`, no CLIP/captioner) but logging the same metrics. It
+   answers the question Runs 1–4 never did: *is the env/episode navigable at
+   all with a perfect planner?*
+
+### The smoke this enables (Phase 1 bring-up, then:)
+
+```bash
+# A) Oracle env check — no model loads, both scenes
+for sc in TEEsavR23oF wcojb4TFT35; do
+  python -m embodied_memory.run_hm3d_pol --mode live --backbone oracle \
+    --setting 1 --scene $sc --n-episodes 2 --target any --no-strict-pass \
+    --out-dir runs/oracle-smoke-$sc
+done
+# B) Densified-grid escape check — full stack
+python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
+    --setting 3 --scene wcojb4TFT35 --n-episodes 2 --target any \
+    --out-dir runs/remembr-dense-smoke
+```
+
+Read the result with the decision tree in `PHASE2_ABLATION_REPORT.md` Run-5
+("Decision tree on the read"): oracle-reaches + densified-passes → full 3×30
+ablation (Phase 3); oracle-reaches + densified-stalls → iterate the splat
+locally; oracle-also-stalls → env debugging, no planner/perception fix matters.
+Phases 1–4 of this runbook still apply verbatim; Run 5 only changes the code
+checked in before Phase 1 and runs the two cheap smokes above before Phase 3.
+
+### Status when this amendment landed
+
+Code change + 13-case module-level sanity suite passing locally. **No RACE
+execution yet** (CUDA-host operator step). Run-3 stopgap
+(`REMEMBR_STOP_COS=0.40 REMEMBR_STOP_MIN_STEP=20`) stays in place for smoke B.

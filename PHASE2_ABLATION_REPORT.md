@@ -832,3 +832,158 @@ frontier-injection path.
 | `embodied_memory/scripts/analyze_ablation.py` | `n_memory_chosen` + `n_frontier_chosen` surfaced |
 | `docs/phase3-qwen7b-runbook.md` | Run-4 amendment block at the bottom |
 
+# Run 5 — Oracle diagnostic + occupancy-grid densification (prep, 2026-05-24)
+
+**Date:** 2026-05-24 (local implementation; RACE smoke deferred to operator bring-up)
+**Branch:** `phase2-readiness`
+**Pod:** _(none — local code change + faiss/habitat-free sanity tests only)_
+**Commits:** `a26b1b6` (densified splat + `grid_stats`), `f713119` (oracle backbone + grid logging + tests)
+**Run dirs (planned):** `runs/oracle-smoke-{TEEsavR23oF,wcojb4TFT35}`, `runs/remembr-dense-smoke`
+**Status:** **Prep complete — RACE smoke + full ablation deferred (cost-gated, CUDA host).**
+
+## TL;DR
+
+Across Runs 1–4 the agent **cannot navigate**: <2 m in 250 steps, stalled near
+start. Run 4 made the architecture complete (`n_frontier_chosen >> 0`, all
+module/coherence gates green) but the navigation gate (≥1 episode with
+`n_steps>50` AND `path_traveled≥4 m`) still FAILS. Five research agents plus
+direct code reads narrowed it to two complementary levers, both landed here:
+
+1. **Root cause (densification).** `frontier_planner.update()` splatted depth
+   from a **single middle-row scanline** subsampled to 64 columns. At eye
+   height that scanline mostly hits walls/furniture and misses floor
+   openings → too few FREE cells → frontiers cluster against walls → no
+   navigable subgoal → the agent barely moves. The grid is already correctly
+   agent-centered (`6713d12`), so sparsity — not mis-centering — is the cause.
+   Replaced with a multi-row per-pixel back-projection + height gate that
+   marks floor FREE (walkable, fills doorways) and only tall endpoints
+   OCCUPIED.
+2. **Decisive unknown (oracle).** We have **never** confirmed the
+   environment/episode is navigable at all. Added `--backbone oracle`: a
+   `ShortestPathFollower` that steers straight to the goal with a perfect
+   planner, bypassing the candidate/scorer/memory machinery but logging
+   `success`/`spl`/`distance_to_goal`/`n_steps` identically. If the oracle
+   reaches the goal, our pipeline is the bottleneck; if it stalls, the env
+   setup is broken and no planner/perception fix matters — the highest-value
+   thing a $0.10 run can tell us.
+
+Research notes that did **not** make the cut: no goal-bearing scorer term
+(real ObjectNav agents shouldn't know goal xyz; the oracle already supplies
+the goal-direction answer), and no collision flag in `info` (the `Collisions`
+measure is off in `objectnav_hm3d.yaml`; the bbox<0.1 m stall heuristic stays).
+
+## What we ran
+
+**Code change only.** No RACE provisioning, no live ablation/smoke. The RACE
+bring-up is a CUDA-host operator step (`docs/phase3-qwen7b-runbook.md` Phase 1);
+this machine is a CPU-only laptop. Patches landed locally and verified with the
+faiss/habitat-free sanity suite (importlib-loaded, `sys.modules`-stubbed).
+
+| File | Change |
+|---|---|
+| `embodied_memory/frontier_planner.py` | `update()` rewritten: multi-row (~28×28 subsample) per-pixel back-projection from `hfov=79°` pinhole intrinsics + height gate (`camera_height_m=0.88`, `obstacle_min_h=0.3`); `reset(agent_pos)` fixes `_floor_y`. New `grid_stats()` census. |
+| `embodied_memory/episode_runner.py` | `--backbone oracle` in-loop branch; `_init_oracle_follower`/`_oracle_action`; `None`-bridge guards throughout; logs `grid_cells_{free,occupied,unknown}`+`grid_frontier_cells` into `ep_log`/metrics/per-episode summary row. |
+| `embodied_memory/run_hm3d_pol.py` | `--backbone oracle` choice; skips CLIP/captioner/text-encoder/bridge loads (`bridge=None`) so the oracle smoke starts in seconds. |
+| `embodied_memory/habitat_env.py` | `get_sim()` accessor exposing `env.sim` to the follower. |
+| `embodied_memory/episode_source.py` | base `get_sim()` returning `None`. |
+| `embodied_memory/scripts/test_propose_candidates.py` | 5 new sanity cases (densify, height gate, `grid_stats` schema, oracle action map, oracle short-circuit) + `habitat_env._ACTION_NAMES` stub. |
+
+## Sanity-test output (local)
+
+```
+$ python embodied_memory/scripts/test_propose_candidates.py
+Run-4/Run-5 sanity tests
+  case (a) STOP short-circuit: OK
+  case (b) frontier injected (no overlap): OK
+  case (c) de-dup within 0.5 m: OK
+  case (d) n_frontier_inject=0 disables injection: OK
+  case (e) frontier backbone unchanged: OK
+  case (f) propose_diverse compass fallback (k=3, baseline 0.7): OK
+  case (g) compass occupancy-aware (FREE=1.000, OCC=0.200): OK
+  case (h) grid recenters on reset (origin=(-10.23, -27.77)): OK
+  case densify_grid (base_free=26, dense_free=926, frontier=632): OK
+  case height_gate (floor_occ=0, wall_occ=29): OK
+  case grid_stats_schema (n*n=40000, free=601): OK
+  case oracle_action_map (move_forward/turn_left/stop/None → 1/2/0/0): OK
+  case oracle_short_circuit (no bridge/propose deref, grid logged): OK
+All cases passed.
+```
+
+The densification case is the headline: the same synthetic frame carves
+**926 FREE cells** with the multi-row splat vs **26** with the single
+eye-level scanline (35×), and exposes 632 frontier cells where the old splat
+exposed 16. The height gate correctly produces **0 OCCUPIED** for a far floor
+band and **29 OCCUPIED** for an eye-level band.
+
+## RACE smoke — pending operator bring-up (~$0.80)
+
+Standard RACE G15 bring-up per `docs/phase3-qwen7b-runbook.md` Phase 1. Keep
+the Run-3 stopgap (`REMEMBR_STOP_COS=0.40 REMEMBR_STOP_MIN_STEP=20`). Run two
+cheap smokes, **explicitly pinning `--scene`** (short smokes are single-scene;
+episode iteration follows dataset order, not round-robin):
+
+```bash
+# A) Oracle env check — no model loads, both scenes
+for sc in TEEsavR23oF wcojb4TFT35; do
+  python -m embodied_memory.run_hm3d_pol --mode live --backbone oracle \
+    --setting 1 --scene $sc --n-episodes 2 --target any --no-strict-pass \
+    --out-dir runs/oracle-smoke-$sc
+done
+# B) Densified-grid escape check — full stack
+python -m embodied_memory.run_hm3d_pol --mode live --backbone remembr \
+    --setting 3 --scene wcojb4TFT35 --n-episodes 2 --target any \
+    --out-dir runs/remembr-dense-smoke
+```
+
+### Decision tree on the read
+
+- **Oracle reaches goal** (`success≥1` or `distance_to_goal`<1 m) **AND
+  densified smoke passes** `path_traveled≥4 m` / `n_frontier_chosen≥1` → env
+  navigable AND the grid fix unblocked movement. Proceed to the full 3×30
+  ablation (runbook Phase 3) for the gate read.
+- **Oracle reaches goal but densified smoke still stalls** → env fine, our
+  perception/planner is still the bottleneck. Inspect the new `grid_*` counts:
+  if `cells_free` is still tiny, densification didn't take (recheck
+  planar-depth / intrinsics assumption — verify `normalize_depth` is false);
+  iterate the splat **locally**, not on RACE.
+- **Oracle ALSO stalls** → env/episode/action-space is broken (agent spawned in
+  an unreachable pocket, goal coords wrong, or discrete action-space mismatch).
+  No planner/perception fix matters; pivot to env debugging. Highest-value $0.10
+  the oracle can spend.
+
+## Tuning knobs added this run
+
+| Ctor param | Default | Purpose |
+|---|---|---|
+| `FrontierPlanner.camera_height_m` | 0.88 | Agent eye height above floor; sets `_floor_y` in `reset(agent_pos)`. |
+| `FrontierPlanner.obstacle_min_h` | 0.30 | Endpoint must rise this far above floor to count as OBSTACLE; lower → FREE (walkable). |
+
+`--backbone oracle` runs with `--no-strict-pass` (empty-LTM pass-conditions
+don't flip the exit code). No new env vars; the Run-1..4 knobs all still apply.
+
+## Cost ceiling
+
+| Phase | Best | Worst |
+|---|---|---|
+| Implementation + local tests | $0 | $0 |
+| RACE bring-up + oracle smoke (A) | $0.50 | $1 |
+| Densified-grid smoke (B) | $0.30 | $1 |
+| Full ablation (if both green) | $6 | $10 |
+| Buffer | $0 | $4 |
+| **Total** | **$7** | **$16** |
+
+Budget remaining ~$11. Hard cap unchanged: stop and escalate if costs trend
+past **$17 without a gate read**.
+
+## File index (Run 5)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/frontier_planner.py` | Densified multi-row depth splat + height gate + `grid_stats()` |
+| `embodied_memory/episode_runner.py` | Oracle in-loop branch + `_init_oracle_follower`/`_oracle_action` + `None`-bridge guards + grid logging |
+| `embodied_memory/run_hm3d_pol.py` | `--backbone oracle` choice + conditional model loads |
+| `embodied_memory/habitat_env.py` | `get_sim()` accessor |
+| `embodied_memory/episode_source.py` | base `get_sim()` |
+| `embodied_memory/scripts/test_propose_candidates.py` | 5 new Run-5 sanity cases |
+| `docs/phase3-qwen7b-runbook.md` | Run-5 amendment block at the bottom |
+
