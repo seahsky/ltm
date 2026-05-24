@@ -199,7 +199,7 @@ class EpisodeRunner:
 
     def _run_episode(self, ep_idx: int):
         step, ep = self.source.reset(ep_idx)
-        self.planner.reset()
+        self.planner.reset(agent_pos=step.agent_state.position)
         self.bridge.begin_episode(ep.episode_id, scene_id=ep.scene_id)
 
         ep_log: Dict[str, Any] = {

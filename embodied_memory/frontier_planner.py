@@ -148,7 +148,17 @@ class FrontierPlanner:
     # public API
     # ------------------------------------------------------------------
 
-    def reset(self):
+    def reset(self, agent_pos: Optional[np.ndarray] = None):
+        """Clear the grid and per-episode state.
+
+        If ``agent_pos`` is provided, re-center the grid origin so the
+        agent starts at the grid's geometric center. This fixes a
+        long-standing bug where the grid was hard-centered at world
+        origin (0, 0) with a 20 m span, while HM3D agent starts are
+        frequently 15–20 m away (e.g. z=-17.77 in scene wcojb4TFT35).
+        Without recentering, every grid lookup is out-of-bounds and the
+        occupancy data is silently lost.
+        """
         n = self.grid.n
         self.grid.grid = np.full((n, n), CELL_UNKNOWN, dtype=np.uint8)
         self._step_count = 0
@@ -157,6 +167,10 @@ class FrontierPlanner:
         self._last_action = None
         self._escape_toggle = False
         self._force_replan = False
+        if agent_pos is not None:
+            ax, az = float(agent_pos[0]), float(agent_pos[2])
+            half = self.grid.size_m / 2.0
+            self.grid.origin_xy = (ax - half, az - half)
 
     def update(self, depth: np.ndarray, agent_pos: np.ndarray, agent_yaw: float):
         """Splat depth into the grid. Cheap raycast: for each column take the

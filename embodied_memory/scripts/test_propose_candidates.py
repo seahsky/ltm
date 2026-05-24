@@ -317,6 +317,47 @@ def case_g_compass_occupancy_aware():
           f"(FREE={fwd.raw_score:.3f}, OCC={bwd.raw_score:.3f}): OK")
 
 
+def case_h_grid_recenters_on_reset():
+    """planner.reset(agent_pos=...) must shift the grid origin so the
+    agent's start xz lands at the grid's center cell. Without this,
+    HM3D agent positions like z=-17.77 fall outside the default
+    20 m-square grid centered at world origin."""
+    from embodied_memory.frontier_planner import FrontierPlanner
+    fp = FrontierPlanner()
+    # Default (no agent_pos): origin at (-10, -10) per __init__.
+    assert fp.grid.origin_xy == (-10.0, -10.0), \
+        f"unexpected default origin: {fp.grid.origin_xy}"
+    # HM3D-style position 7.77 m outside the default grid.
+    agent_pos = np.array([-0.23, 0.0, -17.77], dtype=np.float32)
+    fp.reset(agent_pos=agent_pos)
+    ox, oz = fp.grid.origin_xy
+    # New origin must place agent at grid center (size/2 from each edge).
+    assert abs(ox - (-0.23 - 10.0)) < 1e-6, f"x origin off: {ox}"
+    assert abs(oz - (-17.77 - 10.0)) < 1e-6, f"z origin off: {oz}"
+    # Agent's xz must now be in-bounds.
+    r, c = fp.grid.world_to_grid(-0.23, -17.77)
+    assert fp.grid.in_bounds(r, c), \
+        f"agent xz still out-of-bounds after recenter: ({r}, {c})"
+    # And the ray-occupancy helper must report in-bounds samples for a
+    # forward ray from the agent (no FREE/OCC marks yet, just bounds).
+    frac_f, frac_o = fp._ray_occupancy_fractions(
+        ax=-0.23, az=-17.77, theta=0.0, max_dist=2.0,
+    )
+    # All UNKNOWN at this point — both fractions zero, but the helper
+    # would have returned (0, 0) for out-of-bounds too. Disambiguate by
+    # confirming a marked cell shows up: paint one FREE cell along the
+    # forward ray and re-evaluate.
+    from embodied_memory.frontier_planner import CELL_FREE
+    fr, fc = fp.grid.world_to_grid(-0.23, -17.77 + 1.0)  # 1 m forward in +z
+    fp.grid.mark(fr, fc, CELL_FREE)
+    frac_f, _ = fp._ray_occupancy_fractions(
+        ax=-0.23, az=-17.77, theta=0.0, max_dist=2.0,
+    )
+    assert frac_f > 0.0, \
+        f"FREE cell at agent+1m must register after recenter (frac_free={frac_f})"
+    print(f"  case (h) grid recenters on reset (origin={fp.grid.origin_xy}): OK")
+
+
 def main() -> int:
     print("Run-4 _propose_candidates sanity tests")
     case_a_stop_short_circuit()
@@ -326,6 +367,7 @@ def main() -> int:
     case_e_frontier_backbone_unchanged()
     case_f_propose_diverse_compass_fallback()
     case_g_compass_occupancy_aware()
+    case_h_grid_recenters_on_reset()
     print("All cases passed.")
     return 0
 
