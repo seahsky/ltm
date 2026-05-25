@@ -122,6 +122,14 @@ class EpisodeRunner:
         # machinery. Lazily constructed per-episode in _init_oracle_follower.
         self.follower = None
         self._oracle_goal_radius = 1.0
+        # Navmesh point-goal locomotion (Phase-2 C1 fix): the same
+        # ShortestPathFollower steers toward the agent's SELF-CHOSEN waypoint
+        # (frontier/memory/remembr), replacing the occupancy-grid step
+        # controller whose grid-vs-navmesh mismatch kept SPL at 0. High-level
+        # waypoint selection is unchanged; only locomotion uses the navmesh.
+        # goal_radius ≈ propose_reached_m so "reached" aligns with re-propose.
+        self._waypoint_goal_radius = 0.5
+        self._waypoint_force_repropose = False
         # ReMEmbR pair is required for backbone='remembr' but optional otherwise
         # so the frontier-only path keeps its constructor signature simple.
         if backbone == "remembr" and (remembr_builder is None or remembr_planner is None):
@@ -448,11 +456,16 @@ class EpisodeRunner:
                 # lies within the success radius of the agent. Emit action=0.
                 action = ACTION_STOP
             else:
-                action = self.planner.step_controller(
+                action = self._waypoint_action(
                     current_candidate,
                     step.agent_state.position,
                     step.agent_state.rotation_yaw,
                 )
+                if self._waypoint_force_repropose:
+                    # Follower reports the waypoint reached/unreachable → drop it
+                    # so the next tick re-proposes a fresh target (locomotion
+                    # never STOPs; only keyword-STOP / stop_signal ends an ep).
+                    current_candidate = None
 
             # Step the env.
             action_counts[action] = action_counts.get(action, 0) + 1
@@ -712,6 +725,71 @@ class EpisodeRunner:
         if isinstance(raw, (int, np.integer)):
             return int(raw)
         return ACTION_STOP
+
+    def _init_waypoint_follower(self) -> None:
+        """Build a navmesh ShortestPathFollower reused for steering toward the
+        agent's self-chosen waypoints. Checks for a sim BEFORE importing habitat
+        so the sim-less path (cached mode / unit tests) never needs habitat.
+        Leaves ``self.follower = None`` when the source has no sim, in which case
+        ``_waypoint_action`` falls back to the grid step controller."""
+        sim = self.source.get_sim()
+        if sim is None:
+            self.follower = None
+            return
+        from habitat.tasks.nav.shortest_path_follower import ShortestPathFollower
+
+        self.follower = ShortestPathFollower(
+            sim, goal_radius=self._waypoint_goal_radius, return_one_hot=False
+        )
+
+    def _waypoint_action(self, candidate, agent_pos, agent_yaw) -> int:
+        """Next discrete action toward the chosen waypoint via the navmesh
+        ShortestPathFollower (Phase-2 C1 fix).
+
+        Snaps the waypoint to the navmesh and asks the follower for the action
+        toward it. ``None`` from the follower (waypoint reached or unreachable)
+        sets ``_waypoint_force_repropose`` and returns a TURN — locomotion never
+        emits ACTION_STOP (only the keyword-STOP / explicit stop_signal ends an
+        episode). When no sim is available (cached mode) it degrades to the
+        occupancy-grid ``step_controller`` so that path keeps working.
+        """
+        from .frontier_planner import ACTION_TURN_LEFT
+
+        self._waypoint_force_repropose = False
+        if self.follower is None:
+            self._init_waypoint_follower()
+        if self.follower is None:
+            return self.planner.step_controller(candidate, agent_pos, agent_yaw)
+
+        wx, wz = float(candidate.world_xy[0]), float(candidate.world_xy[1])
+        goal = np.array([wx, float(agent_pos[1]), wz], dtype=np.float32)
+        sim = self.source.get_sim()
+        if sim is not None:
+            try:
+                sp = sim.pathfinder.snap_point(goal)
+                snapped = np.array([float(sp[0]), float(sp[1]), float(sp[2])],
+                                   dtype=np.float32)
+                if np.all(np.isfinite(snapped)):
+                    goal = snapped
+            except Exception:
+                pass  # off-navmesh or unsupported snap → steer to the raw point
+
+        raw = self.follower.get_next_action(goal)
+        if raw is None:
+            # Reached/unreachable: drop the waypoint and re-propose; don't STOP.
+            self._waypoint_force_repropose = True
+            return ACTION_TURN_LEFT
+        if isinstance(raw, str):
+            from .habitat_env import _ACTION_NAMES
+            try:
+                return _ACTION_NAMES.index(raw)
+            except ValueError:
+                self._waypoint_force_repropose = True
+                return ACTION_TURN_LEFT
+        if isinstance(raw, (int, np.integer)):
+            return int(raw)
+        self._waypoint_force_repropose = True
+        return ACTION_TURN_LEFT
 
     def _build_keyframe(self, step: Step) -> Keyframe:
         # Cached mode may have already produced a caption + embeddings.

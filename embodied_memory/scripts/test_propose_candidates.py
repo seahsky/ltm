@@ -1127,6 +1127,72 @@ def case_remembr_parse():
     print("  case remembr_parse (goto/explore/xy/tool/unparseable): OK")
 
 
+def case_waypoint_action_navmesh():
+    """Navmesh waypoint controller: _waypoint_action snaps the chosen waypoint
+    to the navmesh and maps the ShortestPathFollower's return to an action;
+    None → TURN + re-propose signal (never STOP); no sim → grid fallback."""
+    from embodied_memory.frontier_planner import ACTION_TURN_LEFT
+
+    cand = _make_cand(7, 2.0, 3.0, "memory")
+    pos = np.array([0.0, 0.5, 0.0], dtype=np.float32)
+    yaw = 0.0
+
+    # --- with sim + follower: name/int returns map; goal snapped to navmesh ---
+    snap_calls = {"goal": None}
+    getnext_calls = {"goal": None}
+
+    def _snap(goal):
+        snap_calls["goal"] = np.asarray(goal, dtype=np.float32)
+        return np.array([2.1, 0.0, 3.1], dtype=np.float32)  # navmesh-snapped
+
+    holder = {"next": "move_forward"}
+
+    def _getnext(goal):
+        getnext_calls["goal"] = np.asarray(goal, dtype=np.float32)
+        return holder["next"]
+
+    sim = SimpleNamespace(pathfinder=SimpleNamespace(snap_point=_snap))
+    r = EpisodeRunner.__new__(EpisodeRunner)
+    r.backbone = "remembr"
+    r._waypoint_goal_radius = 0.5
+    r._waypoint_force_repropose = False
+    r.source = SimpleNamespace(get_sim=lambda: sim)
+    r.follower = SimpleNamespace(get_next_action=_getnext)
+
+    assert r._waypoint_action(cand, pos, yaw) == 1, "move_forward → action id 1"
+    assert r._waypoint_force_repropose is False, "a real action must not re-propose"
+    # snap_point got the 3D goal [wx, agent_y, wz]; follower got the SNAPPED goal.
+    assert np.allclose(snap_calls["goal"], [2.0, 0.5, 3.0]), snap_calls["goal"]
+    assert np.allclose(getnext_calls["goal"], [2.1, 0.0, 3.1]), getnext_calls["goal"]
+
+    holder["next"] = 3  # int action id passes through
+    assert r._waypoint_action(cand, pos, yaw) == 3, "int id passthrough"
+
+    # --- None → TURN_LEFT + re-propose signal, never STOP ---
+    holder["next"] = None
+    got = r._waypoint_action(cand, pos, yaw)
+    assert got == ACTION_TURN_LEFT, f"follower None → TURN_LEFT, got {got}"
+    assert r._waypoint_force_repropose is True, "None must signal re-propose"
+
+    # --- non-finite snap → raw [wx, agent_y, wz] goal used ---
+    holder["next"] = "move_forward"
+    sim.pathfinder.snap_point = lambda goal: np.array(
+        [np.nan, np.nan, np.nan], dtype=np.float32)
+    r._waypoint_action(cand, pos, yaw)
+    assert np.allclose(getnext_calls["goal"], [2.0, 0.5, 3.0]), \
+        f"non-finite snap → raw goal, got {getnext_calls['goal']}"
+
+    # --- no sim (cached mode) → grid step_controller fallback ---
+    r.follower = None
+    sc_calls = {"n": 0}
+    r.planner = SimpleNamespace(
+        step_controller=lambda c, p, y: (sc_calls.__setitem__("n", sc_calls["n"] + 1) or 99))
+    r.source = SimpleNamespace(get_sim=lambda: None)
+    got = r._waypoint_action(cand, pos, yaw)
+    assert got == 99 and sc_calls["n"] == 1, "no sim → step_controller fallback"
+    print("  case waypoint_action_navmesh (snap+map; None→turn+repropose; no-sim→grid): OK")
+
+
 def main() -> int:
     print("Run-4/Run-5 sanity tests")
     case_a_stop_short_circuit()
@@ -1159,6 +1225,7 @@ def main() -> int:
     case_remembr_grounding()
     case_remembr_llm_loop()
     case_mem_cos_full_calibration()
+    case_waypoint_action_navmesh()
     print("All cases passed.")
     return 0
 
