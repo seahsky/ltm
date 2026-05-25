@@ -157,9 +157,13 @@ class FrontierPhysicsScorer(Scorer):
     # SBERT scale for the "there is a {}" query (diagnose_sbert_cosines.py on real
     # minival captions): non-match mean ~0.22 (p90 ~0.32), match mean ~0.44.
     #   cos<=0.30 -> cos_norm 0    (non-match, loses to a strong frontier ~0.97)
-    #   cos>=0.45 -> cos_norm 1.0  (solid match saturates; wins when close)
+    #   cos>=0.42 -> cos_norm 1.0  (match saturates; wins when close)
+    # FULL sits at/below the measured match mean (~0.44, diagnose_sbert_cosines.py)
+    # so a genuine match saturates and can beat a strong frontier; the live mini
+    # had only non-matches (~0.235, inspect_memory_rerank on mini-s3) which stay
+    # below NULL → score 0, so lowering FULL cannot re-introduce wrong-pick hurting.
     _MEM_COS_NULL = 0.30   # cos at-or-below this contributes nothing (~nonmatch p75)
-    _MEM_COS_FULL = 0.45   # cos at-or-above this saturates the bonus (~match mean)
+    _MEM_COS_FULL = 0.42   # cos at-or-above this saturates the bonus (<= match mean)
     _MEM_DIST_WEIGHT = 0.20
 
     def score(self, candidate: str, candidate_embedding: np.ndarray, context: Dict[str, Any]) -> float:

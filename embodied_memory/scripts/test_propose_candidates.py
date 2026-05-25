@@ -1074,8 +1074,8 @@ def case_mem_cos_full_calibration():
     cos_null = _const("_MEM_COS_NULL")
     cos_full = _const("_MEM_COS_FULL")
     dist_w = _const("_MEM_DIST_WEIGHT")
-    # The recalibration this guards: saturate at the measured SBERT match scale.
-    assert abs(cos_full - 0.45) < 1e-9, f"_MEM_COS_FULL={cos_full} (expected 0.45)"
+    # The recalibration this guards: saturate at/below the measured SBERT match mean.
+    assert abs(cos_full - 0.42) < 1e-9, f"_MEM_COS_FULL={cos_full} (expected 0.42)"
 
     def _dist_score(d):
         return 0.0 if d <= 0 else max(0.0, 1.0 - abs(d - 2.0) / 4.0)
@@ -1098,7 +1098,7 @@ def case_mem_cos_full_calibration():
     # baseline non-match (cos 0.22) still loses to a strong frontier (raw 0.97)
     assert score("memory", 0.22, 3.2) < score("frontier", 0.97, 1.9), \
         (score("memory", 0.22, 3.2), score("frontier", 0.97, 1.9))
-    print("  case mem_cos_full_calibration (constant pinned 0.45; SBERT match wins, non-match loses): OK")
+    print("  case mem_cos_full_calibration (constant pinned 0.42; SBERT match wins, non-match loses): OK")
 
 
 def case_remembr_parse():
