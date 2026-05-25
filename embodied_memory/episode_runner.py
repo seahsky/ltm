@@ -215,6 +215,8 @@ class EpisodeRunner:
                 "n_remembr_chosen": int(ep_metrics.get("n_remembr_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
+                "min_distance_to_goal": ep_metrics.get("min_distance_to_goal"),
+                "success_1m": bool(ep_metrics.get("success_1m", False)),
                 "grid_cells_free": int(ep_metrics.get("grid_cells_free", 0)),
                 "grid_cells_occupied": int(ep_metrics.get("grid_cells_occupied", 0)),
                 "grid_cells_unknown": int(ep_metrics.get("grid_cells_unknown", 0)),
@@ -289,6 +291,17 @@ class EpisodeRunner:
         n_frontier_chosen = 0
         n_remembr_chosen = 0
         n_stop_signals = 0
+        # Closest the agent ever gets to a goal viewpoint over the episode
+        # (geodesic). success@0.1m is perception-bound with caption-only
+        # detection; min_d2g + success@1m are the reframed reach diagnostics.
+        min_d2g = float("inf")
+
+        def _track_d2g(s) -> None:
+            nonlocal min_d2g
+            v = s.info.get("distance_to_goal") if s.info else None
+            if v is not None:
+                min_d2g = min(min_d2g, float(v))
+
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
         last_propose_step: int = -10**9  # forces a proposal on the first loop tick
@@ -303,6 +316,7 @@ class EpisodeRunner:
         # path skips the perception/memory preamble entirely (no bridge, no
         # CLIP, no captioner) — it only needs the goal and the follower.
         self.planner.update(step.depth, step.agent_state.position, step.agent_state.rotation_yaw)
+        _track_d2g(step)
         if not is_oracle:
             keyframe = self._build_keyframe(step)
             self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
@@ -329,6 +343,7 @@ class EpisodeRunner:
                 self.planner.update(
                     step.depth, step.agent_state.position, step.agent_state.rotation_yaw
                 )
+                _track_d2g(step)
                 if step.done:
                     break
                 continue
@@ -473,6 +488,7 @@ class EpisodeRunner:
             self.planner.update(
                 step.depth, step.agent_state.position, step.agent_state.rotation_yaw
             )
+            _track_d2g(step)
 
             # Re-bearing-rel is needed for the controller next iteration; we
             # recompute the candidate's bearing relative to the current yaw.
@@ -515,6 +531,14 @@ class EpisodeRunner:
         spl = float(step.info.get("spl", 1.0 if success else 0.0))
         soft_spl = float(step.info.get("softspl", step.info.get("soft_spl", spl)))
         distance_to_goal = step.info.get("distance_to_goal")
+        # Reframed reach diagnostics: success@0.1m is perception-bound (caption
+        # detection can't localize to 0.1m), so the gate keys on soft-SPL plus
+        # success@1m = "agent came within 1.0m of a goal viewpoint at any step"
+        # (STOP-independent reach), with min_d2g as the continuous companion.
+        min_distance_to_goal = None if min_d2g == float("inf") else float(min_d2g)
+        success_1m = bool(
+            min_distance_to_goal is not None and min_distance_to_goal < 1.0
+        )
         ep.success = success
         ep.spl = spl
 
@@ -577,6 +601,8 @@ class EpisodeRunner:
         ep_log["n_frontier_chosen"] = n_frontier_chosen
         ep_log["n_remembr_chosen"] = n_remembr_chosen
         ep_log["n_stop_signals"] = n_stop_signals
+        ep_log["min_distance_to_goal"] = min_distance_to_goal
+        ep_log["success_1m"] = success_1m
         ep_log["grid_cells_free"] = grid_stats["cells_free"]
         ep_log["grid_cells_occupied"] = grid_stats["cells_occupied"]
         ep_log["grid_cells_unknown"] = grid_stats["cells_unknown"]
@@ -592,6 +618,8 @@ class EpisodeRunner:
             "spl": spl,
             "soft_spl": soft_spl,
             "distance_to_goal": distance_to_goal,
+            "min_distance_to_goal": min_distance_to_goal,
+            "success_1m": success_1m,
             "rerank_calls": rerank_calls,
             "rerank_disagreements": rerank_disagreements,
             "retrieval_hits": retrieval_hits,

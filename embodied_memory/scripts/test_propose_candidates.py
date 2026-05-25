@@ -548,6 +548,11 @@ def case_oracle_short_circuit():
     assert not propose_calls, "oracle must NOT call _propose_candidates"
     assert oracle_calls, "oracle must call _oracle_action"
     assert ep_metrics["success"] is False
+    # Reframed reach diagnostics: min d2g tracked over the episode (step1.info
+    # d2g=5.0; step0.info={} is skipped), success@1m False (5.0 ≥ 1.0).
+    assert ep_metrics["min_distance_to_goal"] == 5.0, ep_metrics.get("min_distance_to_goal")
+    assert ep_metrics["success_1m"] is False
+    assert ep_log["min_distance_to_goal"] == 5.0 and ep_log["success_1m"] is False
     assert ep_log["grid_cells_unknown"] == 40000, \
         f"grid stats not logged: {ep_log.get('grid_cells_unknown')}"
     assert ep_log["bridge_stats_after"] == {}, "None bridge must log empty stats"
