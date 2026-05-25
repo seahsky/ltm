@@ -792,14 +792,12 @@ class ReMEmbRPlanner:
                  - retrieve_from_time(t)
                  Reply with a single line in one of these formats:
                      TOOL: <name>(<arg>)
-                     ANSWER: x=<float>, z=<float>, confidence=<float>"
+                     ANSWER: goto_t=<timestep>, confidence=<float>
+                     ANSWER: explore"
 
-        USER:   "Goal: <goal>. Current xyz: <pose>. Pick a waypoint."
+        USER: "Goal: find a <goal>. Current position: <pose>. ANSWER with a timestep to navigate toward, or explore."
 
-        Loop up to ``max_tool_calls`` rounds; if no ANSWER, fall back to
-        ``_stub_propose``. Parsing intentionally permissive — small LLMs
-        often emit slightly malformed lines; we accept anything that
-        regex-matches the expected shape.
+        Loop up to ``max_tool_calls`` rounds; a goto_t/x,z answer is grounded to a remembered position via ``_ground_answer``, ``explore`` (or no answer within the budget) returns ``[]`` to defer to frontier exploration. Parsing is permissive — small LLMs emit slightly malformed lines.
         """
         try:
             import torch  # noqa: F401
@@ -855,6 +853,7 @@ class ReMEmbRPlanner:
                 break
 
         if answer is None:
+            trace.tool_calls.append({"tool": "budget_exhausted_defer"})
             return []  # no usable answer after the tool budget → defer to frontier
 
         cand = self._ground_answer(goal, answer, agent_pose, agent_yaw, trace)

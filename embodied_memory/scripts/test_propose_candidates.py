@@ -1033,6 +1033,10 @@ def case_remembr_llm_loop():
     planner._llm_complete = lambda prompt: "ANSWER: explore"
     assert planner._llm_propose("chair", agent, 0.0, 3, rb.PlannerTrace(goal="chair")) == []
 
+    # only TOOL replies → budget exhausted, no ANSWER → defer ([])
+    planner._llm_complete = lambda prompt: "TOOL: retrieve_from_text(chair)"
+    assert planner._llm_propose("chair", agent, 0.0, 3, rb.PlannerTrace(goal="chair")) == []
+
     print("  case remembr_llm_loop (tool->goto grounds; explore->defer): OK")
 
 
