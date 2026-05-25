@@ -885,19 +885,29 @@ def _rel_bearing(dx: float, dz: float, agent_yaw: float) -> float:
 def _parse_planner_reply(reply: str) -> Dict[str, Any]:
     """Permissive parser for the LLM's reply line.
 
-    Accepts either ``TOOL: name(arg)`` or
-    ``ANSWER: x=..., z=..., confidence=...``. Returns
-    ``{"kind": "tool"|"answer"|"unparseable", ...}``.
+    Accepts ``TOOL: name(arg)`` or one of the ANSWER forms:
+      - ``ANSWER: goto_t=<int>, confidence=<float>`` → navigate to a remembered
+        observation (the timestep is grounded to its stored position downstream).
+      - ``ANSWER: explore`` → nothing goal-relevant remembered yet; defer.
+      - ``ANSWER: x=<float>, z=<float>, confidence=<float>`` → legacy free-form
+        coordinate, kept only for the snap-to-nearest-memory robustness fallback.
+    Returns ``{"kind": "goto"|"explore"|"answer_xy"|"tool"|"unparseable", ...}``.
     """
     s = reply.strip().splitlines()[0] if reply.strip() else ""
     low = s.lower()
     if low.startswith("answer:"):
+        if "explore" in low:
+            return {"kind": "explore"}
+        t = _extract_float(s, "goto_t=")
+        if t is not None:
+            conf = _extract_float(s, "confidence=", default=0.5)
+            return {"kind": "goto", "timestep": int(t), "conf": conf}
         x = _extract_float(s, "x=")
         z = _extract_float(s, "z=")
-        conf = _extract_float(s, "confidence=", default=0.5)
-        if x is None or z is None:
-            return {"kind": "unparseable"}
-        return {"kind": "answer", "xz_conf": (x, z, conf)}
+        if x is not None and z is not None:
+            conf = _extract_float(s, "confidence=", default=0.5)
+            return {"kind": "answer_xy", "xz_conf": (x, z, conf)}
+        return {"kind": "unparseable"}
     if low.startswith("tool:"):
         body = s.split(":", 1)[1].strip()
         if "(" in body and body.endswith(")"):

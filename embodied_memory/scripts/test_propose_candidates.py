@@ -919,6 +919,32 @@ def case_keyword_stop():
     print("  case keyword_stop (names goal→STOP; room/far/early→no STOP): OK")
 
 
+def case_remembr_parse():
+    """Run-6.3 planner grammar: ANSWER references a remembered timestep
+    (goto_t=) or defers (explore); legacy x,z still parses for the snap
+    fallback; TOOL and unparseable unchanged."""
+    rb = _load_file_as("embodied_memory._rb_parse",
+                       _EMB_DIR / "remembr_backbone.py")
+    p = rb._parse_planner_reply
+
+    r = p("ANSWER: goto_t=2, confidence=0.8")
+    assert r["kind"] == "goto" and r["timestep"] == 2 and abs(r["conf"] - 0.8) < 1e-6, r
+
+    assert p("ANSWER: explore")["kind"] == "explore"
+    assert p("answer: EXPLORE the next room")["kind"] == "explore"  # case-insensitive substring
+
+    r = p("ANSWER: x=1.0, z=2.0, confidence=0.4")
+    assert r["kind"] == "answer_xy" and r["xz_conf"] == (1.0, 2.0, 0.4), r
+
+    r = p("TOOL: retrieve_from_text(chair)")
+    assert r["kind"] == "tool" and r["tool_name"] == "retrieve_from_text" and r["tool_arg"] == "chair", r
+
+    assert p("blah blah")["kind"] == "unparseable"
+    assert p("ANSWER: nonsense")["kind"] == "unparseable"
+
+    print("  case remembr_parse (goto/explore/xy/tool/unparseable): OK")
+
+
 def main() -> int:
     print("Run-4/Run-5 sanity tests")
     case_a_stop_short_circuit()
@@ -947,6 +973,7 @@ def main() -> int:
     case_astar_reachable_fallback()
     case_propose_reachability_filter()
     case_keyword_stop()
+    case_remembr_parse()
     print("All cases passed.")
     return 0
 
