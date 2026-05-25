@@ -888,6 +888,13 @@ def case_keyword_stop():
     assert cfg.STOP_USE_KEYWORD if hasattr(cfg, "STOP_USE_KEYWORD") else True  # default keyword
     builder = rb.ReMEmbRBuilder(cfg, text_embed_fn=lambda s: np.zeros(4, dtype=np.float32))
     planner = rb.ReMEmbRPlanner(builder, cfg)
+    # Hermetic unit test: the STOP knobs are class attrs read from REMEMBR_STOP_* at
+    # import time, and scripts/race-setup.sh exports REMEMBR_STOP_MIN_STEP=20 (> the
+    # current_step=12 below) which short-circuits _maybe_stop at the step floor. Pin
+    # them so this test of the keyword-match logic is independent of live-run tuning.
+    planner.STOP_USE_KEYWORD = True
+    planner.STOP_DIST_THRESHOLD = 1.5
+    planner.STOP_MIN_STEP = 8
     agent = np.array([0.6, 0.0, 0.0], dtype=np.float32)
 
     # goal named within 1.5 m of agent (and strictly older than current_step) → STOP
