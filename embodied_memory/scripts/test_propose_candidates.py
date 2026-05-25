@@ -1041,51 +1041,56 @@ def case_remembr_llm_loop():
 
 
 def case_mem_cos_full_calibration():
-    """Recalibrated _MEM_COS_FULL=0.25: a true sighting (image-text cos ~0.25,
-    nearby) out-scores a strong frontier; a baseline non-sighting (~0.228) does
-    not. Exercises the REAL FrontierPhysicsScorer from memory_bridge (faiss
-    stubbed so the module imports without the LTM backend)."""
-    import sys, types
-    # memory_bridge is already cached as a stub in sys.modules (from _bootstrap).
-    # Load the real file under a distinct name so the stub isn't returned.
-    # memory_bridge.py itself imports dialogue_memory.* and faiss — stub the
-    # heavy deps first so the file executes locally.  If ANY import still fails
-    # (e.g. a dialogue_memory sub-dep that needs a real C extension), the SKIP
-    # path keeps the suite green; on RACE everything is installed and the test
-    # runs for real.
-    for mod in (
-        "faiss",
-        "sentence_transformers",
-        "sklearn",
-        "sklearn.cluster",
-        "sklearn.metrics",
-        "sklearn.metrics.pairwise",
-    ):
-        if mod not in sys.modules:
-            sys.modules[mod] = types.ModuleType(mod)
-    try:
-        mb = _load_file_as("embodied_memory._mb_costest",
-                           _EMB_DIR / "memory_bridge.py")
-    except Exception as e:
-        print(f"  case mem_cos_full_calibration: SKIP (import failed: {type(e).__name__})")
-        return
+    """Recalibrated _MEM_COS_FULL=0.25: a true image-text sighting (cos ~0.25,
+    nearby) out-scores a baseline frontier; a non-sighting (~0.228) loses to a
+    strong frontier.
 
-    scorer = mb.FrontierPhysicsScorer()
-    assert abs(scorer._MEM_COS_FULL - 0.25) < 1e-9, scorer._MEM_COS_FULL
-    FC = mb.FrontierCandidate
+    FrontierPhysicsScorer lives in memory_bridge.py, which can't be imported
+    without the faiss/LTM backend (absent locally AND, per remembr-run63/64, the
+    dialogue_memory import chain still fails under stubs). So this always-running
+    guard instead (1) PINS the three real scorer constants by reading the source,
+    and (2) replays the exact FrontierPhysicsScorer.score formula with them — the
+    same math inspect_memory_rerank.py mirrors. Reading the constants from source
+    means the guard tracks the real values and can't silently drift."""
+    import re
+    src = (_EMB_DIR / "memory_bridge.py").read_text(encoding="utf-8")
+
+    def _const(name):
+        # Anchor to an assignment line (leading indent only) so we match the real
+        # constant, not a mention inside the explanatory comment (which references
+        # the old "_MEM_COS_FULL=0.32" value in prose).
+        m = re.search(rf"^\s*{name}\s*=\s*([0-9.]+)", src, re.MULTILINE)
+        assert m is not None, f"{name} assignment not found in memory_bridge.py"
+        return float(m.group(1))
+
+    cos_null = _const("_MEM_COS_NULL")
+    cos_full = _const("_MEM_COS_FULL")
+    dist_w = _const("_MEM_DIST_WEIGHT")
+    # The recalibration this guards: saturate at the real ViT-B/32 sighting scale.
+    assert abs(cos_full - 0.25) < 1e-9, f"_MEM_COS_FULL={cos_full} (expected 0.25)"
+
+    def _dist_score(d):
+        return 0.0 if d <= 0 else max(0.0, 1.0 - abs(d - 2.0) / 4.0)
 
     def score(source, raw, dist, bearing=0.0):
-        c = FC(candidate_id=0, world_xy=np.zeros(2, dtype=np.float32), grid_rc=(-1, -1),
-               distance_m=dist, bearing_rad=bearing, cluster_size=0, raw_score=raw, source=source)
-        return scorer.score("go to (x,y)", np.zeros(4, dtype=np.float32), {"frontier_candidate": c})
+        # mirrors FrontierPhysicsScorer.score (memory_bridge.py) exactly
+        if source == "memory":
+            span = cos_full - cos_null
+            cn = (raw - cos_null) / span if span > 0 else 0.0
+            cn = min(1.0, max(0.0, cn))
+            s = (1.0 - dist_w) * cn + dist_w * _dist_score(dist)
+        else:
+            b = max(0.0, 1.0 - abs(bearing) / np.pi)
+            s = 0.5 * raw + 0.3 * b + 0.2 * _dist_score(dist)
+        return float(np.clip(s, 0.0, 1.0))
 
-    # a true sighting (cos 0.25) nearby beats a baseline frontier (raw 0.7)
+    # a true sighting (cos 0.25, nearby) beats a baseline frontier (raw 0.70)
     assert score("memory", 0.25, 2.0) > score("frontier", 0.70, 1.5), \
         (score("memory", 0.25, 2.0), score("frontier", 0.70, 1.5))
     # baseline non-sighting (cos 0.228) still loses to a strong frontier (raw 0.97)
     assert score("memory", 0.228, 3.2) < score("frontier", 0.97, 1.9), \
         (score("memory", 0.228, 3.2), score("frontier", 0.97, 1.9))
-    print("  case mem_cos_full_calibration (sighting wins, baseline loses): OK")
+    print("  case mem_cos_full_calibration (constant pinned 0.25; sighting wins, baseline loses): OK")
 
 
 def case_remembr_parse():
