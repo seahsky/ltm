@@ -38,49 +38,55 @@ before any episode succeeds, so the Phase-1→Phase-2 gate as written (mean SPL
 is inert/harmful". See `runs/abl-s{1,2,3}/summary.json` for the latest numbers
 and `runs/abl-s{1,2,3}-v{1,2,3}/` for the development history.
 
-**What's still missing**: operationally running the real **ReMEmbR backbone**
-on a CUDA host (the code path exists at `embodied_memory/remembr_backbone.py`
-and `--backbone remembr` is wired; weights aren't pulled yet — this is why
-cosines cap at ~0.27 vs the 0.32 saturation point and binary success stays
-at 0) and multi-scene lifelong eval beyond 2-scene minival. The remaining
-code seams (consolidator R-weighting of failed episodes, embodied-data
-training of `train_predictor` / `train_scorer`, coarse-layer affordance
-learning) are all wired in this branch — see `models/README.md`
-"Phase-2 operator runbook" for the exact commands.
+**Phase-2 outcome (2026-05-25, real ReMEmbR — see `PHASE2_ABLATION_REPORT.md`
+Run 7 for the full arc).** The real ReMEmbR backbone (Qwen2-VL-2B captioner +
+Qwen2.5-7B planner) now runs in the loop on a CUDA host (the "weights aren't
+pulled" note above is stale). Two fixes made the ablation meaningful:
+a **navmesh point-goal controller** (`episode_runner._waypoint_action` steers
+to the agent's self-chosen waypoint via Habitat's `ShortestPathFollower`,
+replacing the grid-A\* that couldn't route — this fixed navigation), and a
+**re-index of the LTM onto discriminative SBERT caption-text** (the CLIP
+image-text cosine was flat ~0.25 and made memory pick wrong instances). The
+gate was reframed to soft-SPL (binary SPL@0.1 m is perception-bound: caption
+detection can't localize to the 0.1 m success radius). **Final 3×30 G4
+(`runs/abl-s{1,2,3}-qwen`): C1 PASS (navigation works, soft-SPL S1 ≈ 0.089),
+C2 FAIL — the hierarchical LTM is net-neutral (soft-SPL S3−S1 = −0.009, n.s.;
+S3 ~18 steps slower).** This is a structural property of the eval, not a bug:
+ObjectNav is single-goal-per-episode, so the LTM's recall-past-sighting value
+rarely applies. The memory mechanism is verified correct and discriminative.
 
 ## Next milestone
 
-**Phase 2: integrate real ReMEmbR.** Phase 1 confirmed the LTM machinery
-works end-to-end and produces a small but real soft-SPL signal once memory
-gets to *propose* candidates (not just rerank). The remaining headroom — and
-the path to non-zero hard SPL — is in the perception+planning backbone.
+**Lifelong / revisit eval.** The Phase-2 result shows the LTM is net-neutral on
+the single-goal-per-episode `val_mini`; a positive memory effect needs an eval
+where past observations are actually relevant — the same scene traversed
+repeatedly with the LTM carrying over, and recurring goals so a past sighting is
+retrievable and useful. This is eval-infrastructure work, not a fix to the
+memory stack. A separate lever for non-zero **binary** SPL is a real object
+detector / precise goal-approach (the 0.1 m localization the captioner can't
+provide). The remaining code seams (consolidator R-weighting, embodied-data
+training of `train_predictor` / `train_scorer`, coarse-layer affordance
+learning) are wired — see `models/README.md` "Phase-2 operator runbook".
 
-When ReMEmbR lands, re-run the same 3-setting ablation (`--setting 1|2|3` in
-`embodied_memory.run_hm3d_pol`); the harness and paired-bootstrap analyzer
-(`embodied_memory/scripts/analyze_ablation.py`) are already wired. Setting 1
-will then be paper-faithful (vanilla ReMEmbR with native flat keyframe
-memory) rather than the current memory-off stand-in.
-
-Headline metrics: ObjectNav SPL, success rate, steps-to-success, and — for
-settings 2–3 — `n_memory_chosen`, `retrieval_hits`, and the paired soft-SPL
-delta from `analyze_ablation.py`.
+The 3-setting ablation + paired-bootstrap analyzer
+(`embodied_memory/scripts/analyze_ablation.py`, soft-SPL-primary gate) are the
+measurement harness. Headline metrics: soft-SPL S3−S1 (primary), `success@1m` /
+`min_d2g` (reach diagnostics), `n_memory_chosen` / `n_remembr_chosen`, and the
+honest binary SPL@0.1 m.
 
 ## Running the ablation
 
 ```bash
-conda activate ltm-embodied
-# Setting 1: memory-off baseline (STM/LTM/rerank all disabled)
-python -m embodied_memory.run_hm3d_pol --mode live --scene all \
-    --setting 1 --n-episodes 30 --target any --out-dir runs/abl-s1
-# Setting 2: STM only
-python -m embodied_memory.run_hm3d_pol --mode live --scene all \
-    --setting 2 --n-episodes 30 --target any --out-dir runs/abl-s2
-# Setting 3: full system + memory-injected candidates
-python -m embodied_memory.run_hm3d_pol --mode live --scene all \
-    --setting 3 --n-episodes 30 --target any --out-dir runs/abl-s3
-# Paired-bootstrap delta report
+conda activate ltm-embodied   # on RACE: source scripts/race-setup.sh
+# IMPORTANT: pass --backbone remembr for the real ReMEmbR ablation. Omitting it
+# silently uses the 'frontier' stand-in (a wrong-backbone G4 cost a re-run).
+for s in 1 2 3; do   # 1=memory-off, 2=STM-only, 3=full system
+  python -m embodied_memory.run_hm3d_pol --mode live --scene all --backbone remembr \
+      --setting $s --n-episodes 30 --target any --out-dir runs/abl-s$s-qwen
+done
+# Paired-bootstrap delta report + soft-SPL-primary Phase-2 gate
 python embodied_memory/scripts/analyze_ablation.py \
-    runs/abl-s1 runs/abl-s2 runs/abl-s3
+    runs/abl-s1-qwen runs/abl-s2-qwen runs/abl-s3-qwen
 ```
 
 `--scene all` auto-discovers minival scenes from
