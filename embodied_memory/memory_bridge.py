@@ -113,6 +113,15 @@ class EmbodiedRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+# Query phrasing for goal-directed LTM retrieval against the SBERT-indexed
+# caption layer. "there is a {}" gave the widest goal-vs-caption separation
+# (diagnose_sbert_cosines.py on real minival captions: match mean 0.44 vs
+# non-match 0.22, separation +0.223 — best of 5 phrasings; "a photo of a {}"
+# was +0.177). Used for the fine-layer query, the rerank retrieval query, and
+# the coarse-layer category-prior seeds so seed and query share a phrasing.
+_GOAL_QUERY_TEMPLATE = "there is a {}"
+
+
 # ----------------------------------------------------------------------
 # Frontier physics scorer (S_phys)
 # ----------------------------------------------------------------------
@@ -144,12 +153,13 @@ class FrontierPhysicsScorer(Scorer):
     # indoor caption ~0.2-0.3 — unlike the prior CLIP image-text signal which was
     # flat (~0.25 sighting vs ~0.228 baseline → memory picked wrong instances and
     # HURT, G4 + mini-ablation). Saturate at the match scale so a real match wins
-    # while a non-match loses to a strong frontier. NOTE: provisional text-scale
-    # values — verify/tune against the SBERT cosine distribution in the next smoke.
-    #   cos=0.30 -> cos_norm 0    (non-match, loses to a strong frontier ~0.97)
-    #   cos=0.50 -> cos_norm 1.0  (match saturates; wins when close + frontier weak)
-    _MEM_COS_NULL = 0.30   # cos at-or-below this contributes nothing
-    _MEM_COS_FULL = 0.50   # cos at-or-above this saturates the bonus
+    # while a non-match loses to a strong frontier. Calibrated to the MEASURED
+    # SBERT scale for the "there is a {}" query (diagnose_sbert_cosines.py on real
+    # minival captions): non-match mean ~0.22 (p90 ~0.32), match mean ~0.44.
+    #   cos<=0.30 -> cos_norm 0    (non-match, loses to a strong frontier ~0.97)
+    #   cos>=0.45 -> cos_norm 1.0  (solid match saturates; wins when close)
+    _MEM_COS_NULL = 0.30   # cos at-or-below this contributes nothing (~nonmatch p75)
+    _MEM_COS_FULL = 0.45   # cos at-or-above this saturates the bonus (~match mean)
     _MEM_DIST_WEIGHT = 0.20
 
     def score(self, candidate: str, candidate_embedding: np.ndarray, context: Dict[str, Any]) -> float:
@@ -507,10 +517,14 @@ class EmbodiedMemoryBridge:
             # the prior toward places the agent already failed.
             has_evidence = bool(best_room) and (best_rate or 0.0) > 0.0
             if self.clip_encoder is not None:
+                # Seed in the same phrasing the fine layer is queried with
+                # (_GOAL_QUERY_TEMPLATE) so coarse priors and decision-time
+                # queries share an SBERT phrasing.
+                base = _GOAL_QUERY_TEMPLATE.format(cat)
                 if has_evidence:
-                    prompt = f"a photo of a {cat} in a {best_room.replace('_', ' ')}"
+                    prompt = f"{base} in a {best_room.replace('_', ' ')}"
                 else:
-                    prompt = f"a photo of a {cat}"
+                    prompt = base
             else:
                 if has_evidence:
                     prompt = f"category prior: agent searches for a {cat} (typically in {best_room})"
@@ -604,7 +618,7 @@ class EmbodiedMemoryBridge:
         target_category: Optional[str],
         planner_world_xys: Optional[List[np.ndarray]] = None,
         top_k: int = 3,
-        min_cosine: float = 0.25,
+        min_cosine: float = 0.23,
         dedup_radius_m: float = 1.5,
         max_distance_m: float = 30.0,
     ) -> List[FrontierCandidate]:
@@ -634,7 +648,7 @@ class EmbodiedMemoryBridge:
         # (same encoder the layer was indexed with) → discriminative goal-vs-
         # caption cosine, not the flat CLIP image-text cosine.
         query = self._ltm_encode_text(
-            f"a photo of a {target_category}"
+            _GOAL_QUERY_TEMPLATE.format(target_category)
         ).astype(np.float32)
 
         # Over-fetch: we'll discard scene-mismatched and threshold-failing hits.
@@ -787,7 +801,7 @@ class EmbodiedMemoryBridge:
         else:
             if target_category:
                 query_emb = self._ltm_encode_text(
-                    f"a photo of a {target_category}"
+                    _GOAL_QUERY_TEMPLATE.format(target_category)
                 ).astype(np.float32)
             else:
                 query_emb = self._ltm_encode_text(query_text).astype(np.float32)
