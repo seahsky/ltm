@@ -896,7 +896,8 @@ def _parse_planner_reply(reply: str) -> Dict[str, Any]:
     s = reply.strip().splitlines()[0] if reply.strip() else ""
     low = s.lower()
     if low.startswith("answer:"):
-        if "explore" in low:
+        payload = low[len("answer:"):].lstrip()
+        if payload.startswith("explore"):
             return {"kind": "explore"}
         t = _extract_float(s, "goto_t=")
         if t is not None:

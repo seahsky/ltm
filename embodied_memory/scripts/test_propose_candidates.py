@@ -942,6 +942,14 @@ def case_remembr_parse():
     assert p("blah blah")["kind"] == "unparseable"
     assert p("ANSWER: nonsense")["kind"] == "unparseable"
 
+    # empty / multi-line: first non-empty line only; empty → unparseable
+    assert p("")["kind"] == "unparseable"
+    r = p("ANSWER: goto_t=2, confidence=0.5\ntrailing noise")
+    assert r["kind"] == "goto" and r["timestep"] == 2, r
+    # 'explore' appearing AFTER a goto answer must NOT be read as explore
+    r = p("ANSWER: goto_t=3, confidence=0.6 explore region")
+    assert r["kind"] == "goto" and r["timestep"] == 3, r
+
     print("  case remembr_parse (goto/explore/xy/tool/unparseable): OK")
 
 
