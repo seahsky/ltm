@@ -41,11 +41,46 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+
+# HM3D ObjectNav goal categories → caption synonyms for the keyword STOP. The
+# CLIP text-vs-text cosine STOP proved anti-discriminative (full room captions
+# score ~0.72-0.77 vs ANY goal word — a "hole in the wall" caption matched
+# "plant" at 0.736), so we match the goal object as a whole word in the
+# Qwen-VL caption instead. Word-boundary matched so "bedroom" does NOT satisfy
+# goal "bed".
+_GOAL_SYNONYMS: Dict[str, List[str]] = {
+    "chair": ["chair"],
+    "bed": ["bed"],
+    "plant": ["plant", "potted plant", "houseplant"],
+    "toilet": ["toilet"],
+    "tv_monitor": ["tv", "television", "monitor", "screen"],
+    "sofa": ["sofa", "couch"],
+}
+
+
+def _goal_terms(goal: str) -> List[str]:
+    """Goal category + caption synonyms, lowercased."""
+    key = str(goal).strip().lower()
+    terms = set(_GOAL_SYNONYMS.get(key, []))
+    terms.add(key.replace("_", " "))
+    return [t for t in terms if t]
+
+
+def _caption_mentions(caption: str, terms: List[str]) -> Optional[str]:
+    """First goal term appearing as a whole word in the caption (case-
+    insensitive), else None. Word-boundary so 'bedroom' != goal 'bed'."""
+    cap = str(caption).lower()
+    for t in terms:
+        if re.search(r"\b" + re.escape(t) + r"\b", cap):
+            return t
+    return None
 
 from .frontier_planner import FrontierCandidate
 
@@ -463,11 +498,12 @@ class ReMEmbRPlanner:
     # grounded STOP check
     # ------------------------------------------------------------------
 
-    # Cosine threshold for goal-vs-caption match in CLIP joint space. The
-    # builder stores CLIP-text embeddings of Qwen-VL captions, so this is
-    # caption-text-vs-goal-text — easily clears 0.7 when the caption mentions
-    # the goal word at all. Hold the bar high so a passing mention in the
-    # caption doesn't trigger a false STOP.
+    # Keyword STOP is the default (REMEMBR_STOP_KEYWORD=1): match the goal
+    # object as a whole word in the caption. Set to 0 to fall back to the legacy
+    # CLIP text-vs-text cosine path (kept only for comparison — it is anti-
+    # discriminative: room captions score ~0.72-0.77 vs any goal word).
+    STOP_USE_KEYWORD: bool = os.environ.get("REMEMBR_STOP_KEYWORD", "1") == "1"
+    # Cosine threshold for the legacy text-vs-text path (unused in keyword mode).
     STOP_COS_THRESHOLD: float = float(os.environ.get("REMEMBR_STOP_COS", "0.25"))
     # Max xz distance (m) between the matching observation and the agent's
     # current position. HM3D ObjectNav success radius is 1.0 m; add slack
@@ -486,44 +522,60 @@ class ReMEmbRPlanner:
         trace: "PlannerTrace",
         current_step: int = 0,
     ) -> Optional[FrontierCandidate]:
-        """Emit a stop candidate iff a goal-matching past observation lies
-        within the success radius of the agent's current position."""
+        """Emit a stop candidate iff a strictly-older observation that names the
+        goal object lies within the success radius of the agent's current
+        position. Default match is a whole-word caption keyword (discriminative);
+        ``REMEMBR_STOP_KEYWORD=0`` falls back to the legacy cosine path."""
         # Step floor: don't allow STOP until the agent has actually explored.
         if current_step < self.STOP_MIN_STEP:
             return None
-        try:
-            hits = self.builder.retrieve_from_text(goal, top_k=5, min_cosine=self.STOP_COS_THRESHOLD)
-        except Exception:
-            return None
-        if not hits:
-            return None
         ax, _, az = float(agent_pose[0]), float(agent_pose[1]), float(agent_pose[2])
-        best: Optional[Tuple[MemoryRecord, float, float]] = None
-        for rec, cos in hits:
-            # Exclude the current-step's just-ingested keyframe — its position
-            # equals the agent's pose by construction, so it trivially passes
-            # the geometric guard. STOP must be triggered by a strictly older
-            # observation that the agent has returned to (or stayed near).
-            if rec.timestep >= current_step:
-                continue
-            rx, _, rz = float(rec.position[0]), float(rec.position[1]), float(rec.position[2])
-            dist = math.hypot(rx - ax, rz - az)
-            if dist <= self.STOP_DIST_THRESHOLD:
-                if best is None or cos > best[1]:
-                    best = (rec, cos, dist)
+        # best: (record, dist, matched_term_or_None, score)
+        best: Optional[Tuple[MemoryRecord, float, Optional[str], float]] = None
+
+        if self.STOP_USE_KEYWORD:
+            terms = _goal_terms(goal)
+            for rec in self.builder.records:
+                # Exclude the current step's just-ingested keyframe (its position
+                # equals the agent pose, trivially passing the geometric guard).
+                if rec.timestep >= current_step:
+                    continue
+                term = _caption_mentions(rec.caption, terms)
+                if term is None:
+                    continue
+                rx, _, rz = float(rec.position[0]), float(rec.position[1]), float(rec.position[2])
+                dist = math.hypot(rx - ax, rz - az)
+                if dist <= self.STOP_DIST_THRESHOLD and (best is None or dist < best[1]):
+                    best = (rec, dist, term, 1.0)
+        else:
+            try:
+                hits = self.builder.retrieve_from_text(
+                    goal, top_k=5, min_cosine=self.STOP_COS_THRESHOLD
+                )
+            except Exception:
+                return None
+            for rec, cos in hits:
+                if rec.timestep >= current_step:
+                    continue
+                rx, _, rz = float(rec.position[0]), float(rec.position[1]), float(rec.position[2])
+                dist = math.hypot(rx - ax, rz - az)
+                if dist <= self.STOP_DIST_THRESHOLD and (best is None or cos > best[3]):
+                    best = (rec, dist, None, cos)
+
         if best is None:
             return None
-        rec, cos, dist = best
+        rec, dist, term, score = best
         self._candidate_counter += 1
         trace.tool_calls.append({
             "tool": "stop_check",
             "goal": str(goal),
-            "cos": float(cos),
+            "match": term,
+            "cos": float(score),
             "dist_m": float(dist),
             "matched_caption": rec.caption[:120],
         })
         trace.chosen_xyz = [ax, float(agent_pose[1]), az]
-        trace.confidence = float(cos)
+        trace.confidence = float(score)
         return FrontierCandidate(
             candidate_id=self._candidate_counter + 90_000,
             world_xy=np.array([ax, az], dtype=np.float32),
@@ -531,13 +583,14 @@ class ReMEmbRPlanner:
             distance_m=0.0,
             bearing_rad=0.0,
             cluster_size=0,
-            raw_score=float(cos),
+            raw_score=float(score),
             source="stop",
             metadata={
                 "stop_signal": True,
-                "stop_cos": float(cos),
+                "stop_cos": float(score),
                 "stop_dist_m": float(dist),
-                "stop_reason": "goal_match_near_agent",
+                "stop_match": term,
+                "stop_reason": "goal_keyword_near_agent" if term else "goal_cos_near_agent",
                 "matched_caption": rec.caption[:120],
             },
         )

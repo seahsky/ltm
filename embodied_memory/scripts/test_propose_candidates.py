@@ -860,6 +860,58 @@ def case_propose_reachability_filter():
     print(f"  case propose_reachability_filter ({len(cands)} reachable cands): OK")
 
 
+def case_keyword_stop():
+    """Run-6.2 keyword STOP: a strictly-older observation that NAMES the goal
+    object within the success radius triggers STOP; an unrelated room caption
+    (which CLIP text-cosine would falsely score ~0.74 against the goal) does
+    not; 'bedroom' does not satisfy goal 'bed' (word boundary); synonyms match;
+    a goal-naming caption too far away does not STOP."""
+    rb = _load_file_as("embodied_memory._rb_kwtest",
+                       _EMB_DIR / "remembr_backbone.py")
+
+    # pure caption-keyword matcher
+    assert rb._caption_mentions("a room with a wooden chair", rb._goal_terms("chair")) == "chair"
+    assert rb._caption_mentions("a corner of a room with a window", rb._goal_terms("bed")) is None
+    assert rb._caption_mentions("a cozy bedroom doorway", rb._goal_terms("bed")) is None  # boundary
+    assert rb._caption_mentions("a couch by the window", rb._goal_terms("sofa")) == "couch"  # synonym
+    assert rb._caption_mentions("a flat-screen television", rb._goal_terms("tv_monitor")) in (
+        "television", "tv", "screen")
+
+    def _rec(ts, cap, x, z):
+        return rb.MemoryRecord(
+            timestep=ts, timestamp=0.0,
+            position=np.array([x, 0.0, z], dtype=np.float32),
+            caption=cap, caption_embedding=np.zeros(4, dtype=np.float32),
+        )
+
+    cfg = rb.ReMEmbRConfig()
+    assert cfg.STOP_USE_KEYWORD if hasattr(cfg, "STOP_USE_KEYWORD") else True  # default keyword
+    builder = rb.ReMEmbRBuilder(cfg, text_embed_fn=lambda s: np.zeros(4, dtype=np.float32))
+    planner = rb.ReMEmbRPlanner(builder, cfg)
+    agent = np.array([0.6, 0.0, 0.0], dtype=np.float32)
+
+    # goal named within 1.5 m of agent (and strictly older than current_step) → STOP
+    builder._records = [_rec(1, "a hallway with a window", 0.0, 0.0),
+                        _rec(2, "a wooden chair near the desk", 0.5, 0.0)]
+    cand = planner._maybe_stop("chair", agent, rb.PlannerTrace(goal="chair"), current_step=12)
+    assert cand is not None and cand.metadata["stop_signal"] is True, "should STOP at the chair"
+    assert cand.metadata["stop_match"] == "chair", f"bad match: {cand.metadata}"
+
+    # goal named but >1.5 m away → no STOP (geometric guard)
+    builder._records = [_rec(2, "a wooden chair", 5.0, 5.0)]
+    assert planner._maybe_stop("chair", agent, rb.PlannerTrace(goal="chair"), current_step=12) is None
+
+    # goal NOT named (only a room caption) → no STOP (the false-STOP killer)
+    builder._records = [_rec(2, "a corner of a room with a window", 0.5, 0.0)]
+    assert planner._maybe_stop("bed", agent, rb.PlannerTrace(goal="bed"), current_step=12) is None
+
+    # step floor: even a perfect match before STOP_MIN_STEP must not fire
+    builder._records = [_rec(0, "a wooden chair", 0.5, 0.0)]
+    assert planner._maybe_stop("chair", agent, rb.PlannerTrace(goal="chair"), current_step=1) is None
+
+    print("  case keyword_stop (names goal→STOP; room/far/early→no STOP): OK")
+
+
 def main() -> int:
     print("Run-4/Run-5 sanity tests")
     case_a_stop_short_circuit()
@@ -887,6 +939,7 @@ def main() -> int:
     case_controller_stats_counters()
     case_astar_reachable_fallback()
     case_propose_reachability_filter()
+    case_keyword_stop()
     print("All cases passed.")
     return 0
 

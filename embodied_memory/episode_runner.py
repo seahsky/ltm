@@ -135,6 +135,24 @@ class EpisodeRunner:
         # Env-tunable so the cap can shift without a constructor change.
         self.n_frontier_inject: int = int(os.environ.get("REMEMBR_FRONTIER_INJECT", "3"))
 
+        # Commit-to-candidate (Phase-2): with a REAL ReMEmbR backbone, every
+        # re-proposal is an expensive 7B agent loop. The Run-6 controller's
+        # re-steer signals (force-replan from A* fallback, stuck) fire ~every
+        # step, which — when each re-proposal called the real LLM — made a
+        # full-horizon episode take ~20 min and thrashed the steering target.
+        # Decouple the two cadences: the planner PROPOSES a waypoint only every
+        # ``propose_period`` steps (or when the current one is reached / there
+        # is none); between proposals the agent COMMITS to that waypoint and the
+        # step controller re-steers toward it each step (A* + reachable-fallback
+        # handle obstacles without a new LLM call). Caps LLM calls at
+        # ~n_steps/period and kills the target ping-pong.
+        self.propose_period: int = int(
+            os.environ.get("REMEMBR_PROPOSE_PERIOD", str(self.planner.decision_period))
+        )
+        self.propose_reached_m: float = float(
+            os.environ.get("REMEMBR_PROPOSE_REACHED_M", "0.5")
+        )
+
         os.makedirs(out_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -260,6 +278,7 @@ class EpisodeRunner:
         n_stop_signals = 0
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
+        last_propose_step: int = -10**9  # forces a proposal on the first loop tick
         # Run-6 instrumentation: action mix over the episode (non-oracle path).
         action_counts = {ACTION_STOP: 0, ACTION_FORWARD: 0,
                          ACTION_TURN_LEFT: 0, ACTION_TURN_RIGHT: 0}
@@ -301,8 +320,20 @@ class EpisodeRunner:
                     break
                 continue
 
-            # Decide whether to re-plan.
-            if self.planner.is_decision_step() or current_candidate is None:
+            # Decide whether to RE-PROPOSE a waypoint (expensive: real LLM
+            # agent loop). Commit-to-candidate: only on a fixed schedule, when
+            # there is no candidate, or when the current one is reached — NOT on
+            # every controller re-steer. is_decision_step() is still ticked for
+            # its replan-trigger instrumentation, but no longer gates proposal.
+            self.planner.is_decision_step()  # tick stats only (return ignored)
+            candidate_reached = (
+                current_candidate is not None
+                and float(getattr(current_candidate, "distance_m", 1e9))
+                < self.propose_reached_m
+            )
+            due_to_propose = (step.step_idx - last_propose_step) >= self.propose_period
+            if current_candidate is None or due_to_propose or candidate_reached:
+                last_propose_step = int(step.step_idx)
                 cands = self._propose_candidates(step, ep)
                 if cands:
                     # raw_top1 is the planner's pick BEFORE memory injection,
@@ -355,6 +386,7 @@ class EpisodeRunner:
                         # premature one and tune REMEMBR_STOP_COS for the ablation.
                         stop_event = {
                             "step": int(step.step_idx),
+                            "stop_match": stop_cand.metadata.get("stop_match"),
                             "stop_cos": stop_cand.metadata.get("stop_cos"),
                             "stop_dist_m": stop_cand.metadata.get("stop_dist_m"),
                             "matched_caption": stop_cand.metadata.get("matched_caption"),
