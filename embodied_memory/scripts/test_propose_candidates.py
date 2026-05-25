@@ -987,6 +987,55 @@ def case_remembr_grounding():
     print("  case remembr_grounding (goto/unknown/zero/snap/far/cos): OK")
 
 
+def case_remembr_llm_loop():
+    """Run-6.3 loop wiring: a TOOL turn dispatches retrieval, then a goto_t
+    answer grounds to that record's position; explore → defer ([]). LLM I/O is
+    stubbed (no model load); a dummy torch lets _llm_propose's guard pass."""
+    import types
+    if "torch" not in sys.modules:
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            sys.modules["torch"] = types.ModuleType("torch")
+
+    rb = _load_file_as("embodied_memory._rb_loop",
+                       _EMB_DIR / "remembr_backbone.py")
+    os.environ["REMEMBR_MIN_WAYPOINT_DIST"] = "0.5"
+
+    def fake_embed(s):
+        s = s.lower()
+        v = np.zeros(4, dtype=np.float32)
+        if "chair" in s:
+            v[0] = 1.0
+        else:
+            v[2] = 1.0
+        return v
+
+    builder = rb.ReMEmbRBuilder(rb.ReMEmbRConfig(), text_embed_fn=fake_embed)
+    builder._records.append(rb.MemoryRecord(
+        timestep=2, timestamp=2.0, position=np.array([3.0, 0.0, 0.0], dtype=np.float32),
+        caption="a wooden chair by the desk", caption_embedding=fake_embed("a wooden chair by the desk")))
+
+    planner = rb.ReMEmbRPlanner(builder, rb.ReMEmbRConfig())
+    planner._lazy_load_llm = lambda: None
+    planner._format_chat = lambda sys_p, usr_p, hist: "prompt"  # skip tokenizer
+
+    agent = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+    # tool turn → goto answer: grounds to record 2's position (3,0)
+    replies = iter(["TOOL: retrieve_from_text(chair)", "ANSWER: goto_t=2, confidence=0.7"])
+    planner._llm_complete = lambda prompt: next(replies)
+    out = planner._llm_propose("chair", agent, 0.0, 3, rb.PlannerTrace(goal="chair"))
+    assert len(out) == 1 and out[0].source == "remembr", out
+    assert abs(out[0].world_xy[0] - 3.0) < 1e-5 and abs(out[0].raw_score - 1.0) < 1e-5, out[0]
+
+    # explore → defer to frontier (empty list, NOT a stub forward-walk)
+    planner._llm_complete = lambda prompt: "ANSWER: explore"
+    assert planner._llm_propose("chair", agent, 0.0, 3, rb.PlannerTrace(goal="chair")) == []
+
+    print("  case remembr_llm_loop (tool->goto grounds; explore->defer): OK")
+
+
 def case_remembr_parse():
     """Run-6.3 planner grammar: ANSWER references a remembered timestep
     (goto_t=) or defers (explore); legacy x,z still parses for the snap
@@ -1051,6 +1100,7 @@ def main() -> int:
     case_keyword_stop()
     case_remembr_parse()
     case_remembr_grounding()
+    case_remembr_llm_loop()
     print("All cases passed.")
     return 0
 

@@ -21,8 +21,11 @@ Two phases:
       - ``retrieve_from_text(query)``     → top-K caption hits
       - ``retrieve_from_position(xyz)``   → top-K nearest-in-space hits
       - ``retrieve_from_time(t)``         → top-K nearest-in-time hits
-  The LLM is allowed up to ``max_tool_calls`` rounds, then it commits to a
-  target xyz; we wrap that pose as a ``FrontierCandidate(source="remembr")``
+  The LLM is allowed up to ``max_tool_calls`` rounds, then it commits by
+  REFERENCING a retrieved observation (``ANSWER: goto_t=<timestep>``) — the
+  waypoint is that memory's stored position, never an invented coordinate — or
+  defers with ``ANSWER: explore``. The grounded pose is wrapped as a
+  ``FrontierCandidate(source="remembr")``
   so the existing rerank + memory-injection + low-level controller pipeline
   consumes it unchanged.
 
@@ -808,77 +811,54 @@ class ReMEmbRPlanner:
             "  - retrieve_from_text(<query>): find past observations matching the query\n"
             "  - retrieve_from_position(x,y,z): find past observations near a coordinate\n"
             "  - retrieve_from_time(<t>): find past observations near a timestamp\n"
+            "Each TOOL_RESULT lists past observations as: t=<timestep> xz=(x,z) score=.. cap=\"..\".\n"
             "Reply with EXACTLY one of:\n"
             "  TOOL: <name>(<arg>)\n"
-            "  ANSWER: x=<float>, z=<float>, confidence=<float>\n"
-            "Stop once you have enough information to ANSWER."
+            "  ANSWER: goto_t=<timestep>, confidence=<float>   (navigate to that remembered observation)\n"
+            "  ANSWER: explore                                  (nothing goal-relevant remembered yet)\n"
+            "Choose goto_t from a timestep shown in a TOOL_RESULT whose caption is most relevant to the\n"
+            "goal. Reply 'ANSWER: explore' if no remembered observation is relevant. Stop once you ANSWER."
         )
         ax, ay, az = float(agent_pose[0]), float(agent_pose[1]), float(agent_pose[2])
         user_prompt = (
             f"Goal: find a {goal}. Current position: x={ax:.2f}, y={ay:.2f}, z={az:.2f}. "
-            f"Pick a waypoint (x, z)."
+            f"Use the tools to recall where relevant things were seen, then ANSWER with the "
+            f"timestep to navigate toward (or explore)."
         )
         history: List[str] = []
-        answer_xz: Optional[Tuple[float, float, float]] = None
+        answer: Optional[tuple] = None
 
         for _ in range(self.config.max_tool_calls):
             prompt = self._format_chat(sys_prompt, user_prompt, history)
             reply = self._llm_complete(prompt)
             history.append(reply)
             parsed = _parse_planner_reply(reply)
-            if parsed["kind"] == "answer":
-                answer_xz = parsed["xz_conf"]
-                trace.tool_calls.append({"tool": "answer", "reply": reply[:200]})
+            kind = parsed["kind"]
+            if kind == "goto":
+                answer = ("goto", parsed["timestep"], parsed["conf"])
+                trace.tool_calls.append({"tool": "answer_goto", "t": parsed["timestep"], "reply": reply[:200]})
                 break
-            if parsed["kind"] == "tool":
-                tool_name = parsed["tool_name"]
-                tool_arg = parsed["tool_arg"]
-                hits = self._dispatch_tool(tool_name, tool_arg, agent_pose)
-                trace.tool_calls.append({
-                    "tool": tool_name,
-                    "arg": tool_arg,
-                    "n_hits": len(hits),
-                })
-                # Append a tool-result line for the next turn's prompt.
+            if kind == "explore":
+                trace.tool_calls.append({"tool": "answer_explore", "reply": reply[:200]})
+                return []  # defer to frontier exploration
+            if kind == "answer_xy":
+                answer = ("xy", parsed["xz_conf"][0], parsed["xz_conf"][1], parsed["xz_conf"][2])
+                trace.tool_calls.append({"tool": "answer_xy", "reply": reply[:200]})
+                break
+            if kind == "tool":
+                hits = self._dispatch_tool(parsed["tool_name"], parsed["tool_arg"], agent_pose)
+                trace.tool_calls.append(
+                    {"tool": parsed["tool_name"], "arg": parsed["tool_arg"], "n_hits": len(hits)})
                 history.append(_summarize_hits(hits))
             else:
-                # Unparseable — break to fallback.
                 trace.tool_calls.append({"tool": "unparseable", "reply": reply[:200]})
                 break
 
-        if answer_xz is None:
-            return self._stub_propose(goal, agent_pose, agent_yaw, max_candidates, trace)
+        if answer is None:
+            return []  # no usable answer after the tool budget → defer to frontier
 
-        x_target, z_target, conf = answer_xz
-        dx, dz = x_target - ax, z_target - az
-        dist = math.hypot(dx, dz)
-        # Regurgitation guard: small planners (Qwen2.5-3B at temperature 0)
-        # often echo the prompt's "Current position" back as their ANSWER.
-        # That produces a zero-displacement waypoint and the controller can't
-        # move forward. Treat sub-0.5 m "stay here" answers as bogus and use
-        # the stub's forward-walk fallback so the agent at least explores.
-        if dist < float(os.environ.get("REMEMBR_MIN_WAYPOINT_DIST", "0.5")):
-            trace.tool_calls.append({
-                "tool": "answer_rejected_regurgitation",
-                "x": float(x_target), "z": float(z_target), "dist": float(dist),
-            })
-            return self._stub_propose(goal, agent_pose, agent_yaw, max_candidates, trace)
-        bearing = _rel_bearing(dx, dz, agent_yaw)
-        self._candidate_counter += 1
-        primary = FrontierCandidate(
-            candidate_id=self._candidate_counter + 50_000,
-            world_xy=np.array([x_target, z_target], dtype=np.float32),
-            grid_rc=(-1, -1),
-            distance_m=float(dist),
-            bearing_rad=float(bearing),
-            cluster_size=0,
-            raw_score=float(conf),
-            source="remembr",
-            metadata={"trace_n_tool_calls": len(trace.tool_calls)},
-        )
-        trace.chosen_xyz = primary.world_xy.tolist()
-        trace.confidence = float(conf)
-        return [primary]
+        cand = self._ground_answer(goal, answer, agent_pose, agent_yaw, trace)
+        return [cand] if cand is not None else []
 
     # ------------------------------------------------------------------
     # tool dispatch + LLM I/O helpers
