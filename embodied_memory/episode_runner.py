@@ -51,6 +51,7 @@ class RunSummary:
     n_memory_candidates: int = 0      # total LTM-injected candidates surfaced
     n_memory_chosen: int = 0          # decisions where reranker picked a memory candidate
     n_frontier_chosen: int = 0        # decisions where reranker picked a frontier-injected candidate
+    n_remembr_chosen: int = 0         # decisions where reranker picked a grounded remembr (LLM) candidate
     n_stop_signals: int = 0           # decisions where backbone emitted a grounded STOP
     n_keyframes_observed: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
@@ -71,6 +72,7 @@ class RunSummary:
             "n_memory_candidates": self.n_memory_candidates,
             "n_memory_chosen": self.n_memory_chosen,
             "n_frontier_chosen": self.n_frontier_chosen,
+            "n_remembr_chosen": self.n_remembr_chosen,
             "n_stop_signals": self.n_stop_signals,
             "n_keyframes_observed": self.n_keyframes_observed,
             "modules_invoked": self.modules_invoked,
@@ -184,6 +186,7 @@ class EpisodeRunner:
             summary.n_memory_candidates += int(ep_metrics.get("n_memory_candidates", 0))
             summary.n_memory_chosen += int(ep_metrics.get("n_memory_chosen", 0))
             summary.n_frontier_chosen += int(ep_metrics.get("n_frontier_chosen", 0))
+            summary.n_remembr_chosen += int(ep_metrics.get("n_remembr_chosen", 0))
             summary.n_stop_signals += int(ep_metrics.get("n_stop_signals", 0))
             # Per-episode row used by analyze_ablation.py to pair runs.
             summary.episodes.append({
@@ -201,6 +204,7 @@ class EpisodeRunner:
                 "n_memory_candidates": int(ep_metrics.get("n_memory_candidates", 0)),
                 "n_memory_chosen": int(ep_metrics.get("n_memory_chosen", 0)),
                 "n_frontier_chosen": int(ep_metrics.get("n_frontier_chosen", 0)),
+                "n_remembr_chosen": int(ep_metrics.get("n_remembr_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
                 "grid_cells_free": int(ep_metrics.get("grid_cells_free", 0)),
@@ -275,6 +279,7 @@ class EpisodeRunner:
         n_memory_candidates = 0
         n_memory_chosen = 0
         n_frontier_chosen = 0
+        n_remembr_chosen = 0
         n_stop_signals = 0
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
@@ -400,6 +405,8 @@ class EpisodeRunner:
                         n_memory_chosen += 1
                     if chosen.source == "frontier":
                         n_frontier_chosen += 1
+                    if chosen.source == "remembr":
+                        n_remembr_chosen += 1
                     current_candidate = chosen
 
                     n_frontier_in_pool = sum(1 for c in cands if c.source == "frontier")
@@ -555,6 +562,7 @@ class EpisodeRunner:
         ep_log["n_memory_candidates"] = n_memory_candidates
         ep_log["n_memory_chosen"] = n_memory_chosen
         ep_log["n_frontier_chosen"] = n_frontier_chosen
+        ep_log["n_remembr_chosen"] = n_remembr_chosen
         ep_log["n_stop_signals"] = n_stop_signals
         ep_log["grid_cells_free"] = grid_stats["cells_free"]
         ep_log["grid_cells_occupied"] = grid_stats["cells_occupied"]
@@ -577,6 +585,7 @@ class EpisodeRunner:
             "n_memory_candidates": n_memory_candidates,
             "n_memory_chosen": n_memory_chosen,
             "n_frontier_chosen": n_frontier_chosen,
+            "n_remembr_chosen": n_remembr_chosen,
             "n_stop_signals": n_stop_signals,
             "grid_cells_free": grid_stats["cells_free"],
             "grid_cells_occupied": grid_stats["cells_occupied"],

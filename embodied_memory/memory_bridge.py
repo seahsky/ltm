@@ -137,12 +137,18 @@ class FrontierPhysicsScorer(Scorer):
     (~0.25+) win comfortably.
     """
 
-    # Calibration constants for memory-source physics. Chosen so:
-    #   cos=0.18  -> score ~0.55 (borderline, usually loses to a strong planner ~0.77)
-    #   cos=0.25  -> score ~0.85 (competitive)
-    #   cos=0.30  -> score ~0.95 (typically wins)
+    # Calibration constants for memory-source physics. The memory raw_score is a
+    # CLIP IMAGE-text cosine (goal text vs a stored keyframe image), which in
+    # ViT-B/32 space is compressed: a non-sighting baseline sits ~0.228 and a
+    # true target sighting reaches only ~0.25 (measured, remembr-run63). The old
+    # _MEM_COS_FULL=0.32 assumed matches reach ~0.30, so genuine sightings never
+    # saturated and memory never won. Saturate at the real sighting scale so a
+    # sighting (>=~0.25) can win while baseline (~0.228) still loses to a strong
+    # frontier. NOTE: calibrated on thin smoke data — revisit at G4 scale.
+    #   cos=0.228 -> cos_norm ~0.78 (baseline, loses to a strong frontier ~0.97)
+    #   cos=0.25  -> cos_norm ~1.0  (sighting saturates; wins when close + frontier weak)
     _MEM_COS_NULL = 0.15   # cos at-or-below this contributes nothing
-    _MEM_COS_FULL = 0.32   # cos at-or-above this saturates the bonus
+    _MEM_COS_FULL = 0.25   # cos at-or-above this saturates the bonus
     _MEM_DIST_WEIGHT = 0.20
 
     def score(self, candidate: str, candidate_embedding: np.ndarray, context: Dict[str, Any]) -> float:

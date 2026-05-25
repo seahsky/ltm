@@ -1040,6 +1040,54 @@ def case_remembr_llm_loop():
     print("  case remembr_llm_loop (tool->goto grounds; explore->defer): OK")
 
 
+def case_mem_cos_full_calibration():
+    """Recalibrated _MEM_COS_FULL=0.25: a true sighting (image-text cos ~0.25,
+    nearby) out-scores a strong frontier; a baseline non-sighting (~0.228) does
+    not. Exercises the REAL FrontierPhysicsScorer from memory_bridge (faiss
+    stubbed so the module imports without the LTM backend)."""
+    import sys, types
+    # memory_bridge is already cached as a stub in sys.modules (from _bootstrap).
+    # Load the real file under a distinct name so the stub isn't returned.
+    # memory_bridge.py itself imports dialogue_memory.* and faiss — stub the
+    # heavy deps first so the file executes locally.  If ANY import still fails
+    # (e.g. a dialogue_memory sub-dep that needs a real C extension), the SKIP
+    # path keeps the suite green; on RACE everything is installed and the test
+    # runs for real.
+    for mod in (
+        "faiss",
+        "sentence_transformers",
+        "sklearn",
+        "sklearn.cluster",
+        "sklearn.metrics",
+        "sklearn.metrics.pairwise",
+    ):
+        if mod not in sys.modules:
+            sys.modules[mod] = types.ModuleType(mod)
+    try:
+        mb = _load_file_as("embodied_memory._mb_costest",
+                           _EMB_DIR / "memory_bridge.py")
+    except Exception as e:
+        print(f"  case mem_cos_full_calibration: SKIP (import failed: {type(e).__name__})")
+        return
+
+    scorer = mb.FrontierPhysicsScorer()
+    assert abs(scorer._MEM_COS_FULL - 0.25) < 1e-9, scorer._MEM_COS_FULL
+    FC = mb.FrontierCandidate
+
+    def score(source, raw, dist, bearing=0.0):
+        c = FC(candidate_id=0, world_xy=np.zeros(2, dtype=np.float32), grid_rc=(-1, -1),
+               distance_m=dist, bearing_rad=bearing, cluster_size=0, raw_score=raw, source=source)
+        return scorer.score("go to (x,y)", np.zeros(4, dtype=np.float32), {"frontier_candidate": c})
+
+    # a true sighting (cos 0.25) nearby beats a baseline frontier (raw 0.7)
+    assert score("memory", 0.25, 2.0) > score("frontier", 0.70, 1.5), \
+        (score("memory", 0.25, 2.0), score("frontier", 0.70, 1.5))
+    # baseline non-sighting (cos 0.228) still loses to a strong frontier (raw 0.97)
+    assert score("memory", 0.228, 3.2) < score("frontier", 0.97, 1.9), \
+        (score("memory", 0.228, 3.2), score("frontier", 0.97, 1.9))
+    print("  case mem_cos_full_calibration (sighting wins, baseline loses): OK")
+
+
 def case_remembr_parse():
     """Run-6.3 planner grammar: ANSWER references a remembered timestep
     (goto_t=) or defers (explore); legacy x,z still parses for the snap
@@ -1105,6 +1153,7 @@ def main() -> int:
     case_remembr_parse()
     case_remembr_grounding()
     case_remembr_llm_loop()
+    case_mem_cos_full_calibration()
     print("All cases passed.")
     return 0
 
