@@ -919,6 +919,74 @@ def case_keyword_stop():
     print("  case keyword_stop (names goal→STOP; room/far/early→no STOP): OK")
 
 
+def case_remembr_grounding():
+    """Run-6.3 grounding: a goto_t answer materializes a remembr candidate at
+    the referenced memory's stored position; raw_score = goal-vs-memory cosine;
+    unknown timestep / zero-displacement / far free-form → defer (None)."""
+    rb = _load_file_as("embodied_memory._rb_ground",
+                       _EMB_DIR / "remembr_backbone.py")
+
+    # Hermetic: _ground_answer reads REMEMBR_MIN_WAYPOINT_DIST at call time and
+    # race-setup may export a different value. Pin the snap / zero-displacement
+    # floor so this logic test is independent of live tuning (cf. case_keyword_stop).
+    os.environ["REMEMBR_MIN_WAYPOINT_DIST"] = "0.5"
+
+    def fake_embed(s):
+        s = s.lower()
+        v = np.zeros(4, dtype=np.float32)
+        if "chair" in s:
+            v[0] = 1.0
+        elif "sofa" in s or "couch" in s:
+            v[1] = 1.0
+        else:
+            v[2] = 1.0
+        return v
+
+    builder = rb.ReMEmbRBuilder(rb.ReMEmbRConfig(), text_embed_fn=fake_embed)
+
+    def add(ts, cap, x, z):
+        builder._records.append(rb.MemoryRecord(
+            timestep=ts, timestamp=float(ts),
+            position=np.array([x, 0.0, z], dtype=np.float32),
+            caption=cap, caption_embedding=fake_embed(cap)))
+
+    add(1, "a hallway with a window", 0.0, 4.0)     # non-goal, 4 m away
+    add(2, "a wooden chair by the desk", 3.0, 0.0)  # the goal object, 3 m away
+    add(3, "a window", 0.2, 0.1)                     # ~0.22 m → zero-displacement
+
+    planner = rb.ReMEmbRPlanner(builder, rb.ReMEmbRConfig())
+    agent = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    yaw = 0.0
+    trace = rb.PlannerTrace(goal="chair")
+
+    # 1. valid goto_t=2 → candidate at (3,0); raw_score = cos(chair, chair) = 1.0
+    c = planner._ground_answer("chair", ("goto", 2, 0.8), agent, yaw, trace)
+    assert c is not None and c.source == "remembr", c
+    assert abs(c.world_xy[0] - 3.0) < 1e-5 and abs(c.world_xy[1] - 0.0) < 1e-5, c.world_xy
+    assert abs(c.raw_score - 1.0) < 1e-5, c.raw_score
+    assert abs(c.distance_m - 3.0) < 1e-4, c.distance_m
+    assert c.metadata["grounded_timestep"] == 2, c.metadata
+
+    # 2. unknown timestep → defer
+    assert planner._ground_answer("chair", ("goto", 99, 0.8), agent, yaw, trace) is None
+
+    # 3. zero displacement (record 3 ~0.22 m from agent) → defer
+    assert planner._ground_answer("chair", ("goto", 3, 0.8), agent, yaw, trace) is None
+
+    # 4. free-form xy near record 2 (within 0.5 m) → snapped to (3,0)
+    c = planner._ground_answer("chair", ("xy", 3.1, 0.0, 0.5), agent, yaw, trace)
+    assert c is not None and abs(c.world_xy[0] - 3.0) < 1e-5, c
+
+    # 5. free-form xy far from any record → defer
+    assert planner._ground_answer("chair", ("xy", 20.0, 20.0, 0.5), agent, yaw, trace) is None
+
+    # 6. raw_score reflects the goal: goto a non-chair record → cos 0
+    c = planner._ground_answer("chair", ("goto", 1, 0.8), agent, yaw, trace)
+    assert c is not None and abs(c.raw_score - 0.0) < 1e-5, c.raw_score
+
+    print("  case remembr_grounding (goto/unknown/zero/snap/far/cos): OK")
+
+
 def case_remembr_parse():
     """Run-6.3 planner grammar: ANSWER references a remembered timestep
     (goto_t=) or defers (explore); legacy x,z still parses for the snap
@@ -982,6 +1050,7 @@ def main() -> int:
     case_propose_reachability_filter()
     case_keyword_stop()
     case_remembr_parse()
+    case_remembr_grounding()
     print("All cases passed.")
     return 0
 

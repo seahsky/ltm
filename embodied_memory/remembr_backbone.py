@@ -180,6 +180,14 @@ class ReMEmbRBuilder:
     def records(self) -> List[MemoryRecord]:
         return self._records
 
+    def record_by_timestep(self, timestep: int) -> Optional[MemoryRecord]:
+        """Return the flat-memory record observed at ``timestep``, or None.
+        Timesteps are unique per ingested keyframe; linear scan (horizon-bounded)."""
+        for r in self._records:
+            if r.timestep == int(timestep):
+                return r
+        return None
+
     @property
     def stub_mode(self) -> bool:
         return self._stub_mode
@@ -673,6 +681,90 @@ class ReMEmbRPlanner:
         trace.chosen_xyz = out[0].world_xy.tolist()
         trace.confidence = float(out[0].raw_score)
         return out
+
+    # ------------------------------------------------------------------
+    # grounding helpers (wired into _llm_propose in Task 3)
+    # ------------------------------------------------------------------
+
+    def _goal_memory_cosine(self, goal: str, record: "MemoryRecord") -> float:
+        """CLIP text-text cosine of "a photo of a {goal}" vs the record's caption
+        embedding, clamped to [0,1]. Matches the bridge's propose_memory_candidates
+        query so remembr- and memory-source raw_scores share a scale."""
+        fn = self.builder._text_embed_fn
+        if fn is None:
+            return 0.0
+        q = np.asarray(fn(f"a photo of a {goal}"), dtype=np.float32)
+        e = np.asarray(record.caption_embedding, dtype=np.float32)
+        nq, ne = float(np.linalg.norm(q)), float(np.linalg.norm(e))
+        if nq < 1e-8 or ne < 1e-8:
+            return 0.0
+        return float(np.clip(float(np.dot(q / nq, e / ne)), 0.0, 1.0))
+
+    def _ground_answer(
+        self,
+        goal: str,
+        answer: tuple,
+        agent_pose: np.ndarray,
+        agent_yaw: float,
+        trace: "PlannerTrace",
+    ) -> Optional[FrontierCandidate]:
+        """Turn a parsed answer into a grounded waypoint at a remembered position.
+
+        ``answer`` is ("goto", timestep, conf) or ("xy", x, z, conf). Returns a
+        FrontierCandidate(source="remembr") at the referenced memory's stored xz,
+        or None to defer to frontier exploration (unknown timestep, no nearby
+        memory for a free-form xy, or a zero-displacement pick).
+        """
+        ax, ay, az = float(agent_pose[0]), float(agent_pose[1]), float(agent_pose[2])
+        floor = float(os.environ.get("REMEMBR_MIN_WAYPOINT_DIST", "0.5"))
+
+        if answer[0] == "goto":
+            _, t, conf = answer
+            rec = self.builder.record_by_timestep(int(t))
+            if rec is None:
+                trace.tool_calls.append({"tool": "goto_rejected_unknown_t", "t": int(t)})
+                return None
+        else:  # "xy" — snap an invented coordinate to the nearest real observation
+            _, x, z, conf = answer
+            hits = self.builder.retrieve_from_position(
+                np.array([x, ay, z], dtype=np.float32), top_k=1
+            )
+            if not hits:
+                return None
+            rec, snap_d = hits[0]
+            if snap_d > floor:
+                trace.tool_calls.append(
+                    {"tool": "answer_xy_rejected_far_from_memory", "snap_d": float(snap_d)})
+                return None
+
+        rx, rz = float(rec.position[0]), float(rec.position[2])
+        dx, dz = rx - ax, rz - az
+        dist = math.hypot(dx, dz)
+        if dist < floor:
+            trace.tool_calls.append(
+                {"tool": "goto_rejected_zero_displacement", "t": int(rec.timestep), "dist": float(dist)})
+            return None
+
+        bearing = _rel_bearing(dx, dz, agent_yaw)
+        cos = self._goal_memory_cosine(goal, rec)
+        self._candidate_counter += 1
+        trace.chosen_xyz = [rx, ay, rz]
+        trace.confidence = float(cos)
+        return FrontierCandidate(
+            candidate_id=self._candidate_counter + 50_000,
+            world_xy=np.array([rx, rz], dtype=np.float32),
+            grid_rc=(-1, -1),
+            distance_m=float(dist),
+            bearing_rad=float(bearing),
+            cluster_size=0,
+            raw_score=float(cos),
+            source="remembr",
+            metadata={
+                "grounded_timestep": int(rec.timestep),
+                "ground_cos": float(cos),
+                "llm_confidence": float(conf),
+            },
+        )
 
     # ------------------------------------------------------------------
     # real LLM propose
