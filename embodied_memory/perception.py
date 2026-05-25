@@ -56,6 +56,15 @@ class CLIPKeyframeEncoder:
     """
 
     def __init__(self, model_name: str = "ViT-B-32", pretrained: str = "openai", device: Optional[str] = None):
+        # The OpenAI CLIP weights were trained with QuickGELU. open_clip's plain
+        # "ViT-B-32" config uses standard GELU, so loading pretrained="openai"
+        # onto it silently degrades the embeddings and COMPRESSES the cosine
+        # range (open_clip emits a runtime "QuickGELU mismatch" warning). That
+        # is why goal-vs-keyframe cosines were pinned ~0.226 with true matches
+        # barely reaching 0.249. Use the matching "-quickgelu" model variant so
+        # cosines reflect real CLIP similarity. See open_clip create_model docs.
+        if pretrained == "openai" and not model_name.endswith("-quickgelu"):
+            model_name = f"{model_name}-quickgelu"
         self.model_name = model_name
         self.pretrained = pretrained
         self._requested_device = device
