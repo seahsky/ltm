@@ -129,26 +129,27 @@ class FrontierPhysicsScorer(Scorer):
     - ``distance_band``: 1–4 m preferred (not on top, not too far)
 
     Memory candidates (LTM-injected by ``propose_memory_candidates``) carry
-    raw_score = CLIP image-text cosine. We score them goal-directed:
+    raw_score = SBERT goal-vs-caption TEXT cosine. We score them goal-directed:
         ``score = sigmoid-ish boost in cosine + small distance preference``
     Bearing penalty is dropped — turning to face a memory waypoint is cheap
-    compared to the value of going there. Borderline cosines (~0.18) keep
-    memory from out-voting a strong planner choice; in-category cosines
-    (~0.25+) win comfortably.
+    compared to the value of going there. Non-match cosines (~0.2-0.3) keep
+    memory from out-voting a strong planner choice; true caption matches
+    (~0.5+) win comfortably.
     """
 
-    # Calibration constants for memory-source physics. The memory raw_score is a
-    # CLIP IMAGE-text cosine (goal text vs a stored keyframe image), which in
-    # ViT-B/32 space is compressed: a non-sighting baseline sits ~0.228 and a
-    # true target sighting reaches only ~0.25 (measured, remembr-run63). The old
-    # _MEM_COS_FULL=0.32 assumed matches reach ~0.30, so genuine sightings never
-    # saturated and memory never won. Saturate at the real sighting scale so a
-    # sighting (>=~0.25) can win while baseline (~0.228) still loses to a strong
-    # frontier. NOTE: calibrated on thin smoke data — revisit at G4 scale.
-    #   cos=0.228 -> cos_norm ~0.78 (baseline, loses to a strong frontier ~0.97)
-    #   cos=0.25  -> cos_norm ~1.0  (sighting saturates; wins when close + frontier weak)
-    _MEM_COS_NULL = 0.15   # cos at-or-below this contributes nothing
-    _MEM_COS_FULL = 0.25   # cos at-or-above this saturates the bonus
+    # Calibration constants for memory-source physics. The memory raw_score is an
+    # SBERT goal-vs-caption TEXT cosine (the LTM is indexed on caption text, not
+    # CLIP images). Text-text separation is WIDE — a true caption match
+    # ("a photo of a chair" vs "...featuring a wooden chair") ~0.5+, an unrelated
+    # indoor caption ~0.2-0.3 — unlike the prior CLIP image-text signal which was
+    # flat (~0.25 sighting vs ~0.228 baseline → memory picked wrong instances and
+    # HURT, G4 + mini-ablation). Saturate at the match scale so a real match wins
+    # while a non-match loses to a strong frontier. NOTE: provisional text-scale
+    # values — verify/tune against the SBERT cosine distribution in the next smoke.
+    #   cos=0.30 -> cos_norm 0    (non-match, loses to a strong frontier ~0.97)
+    #   cos=0.50 -> cos_norm 1.0  (match saturates; wins when close + frontier weak)
+    _MEM_COS_NULL = 0.30   # cos at-or-below this contributes nothing
+    _MEM_COS_FULL = 0.50   # cos at-or-above this saturates the bonus
     _MEM_DIST_WEIGHT = 0.20
 
     def score(self, candidate: str, candidate_embedding: np.ndarray, context: Dict[str, Any]) -> float:
@@ -224,14 +225,17 @@ class EmbodiedMemoryBridge:
         # ("a photo of a {category}") so goal-directed retrieval can surface
         # past sightings of the target.
         self.clip_encoder = clip_encoder
-        if self.clip_encoder is not None:
-            self._ltm_embed_dim = int(self.clip_encoder.embed_dim)
-            self._ltm_encode_text = self.clip_encoder.encode_text
-        else:
-            # Fallback: keep legacy SBERT-text indexing (used by the
-            # cached/synthetic smoke path which doesn't load CLIP).
-            self._ltm_embed_dim = int(text_embed_dim)
-            self._ltm_encode_text = text_encode_fn
+        # Index the LTM on the caption TEXT embedding (SBERT), not CLIP image
+        # embeddings. The CLIP image-text cosine (ViT-B/32) was flat (~0.25
+        # sighting vs ~0.228 baseline) and non-discriminative, so memory picked
+        # wrong-but-similar instances and HURT (G4 + mini-ablation). The now-rich
+        # Qwen-VL captions make SBERT goal-vs-caption similarity discriminative
+        # again (~0.5 match vs ~0.2 non-match); the original reason for
+        # image-indexing — degenerate all-"room interior" semantic-sensor captions
+        # — no longer holds. clip_encoder is still kept for keyframe visual
+        # encoding and the rerank's visual query.
+        self._ltm_embed_dim = int(text_embed_dim)
+        self._ltm_encode_text = text_encode_fn
 
         # 1. Hierarchical LTM (primary index = CLIP joint space when a
         # clip_encoder is supplied, else SBERT-text space as a fallback).
@@ -373,14 +377,11 @@ class EmbodiedMemoryBridge:
         self.modules_invoked["consolidation"] = True
         segments = []
         for rec in self._pending:
-            # When a clip_encoder is configured, the LTM is indexed in CLIP
-            # joint space — so the segment's primary embedding must be the
-            # visual CLIP vector, not the SBERT text vector. The caption text
-            # is kept as `content` for human-readable logs only.
-            if self.clip_encoder is not None and rec.visual_embedding is not None:
-                primary_emb = rec.visual_embedding
-            else:
-                primary_emb = rec.text_embedding
+            # Index the fine layer on the caption TEXT embedding (SBERT) —
+            # discriminative goal-vs-caption similarity now that captions are
+            # rich VLM output. The image CLIP vector stays in metadata for
+            # potential visual use but is no longer the retrieval index.
+            primary_emb = rec.text_embedding
             seg = DialogueSegment(
                 session_id=episode_idx,
                 dialogue_id=episode_idx,
@@ -426,11 +427,9 @@ class EmbodiedMemoryBridge:
                 new_entries = [e for e in self.ltm.fine.entries if e.id in inserted_fine_ids]
                 for entry in new_entries:
                     for rec in self._pending:
-                        rec_emb = (
-                            rec.visual_embedding
-                            if (self.clip_encoder is not None and rec.visual_embedding is not None)
-                            else rec.text_embedding
-                        )
+                        # Match on the same primary embedding the fine layer was
+                        # indexed with (caption text / SBERT).
+                        rec_emb = rec.text_embedding
                         if rec_emb is None:
                             continue
                         if rec_emb.shape != entry.embedding.shape:
@@ -605,32 +604,36 @@ class EmbodiedMemoryBridge:
         target_category: Optional[str],
         planner_world_xys: Optional[List[np.ndarray]] = None,
         top_k: int = 3,
-        min_cosine: float = 0.18,
+        min_cosine: float = 0.25,
         dedup_radius_m: float = 1.5,
         max_distance_m: float = 30.0,
     ) -> List[FrontierCandidate]:
         """Option-2: turn LTM hits into extra frontier candidates.
 
-        Query the fine layer with ``"a photo of a {target_category}"`` in CLIP
-        joint space; for each hit that (a) clears the cosine threshold,
+        Query the fine layer with ``"a photo of a {target_category}"`` in SBERT
+        text space; for each hit that (a) clears the cosine threshold,
         (b) belongs to the current scene, and (c) isn't a near-duplicate of an
         already-proposed planner candidate, materialize a ``FrontierCandidate``
         from the stored ``agent_position``. ``raw_score`` carries the cosine
         through so the downstream FrontierPhysicsScorer naturally favours
-        semantically-strong memories.
+        semantically-strong memories. ``min_cosine`` (default 0.25) pre-filters
+        clearly-unrelated captions on the SBERT scale.
 
-        Returns ``[]`` whenever LTM is disabled, no CLIP encoder is wired, the
+        Returns ``[]`` whenever LTM is disabled, no text encoder is wired, the
         target is missing, or no hit clears the bar — so callers can always
         concatenate the result onto the planner's list without a guard.
         """
-        if self.disable_ltm or self.clip_encoder is None or not target_category:
+        if self.disable_ltm or self._ltm_encode_text is None or not target_category:
             return []
         if not len(self.ltm.fine):
             return []
 
         import math
 
-        query = self.clip_encoder.encode_text(
+        # Query the text-indexed fine layer with the goal phrase in SBERT space
+        # (same encoder the layer was indexed with) → discriminative goal-vs-
+        # caption cosine, not the flat CLIP image-text cosine.
+        query = self._ltm_encode_text(
             f"a photo of a {target_category}"
         ).astype(np.float32)
 
@@ -774,36 +777,30 @@ class EmbodiedMemoryBridge:
         # Encode the query once. With disable_ltm=True we skip the multi-scale
         # search so retrieval is always empty — the score from
         # MemorySimilarityScorer collapses to its no-context default.
-        # Query preference (most informative first):
-        #   1. CLIP-text of the per-episode target category — goal-directed
-        #      retrieval surfaces past visual keyframes that resemble the
-        #      object the agent is trying to find. This is the primary signal.
-        #   2. Current keyframe's CLIP visual embedding — falls back to
-        #      "find past observations that look like what I see now",
-        #      useful for re-orientation when no target is given.
-        #   3. Legacy SBERT-text encode of query_text — used only when no
-        #      CLIP encoder is configured (cached/synthetic smoke path).
+        # The LTM is indexed on SBERT caption text, so the query MUST live in the
+        # same text space (a 512-d CLIP vector would mismatch the 384-d index).
+        # Goal-directed when a target is given (surfaces past captions mentioning
+        # the object), else the current caption. query_visual_embedding is no
+        # longer used here — the index is text, not images.
         if self.disable_ltm:
             retrieval = {"fine": [], "mid": [], "coarse": []}
         else:
-            if self.clip_encoder is not None and target_category:
-                query_emb = self.clip_encoder.encode_text(
+            if target_category:
+                query_emb = self._ltm_encode_text(
                     f"a photo of a {target_category}"
                 ).astype(np.float32)
-            elif self.clip_encoder is not None and query_visual_embedding is not None:
-                query_emb = np.asarray(query_visual_embedding, dtype=np.float32)
             else:
-                query_emb = self.text_encode_fn(query_text).astype(np.float32)
+                query_emb = self._ltm_encode_text(query_text).astype(np.float32)
             retrieval = self.retrieve(query_emb, top_k_per_layer=3)
 
         # Build a textual stand-in per candidate so the scorers have something
         # to embed; subsequent scorers only need *embedding* equality, not
         # human readability. We encode in whichever space the LTM lives in
-        # (CLIP joint when configured) so the candidate-aware memory scorer
-        # can compute well-defined cosines against retrieved entries.
+        # (SBERT text) so the candidate-aware memory scorer can compute
+        # well-defined cosines against retrieved entries.
         # NB: the memory scorer's per-candidate signal is intentionally weak
         # here — candidate texts are geometric "go to (x,y)" strings, so they
-        # cluster tightly in CLIP space. Path 1 is scaffolding; meaningful
+        # cluster tightly in text space. Path 1 is scaffolding; meaningful
         # candidate-level memory influence requires option 2 (planner-side
         # memory-injected candidates with their own visual embeddings).
         cand_texts: List[str] = []

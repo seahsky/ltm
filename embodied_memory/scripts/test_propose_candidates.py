@@ -1046,9 +1046,11 @@ def case_remembr_llm_loop():
 
 
 def case_mem_cos_full_calibration():
-    """Recalibrated _MEM_COS_FULL=0.25: a true image-text sighting (cos ~0.25,
-    nearby) out-scores a baseline frontier; a non-sighting (~0.228) loses to a
-    strong frontier.
+    """Recalibrated for SBERT goal-vs-caption TEXT cosine (_MEM_COS_FULL=0.50):
+    a true caption match (cos ~0.55, nearby) out-scores a baseline frontier; a
+    non-match (~0.30) loses to a strong frontier. The LTM is indexed on caption
+    text (SBERT), not CLIP image embeddings — text-text separation is wide
+    (~0.5 match vs ~0.2 non-match) where image-text was flat (~0.25 vs 0.228).
 
     FrontierPhysicsScorer lives in memory_bridge.py, which can't be imported
     without the faiss/LTM backend (absent locally AND, per remembr-run63/64, the
@@ -1071,8 +1073,8 @@ def case_mem_cos_full_calibration():
     cos_null = _const("_MEM_COS_NULL")
     cos_full = _const("_MEM_COS_FULL")
     dist_w = _const("_MEM_DIST_WEIGHT")
-    # The recalibration this guards: saturate at the real ViT-B/32 sighting scale.
-    assert abs(cos_full - 0.25) < 1e-9, f"_MEM_COS_FULL={cos_full} (expected 0.25)"
+    # The recalibration this guards: saturate at the SBERT text-match scale.
+    assert abs(cos_full - 0.50) < 1e-9, f"_MEM_COS_FULL={cos_full} (expected 0.50)"
 
     def _dist_score(d):
         return 0.0 if d <= 0 else max(0.0, 1.0 - abs(d - 2.0) / 4.0)
@@ -1089,13 +1091,13 @@ def case_mem_cos_full_calibration():
             s = 0.5 * raw + 0.3 * b + 0.2 * _dist_score(dist)
         return float(np.clip(s, 0.0, 1.0))
 
-    # a true sighting (cos 0.25, nearby) beats a baseline frontier (raw 0.70)
-    assert score("memory", 0.25, 2.0) > score("frontier", 0.70, 1.5), \
-        (score("memory", 0.25, 2.0), score("frontier", 0.70, 1.5))
-    # baseline non-sighting (cos 0.228) still loses to a strong frontier (raw 0.97)
-    assert score("memory", 0.228, 3.2) < score("frontier", 0.97, 1.9), \
-        (score("memory", 0.228, 3.2), score("frontier", 0.97, 1.9))
-    print("  case mem_cos_full_calibration (constant pinned 0.25; sighting wins, baseline loses): OK")
+    # a true caption match (cos 0.55, nearby) beats a baseline frontier (raw 0.70)
+    assert score("memory", 0.55, 2.0) > score("frontier", 0.70, 1.5), \
+        (score("memory", 0.55, 2.0), score("frontier", 0.70, 1.5))
+    # baseline non-match (cos 0.30) still loses to a strong frontier (raw 0.97)
+    assert score("memory", 0.30, 3.2) < score("frontier", 0.97, 1.9), \
+        (score("memory", 0.30, 3.2), score("frontier", 0.97, 1.9))
+    print("  case mem_cos_full_calibration (constant pinned 0.50; SBERT match wins, non-match loses): OK")
 
 
 def case_remembr_parse():

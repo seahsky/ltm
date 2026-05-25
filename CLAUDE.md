@@ -17,10 +17,14 @@ The four core modules — STM, bio-inspired consolidation, hierarchical LTM
   the embodied side; the bridge subclasses/swaps where needed.
 - `embodied_memory/` — Habitat ObjectNav port of the same LTM stack. The
   Phase-1 ablation has been run end-to-end on HM3D `val_mini` (2 scenes ×
-  ~30 paired episodes per setting). The LTM is now indexed in **CLIP joint
-  vision-language space** (not SBERT-text on captions, which was inert — the
-  HM3D semantic sensor returns all-zeros so every caption defaulted to
-  "room interior"). Memory now **injects waypoint candidates** into the
+  ~30 paired episodes per setting). The LTM fine layer is indexed on the
+  **caption TEXT embedding (SBERT)**. (It briefly used CLIP image embeddings
+  after the original SBERT-text index went inert — the HM3D semantic sensor
+  returns all-zeros so every caption defaulted to "room interior" — but the
+  CLIP image-text cosine proved flat/non-discriminative (~0.25 sighting vs
+  ~0.228 baseline) and made memory pick wrong instances. With the real Qwen-VL
+  captioner the captions are rich again, so SBERT goal-vs-caption similarity is
+  the discriminative signal.) Memory **injects waypoint candidates** into the
   frontier planner's pool (option 2 in the design notes), not just reranks.
 
 **Phase-1 outcome.** Memory is in the action loop (~1,400 memory candidates
