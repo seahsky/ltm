@@ -664,21 +664,33 @@ class EmbodiedMemoryBridge:
         ax = float(agent_pos[0])
         az = float(agent_pos[2])
 
+        # Diagnostic breakdown (why each hit is or isn't emitted). Gated on
+        # LTM_PROPOSE_DEBUG so it's silent for normal runs; race-revisit.sh
+        # turns it on to pinpoint the binding filter when candidates==0.
+        _dbg = {"hits": len(hits), "below_cos": 0, "scene_mism": 0,
+                "no_pos": 0, "dedup": 0, "too_far": 0, "emitted": 0}
+        _cos_max = -1.0
+
         for entry, dist in hits:
             # FAISS returns L2² on unit-norm vectors → cos = 1 - d²/2.
             cos = max(-1.0, min(1.0, 1.0 - float(dist) / 2.0))
+            _cos_max = max(_cos_max, cos)
             if cos < min_cosine:
+                _dbg["below_cos"] += 1
                 continue
             if entry.metadata.get("scene_id") != self._current_scene_id:
+                _dbg["scene_mism"] += 1
                 continue
             ap = entry.metadata.get("agent_position")
             if ap is None or len(ap) < 3:
+                _dbg["no_pos"] += 1
                 continue
             world_xy = np.asarray([ap[0], ap[2]], dtype=np.float32)
 
             # Skip "go back to where I'm standing" — and dedup against the
             # planner's own frontier proposals so we don't double-vote.
             if any(np.linalg.norm(world_xy - sx) < dedup_radius_m for sx in seen_xys):
+                _dbg["dedup"] += 1
                 continue
             seen_xys.append(world_xy)
 
@@ -686,6 +698,7 @@ class EmbodiedMemoryBridge:
             dz = float(world_xy[1]) - az
             dist_m = math.hypot(dx, dz)
             if dist_m > max_distance_m:
+                _dbg["too_far"] += 1
                 continue
 
             world_bearing = math.atan2(dx, dz)
@@ -718,6 +731,19 @@ class EmbodiedMemoryBridge:
             )
             if len(out) >= top_k:
                 break
+
+        _dbg["emitted"] = len(out)
+        import os
+        if os.environ.get("LTM_PROPOSE_DEBUG"):
+            import sys
+            print(
+                f"[propose_dbg] cat={target_category} fine={len(self.ltm.fine)} "
+                f"hits={_dbg['hits']} cos_max={_cos_max:.3f} min_cos={min_cosine} "
+                f"below_cos={_dbg['below_cos']} scene_mism={_dbg['scene_mism']} "
+                f"no_pos={_dbg['no_pos']} dedup={_dbg['dedup']} "
+                f"too_far={_dbg['too_far']} emitted={_dbg['emitted']}",
+                file=sys.stderr, flush=True,
+            )
 
         if out:
             # Counts as fine-layer activation for the criterion-4 module check.
