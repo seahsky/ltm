@@ -45,7 +45,12 @@ SCENE="wcojb4TFT35"
 CATS="chair bed"
 NWARM="3"
 TAG="revisit-b1"
-N_EPISODES="20"        # ceiling; the controlled-start dataset has 8 eps
+# Empty => auto: run each dataset episode exactly ONCE (one clean cold->warm
+# pass). Habitat wraps around when n_episodes > dataset size, which re-runs the
+# cold (start-on-goal) episodes; the order-based analyzer then mislabels those
+# repeats as "warm" and deflates the warm fire-rate. Pass --n-episodes N
+# explicitly to cycle for lifelong-accumulation experiments.
+N_EPISODES=""
 TARGET="any"
 
 # --- arg parse ---
@@ -81,11 +86,13 @@ source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; exit 1; }
 # These suites are standalone case_*/main() runners (assert-based, sys.exit),
 # NOT pytest test_* functions — `pytest` would collect zero and pass vacuously.
 # Run them as scripts so a real failure returns non-zero and aborts here.
-banner "[3/6] pre-test code verify (revisit analyzer + builder sanity suites)"
+banner "[3/6] pre-test code verify (revisit analyzer + builder + SPL-guard suites)"
 python embodied_memory/scripts/test_analyze_revisit.py \
   || { echo "FATAL: analyze_revisit sanity suite failed — not spending on the live run."; exit 1; }
 python embodied_memory/scripts/test_make_revisit_smoke.py \
   || { echo "FATAL: make_revisit_smoke sanity suite failed — not spending on the live run."; exit 1; }
+python embodied_memory/scripts/test_spl_guard.py \
+  || { echo "FATAL: spl_guard sanity suite failed — not spending on the live run."; exit 1; }
 
 # --- 4. rebuild controlled-start dataset (gitignored -> not on RACE) ---
 banner "[4/6] build revisit dataset: scene=$SCENE cats=[$CATS] n-warm=$NWARM -> $DS_DIR"
@@ -96,6 +103,15 @@ python embodied_memory/scripts/make_revisit_smoke.py \
     --out-dir "$DS_DIR" \
   || { echo "FATAL: dataset build failed."; exit 1; }
 [ -f "$DS" ] || { echo "FATAL: expected dataset not written: $DS"; exit 1; }
+
+# Default n-episodes = exactly the built episode count (one clean cold->warm
+# pass, no Habitat wrap-around re-running the cold seeds). Honour an explicit
+# --n-episodes override.
+if [ -z "$N_EPISODES" ]; then
+  N_EPISODES="$(python -c "import gzip,json,sys; print(len(json.load(gzip.open(sys.argv[1]))['episodes']))" "$DS_DIR/content/$SCENE.json.gz")" \
+    || { echo "FATAL: could not count dataset episodes."; exit 1; }
+  echo "  auto n-episodes = $N_EPISODES (one pass over the built dataset)"
+fi
 
 # --- 5. run S1 (memory-off) and S3 (full) in SEPARATE processes ---
 # LTM persists within a process; settings must never share one out-dir/process.

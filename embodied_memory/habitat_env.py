@@ -119,6 +119,19 @@ class HabitatObjectNavSource(EpisodeSource):
                 "(see embodied_memory/README.md) or use --mode cached."
             ) from e
 
+        # The revisit eval's cold seeding episodes start the agent ON the goal
+        # viewpoint (start_end_distance == 0), so Habitat's SoftSPL/SPL would
+        # raise ZeroDivisionError mid-step and abort the seed. Guard the measures
+        # to yield metric=0.0 on that degenerate division (cold SPL is unused by
+        # Gate A). No-op if the measure classes can't be imported.
+        try:
+            from habitat.tasks.nav.nav import SPL, SoftSPL
+
+            from .spl_guard import guard_zero_start_distance
+            guard_zero_start_distance([SPL, SoftSPL])
+        except Exception:
+            pass
+
         # We use the canonical ObjectNav HM3D config and override scene + sensor
         # resolution. habitat-lab ships this config under benchmark/nav/objectnav.
         config = get_config("benchmark/nav/objectnav/objectnav_hm3d.yaml")

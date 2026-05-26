@@ -172,6 +172,22 @@ def case_build_dataset_two_categories():
     print("  case build_dataset_two_categories: OK")
 
 
+def case_build_dataset_warm_starts_same_category():
+    # The bed episode start [25,0,25] is Euclidean-farthest from the chair goal,
+    # but a non-chair start may be navmesh-unreachable to the chair goal (other
+    # island/floor) -> Infinity geodesic -> NaN soft_SPL. Warm starts must come
+    # only from the SAME category's source episodes (validated reachable to a
+    # goal of that category), so chair's warm start is the chair episode [15,0,0].
+    src = _src_content()
+    content = mk.build_dataset(src, categories=["chair"], n_warm=1)
+    chair_eps = [e for e in content["episodes"] if e["object_category"] == "chair"]
+    assert len(chair_eps) == 2, chair_eps           # cold + 1 warm
+    warm_starts = [e["start_position"] for e in chair_eps[1:]]
+    assert warm_starts == [[15, 0, 0]], warm_starts
+    assert [25, 0, 25] not in warm_starts, warm_starts  # never the bed start
+    print("  case build_dataset_warm_starts_same_category: OK")
+
+
 def case_build_dataset_skips_missing_category():
     src = _src_content()
     content = mk.build_dataset(src, categories=["chair", "sofa"], n_warm=1)
@@ -216,6 +232,7 @@ def main() -> int:
     case_warm_poses_drops_too_close()
     case_build_category_episodes_cold_first()
     case_build_dataset_two_categories()
+    case_build_dataset_warm_starts_same_category()
     case_build_dataset_skips_missing_category()
     case_write_dataset_roundtrip()
     print("All cases passed.")

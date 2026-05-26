@@ -171,18 +171,11 @@ def build_dataset(
 ) -> Dict[str, Any]:
     """Assemble a content dict (goals_by_category preserved) with, per category,
     one cold + ``n_warm`` warm episodes. Categories absent from the source are
-    skipped. Warm-start candidates are drawn from the source episodes' own
-    (navigable) start poses across the scene.
+    skipped. Warm-start candidates are drawn from the SAME category's own source
+    episode starts (see below).
     """
     goals_by_category = src_content.get("goals_by_category") or {}
     src_eps = src_content.get("episodes") or []
-
-    # navigable candidate poses for warm starts = every source episode start
-    candidate_poses = [
-        {"position": list(ep["start_position"]), "rotation": list(ep["start_rotation"])}
-        for ep in src_eps
-        if ep.get("start_position") and ep.get("start_rotation")
-    ]
 
     out_eps: List[Dict[str, Any]] = []
     for cat in categories:
@@ -192,10 +185,26 @@ def build_dataset(
         template = next((ep for ep in src_eps if ep.get("object_category") == cat), None)
         if template is None:
             continue
+
+        # Warm-start candidates = THIS category's own source-episode starts.
+        # The original ObjectNav dataset validated each as reachable to a goal of
+        # this category, so the synthesized warm episode has a finite start->goal
+        # geodesic (valid soft_SPL). Drawing from *any* category's starts (the
+        # global Euclidean-farthest) can land on a disconnected navmesh island /
+        # different floor -> Infinity geodesic -> NaN soft_SPL (observed: every
+        # bed warm episode was NaN in the revisit-b1 smoke).
+        cat_candidate_poses = [
+            {"position": list(ep["start_position"]),
+             "rotation": list(ep["start_rotation"])}
+            for ep in src_eps
+            if ep.get("object_category") == cat
+            and ep.get("start_position") and ep.get("start_rotation")
+        ]
+
         goal_instances = goals_by_category[gkey]
         cold_pose = pick_cold_pose(goal_instances)
         goal_vps = _goal_view_point_positions(goal_instances)
-        warm_poses = pick_warm_poses(candidate_poses, goal_vps, n=n_warm, min_dist=min_dist)
+        warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps, n=n_warm, min_dist=min_dist)
         out_eps.extend(build_category_episodes(template, cold_pose, warm_poses, cat))
 
     return {
