@@ -49,10 +49,17 @@ def _build_text_encoder(name: str):
         enc = MockEncoder(embed_dim=384)
         return (lambda s: enc.encode(s)), 384
     # Default: SBERT all-MiniLM-L6-v2 (384-d) — small, fast, MPS-friendly.
+    # L2-normalize the output: the fine layer is a FAISS IndexFlatL2 read as a
+    # cosine index (cos = 1 - L2^2/2), valid only for unit vectors. SBERT's
+    # .encode() returns non-unit vectors, which made propose_memory_candidates'
+    # cosine clamp to -1 and reject every memory candidate (n_memory_candidates=0
+    # in the revisit smokes). CLIP's encoder already normalizes; match it here.
     from dialogue_memory.encoder import SentenceTransformerEncoder
+
+    from .text_encode_util import l2_normalize_encoder
     enc = SentenceTransformerEncoder(model_name="all-MiniLM-L6-v2")
     dim = enc.embed_dim
-    return (lambda s: np.asarray(enc.encode(s), dtype=np.float32)), int(dim)
+    return l2_normalize_encoder(enc.encode), int(dim)
 
 
 # ----------------------------------------------------------------------

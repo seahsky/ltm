@@ -93,6 +93,8 @@ python embodied_memory/scripts/test_make_revisit_smoke.py \
   || { echo "FATAL: make_revisit_smoke sanity suite failed — not spending on the live run."; exit 1; }
 python embodied_memory/scripts/test_spl_guard.py \
   || { echo "FATAL: spl_guard sanity suite failed — not spending on the live run."; exit 1; }
+python embodied_memory/scripts/test_text_encode_util.py \
+  || { echo "FATAL: text_encode_util sanity suite failed — not spending on the live run."; exit 1; }
 
 # --- 4. rebuild controlled-start dataset (gitignored -> not on RACE) ---
 banner "[4/6] build revisit dataset: scene=$SCENE cats=[$CATS] n-warm=$NWARM -> $DS_DIR"
