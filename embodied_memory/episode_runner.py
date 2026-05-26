@@ -318,20 +318,22 @@ class EpisodeRunner:
         self.planner.update(step.depth, step.agent_state.position, step.agent_state.rotation_yaw)
         _track_d2g(step)
         if not is_oracle:
-            keyframe = self._build_keyframe(step)
-            self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
-            stm_captions.append(keyframe.caption)
-            ep_log["steps"].append(self._serialize_step(step, keyframe))
-
-            # Reset ReMEmbR per-episode state and index the initial keyframe.
+            # Reset ReMEmbR per-episode state and index the initial keyframe;
+            # reuse its RICH VLM caption for the LTM keyframe (see _build_keyframe).
+            caption_override = None
             if self.backbone == "remembr":
                 self.remembr_builder.reset()
                 self.remembr_planner.reset()
-                self.remembr_builder.caption_and_index(
+                rec = self.remembr_builder.caption_and_index(
                     rgb=step.rgb,
                     agent_position=step.agent_state.position,
                     timestep=int(step.step_idx),
                 )
+                caption_override = rec.caption
+            keyframe = self._build_keyframe(step, caption_override=caption_override)
+            self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
+            stm_captions.append(keyframe.caption)
+            ep_log["steps"].append(self._serialize_step(step, keyframe))
 
         # Loop.
         for t in range(1, self.max_steps_per_episode):
@@ -507,19 +509,24 @@ class EpisodeRunner:
 
             # Build keyframe periodically.
             if step.step_idx % self.keyframe_every_m == 0:
-                keyframe = self._build_keyframe(step)
+                # ReMEmbR build phase: caption the RGB with the VLM, write it to
+                # flat memory, and reuse that RICH caption for the LTM keyframe
+                # (the SemanticCaptioner fallback is degenerate — see
+                # _build_keyframe). One VLM call serves both.
+                caption_override = None
+                if self.backbone == "remembr":
+                    rec = self.remembr_builder.caption_and_index(
+                        rgb=step.rgb,
+                        agent_position=step.agent_state.position,
+                        timestep=int(step.step_idx),
+                    )
+                    caption_override = rec.caption
+                keyframe = self._build_keyframe(step, caption_override=caption_override)
                 self.bridge.observe_keyframe(
                     keyframe, action=action, reward=step.reward, success=False
                 )
                 stm_captions.append(keyframe.caption)
                 ep_log["steps"].append(self._serialize_step(step, keyframe))
-                # ReMEmbR build phase: per-keyframe caption + flat-memory write.
-                if self.backbone == "remembr":
-                    self.remembr_builder.caption_and_index(
-                        rgb=step.rgb,
-                        agent_position=step.agent_state.position,
-                        timestep=int(step.step_idx),
-                    )
 
             if step.done:
                 break
@@ -819,7 +826,7 @@ class EpisodeRunner:
         self._waypoint_force_repropose = True
         return ACTION_TURN_LEFT
 
-    def _build_keyframe(self, step: Step) -> Keyframe:
+    def _build_keyframe(self, step: Step, caption_override: Optional[str] = None) -> Keyframe:
         # Cached mode may have already produced a caption + embeddings.
         precomputed_text_emb = step.info.get("text_embedding") if step.info else None
         precomputed_visual_emb = step.info.get("visual_embedding") if step.info else None
@@ -832,6 +839,13 @@ class EpisodeRunner:
 
         if precomputed_caption is not None:
             caption = str(precomputed_caption)
+        elif caption_override is not None:
+            # ReMEmbR backbone: index the LTM fine layer on the RICH VLM caption,
+            # not the SemanticCaptioner fallback. HM3D's semantic sensor is
+            # all-zeros, so SemanticCaptioner emits a degenerate "room interior"
+            # caption — that made the goal-query↔caption cosine non-discriminative
+            # (pinned ~0.17, below the 0.23 bar) so memory never fired.
+            caption = str(caption_override)
         else:
             caption = self.captioner.caption(
                 step.semantic, step.agent_state.position, target=self.target_category
