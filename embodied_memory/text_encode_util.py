@@ -31,3 +31,17 @@ def l2_normalize_encoder(
         return v / n if n > 1e-8 else v
 
     return _encode
+
+
+def cosine_sim(a, b) -> float:
+    """Raw cosine similarity in [-1, 1], normalized at comparison time so it's
+    invariant to either input's magnitude. Returns 0.0 if either vector is
+    ~zero. Used by propose_memory_candidates instead of the `1 - L2^2/2` index
+    shortcut, which silently under-reports when a side isn't unit-norm."""
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na < 1e-8 or nb < 1e-8:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))

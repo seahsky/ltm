@@ -63,12 +63,33 @@ def case_returns_float32():
     print("  case returns_float32: OK")
 
 
+def case_cosine_sim_norm_invariant():
+    # Raw cosine is invariant to vector magnitude: a non-unit stored vector vs a
+    # unit query must yield the SAME cosine as if both were unit. This is the
+    # property propose_memory_candidates needs — the live `1 - L2^2/2` shortcut
+    # LACKED it (it under-reported when a side wasn't unit-norm).
+    a = np.array([1.0, 0.0, 0.0])              # unit
+    b = np.array([3.0, 3.0, 0.0])              # non-unit, 45 deg from a
+    cos = text_encode_util.cosine_sim(a, b)
+    assert np.isclose(cos, np.cos(np.pi / 4), atol=1e-4), cos
+    # scaling b by 10x must not change the cosine
+    assert np.isclose(cos, text_encode_util.cosine_sim(a, 10.0 * b), atol=1e-4)
+    print("  case cosine_sim_norm_invariant: OK")
+
+
+def case_cosine_sim_zero_safe():
+    assert text_encode_util.cosine_sim(np.zeros(3), np.array([1.0, 2.0, 3.0])) == 0.0
+    print("  case cosine_sim_zero_safe: OK")
+
+
 def main() -> int:
     print("text_encode_util.l2_normalize_encoder sanity tests")
     case_normalizes_to_unit_norm()
     case_preserves_direction()
     case_zero_vector_safe()
     case_returns_float32()
+    case_cosine_sim_norm_invariant()
+    case_cosine_sim_zero_safe()
     print("All cases passed.")
     return 0
 

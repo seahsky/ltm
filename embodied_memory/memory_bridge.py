@@ -90,6 +90,7 @@ class EmbodiedMemorySimilarityScorer(Scorer):
 
 from .frontier_planner import FrontierCandidate
 from .perception import Keyframe
+from .text_encode_util import cosine_sim
 
 
 # ----------------------------------------------------------------------
@@ -671,9 +672,13 @@ class EmbodiedMemoryBridge:
                 "no_pos": 0, "dedup": 0, "too_far": 0, "emitted": 0}
         _cos_max = -1.0
 
-        for entry, dist in hits:
-            # FAISS returns L2² on unit-norm vectors → cos = 1 - d²/2.
-            cos = max(-1.0, min(1.0, 1.0 - float(dist) / 2.0))
+        for entry, _dist in hits:
+            # Proper cosine query·entry, normalized at comparison time. The old
+            # `1 - L2²/2` shortcut assumed both sides were unit-norm; in the live
+            # pipeline they weren't, so it under-reported the cosine (~0.17 vs the
+            # true ~0.42 from diagnose_sbert_cosines) and rejected every true
+            # match. cosine_sim normalizes here, so it's robust regardless.
+            cos = cosine_sim(query, entry.embedding)
             _cos_max = max(_cos_max, cos)
             if cos < min_cosine:
                 _dbg["below_cos"] += 1
