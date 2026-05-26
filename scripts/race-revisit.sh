@@ -121,10 +121,10 @@ OUT_DIRS=""
 for S in 1 3; do
   out_dir="runs/${TAG}-s$S"
   banner "[5/6] run: setting=$S backbone=remembr scene=$SCENE -> $out_dir"
-  # LTM_PROPOSE_DEBUG: per-call breakdown of why memory candidates are/aren't
-  # emitted (cos_max / below_cos / no_pos / dedup / too_far) — diagnoses
-  # n_memory_candidates==0. Harmless when memory fires; remove once resolved.
-  REMEMBR_STRICT=1 LTM_PROPOSE_DEBUG=1 python -m embodied_memory.run_hm3d_pol --mode live \
+  # Set LTM_PROPOSE_DEBUG=1 to print a per-call breakdown of why memory
+  # candidates are/aren't emitted (cos_max / below_cos / no_pos / dedup /
+  # too_far) — the gated diagnostic that pinpointed the caption bug in Run 8.
+  REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --episodes-path "$DS" \
       --scene "$SCENE" --target "$TARGET" --n-episodes "$N_EPISODES" \
       --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"

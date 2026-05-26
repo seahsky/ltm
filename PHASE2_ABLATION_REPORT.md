@@ -1446,3 +1446,102 @@ goal approach (the 0.1 m localization the captioner can't provide).
 | `embodied_memory/scripts/diagnose_sbert_cosines.py` | offline goal-vs-caption SBERT separation + calibration recommendation |
 | `docs/superpowers/specs/2026-05-25-navmesh-waypoint-controller-design.md` | navmesh controller design spec |
 
+# Run 8 — Lifelong / revisit eval: Gate A GREEN (RACE, 2026-05-27)
+
+## TL;DR
+
+The Run-7 "C2 net-neutral" verdict was **confounded by a captioning bug**, not a
+property of the memory stack. On a controlled-start **revisit** eval (same scene,
+recurring goals, LTM carried across episodes), once the bug was fixed the
+hierarchical LTM produces a **large, significant positive effect**:
+
+| warm-visit metric (`wcojb4TFT35`, chair+bed, 1 cold + 3 warm each) | S1 (memory off) | S3 (full LTM) |
+|---|---|---|
+| soft-SPL | 0.079 | **0.375** |
+| binary SPL@0.1 m | 0.000 | **0.378** |
+| success@1 m | 0% | **66.7%** |
+| memory fire-rate | — | **0.833** (5/6) |
+| steps (mean) | 18 | 61 |
+
+**Paired warm soft-SPL Δ(S3−S1) = +0.296, 90% CI [+0.100, +0.517], one-sided
+p = 0.002.** Cold control Δ = exactly 0.000. This is the **first non-zero binary
+SPL in the project** (bed warm SPL 0.888; three chair warms ~0.45). Gate A
+verdict: **(a) GREEN**.
+
+## The root cause that confounded Phase 1–2
+
+`episode_runner._build_keyframe` captioned keyframes with `SemanticCaptioner`,
+which reads HM3D's semantic sensor — but that sensor returns **all-zeros** on these
+scenes, so every caption fell back to a degenerate `"… sees: room interior"`. The
+LTM fine layer was therefore indexed on `SBERT("room interior")` for **every**
+keyframe, giving a near-constant ~0.17 cosine to any goal query (`"there is a
+chair"`), regardless of category — below the 0.23 selection bar, so memory **never
+fired**. The rich Qwen-VL caption (the `remembr_sample_caption` in the logs) went
+only to ReMEmbR's *separate* flat memory, never the hierarchical LTM. Every prior
+embodied result where the semantic sensor was zero was measured on a memory with no
+discriminative content to retrieve — the "net-neutral" conclusion was an artifact.
+
+## What changed this run (the fix chain, in order)
+
+The revisit infrastructure (Phase A/B) plus a five-fix chain, each verified by the
+`[propose_dbg]` instrumentation that pinpointed the binding filter:
+
+1. **Revisit infra** — `analyze_revisit.py` (visit-order stratify, warm-only paired
+   soft-SPL bootstrap, Gate-A a/b/c verdict) + `make_revisit_smoke.py`
+   (controlled-start dataset: a cold start *at* the goal viewpoint that seats the
+   sighting, then warm starts far from the goal) + `scripts/race-revisit.sh` driver.
+2. **`spl_guard`** — wraps Habitat `SoftSPL`/`SPL` so the cold-start-on-goal episode
+   (`start_end_distance == 0`) yields metric 0.0 instead of `ZeroDivisionError`. The
+   cold seed now completes and consolidates the goal sighting.
+3. **Same-category warm starts** — warm poses drawn only from the same category's
+   source episodes (validated reachable), killing the Infinity-geodesic / NaN
+   soft-SPL on bed.
+4. **SBERT L2-normalization** (`text_encode_util.l2_normalize_encoder`) — restores
+   the unit-norm invariant the FAISS cosine index assumes.
+5. **Proper cosine in `propose_memory_candidates`** — compute cosine from
+   `query·entry.embedding` (normalized at comparison) instead of the fragile
+   `1 − L2²/2` index shortcut.
+6. **Rich-caption keyframes (THE fix)** — when `backbone == remembr`, index the LTM
+   on the VLM caption from `caption_and_index` (re-encoded with SBERT) instead of the
+   degenerate `SemanticCaptioner` fallback. One VLM call serves both ReMEmbR memory
+   and the LTM keyframe. `cos_max` jumped 0.17 → 0.30–0.61; `n_memory_candidates`
+   0 → 118; `n_memory_chosen` 0 → 27.
+
+## Mechanism (why S3 > S1)
+
+Memory-off (S1) warm episodes give up almost immediately (n_steps 1–27, early STOP)
+— with no waypoint to pursue, the backbone stops. Memory-on (S3) injects a
+recalled-goal waypoint, so the agent pursues and reaches the goal (n_steps ~61,
+succeeds). The Phase-2 worry that the `FrontierPhysicsScorer` would under-rank memory
+did **not** materialize: with real cosines (~0.4–0.6) memory candidates were
+competitive and won 27 decisions vs 15 frontier.
+
+## Honest scope / caveats
+
+- **n = 6 warm pairs, single scene (`wcojb4TFT35`), 2 categories.** The effect is
+  large and significant (p = 0.002) but this is a smoke, not a powered multi-scene
+  result. Generalization is the Phase-C job.
+- `wcojb4TFT35` is **multi-floor**; some bed warm starts sit in cramped pockets. The
+  effect held anyway.
+- Binary SPL is non-zero here because several warm episodes reach the 0.1 m radius
+  via the recalled waypoint — a real detector would still help, but is no longer the
+  only path to non-zero SPL.
+
+## What's next
+
+**Phase C** — scale to the full 3-setting ablation (add S2 = STM-only) across
+multiple scenes and categories to confirm the effect generalizes, then fold the
+revisit eval into the standard harness.
+
+## File index (Run 8)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/scripts/analyze_revisit.py` | visit-order stratified, warm-only paired soft-SPL bootstrap + Gate-A verdict |
+| `embodied_memory/scripts/make_revisit_smoke.py` | controlled-start (cold-at-goal / warm-far) revisit dataset builder |
+| `scripts/race-revisit.sh` | one-shot RACE driver (pull→setup→pre-verify→build→S1/S3→analyze) |
+| `embodied_memory/spl_guard.py` | guards SoftSPL/SPL against zero start-distance (cold seed) |
+| `embodied_memory/text_encode_util.py` | `l2_normalize_encoder` + `cosine_sim` (unit-norm invariant) |
+| `embodied_memory/episode_runner.py` | rich-caption keyframes for `backbone==remembr` (`_build_keyframe` override) |
+| `embodied_memory/memory_bridge.py` | proper cosine in `propose_memory_candidates`; `LTM_PROPOSE_DEBUG` breakdown |
+

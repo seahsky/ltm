@@ -55,24 +55,41 @@ S3 ~18 steps slower).** This is a structural property of the eval, not a bug:
 ObjectNav is single-goal-per-episode, so the LTM's recall-past-sighting value
 rarely applies. The memory mechanism is verified correct and discriminative.
 
+**Phase-3 outcome (2026-05-27, lifelong/revisit eval — see
+`PHASE2_ABLATION_REPORT.md` Run 8).** The Run-7 "net-neutral" verdict was
+**confounded by a captioning bug**, not a structural property. The LTM fine layer
+was indexed via `episode_runner._build_keyframe` → `SemanticCaptioner`, which —
+because HM3D's semantic sensor returns all-zeros — emitted a degenerate
+`"… room interior"` caption for *every* keyframe. So memory had no discriminative
+content (goal-query cosine pinned ~0.17, below the 0.23 bar → memory never fired).
+The rich Qwen-VL caption went only to ReMEmbR's separate flat memory. **Fix: when
+`backbone==remembr`, index the LTM on the VLM caption** (plus a fix chain: SBERT
+L2-normalization, proper cosine in `propose_memory_candidates`, `spl_guard` for
+cold-start-on-goal, same-category reachable warm starts). On the controlled-start
+**revisit** smoke (`wcojb4TFT35`, chair+bed): **Gate A GREEN — warm soft-SPL
+S1 0.079 → S3 0.375, paired Δ +0.296, 90% CI [+0.100,+0.517], p=0.002; first
+non-zero binary SPL (warm S3 0.378); memory fire-rate 0.833.** The LTM helps when
+content is discriminative AND past observations are relevant. This recontextualizes
+all prior embodied results where the semantic sensor was zero.
+
 ## Next milestone
 
-**Lifelong / revisit eval.** The Phase-2 result shows the LTM is net-neutral on
-the single-goal-per-episode `val_mini`; a positive memory effect needs an eval
-where past observations are actually relevant — the same scene traversed
-repeatedly with the LTM carrying over, and recurring goals so a past sighting is
-retrievable and useful. This is eval-infrastructure work, not a fix to the
-memory stack. A separate lever for non-zero **binary** SPL is a real object
-detector / precise goal-approach (the 0.1 m localization the captioner can't
-provide). The remaining code seams (consolidator R-weighting, embodied-data
-training of `train_predictor` / `train_scorer`, coarse-layer affordance
-learning) are wired — see `models/README.md` "Phase-2 operator runbook".
+**Phase C — multi-scene revisit ablation.** Gate A is GREEN on a single-scene
+smoke (n=6 warm pairs). Scale the revisit eval to the full 3-setting ablation
+(add S2 = STM-only) across multiple scenes and categories to confirm the effect
+generalizes, then fold the revisit eval into the standard harness. A separate
+lever for higher **binary** SPL is still a real object detector / precise
+goal-approach. The remaining code seams (consolidator R-weighting, embodied-data
+training of `train_predictor` / `train_scorer`, coarse-layer affordance learning)
+are wired — see `models/README.md` "Phase-2 operator runbook".
 
-The 3-setting ablation + paired-bootstrap analyzer
-(`embodied_memory/scripts/analyze_ablation.py`, soft-SPL-primary gate) are the
-measurement harness. Headline metrics: soft-SPL S3−S1 (primary), `success@1m` /
-`min_d2g` (reach diagnostics), `n_memory_chosen` / `n_remembr_chosen`, and the
-honest binary SPL@0.1 m.
+**Revisit harness:** `scripts/race-revisit.sh` drives
+`make_revisit_smoke.py` → `run_hm3d_pol.py --episodes-path` → `analyze_revisit.py`
+(warm-only paired soft-SPL bootstrap + Gate-A a/b/c verdict). The single-goal
+3-setting ablation + `analyze_ablation.py` (soft-SPL-primary gate) remain the
+val_mini harness. Headline metrics: soft-SPL S3−S1 (primary), `success@1m` /
+`min_d2g` (reach diagnostics), `n_memory_chosen` / `n_remembr_chosen`, binary
+SPL@0.1 m.
 
 ## Running the ablation
 
