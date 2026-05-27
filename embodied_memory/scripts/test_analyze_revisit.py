@@ -24,6 +24,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import analyze_revisit as ar  # noqa: E402
+import contextlib  # noqa: E402
+import io  # noqa: E402
 
 
 def _ep(scene, eid, cat, idx, soft=0.0, spl=0.0, success=False, n_steps=10,
@@ -35,6 +37,11 @@ def _ep(scene, eid, cat, idx, soft=0.0, spl=0.0, success=False, n_steps=10,
         n_memory_chosen=n_mem_chosen, n_memory_candidates=n_mem_cand,
         n_memory_decisions=n_mem_dec,
     )
+
+
+def _run(setting, eps):
+    return ar.RevisitRun(name=f"s{setting}", path=f"runs/s{setting}",
+                         setting=setting, episodes=eps)
 
 
 # ----------------------------------------------------------------------
@@ -241,6 +248,92 @@ def case_load_infers_setting_from_name():
     print("  case load_infers_setting_from_name: OK")
 
 
+def case_s2_decomposition_reported():
+    s1 = _run(1, [_ep("S", "a", "chair", 0, soft=0.1),
+                  _ep("S", "b", "chair", 6, soft=0.2),
+                  _ep("S", "d", "chair", 11, soft=0.3)])
+    s2 = _run(2, [_ep("S", "a", "chair", 0, soft=0.1),
+                  _ep("S", "b", "chair", 6, soft=0.25),
+                  _ep("S", "d", "chair", 11, soft=0.35)])
+    s3 = _run(3, [_ep("S", "a", "chair", 0, soft=0.9),
+                  _ep("S", "b", "chair", 6, soft=0.6, n_mem_chosen=1),
+                  _ep("S", "d", "chair", 11, soft=0.5, n_mem_chosen=1)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ar.print_report([s1, s2, s3], n_bootstrap=500)
+    out = buf.getvalue()
+    assert "S2 - S1" in out, out
+    assert "S3 - S2" in out, out
+    assert "S3 - S1" in out, out
+    print("  case s2_decomposition_reported: OK")
+
+
+def _gate_helps_runs():
+    # warm S3 > warm S1 and memory fires -> gate (a)
+    s1 = _run(1, [_ep("S", "a", "chair", 0, soft=0.1),
+                  _ep("S", "b", "chair", 6, soft=0.2),
+                  _ep("S", "d", "chair", 11, soft=0.3)])
+    s3 = _run(3, [_ep("S", "a", "chair", 0, soft=0.9),
+                  _ep("S", "b", "chair", 6, soft=0.6, n_mem_chosen=1),
+                  _ep("S", "d", "chair", 11, soft=0.5, n_mem_chosen=1)])
+    s2 = _run(2, [_ep("S", "a", "chair", 0, soft=0.1),
+                  _ep("S", "b", "chair", 6, soft=0.9),
+                  _ep("S", "d", "chair", 11, soft=0.9)])
+    return s1, s2, s3
+
+
+def case_gate_unchanged_by_s2():
+    s1, s2, s3 = _gate_helps_runs()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        gate_no_s2 = ar.print_report([s1, s3], n_bootstrap=500)
+    s1b, s2b, s3b = _gate_helps_runs()
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        gate_s2 = ar.print_report([s1b, s2b, s3b], n_bootstrap=500)
+    assert gate_no_s2 == "a", gate_no_s2
+    assert gate_s2 == "a", gate_s2
+    assert gate_no_s2 == gate_s2, (gate_no_s2, gate_s2)
+    print("  case gate_unchanged_by_s2: OK")
+
+
+def case_back_compat_no_s2_block():
+    s1 = _run(1, [_ep("S", "a", "chair", 0, soft=0.1),
+                  _ep("S", "b", "chair", 6, soft=0.2)])
+    s3 = _run(3, [_ep("S", "a", "chair", 0, soft=0.9),
+                  _ep("S", "b", "chair", 6, soft=0.6, n_mem_chosen=1)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ar.print_report([s1, s3], n_bootstrap=500)
+    out = buf.getvalue()
+    assert "S2 - S1" not in out and "S3 - S2" not in out, out
+    print("  case back_compat_no_s2_block: OK")
+
+
+def case_warm_delta_multiscene_no_id_collision():
+    # two scenes with the SAME episode_ids; pairing must key on
+    # (scene_id, episode_id) so the scenes don't collide into one pair.
+    s1 = [
+        _ep("S", "chair-cold-0", "chair", 0, soft=0.1),
+        _ep("S", "chair-warm-1", "chair", 1, soft=0.2),
+        _ep("T", "chair-cold-0", "chair", 0, soft=0.1),
+        _ep("T", "chair-warm-1", "chair", 1, soft=0.3),
+    ]
+    s3 = [
+        _ep("S", "chair-cold-0", "chair", 0, soft=0.9),
+        _ep("S", "chair-warm-1", "chair", 1, soft=0.6),
+        _ep("T", "chair-cold-0", "chair", 0, soft=0.9),
+        _ep("T", "chair-warm-1", "chair", 1, soft=0.8),
+    ]
+    ar.assign_visit_order(s1)
+    ar.assign_visit_order(s3)
+    res = ar.paired_warm_delta(s1, s3, n_bootstrap=1000)
+    assert res["n"] == 2, res["n"]   # NOT collapsed to 1 despite shared ids
+    # deltas [0.6-0.2, 0.8-0.3] = [0.4, 0.5] -> mean 0.45
+    assert abs(res["mean"] - 0.45) < 1e-9, res["mean"]
+    print("  case warm_delta_multiscene_no_id_collision: OK")
+
+
 def main() -> int:
     print("Phase-A revisit analyzer sanity tests")
     case_visit_order_by_idx()
@@ -254,6 +347,10 @@ def main() -> int:
     case_classify_gate_c_rare_firing()
     case_classify_gate_a_fires_and_helps()
     case_classify_gate_b_fires_but_hurts()
+    case_s2_decomposition_reported()
+    case_gate_unchanged_by_s2()
+    case_back_compat_no_s2_block()
+    case_warm_delta_multiscene_no_id_collision()
     case_load_reads_episode_files()
     case_load_infers_setting_from_name()
     print("All cases passed.")

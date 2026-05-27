@@ -355,6 +355,14 @@ def print_visit_distribution(run: RevisitRun) -> None:
           f"cold={n_cold}  warm={n_warm}")
 
 
+def _print_delta(label: str, res: Dict[str, Any]) -> None:
+    """Print one paired-delta block uniformly (used for S3-S1, S2-S1, S3-S2,
+    and the cold control)."""
+    print(f"  {label}: n={res['n']:d}  mean={res['mean']:+.4f}  "
+          f"90% CI=[{res['lo']:+.4f}, {res['hi']:+.4f}]  "
+          f"one-sided p(<=0)={res['p_le_zero']:.3f}")
+
+
 def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
     """Print the full Phase-A report and return the Gate A classification."""
     for r in runs:
@@ -384,15 +392,19 @@ def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
         return "skip"
 
     s1, s3 = by_setting[1], by_setting[3]
+    s2 = by_setting.get(2)
 
     warm = paired_warm_delta(s1.episodes, s3.episodes, n_bootstrap=n_bootstrap)
     cold = paired_cold_delta(s1.episodes, s3.episodes, n_bootstrap=n_bootstrap)
 
-    print("=== paired soft-SPL delta (S3 - S1), bootstrap, 90% CI ===")
-    print(f"  WARM (memory can pay off): n={warm['n']:d}  mean={warm['mean']:+.4f}  "
-          f"90% CI=[{warm['lo']:+.4f}, {warm['hi']:+.4f}]  one-sided p(<=0)={warm['p_le_zero']:.3f}")
-    print(f"  COLD (control, expect ~0): n={cold['n']:d}  mean={cold['mean']:+.4f}  "
-          f"90% CI=[{cold['lo']:+.4f}, {cold['hi']:+.4f}]  one-sided p(<=0)={cold['p_le_zero']:.3f}")
+    print("=== paired soft-SPL delta, bootstrap, 90% CI ===")
+    _print_delta("WARM S3 - S1 (full vs memory-off; PRIMARY gate)", warm)
+    if s2 is not None:
+        warm_s2_s1 = paired_warm_delta(s1.episodes, s2.episodes, n_bootstrap=n_bootstrap)
+        warm_s3_s2 = paired_warm_delta(s2.episodes, s3.episodes, n_bootstrap=n_bootstrap)
+        _print_delta("WARM S2 - S1 (STM-only effect; module 1)", warm_s2_s1)
+        _print_delta("WARM S3 - S2 (LTM-specific: consolidation+LTM+rerank)", warm_s3_s2)
+    _print_delta("COLD S3 - S1 (control, expect ~0)", cold)
     print()
 
     # memory firing on warm visits in S3 (the full system)
