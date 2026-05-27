@@ -183,12 +183,13 @@ class HabitatObjectNavSource(EpisodeSource):
             config.habitat.dataset.content_scenes = bare_scene_ids
             config.habitat.environment.max_episode_steps = int(self.max_steps)
 
-            # Pin the episode iterator to no-shuffle so a multi-scene revisit
-            # run yields each scene's COLD seed episode before its WARM visits
-            # (the LTM must hold the cold sighting before a warm visit recalls
-            # it; the analyzer also labels visit order by processing order).
-            from .episode_order import pin_no_shuffle
-            pin_no_shuffle(config)
+            # Pin the episode iterator (shuffle=False + group_by_scene=True) so a
+            # multi-scene revisit run yields each scene's COLD seed episode before
+            # its WARM visits (the LTM must hold the cold sighting before a warm
+            # visit recalls it; the analyzer also labels visit order by processing
+            # order).
+            from .episode_order import pin_episode_order
+            pin_episode_order(config)
 
             # Override habitat-sim's GPU device selection when the host's EGL
             # stack has no CUDA-aware device (e.g. compute-only containers
