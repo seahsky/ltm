@@ -60,6 +60,7 @@ while [ $# -gt 0 ]; do
 done
 CATS="${CATS//,/ }"        # accept comma- or space-separated lists
 SCENES="${SCENES//,/ }"
+[[ "$TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --tag must be alphanumeric/dash/underscore (got '$TAG')"; exit 1; }
 
 VALMINI="data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content"
 DS_DIR="data/hm3d/datasets/objectnav/hm3d/v1/revisit_${TAG}"
@@ -78,7 +79,9 @@ banner "[2/6] conda setup (source scripts/race-setup.sh)"
 source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; exit 1; }
 
 # --- 3. pre-test code verify (free; aborts before any paid run if broken) ---
-# Standalone case_*/main() runners (assert-based, sys.exit), NOT pytest test_*.
+# These suites are standalone case_*/main() runners (assert-based, sys.exit),
+# NOT pytest test_* functions — `pytest` would collect zero and pass vacuously.
+# Run them as scripts so a real failure returns non-zero and aborts here.
 banner "[3/6] pre-test code verify (analyzer + builder + SPL-guard + encoder + episode-order)"
 python embodied_memory/scripts/test_analyze_revisit.py \
   || { echo "FATAL: analyze_revisit sanity suite failed — not spending on the live run."; exit 1; }
@@ -115,6 +118,7 @@ if [ -z "$N_EPISODES" ]; then
     || { echo "FATAL: could not count dataset episodes."; exit 1; }
   echo "  auto n-episodes = $N_EPISODES (one pass over all built scenes)"
 fi
+[ "$N_EPISODES" -gt 0 ] 2>/dev/null || { echo "FATAL: episode count is '$N_EPISODES' (<=0 or non-numeric) — content files missing or unreadable?"; exit 1; }
 
 # --- 5. run S1/S2/S3 in SEPARATE processes (--scene all over the built scenes) ---
 OUT_DIRS=""
@@ -125,6 +129,8 @@ for S in 1 2 3; do
       --backbone remembr --setting "$S" --episodes-path "$DS" \
       --scene all --target "$TARGET" --n-episodes "$N_EPISODES" \
       --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
+  rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] || echo "WARN: setting $S run exited $rc — its results / Gate-A contribution may be partial."
   OUT_DIRS="$OUT_DIRS $out_dir"
 done
 
