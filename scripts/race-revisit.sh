@@ -93,6 +93,8 @@ python embodied_memory/scripts/test_text_encode_util.py \
   || { echo "FATAL: text_encode_util sanity suite failed — not spending on the live run."; exit 1; }
 python embodied_memory/scripts/test_episode_order.py \
   || { echo "FATAL: episode_order sanity suite failed — not spending on the live run."; exit 1; }
+python embodied_memory/scripts/test_analyze_ablation.py \
+  || { echo "FATAL: analyze_ablation --revisit dispatch sanity suite failed — not spending on the live run."; exit 1; }
 
 # --- 4. rebuild controlled-start dataset, ALL scenes into one shared dir ---
 # make_revisit_smoke writes content/<scene>.json.gz per-scene (additive across
@@ -143,8 +145,11 @@ for S in 1 2 3; do
 done
 
 # --- 6. Gate-A verdict (warm-only paired soft-SPL + S2 decomposition) ---
-banner "[6/6] Gate-A analysis: analyze_revisit.py$OUT_DIRS"
+# Revisit analysis is now a first-class mode of the standard analyzer
+# (analyze_ablation --revisit, which lazily delegates to analyze_revisit).
+# Output is identical to the old analyze_revisit.py entry point.
+banner "[6/6] Gate-A analysis: analyze_ablation.py --revisit$OUT_DIRS"
 # shellcheck disable=SC2086
-python embodied_memory/scripts/analyze_revisit.py $OUT_DIRS
+python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS
 
 banner "DONE — paste everything above (esp. the Gate-A block + S2 decomposition)"

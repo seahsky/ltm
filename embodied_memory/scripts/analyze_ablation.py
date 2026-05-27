@@ -397,10 +397,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("run_dirs", nargs="+", help="Two or more run directories.")
     parser.add_argument("--bootstrap", type=int, default=5000)
     parser.add_argument("--ci", type=float, default=0.95)
+    parser.add_argument("--revisit", action="store_true",
+        help="Visit-order (revisit) analysis: cold/warm stratify, warm-paired "
+             "soft-SPL delta + S2 decomposition + Gate-A verdict "
+             "(delegates to analyze_revisit).")
     args = parser.parse_args(argv)
 
     if len(args.run_dirs) < 2:
         parser.error("at least two run directories are required")
+
+    if args.revisit:
+        # Lazy import: avoids the circular import (analyze_revisit imports us at
+        # module top). --ci does not apply here; print_report hardcodes 90% CI to
+        # match the standalone analyze_revisit script.
+        import analyze_revisit  # noqa: E402
+        runs = [analyze_revisit.load_revisit_run(p) for p in args.run_dirs]
+        analyze_revisit.print_report(runs, args.bootstrap)
+        return 0
 
     runs = [load_run(p) for p in args.run_dirs]
 

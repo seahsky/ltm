@@ -88,11 +88,17 @@ the memory stack itself was unchanged from Run 8.
 
 ## Next milestone
 
-**Fold the revisit eval into the standard harness.** Phase C confirmed the LTM
-effect generalizes; the revisit eval is still a separate script
-(`scripts/race-revisit.sh` + `analyze_revisit.py`). Integrate it into
-`analyze_ablation.py` / the val_mini driver so the visit-order revisit analysis is a
-first-class ablation mode. A separate lever for higher **binary** SPL is still a real
+**Fold the revisit eval into the standard harness — DONE (2026-05-27).** Phase C
+confirmed the LTM effect generalizes; the visit-order revisit analysis is now a
+**first-class mode of the standard analyzer**: `python
+embodied_memory/scripts/analyze_ablation.py --revisit <run_dirs>` (one front
+door). It lazily delegates to `analyze_revisit.py`, which **remains runnable
+standalone** as a back-compat alias (identical output). Opt-in only — the
+standard `analyze_ablation` Phase-2 gate is unchanged unless `--revisit` is
+passed. The controlled-start dataset build stays revisit-specific
+(`make_revisit_smoke.py` / `scripts/race-revisit.sh`); only the driver's final
+analysis call moved to `analyze_ablation --revisit`. A separate lever for higher
+**binary** SPL is still a real
 object detector / precise goal-approach (Phase C's binary SPL 0.196 is perception-
 bound at the 0.1 m success radius; memory gets the agent to the goal region, not
 always within 0.1 m). Optional: widen the revisit matrix (tv_monitor / plant /
@@ -103,8 +109,9 @@ affordance learning) are wired — see `models/README.md` "Phase-2 operator runb
 
 **Revisit harness:** `scripts/race-revisit.sh` drives
 `make_revisit_smoke.py` → `run_hm3d_pol.py --episodes-path --scene all` →
-`analyze_revisit.py` (warm-only paired soft-SPL bootstrap + S2-STM-only
-decomposition + Gate-A a/b/c verdict). A bare `bash scripts/race-revisit.sh
+`analyze_ablation.py --revisit` (warm-only paired soft-SPL bootstrap + S2-STM-only
+decomposition + Gate-A a/b/c verdict; `analyze_revisit.py` is the standalone
+alias for the same output). A bare `bash scripts/race-revisit.sh
 --tag <t>` runs the Phase-C default: both val_mini scenes × {chair,bed} ×
 {S1,S2,S3}, n_warm 3 (48 episodes). The single-goal
 3-setting ablation + `analyze_ablation.py` (soft-SPL-primary gate) remain the
