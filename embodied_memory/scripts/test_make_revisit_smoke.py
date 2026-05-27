@@ -224,6 +224,26 @@ def case_write_dataset_roundtrip():
     print("  case write_dataset_roundtrip: OK")
 
 
+def case_two_builds_into_one_dir_are_additive():
+    # Phase C builds each scene into ONE shared out-dir; the per-scene
+    # content/<scene>.json.gz writes must be additive (the 2nd build must not
+    # clobber the 1st), and the rewritten top-level must re-load with empty
+    # episodes + a category map.
+    src_a = _src_content()
+    src_b = _src_content()
+    content_a = mk.build_dataset(src_a, categories=["chair"], n_warm=1)
+    content_b = mk.build_dataset(src_b, categories=["bed"], n_warm=1)
+    with tempfile.TemporaryDirectory() as d:
+        mk.write_dataset(out_dir=d, scene="sceneA", content=content_a, category_maps=src_a)
+        top = mk.write_dataset(out_dir=d, scene="sceneB", content=content_b, category_maps=src_b)
+        assert os.path.isfile(os.path.join(d, "content", "sceneA.json.gz")), "1st build clobbered"
+        assert os.path.isfile(os.path.join(d, "content", "sceneB.json.gz")), "2nd build missing"
+        tj = json.load(gzip.open(top))
+        assert tj["episodes"] == []
+        assert "category_to_task_category_id" in tj
+    print("  case two_builds_into_one_dir_are_additive: OK")
+
+
 def main() -> int:
     print("Phase-B1 controlled-start dataset builder sanity tests")
     case_cold_pose_picks_max_iou_viewpoint()
@@ -235,6 +255,7 @@ def main() -> int:
     case_build_dataset_warm_starts_same_category()
     case_build_dataset_skips_missing_category()
     case_write_dataset_roundtrip()
+    case_two_builds_into_one_dir_are_additive()
     print("All cases passed.")
     return 0
 
