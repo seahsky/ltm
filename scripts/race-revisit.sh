@@ -130,7 +130,15 @@ for S in 1 2 3; do
       --scene all --target "$TARGET" --n-episodes "$N_EPISODES" \
       --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
   rc=${PIPESTATUS[0]}
-  [ "$rc" -eq 0 ] || echo "WARN: setting $S run exited $rc — its results / Gate-A contribution may be partial."
+  # run_hm3d_pol exits nonzero when its full-system pass_conditions fail, which is
+  # EXPECTED for memory-off (S1) / STM-only (S2) — those settings deliberately can't
+  # satisfy fine_layer_nonempty / all_four_modules_invoked. So judge completeness by
+  # the episode count actually written, not the raw exit code (which conflates "this
+  # ablation setting didn't meet the full-system asserts" with "the run crashed").
+  completed="$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['n_episodes_completed'])" "${out_dir}/summary.json" 2>/dev/null || echo 0)"
+  if [ "$completed" != "$N_EPISODES" ]; then
+    echo "WARN: setting $S completed ${completed}/${N_EPISODES} episodes (exit $rc) — Gate-A contribution may be partial."
+  fi
   OUT_DIRS="$OUT_DIRS $out_dir"
 done
 

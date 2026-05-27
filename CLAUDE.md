@@ -72,20 +72,41 @@ non-zero binary SPL (warm S3 0.378); memory fire-rate 0.833.** The LTM helps whe
 content is discriminative AND past observations are relevant. This recontextualizes
 all prior embodied results where the semantic sensor was zero.
 
+**Phase-C outcome (2026-05-27, multi-scene generalization — see
+`PHASE2_ABLATION_REPORT.md` Run 9).** Scaled the revisit eval to the full
+**3-setting ablation (S1/S2/S3) across 2 scenes (`wcojb4TFT35`, `TEEsavR23oF`) ×
+{chair,bed}**, 16 episodes/setting. **Gate A = (a) GREEN, generalizes:** warm
+paired soft-SPL **S3−S1 = +0.240, 90% CI [+0.073,+0.417], p=0.008** (n=12 pairs),
+binary SPL 0→0.196 on both scenes, success@1m 33%→67%. The added **S2 (STM-only)
+decomposition cleanly attributes the gain to the LTM**: S2−S1 = exactly 0.000
+(STM alone does nothing) so the entire effect is **S3−S2 = +0.240** (consolidation
++ hierarchical LTM + rerank, the proposal's modules 2–4); cold control S3−S1 ≈ 0
+(p=0.315, memory inert without a prior sighting). The harness added
+`episode_order.pin_episode_order` (pins shuffle=False + group_by_scene=True for
+multi-scene cold-first ordering) and the S2 delta reporting in `analyze_revisit.py`;
+the memory stack itself was unchanged from Run 8.
+
 ## Next milestone
 
-**Phase C — multi-scene revisit ablation.** Gate A is GREEN on a single-scene
-smoke (n=6 warm pairs). Scale the revisit eval to the full 3-setting ablation
-(add S2 = STM-only) across multiple scenes and categories to confirm the effect
-generalizes, then fold the revisit eval into the standard harness. A separate
-lever for higher **binary** SPL is still a real object detector / precise
-goal-approach. The remaining code seams (consolidator R-weighting, embodied-data
-training of `train_predictor` / `train_scorer`, coarse-layer affordance learning)
-are wired — see `models/README.md` "Phase-2 operator runbook".
+**Fold the revisit eval into the standard harness.** Phase C confirmed the LTM
+effect generalizes; the revisit eval is still a separate script
+(`scripts/race-revisit.sh` + `analyze_revisit.py`). Integrate it into
+`analyze_ablation.py` / the val_mini driver so the visit-order revisit analysis is a
+first-class ablation mode. A separate lever for higher **binary** SPL is still a real
+object detector / precise goal-approach (Phase C's binary SPL 0.196 is perception-
+bound at the 0.1 m success radius; memory gets the agent to the goal region, not
+always within 0.1 m). Optional: widen the revisit matrix (tv_monitor / plant /
+toilet; more scenes — the driver supports it via `--scenes` / `--categories`) to
+tighten the estimate. The remaining code seams (consolidator R-weighting,
+embodied-data training of `train_predictor` / `train_scorer`, coarse-layer
+affordance learning) are wired — see `models/README.md` "Phase-2 operator runbook".
 
 **Revisit harness:** `scripts/race-revisit.sh` drives
-`make_revisit_smoke.py` → `run_hm3d_pol.py --episodes-path` → `analyze_revisit.py`
-(warm-only paired soft-SPL bootstrap + Gate-A a/b/c verdict). The single-goal
+`make_revisit_smoke.py` → `run_hm3d_pol.py --episodes-path --scene all` →
+`analyze_revisit.py` (warm-only paired soft-SPL bootstrap + S2-STM-only
+decomposition + Gate-A a/b/c verdict). A bare `bash scripts/race-revisit.sh
+--tag <t>` runs the Phase-C default: both val_mini scenes × {chair,bed} ×
+{S1,S2,S3}, n_warm 3 (48 episodes). The single-goal
 3-setting ablation + `analyze_ablation.py` (soft-SPL-primary gate) remain the
 val_mini harness. Headline metrics: soft-SPL S3−S1 (primary), `success@1m` /
 `min_d2g` (reach diagnostics), `n_memory_chosen` / `n_remembr_chosen`, binary

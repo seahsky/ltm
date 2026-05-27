@@ -1545,3 +1545,102 @@ revisit eval into the standard harness.
 | `embodied_memory/episode_runner.py` | rich-caption keyframes for `backbone==remembr` (`_build_keyframe` override) |
 | `embodied_memory/memory_bridge.py` | proper cosine in `propose_memory_candidates`; `LTM_PROPOSE_DEBUG` breakdown |
 
+# Run 9 — Phase C: multi-scene 3-setting revisit ablation — Gate A GREEN, generalizes (RACE, 2026-05-27)
+
+## TL;DR
+
+Run 8's GREEN was a single-scene, S1-vs-S3 smoke (n = 6 warm pairs). Phase C scales
+it to **two scenes (`wcojb4TFT35`, `TEEsavR23oF`) × {chair, bed} × three settings
+(S1 memory-off / S2 STM-only / S3 full)**, 16 episodes per setting, and adds the S2
+decomposition. The effect **holds, powered and well-controlled**, and is cleanly
+attributable to the long-term memory:
+
+| warm-visit metric (n = 12 pairs, both scenes + both categories) | S1 (off) | S2 (STM-only) | S3 (full LTM) |
+|---|---|---|---|
+| soft-SPL | 0.060 | 0.060 | **0.300** |
+| binary SPL@0.1 m | 0.000 | 0.000 | **0.196** |
+| success@1 m | 33.3% | 33.3% | **66.7%** |
+| memory fire-rate | — | 0.000 | **0.500** (6/12) |
+| steps (mean) | 21.2 | 21.2 | 31.6 |
+
+**Paired warm soft-SPL deltas (bootstrap, 90% CI, one-sided p):**
+
+| contrast | meaning | mean Δ | 90% CI | p(≤0) |
+|---|---|---|---|---|
+| **S3 − S1** | full vs memory-off (PRIMARY gate) | **+0.240** | [+0.073, +0.417] | **0.008** |
+| S2 − S1 | STM-only effect (module 1) | **+0.000** | [0, 0] | 1.000 |
+| S3 − S2 | LTM-specific (consolidation+LTM+rerank) | **+0.240** | [+0.073, +0.417] | **0.008** |
+| S3 − S1 (cold) | control, expect ~0 | +0.020 | [0, +0.059] | 0.315 |
+
+Gate A verdict: **(a) GREEN**. Binary SPL is non-zero on **both** scenes (wcojb bed
+warm 0.903; TEEsav bed warms 0.668 and 0.776). The LTM populated fine = 65, **mid = 1**
+(first time the pattern layer fired), coarse = 10; 87 candidates proposed, 20 chosen.
+
+## What this run establishes
+
+- **Generalization (the Phase-C job).** The +0.24 warm gain is significant
+  (p = 0.008, n = 12) across two scenes and two categories, not just the single-scene
+  smoke — supporting the proposal's §3.1 *cross-environment* (跨环境) lifelong-reuse
+  claim, not scene-specific overfitting.
+- **The gain is the LTM, not the STM.** Adding S2 (STM-only) decomposes the effect:
+  **S2 − S1 = exactly 0** (STM-only produced byte-identical episodes to memory-off —
+  short-term memory has no cross-episode recall), so the **entire** +0.24 lands on
+  **S3 − S2** = consolidation + hierarchical LTM + memory-guided rerank (the
+  proposal's novel modules 2–4).
+- **Clean control.** Cold-visit S3 − S1 ≈ 0 (p = 0.315): memory is appropriately inert
+  when no prior same-category sighting exists, so the warm gain is not an artifact of
+  the full system simply behaving differently everywhere.
+
+## What changed this run (the harness, Phase C)
+
+No change to the memory stack itself — only the eval harness, built and reviewed via
+the brainstorm → spec → plan → subagent-TDD workflow (spec at
+`docs/superpowers/specs/2026-05-27-phase-c-multiscene-revisit-design.md`):
+
+1. **`episode_order.pin_episode_order`** — pins habitat's episode iterator to
+   `shuffle = False` **and** `group_by_scene = True` inside `habitat_env._build_env`,
+   so a multi-scene `--scene all` run *guarantees* each scene's cold seed precedes its
+   warm visits (the analyzer labels visit order by processing order). The single-scene
+   smoke relied on a default; this makes the ordering invariant self-defending.
+2. **S2 decomposition in `analyze_revisit.py`** — when an S2 run is present, report
+   warm S2 − S1 and S3 − S2 alongside the primary S3 − S1; Gate-A classification stays
+   on S3 − S1 (back-compatible). Pairing keys on `(scene_id, episode_id)` so identical
+   episode ids across scenes don't collide.
+3. **Multi-scene 3-setting driver** (`scripts/race-revisit.sh`) — builds each scene
+   into one shared dataset dir (additive), runs `for S in 1 2 3` in separate
+   processes, sums the episode count across all scenes, runs `--scene all`, and guards
+   a zero count / unsafe `--tag`. The S1/S2 `WARN` now checks episode-count
+   completeness (S1/S2 legitimately exit non-zero on the full-system pass-conditions).
+
+## Honest scope / caveats
+
+- **n = 12 warm pairs, 2 scenes, 2 categories.** Significant (p = 0.008) and a real
+  multi-scene generalization, but still modest scale — more scenes/categories would
+  tighten the CI further.
+- **Memory fired on 6/12 warm visits** (vs 5/6 in the single-scene smoke). The
+  non-firing half (often n_steps = 1 early STOPs on multi-floor or cramped starts)
+  dilutes the mean; where memory fired, soft-SPL gains were large (0.75, 0.66, 0.90).
+  A real detector / better STOP would lift the firing rate and binary SPL.
+- **Binary SPL@0.1 m = 0.196** — non-zero on both scenes but still perception-bound at
+  the 0.1 m success radius; the recalled waypoint gets the agent *to* the goal region,
+  not always within 0.1 m.
+
+## What's next
+
+- **Fold the revisit eval into the standard harness** (`analyze_ablation` / the
+  val_mini driver) so it's a first-class ablation mode rather than a separate script.
+- **Real object detector** for higher binary SPL (the remaining perception lever).
+- Optional: scale the matrix (tv_monitor / plant / toilet; more scenes) to tighten the
+  estimate — the driver already supports it via `--scenes` / `--categories`.
+
+## File index (Run 9)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/episode_order.py` | `pin_episode_order` — pins shuffle=False + group_by_scene=True for multi-scene cold-first ordering |
+| `embodied_memory/habitat_env.py` | calls `pin_episode_order(config)` in `_build_env` |
+| `embodied_memory/scripts/analyze_revisit.py` | S2 (STM-only) decomposition: warm S2−S1, S3−S2; Gate-A stays on S3−S1 |
+| `scripts/race-revisit.sh` | multi-scene 3-setting driver (build loop, `for S in 1 2 3`, episode-count sum, `--scene all`) |
+| `docs/superpowers/specs/2026-05-27-phase-c-multiscene-revisit-design.md` | Phase C design spec |
+| `docs/superpowers/plans/2026-05-27-phase-c-multiscene-revisit.md` | Phase C implementation plan |
+
