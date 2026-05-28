@@ -159,6 +159,7 @@ class GoalDetector:
         max_snap_dist: float = 0.5,
         max_new_tokens: int = 64,
         device: Optional[str] = None,
+        debug_log_path: Optional[str] = None,
     ):
         self.model = model
         self.processor = processor
@@ -166,6 +167,12 @@ class GoalDetector:
         self.max_snap_dist = float(max_snap_dist)
         self.max_new_tokens = int(max_new_tokens)
         self.device = device
+        # When set, every locate() failure appends one JSON line capturing the
+        # reason + (truncated) decoded Qwen-VL output. Detector-c1 found
+        # n_detector_localized=0 across the whole matrix; this is the only way
+        # to see what the model is actually emitting without re-running the
+        # full ablation.
+        self.debug_log_path = debug_log_path
 
     def locate(
         self,
@@ -195,20 +202,29 @@ class GoalDetector:
         # bbox at a different location. If the pre-flight smoke surfaces
         # normalized output instead, flip this default.
         if not bboxes:
+            self._debug_log("empty_parse", decoded=text, goal_category=goal_category)
             return None
 
         best = None
         best_depth = float("inf")
+        depths_seen: List[Optional[float]] = []
         for (x1, y1, x2, y2) in bboxes:
             uc = (x1 + x2) // 2
             vc = (y1 + y2) // 2
             d = robust_depth_at_pixel(depth, u=uc, v=vc, patch=5)
+            depths_seen.append(d)
             if d is None:
                 continue
             if d < best_depth:
                 best_depth = d
                 best = (uc, vc, d)
         if best is None:
+            self._debug_log(
+                "all_depths_invalid",
+                decoded=text, goal_category=goal_category,
+                n_bboxes=len(bboxes),
+                depths=[float(d) if d is not None else None for d in depths_seen],
+            )
             return None
 
         uc, vc, d = best
@@ -216,14 +232,58 @@ class GoalDetector:
             u=uc, v=vc, depth=d, intrinsics=intrinsics, agent_pose=agent_pose,
         )
         if world_pt is None:
+            self._debug_log(
+                "back_project_failed",
+                decoded=text, goal_category=goal_category,
+                uc=int(uc), vc=int(vc), depth=float(d),
+            )
             return None
 
         snapped = np.asarray(self.pathfinder.snap_point(world_pt), dtype=np.float32)
         if not np.all(np.isfinite(snapped)):
+            self._debug_log(
+                "snap_not_finite",
+                decoded=text, goal_category=goal_category,
+                world_pt=[float(x) for x in world_pt],
+            )
             return None
-        if float(np.linalg.norm(snapped - world_pt)) > self.max_snap_dist:
+        snap_dist = float(np.linalg.norm(snapped - world_pt))
+        if snap_dist > self.max_snap_dist:
+            self._debug_log(
+                "snap_too_far",
+                decoded=text, goal_category=goal_category,
+                world_pt=[float(x) for x in world_pt],
+                snapped=[float(x) for x in snapped],
+                snap_dist=snap_dist, max_snap_dist=self.max_snap_dist,
+            )
             return None
         return snapped
+
+    def _debug_log(self, reason: str, decoded: str = "", goal_category: str = "", **extra) -> None:
+        """Append one JSON line per locate() failure to self.debug_log_path.
+
+        No-op when debug_log_path is None. Wrapped in try/except so a logging
+        failure can never crash the agent loop.
+        """
+        if not self.debug_log_path:
+            return
+        try:
+            import json, os, time
+            os.makedirs(os.path.dirname(self.debug_log_path) or ".", exist_ok=True)
+            text = decoded or ""
+            entry = {
+                "ts": time.time(),
+                "reason": reason,
+                "goal_category": goal_category,
+                "decoded_len": len(text),
+                # Truncate so a verbose Qwen output doesn't blow up the log file.
+                "decoded": (text[:1000] + "...[truncated]") if len(text) > 1000 else text,
+                **extra,
+            }
+            with open(self.debug_log_path, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # Never let logging crash the agent.
 
     def _infer(self, rgb: np.ndarray, goal_category: str) -> str:
         """One forward pass through Qwen2-VL for grounding.

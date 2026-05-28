@@ -218,6 +218,64 @@ def case_locate_returns_none_when_snap_too_far():
     print("  case_locate_returns_none_when_snap_too_far: OK")
 
 
+def case_debug_log_records_empty_parse_with_decoded_text():
+    """On the c1 RACE run, 16/16 locate() calls returned None and we had no
+    visibility into WHY (regex? prompt? snap?). The diagnostic log captures
+    the raw Qwen-VL output on every failure so the next preflight surfaces
+    the actual format and we fix the right thing."""
+    import json
+    import tempfile
+    raw_qwen_text = (
+        "<|object_ref_start|>chair<|object_ref_end|>"
+        "<|box_start|>(120,120),(160,160)<|box_end|>"
+    )
+    proc = _MockProcessor(raw_qwen_text)
+    pathfinder = _MockPathfinder(snap_target=np.zeros(3, dtype=np.float32))
+    with tempfile.TemporaryDirectory() as td:
+        log_path = os.path.join(td, "nested", "goal_detector_debug.log")
+        det = gd.GoalDetector(
+            _MockModel(), proc, pathfinder,
+            debug_log_path=log_path,
+        )
+        out = det.locate(
+            rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+            depth=np.full((256, 256), 2.0, dtype=np.float32),
+            goal_category="chair",
+            agent_pose=np.eye(4, dtype=np.float32),
+            intrinsics=_intrinsics(),
+        )
+        # Regex doesn't accept parens -> empty parse -> None
+        assert out is None
+        # The log file must exist (nested dir auto-created) with one entry
+        # whose reason is empty_parse and whose decoded text contains the raw
+        # paren-format bbox tokens we want to diagnose.
+        assert os.path.isfile(log_path), f"debug log not written to {log_path}"
+        with open(log_path) as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+        assert len(lines) == 1, lines
+        entry = json.loads(lines[0])
+        assert entry["reason"] == "empty_parse", entry
+        assert entry["goal_category"] == "chair", entry
+        assert "<|box_start|>(120,120)" in entry["decoded"], entry
+    print("  case_debug_log_records_empty_parse_with_decoded_text: OK")
+
+
+def case_debug_log_disabled_when_path_none():
+    """No log path -> no file created, no exception. Default behavior."""
+    proc = _MockProcessor("nothing here")
+    pathfinder = _MockPathfinder(snap_target=np.zeros(3, dtype=np.float32))
+    det = gd.GoalDetector(_MockModel(), proc, pathfinder)  # debug_log_path=None
+    out = det.locate(
+        rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+        depth=np.full((256, 256), 2.0, dtype=np.float32),
+        goal_category="chair",
+        agent_pose=np.eye(4, dtype=np.float32),
+        intrinsics=_intrinsics(),
+    )
+    assert out is None
+    print("  case_debug_log_disabled_when_path_none: OK")
+
+
 def case_locate_picks_lowest_depth_bbox_among_multiple():
     # Two bboxes: bbox A at center (90,90), bbox B at center (140,140).
     # Depth: 3.0 everywhere except a small patch at (140,140) which is 1.0.
@@ -259,6 +317,8 @@ def main() -> int:
     case_locate_returns_none_when_depth_invalid_at_center()
     case_locate_returns_none_when_snap_too_far()
     case_locate_picks_lowest_depth_bbox_among_multiple()
+    case_debug_log_records_empty_parse_with_decoded_text()
+    case_debug_log_disabled_when_path_none()
     print("All cases passed.")
     return 0
 

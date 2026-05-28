@@ -363,12 +363,20 @@ def main(argv: Optional[list] = None) -> int:
         # Pathfinder lives on the Habitat sim, which the EpisodeSource owns;
         # EpisodeRunner wires it in lazily before the first locate() call.
         from embodied_memory.goal_detector import GoalDetector
+        # Sidecar JSON-lines log of every locate() failure (reason + raw
+        # decoded Qwen-VL output, truncated). Used to diagnose the c1 run
+        # where n_detector_localized was 0/16 — we couldn't tell whether
+        # the regex, the prompt, or the snap was the culprit. The file is
+        # only opened on first failure so a fully-successful run leaves
+        # nothing behind.
+        goal_detector_debug_log = os.path.join(args.out_dir, "goal_detector_debug.log")
         goal_detector = GoalDetector(
             model=remembr_builder.model,
             processor=remembr_builder.processor,
             pathfinder=None,
             device=remembr_builder.device,
             max_snap_dist=0.5,
+            debug_log_path=goal_detector_debug_log,
         )
 
     # 7. source + runner.

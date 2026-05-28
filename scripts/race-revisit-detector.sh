@@ -118,13 +118,28 @@ REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
 n_called="$(python -c "import json,sys; s=json.load(open(sys.argv[1])); print(s.get('n_detector_called', 0))" "${PREFLIGHT_DIR}/summary.json" 2>/dev/null || echo 0)"
 n_localized="$(python -c "import json,sys; s=json.load(open(sys.argv[1])); print(s.get('n_detector_localized', 0))" "${PREFLIGHT_DIR}/summary.json" 2>/dev/null || echo 0)"
 echo "preflight: n_detector_called=$n_called n_detector_localized=$n_localized"
+# Always surface the goal_detector debug log if any locate() failure was
+# recorded. Format is JSON-lines (one entry per failure); first 3 entries are
+# enough to identify the failure mode (regex/prompt/snap) without rerunning
+# the full matrix. Detector-c1 (2026-05-28) shipped the matrix BEFORE this
+# diagnostic existed and burned ~24 min running a 6-cell ablation where the
+# detector silently no-op'd 16/16 — never again.
+DEBUG_LOG="${PREFLIGHT_DIR}/goal_detector_debug.log"
+if [ -f "$DEBUG_LOG" ]; then
+  n_fail="$(wc -l < "$DEBUG_LOG" | tr -d ' ')"
+  echo "preflight goal_detector_debug.log: $n_fail failure entries (first 3 below)"
+  head -3 "$DEBUG_LOG"
+fi
 if [ "$n_called" = "0" ]; then
   echo "FATAL: pre-flight — detector never called. Keyword-STOP didn't fire; rerun or diagnose."
   exit 1
 fi
 if [ "$n_localized" = "0" ]; then
-  echo "WARN: pre-flight — detector called but never localized. Possible Qwen-VL grounding issue."
-  echo "Proceeding to the 6-cell matrix anyway (the matrix itself will surface the rate)."
+  echo "FATAL: pre-flight — detector called but never localized. The debug log"
+  echo "above shows Qwen-VL's actual output; running the 6-cell matrix would"
+  echo "produce a detector=ON arm that's byte-identical to detector=OFF (this"
+  echo "is what detector-c1 found — don't repeat it). Fix the parser/prompt first."
+  exit 1
 fi
 
 # --- 6. run 6 cells: S1/S2/S3 x detector OFF/ON in SEPARATE processes ---
