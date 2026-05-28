@@ -35,7 +35,16 @@ import numpy as np
 
 
 _BBOX_RE = re.compile(
-    r"<\|box_start\|>\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*<\|box_end\|>"
+    # Accepts both Qwen2-VL formats:
+    #   <|box_start|>x1,y1,x2,y2<|box_end|>          (flat)
+    #   <|box_start|>(x1,y1),(x2,y2)<|box_end|>      (paren, the documented
+    #                                                 native-grounding output)
+    # Optional parens around each (x,y) pair tolerate either.
+    r"<\|box_start\|>"
+    r"\s*\(?\s*(\d+)\s*,\s*(\d+)\s*\)?"
+    r"\s*,\s*"
+    r"\(?\s*(\d+)\s*,\s*(\d+)\s*\)?\s*"
+    r"<\|box_end\|>"
 )
 
 
@@ -334,13 +343,28 @@ class GoalDetector:
         """
         from PIL import Image
         img = Image.fromarray(rgb)
+        # Prompt history (each cost a RACE iteration):
+        #   c1/c2/c3: "Please locate the {cat} in this image and return its
+        #     bounding box." -> Qwen2-VL-2B-Instruct refused as "I'm sorry,
+        #     but as an AI language model, I don't have the ability to see
+        #     images or locate objects within them." (16/16 + 1 preflight =
+        #     17/17 failures). The polite-VQA phrasing triggered the RLHF
+        #     safety refusal despite a real image being attached.
+        # Fix: use Qwen2-VL's grounding-task vocabulary (imperative "Locate",
+        # no "please"), and *inline the expected output format* so the model
+        # can't claim it doesn't know how to respond. The exact-token format
+        # hint also biases sampling toward the <|box_start|> tokens we parse.
         messages = [{
             "role": "user",
             "content": [
                 {"type": "image"},
                 {"type": "text",
-                 "text": f"Please locate the {goal_category} in this image "
-                         f"and return its bounding box."},
+                 "text": (
+                     f"Locate the {goal_category} in this image. "
+                     f"Output the bounding box as "
+                     f"<|object_ref_start|>{goal_category}<|object_ref_end|>"
+                     f"<|box_start|>(x1,y1),(x2,y2)<|box_end|>."
+                 )},
             ],
         }]
         prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True)

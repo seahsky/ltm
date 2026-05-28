@@ -49,6 +49,29 @@ def case_parse_multi_bbox_returns_all():
     print("  case_parse_multi_bbox_returns_all: OK")
 
 
+def case_parse_qwen_paren_format():
+    """Qwen2-VL's documented native-grounding output wraps each (x,y) pair
+    in parens. The regex must accept both flat and paren forms."""
+    s = (
+        "<|object_ref_start|>chair<|object_ref_end|>"
+        "<|box_start|>(100,200),(300,400)<|box_end|>"
+    )
+    out = gd.parse_qwen_bbox(s, image_hw=(480, 640))
+    assert out == [(100, 200, 300, 400)], out
+    # Mixed-format gauntlet: paren + flat in the same string.
+    s2 = (
+        "<|box_start|>(10,20),(30,40)<|box_end|> "
+        "<|box_start|>50,60,70,80<|box_end|>"
+    )
+    out2 = gd.parse_qwen_bbox(s2, image_hw=(480, 640))
+    assert out2 == [(10, 20, 30, 40), (50, 60, 70, 80)], out2
+    # Whitespace tolerance.
+    s3 = "<|box_start|>  ( 100 , 200 ) , ( 300 , 400 )  <|box_end|>"
+    out3 = gd.parse_qwen_bbox(s3, image_hw=(480, 640))
+    assert out3 == [(100, 200, 300, 400)], out3
+    print("  case_parse_qwen_paren_format: OK")
+
+
 def case_robust_depth_returns_median():
     depth = np.array([
         [2.0, 2.0, 2.0, 2.0, 2.0],
@@ -219,26 +242,26 @@ def case_locate_returns_none_when_snap_too_far():
 
 
 def case_debug_log_records_empty_parse_with_decoded_text():
-    """On the c1 RACE run, 16/16 locate() calls returned None and we had no
-    visibility into WHY. The diagnostic log captures the raw Qwen-VL output
-    on every failure so the next preflight surfaces the actual format. c2
-    showed the truncation was head-only and hid the model's actual output;
-    we now extract the assistant turn explicitly."""
+    """On the c1/c2/c3 RACE runs, 17/17 locate() calls returned None because
+    Qwen2-VL-Instruct refused the task ("I'm sorry, but as an AI language
+    model, I don't have the ability to see images..."). The diagnostic log
+    must capture that prose so we can see the refusal pattern.
+    """
     import json
     import tempfile
-    # Realistic shape: chat-template prompt echo (long) + assistant response
-    # at the end. Mirrors what processor.batch_decode(skip_special_tokens=False)
-    # returns from Qwen2-VL — the c2 logs proved this.
-    raw_qwen_text = (
+    # Mirrors the actual c3 refusal pattern: chat-template prompt echo + the
+    # model's "I'm sorry" prose response. No <|box_start|> tokens -> empty parse.
+    refusal_text = (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
         "<|im_start|>user\n<|vision_start|>"
         + ("<|image_pad|>" * 80)
-        + "<|vision_end|>Please locate the chair...<|im_end|>\n"
+        + "<|vision_end|>Locate the chair in this image.<|im_end|>\n"
         "<|im_start|>assistant\n"
-        "<|object_ref_start|>chair<|object_ref_end|>"
-        "<|box_start|>(120,120),(160,160)<|box_end|><|im_end|>"
+        "I'm sorry, but as an AI language model, I don't have the ability to "
+        "see images or locate objects within them. However, I can describe "
+        "the chair to you if you'd like.<|im_end|>"
     )
-    proc = _MockProcessor(raw_qwen_text)
+    proc = _MockProcessor(refusal_text)
     pathfinder = _MockPathfinder(snap_target=np.zeros(3, dtype=np.float32))
     with tempfile.TemporaryDirectory() as td:
         log_path = os.path.join(td, "nested", "goal_detector_debug.log")
@@ -253,7 +276,7 @@ def case_debug_log_records_empty_parse_with_decoded_text():
             agent_pose=np.eye(4, dtype=np.float32),
             intrinsics=_intrinsics(),
         )
-        # Regex doesn't accept parens -> empty parse -> None
+        # Prose response, no box tokens -> empty_parse -> None.
         assert out is None
         assert os.path.isfile(log_path), f"debug log not written to {log_path}"
         with open(log_path) as f:
@@ -262,12 +285,11 @@ def case_debug_log_records_empty_parse_with_decoded_text():
         entry = json.loads(lines[0])
         assert entry["reason"] == "empty_parse", entry
         assert entry["goal_category"] == "chair", entry
-        # The headline diagnostic: the assistant output must contain the model's
-        # actual generated tokens (the paren-format bbox), NOT the prompt scaffolding.
-        assert "<|box_start|>(120,120)" in entry["assistant_output"], entry
+        # Headline: the refusal prose must show up in assistant_output so the
+        # next iteration can diagnose the refusal pattern, not the prompt scaffolding.
+        assert "I'm sorry" in entry["assistant_output"], entry
         assert "<|image_pad|>" not in entry["assistant_output"], entry
-        # decoded_head shows the prompt structure; decoded_tail catches any
-        # cases where the assistant marker is missing.
+        # decoded_head shows the prompt structure.
         assert "system" in entry["decoded_head"], entry
     print("  case_debug_log_records_empty_parse_with_decoded_text: OK")
 
@@ -341,6 +363,7 @@ def main() -> int:
     case_parse_no_bbox_returns_empty()
     case_parse_malformed_bbox_returns_empty()
     case_parse_multi_bbox_returns_all()
+    case_parse_qwen_paren_format()
     case_robust_depth_returns_median()
     case_robust_depth_ignores_nan_zero_inf()
     case_robust_depth_returns_none_if_all_invalid()
