@@ -80,25 +80,46 @@ def _extract_assistant_output(text: str, max_chars: int = 800) -> str:
 def parse_qwen_bbox(
     text: str,
     image_hw: Tuple[int, int],
-    normalized: bool = False,
+    normalized: Optional[bool] = None,
 ) -> List[Tuple[int, int, int, int]]:
     """Parse Qwen2-VL grounding bboxes from a text output.
 
-    Qwen2-VL emits bboxes wrapped in ``<|box_start|>x1,y1,x2,y2<|box_end|>``.
-    Coordinates are usually in pixel space matching the input image; some
-    fine-tunes emit them in [0, 1000] normalized space (set ``normalized=True``
-    to scale to pixels using ``image_hw``).
+    Qwen2-VL emits bboxes wrapped in
+    ``<|box_start|>x1,y1,x2,y2<|box_end|>`` or the documented native-grounding
+    paren form ``<|box_start|>(x1,y1),(x2,y2)<|box_end|>``. Coordinates may be
+    in pixel space matching the input image OR in [0, 1000] normalized space
+    (Qwen's documented default for native grounding — confirmed on RACE c4
+    where a 256x256 input produced bboxes like ``(452,414),(586,586)``).
 
-    Returns a list of ``(x1, y1, x2, y2)`` tuples (possibly empty). Malformed
-    tokens are silently dropped (regex match failures); we never raise.
+    When ``normalized`` is None (default), the function auto-detects: if any
+    parsed coordinate exceeds ``max(H, W)``, all bboxes are treated as
+    normalized and scaled into pixel space. Explicit ``normalized=True/False``
+    forces the interpretation.
+
+    Returns a list of ``(x1, y1, x2, y2)`` pixel-space tuples (possibly empty).
+    Malformed tokens are silently dropped (regex match failures); we never raise.
     """
-    out: List[Tuple[int, int, int, int]] = []
     H, W = image_hw
+    raw_groups: List[Tuple[int, int, int, int]] = []
     for m in _BBOX_RE.finditer(text):
         try:
             x1, y1, x2, y2 = (int(g) for g in m.groups())
         except ValueError:
             continue
+        raw_groups.append((x1, y1, x2, y2))
+    if not raw_groups:
+        return []
+
+    # Auto-detect: if ANY coord across ALL matched bboxes exceeds max image
+    # dim, the model is emitting [0, 1000] normalized space. (Pixel-space
+    # output is bounded by the image, so this signal is unambiguous in the
+    # common case.) Explicit kwarg forces.
+    if normalized is None:
+        max_coord = max(max(g) for g in raw_groups)
+        normalized = max_coord > max(H, W)
+
+    out: List[Tuple[int, int, int, int]] = []
+    for (x1, y1, x2, y2) in raw_groups:
         if normalized:
             x1 = int(round(x1 * W / 1000.0))
             x2 = int(round(x2 * W / 1000.0))

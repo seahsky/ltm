@@ -49,6 +49,31 @@ def case_parse_multi_bbox_returns_all():
     print("  case_parse_multi_bbox_returns_all: OK")
 
 
+def case_parse_qwen_autodetect_normalized():
+    """RACE c4 produced this exact output for a 256x256 image. Coords are in
+    Qwen2-VL's [0, 1000] native-grounding space and must auto-scale to pixels.
+    Pre-fix this returned [] because 586 > 256 -> bounds reject."""
+    raw_qwen_c4 = (
+        "<|object_ref_start|>chair<|object_ref_end|>"
+        "<|box_start|>(452,414),(586,586)<|box_end|>"
+    )
+    out = gd.parse_qwen_bbox(raw_qwen_c4, image_hw=(256, 256))
+    # 452/1000*256 = 115.7 -> 116; 414/1000*256 = 105.98 -> 106;
+    # 586/1000*256 = 150.0
+    assert out == [(116, 106, 150, 150)], out
+    # Auto-detect honors per-call: pixel-space inputs that fit the image stay
+    # pixel-space (no spurious rescaling).
+    pixel_in_bounds = "<|box_start|>(120,120),(160,160)<|box_end|>"
+    assert gd.parse_qwen_bbox(pixel_in_bounds, image_hw=(256, 256)) == [(120, 120, 160, 160)]
+    # Explicit normalized=False forces pixel-space (rejects c4 as out-of-bounds).
+    forced_pixel = gd.parse_qwen_bbox(raw_qwen_c4, image_hw=(256, 256), normalized=False)
+    assert forced_pixel == [], forced_pixel
+    # Explicit normalized=True forces normalized (rescales pixel-space input too).
+    forced_norm = gd.parse_qwen_bbox(pixel_in_bounds, image_hw=(256, 256), normalized=True)
+    assert forced_norm == [(31, 31, 41, 41)], forced_norm
+    print("  case_parse_qwen_autodetect_normalized: OK")
+
+
 def case_parse_qwen_paren_format():
     """Qwen2-VL's documented native-grounding output wraps each (x,y) pair
     in parens. The regex must accept both flat and paren forms."""
@@ -364,6 +389,7 @@ def main() -> int:
     case_parse_malformed_bbox_returns_empty()
     case_parse_multi_bbox_returns_all()
     case_parse_qwen_paren_format()
+    case_parse_qwen_autodetect_normalized()
     case_robust_depth_returns_median()
     case_robust_depth_ignores_nan_zero_inf()
     case_robust_depth_returns_none_if_all_invalid()
