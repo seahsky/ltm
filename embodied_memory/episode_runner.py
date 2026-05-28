@@ -86,6 +86,68 @@ class RunSummary:
         }
 
 
+# ---------------------------------------------------------------------------
+# Detector intercept helpers (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def _decide_stop_or_approach(
+    detector_enabled: bool,
+    detector,                          # GoalDetector or None
+    rgb,
+    depth,
+    goal_category: str,
+    agent_pose,
+    intrinsics,
+    counters: Dict[str, Any],
+):
+    """Decide what to do at a stop_signal=True candidate.
+
+    Returns (action, approach_waypoint):
+      action=ACTION_STOP, approach_waypoint=None   -> STOP this tick
+      action=None,        approach_waypoint=wp    -> caller must navigate
+                                                     toward ``wp`` (3D world)
+    Updates ``counters`` (keyed by 'n_detector_called', 'n_detector_localized',
+    'n_detector_offnavmesh') in place. Pure: no I/O, no side effects beyond
+    the counters dict.
+    """
+    if not detector_enabled or detector is None:
+        return ACTION_STOP, None
+    counters["n_detector_called"] = counters.get("n_detector_called", 0) + 1
+    wp = detector.locate(
+        rgb=rgb, depth=depth, goal_category=goal_category,
+        agent_pose=agent_pose, intrinsics=intrinsics,
+    )
+    if wp is None:
+        counters["n_detector_offnavmesh"] = counters.get("n_detector_offnavmesh", 0) + 1
+        return ACTION_STOP, None
+    counters["n_detector_localized"] = counters.get("n_detector_localized", 0) + 1
+    return None, np.asarray(wp, dtype=np.float32)
+
+
+def _detector_candidate(approach_wp_xyz, agent_pos):
+    """Construct a FrontierCandidate at the detector-snapped waypoint.
+
+    ``approach_wp_xyz`` is a 3-vector in world coords; the candidate only
+    uses (x, z) (the floor plane). ``agent_pos`` lets us populate
+    ``distance_m`` for downstream consumers.
+    """
+    return FrontierCandidate(
+        candidate_id=-1,
+        world_xy=np.array([approach_wp_xyz[0], approach_wp_xyz[2]], dtype=np.float32),
+        grid_rc=(0, 0),
+        distance_m=float(np.linalg.norm(
+            np.array([agent_pos[0], agent_pos[2]])
+            - np.array([approach_wp_xyz[0], approach_wp_xyz[2]])
+        )),
+        bearing_rad=0.0,
+        cluster_size=1,
+        raw_score=1.0,
+        source="detector",
+        metadata={"approach": True},
+    )
+
+
 class EpisodeRunner:
     """Drive N episodes, log to ``out_dir``, return a RunSummary."""
 
@@ -302,6 +364,13 @@ class EpisodeRunner:
         n_frontier_chosen = 0
         n_remembr_chosen = 0
         n_stop_signals = 0
+        ep_metrics_counters: Dict[str, Any] = {
+            "n_detector_called": 0,
+            "n_detector_localized": 0,
+            "n_detector_offnavmesh": 0,
+            "n_detector_approach_success": 0,
+            "n_detector_approach_stop_distance": float("nan"),
+        }
         # Closest the agent ever gets to a goal viewpoint over the episode
         # (geodesic). success@0.1m is perception-bound with caption-only
         # detection; min_d2g + success@1m are the reframed reach diagnostics.
@@ -480,9 +549,61 @@ class EpisodeRunner:
             if current_candidate is None:
                 action = ACTION_FORWARD
             elif current_candidate.metadata.get("stop_signal", False):
-                # ReMEmbR's grounded STOP fired: goal-matching observation
-                # lies within the success radius of the agent. Emit action=0.
-                action = ACTION_STOP
+                # Detector intercept (Task 4): if --detector is on, ask the
+                # GoalDetector to localize the goal and navigate the last
+                # metre. None -> fall back to immediate STOP (monotonicity:
+                # detector-ON is expectation->=detector-OFF).
+                action, approach_wp = _decide_stop_or_approach(
+                    detector_enabled=self.detector_enabled,
+                    detector=self.goal_detector,
+                    rgb=step.rgb,
+                    depth=step.depth,
+                    goal_category=self.target_category,
+                    agent_pose=self._agent_pose_matrix(step.agent_state),
+                    intrinsics=self._camera_intrinsics(),
+                    counters=ep_metrics_counters,
+                )
+                if action is None:
+                    # Install detector waypoint and drive toward it THIS step.
+                    self._approach_waypoint = approach_wp
+                    _src_sim = self.source.get_sim()
+                    if self.goal_detector.pathfinder is None and _src_sim is not None:
+                        self.goal_detector.pathfinder = _src_sim.pathfinder
+                    synthetic = _detector_candidate(
+                        approach_wp, step.agent_state.position,
+                    )
+                    action = self._waypoint_action(
+                        synthetic, step.agent_state.position, step.agent_state.rotation_yaw,
+                    )
+                    if self._waypoint_force_repropose:
+                        # Already at the snapped waypoint -> success ring.
+                        ep_metrics_counters["n_detector_approach_success"] += 1
+                        ep_metrics_counters["n_detector_approach_stop_distance"] = float(
+                            np.linalg.norm(
+                                np.array([step.agent_state.position[0], step.agent_state.position[2]])
+                                - np.array([approach_wp[0], approach_wp[2]])
+                            )
+                        )
+                        action = ACTION_STOP
+                        self._approach_waypoint = None
+                # else: action is ACTION_STOP from the helper -> emit it
+            elif self._approach_waypoint is not None:
+                # Continuing the detector approach from a prior tick.
+                wp = self._approach_waypoint
+                synthetic = _detector_candidate(wp, step.agent_state.position)
+                action = self._waypoint_action(
+                    synthetic, step.agent_state.position, step.agent_state.rotation_yaw,
+                )
+                if self._waypoint_force_repropose:
+                    ep_metrics_counters["n_detector_approach_success"] += 1
+                    ep_metrics_counters["n_detector_approach_stop_distance"] = float(
+                        np.linalg.norm(
+                            np.array([step.agent_state.position[0], step.agent_state.position[2]])
+                            - np.array([wp[0], wp[2]])
+                        )
+                    )
+                    action = ACTION_STOP
+                    self._approach_waypoint = None
             else:
                 action = self._waypoint_action(
                     current_candidate,
@@ -836,6 +957,41 @@ class EpisodeRunner:
             return int(raw)
         self._waypoint_force_repropose = True
         return ACTION_TURN_LEFT
+
+    def _agent_pose_matrix(self, agent_state):
+        """Build a 4x4 world-from-camera transform from a Habitat agent state.
+
+        ``AgentState`` stores only a yaw float (rotation around y-axis) so we
+        construct the rotation matrix from ``rotation_yaw`` directly, without
+        needing the quaternion library.
+        """
+        p = np.asarray(agent_state.position, dtype=np.float32)
+        yaw = float(agent_state.rotation_yaw)
+        cy, sy = float(np.cos(yaw)), float(np.sin(yaw))
+        # y-up Habitat convention: yaw rotates in the xz-plane.
+        R = np.array([
+            [ cy, 0.0, sy],
+            [0.0, 1.0, 0.0],
+            [-sy, 0.0, cy],
+        ], dtype=np.float32)
+        T = np.eye(4, dtype=np.float32)
+        T[:3, :3] = R
+        T[:3, 3] = p
+        return T
+
+    def _camera_intrinsics(self):
+        """Compute pinhole intrinsics from the source's image size + HFOV.
+
+        If the source doesn't expose ``image_hw`` and ``hfov_rad`` cleanly,
+        falls back to the Habitat default for the val_mini config:
+        ``image_hw=(256, 256)`` and ``hfov=90°``.
+        """
+        H = getattr(self.source, "image_hw", (256, 256))[0]
+        W = getattr(self.source, "image_hw", (256, 256))[1]
+        hfov_rad = float(getattr(self.source, "hfov_rad", np.pi / 2.0))
+        fx = 0.5 * W / np.tan(0.5 * hfov_rad)
+        fy = fx   # square pixels in Habitat default
+        return {"fx": fx, "fy": fy, "cx": W / 2.0, "cy": H / 2.0, "image_hw": (H, W)}
 
     def _build_keyframe(self, step: Step, caption_override: Optional[str] = None) -> Keyframe:
         # Cached mode may have already produced a caption + embeddings.
