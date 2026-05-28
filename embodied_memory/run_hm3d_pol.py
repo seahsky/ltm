@@ -218,6 +218,13 @@ def main(argv: Optional[list] = None) -> int:
                              "Run-5 diagnostic: a ShortestPathFollower steers "
                              "straight to the goal, bypassing all memory/model "
                              "loads (answers 'is this env navigable at all?').")
+    parser.add_argument(
+        "--detector",
+        action="store_true",
+        help="Enable precise final-approach localization at keyword-STOP "
+             "events (default off; on requires --backbone remembr because the "
+             "detector reuses ReMEmbR's loaded Qwen2-VL handles).",
+    )
     parser.add_argument("--affordance-from-runs", type=str, nargs="+", default=None,
                         help="Build a per-(category, room) success-rate table "
                              "from prior runs/<dir>/ JSONs and condition coarse-"
@@ -334,7 +341,26 @@ def main(argv: Optional[list] = None) -> int:
         )
         remembr_planner = ReMEmbRPlanner(builder=remembr_builder, config=rmb_cfg)
 
-    # 6. source + runner.
+    # 6. Goal detector (--detector). Reuses ReMEmbR's already-loaded Qwen2-VL
+    # — no new weights, no extra GPU memory.
+    goal_detector = None
+    if args.detector:
+        if args.backbone != "remembr":
+            parser.error("--detector requires --backbone remembr (needs Qwen2-VL handles)")
+        if remembr_builder is None or remembr_builder.model is None:
+            parser.error("--detector: ReMEmbR builder/model not initialised")
+        # Pathfinder lives on the Habitat sim, which the EpisodeSource owns;
+        # EpisodeRunner wires it in lazily before the first locate() call.
+        from embodied_memory.goal_detector import GoalDetector
+        goal_detector = GoalDetector(
+            model=remembr_builder.model,
+            processor=remembr_builder.processor,
+            pathfinder=None,
+            device=remembr_builder.device,
+            max_snap_dist=0.5,
+        )
+
+    # 7. source + runner.
     source = _build_source(args)
     runner = EpisodeRunner(
         source=source,
@@ -356,6 +382,7 @@ def main(argv: Optional[list] = None) -> int:
         backbone=args.backbone,
         remembr_builder=remembr_builder,
         remembr_planner=remembr_planner,
+        goal_detector=goal_detector,
     )
 
     summary = runner.run(args.n_episodes)

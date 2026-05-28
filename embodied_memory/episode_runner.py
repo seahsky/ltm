@@ -21,7 +21,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 
@@ -37,6 +37,9 @@ from .frontier_planner import (
 from .memory_bridge import EmbodiedMemoryBridge
 from .perception import CLIPKeyframeEncoder, Keyframe, SemanticCaptioner
 from .remembr_backbone import ReMEmbRBuilder, ReMEmbRPlanner
+
+if TYPE_CHECKING:
+    from .goal_detector import GoalDetector
 
 
 @dataclass
@@ -101,6 +104,7 @@ class EpisodeRunner:
         backbone: str = "frontier",
         remembr_builder: Optional[ReMEmbRBuilder] = None,
         remembr_planner: Optional[ReMEmbRPlanner] = None,
+        goal_detector: Optional["GoalDetector"] = None,
     ):
         self.source = source
         self.planner = planner
@@ -130,6 +134,13 @@ class EpisodeRunner:
         # goal_radius ≈ propose_reached_m so "reached" aligns with re-propose.
         self._waypoint_goal_radius = 0.5
         self._waypoint_force_repropose = False
+        # Goal detector for precise final-approach (Task 3).
+        self.goal_detector = goal_detector
+        self.detector_enabled = goal_detector is not None
+        # Detector approach state: when locate() returns a 3D point we lock
+        # to that waypoint for subsequent ticks until ShortestPathFollower
+        # reports reached -> emit STOP (Task 4 implements the intercept).
+        self._approach_waypoint: Optional[np.ndarray] = None
         # ReMEmbR pair is required for backbone='remembr' but optional otherwise
         # so the frontier-only path keeps its constructor signature simple.
         if backbone == "remembr" and (remembr_builder is None or remembr_planner is None):
