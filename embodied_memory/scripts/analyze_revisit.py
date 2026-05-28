@@ -407,6 +407,23 @@ def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
     _print_delta("COLD S3 - S1 (control, expect ~0)", cold)
     print()
 
+    # --- paired binary SPL block (precision-bound metric) ---
+    warm_b = paired_warm_delta(s1.episodes, s3.episodes,
+                               n_bootstrap=n_bootstrap, metric="spl")
+    cold_b = paired_cold_delta(s1.episodes, s3.episodes,
+                               n_bootstrap=n_bootstrap, metric="spl")
+    print("=== paired binary SPL delta, bootstrap, 90% CI ===")
+    _print_delta("WARM binary S3 - S1 (full vs memory-off; binary precision)", warm_b)
+    if s2 is not None:
+        warm_b_s2_s1 = paired_warm_delta(s1.episodes, s2.episodes,
+                                         n_bootstrap=n_bootstrap, metric="spl")
+        warm_b_s3_s2 = paired_warm_delta(s2.episodes, s3.episodes,
+                                         n_bootstrap=n_bootstrap, metric="spl")
+        _print_delta("WARM binary S2 - S1", warm_b_s2_s1)
+        _print_delta("WARM binary S3 - S2", warm_b_s3_s2)
+    _print_delta("COLD binary S3 - S1 (control, expect ~0)", cold_b)
+    print()
+
     # memory firing on warm visits in S3 (the full system)
     s3_warm = [e for e in s3.episodes if e.is_warm]
     warm_fire_rate = _mean([1.0 if e.memory_fired else 0.0 for e in s3_warm]) if s3_warm else 0.0

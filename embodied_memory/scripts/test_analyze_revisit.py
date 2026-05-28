@@ -334,6 +334,21 @@ def case_warm_delta_multiscene_no_id_collision():
     print("  case warm_delta_multiscene_no_id_collision: OK")
 
 
+def case_binary_spl_block_printed_when_runs_have_spl():
+    s1 = _run(1, [_ep("S", "a", "chair", 0, soft=0.1, spl=0.0),
+                  _ep("S", "b", "chair", 6, soft=0.2, spl=0.0)])
+    s3 = _run(3, [_ep("S", "a", "chair", 0, soft=0.9, spl=0.0),
+                  _ep("S", "b", "chair", 6, soft=0.6, spl=0.4, n_mem_chosen=1)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ar.print_report([s1, s3], n_bootstrap=500)
+    out = buf.getvalue()
+    # New binary-SPL block headers MUST be present
+    assert "paired binary spl" in out.lower(), out
+    assert "WARM binary S3 - S1" in out, out
+    print("  case_binary_spl_block_printed_when_runs_have_spl: OK")
+
+
 def main() -> int:
     print("Phase-A revisit analyzer sanity tests")
     case_visit_order_by_idx()
@@ -353,6 +368,7 @@ def main() -> int:
     case_warm_delta_multiscene_no_id_collision()
     case_load_reads_episode_files()
     case_load_infers_setting_from_name()
+    case_binary_spl_block_printed_when_runs_have_spl()
     print("All cases passed.")
     return 0
 
