@@ -56,6 +56,10 @@ class RunSummary:
     n_frontier_chosen: int = 0        # decisions where reranker picked a frontier-injected candidate
     n_remembr_chosen: int = 0         # decisions where reranker picked a grounded remembr (LLM) candidate
     n_stop_signals: int = 0           # decisions where backbone emitted a grounded STOP
+    n_detector_called: int = 0
+    n_detector_localized: int = 0
+    n_detector_offnavmesh: int = 0
+    n_detector_approach_success: int = 0
     n_keyframes_observed: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
     ablation: Dict[str, Any] = field(default_factory=dict)
@@ -77,6 +81,10 @@ class RunSummary:
             "n_frontier_chosen": self.n_frontier_chosen,
             "n_remembr_chosen": self.n_remembr_chosen,
             "n_stop_signals": self.n_stop_signals,
+            "n_detector_called": self.n_detector_called,
+            "n_detector_localized": self.n_detector_localized,
+            "n_detector_offnavmesh": self.n_detector_offnavmesh,
+            "n_detector_approach_success": self.n_detector_approach_success,
             "n_keyframes_observed": self.n_keyframes_observed,
             "modules_invoked": self.modules_invoked,
             "ablation": self.ablation,
@@ -269,6 +277,10 @@ class EpisodeRunner:
             summary.n_frontier_chosen += int(ep_metrics.get("n_frontier_chosen", 0))
             summary.n_remembr_chosen += int(ep_metrics.get("n_remembr_chosen", 0))
             summary.n_stop_signals += int(ep_metrics.get("n_stop_signals", 0))
+            summary.n_detector_called += int(ep_metrics.get("n_detector_called", 0))
+            summary.n_detector_localized += int(ep_metrics.get("n_detector_localized", 0))
+            summary.n_detector_offnavmesh += int(ep_metrics.get("n_detector_offnavmesh", 0))
+            summary.n_detector_approach_success += int(ep_metrics.get("n_detector_approach_success", 0))
             # Per-episode row used by analyze_ablation.py to pair runs.
             summary.episodes.append({
                 "episode_idx": ep_idx,
@@ -287,6 +299,10 @@ class EpisodeRunner:
                 "n_frontier_chosen": int(ep_metrics.get("n_frontier_chosen", 0)),
                 "n_remembr_chosen": int(ep_metrics.get("n_remembr_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
+                "n_detector_called": int(ep_metrics.get("n_detector_called", 0)),
+                "n_detector_localized": int(ep_metrics.get("n_detector_localized", 0)),
+                "n_detector_offnavmesh": int(ep_metrics.get("n_detector_offnavmesh", 0)),
+                "n_detector_approach_success": int(ep_metrics.get("n_detector_approach_success", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
                 "min_distance_to_goal": ep_metrics.get("min_distance_to_goal"),
                 "success_1m": bool(ep_metrics.get("success_1m", False)),
@@ -740,6 +756,11 @@ class EpisodeRunner:
         ep_log["n_frontier_chosen"] = n_frontier_chosen
         ep_log["n_remembr_chosen"] = n_remembr_chosen
         ep_log["n_stop_signals"] = n_stop_signals
+        ep_log["n_detector_called"] = int(ep_metrics_counters["n_detector_called"])
+        ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
+        ep_log["n_detector_offnavmesh"] = int(ep_metrics_counters["n_detector_offnavmesh"])
+        ep_log["n_detector_approach_success"] = int(ep_metrics_counters["n_detector_approach_success"])
+        ep_log["n_detector_approach_stop_distance"] = float(ep_metrics_counters["n_detector_approach_stop_distance"])
         ep_log["min_distance_to_goal"] = min_distance_to_goal
         ep_log["success_1m"] = success_1m
         ep_log["grid_cells_free"] = grid_stats["cells_free"]
@@ -767,6 +788,11 @@ class EpisodeRunner:
             "n_frontier_chosen": n_frontier_chosen,
             "n_remembr_chosen": n_remembr_chosen,
             "n_stop_signals": n_stop_signals,
+            "n_detector_called": int(ep_metrics_counters["n_detector_called"]),
+            "n_detector_localized": int(ep_metrics_counters["n_detector_localized"]),
+            "n_detector_offnavmesh": int(ep_metrics_counters["n_detector_offnavmesh"]),
+            "n_detector_approach_success": int(ep_metrics_counters["n_detector_approach_success"]),
+            "n_detector_approach_stop_distance": float(ep_metrics_counters["n_detector_approach_stop_distance"]),
             "grid_cells_free": grid_stats["cells_free"],
             "grid_cells_occupied": grid_stats["cells_occupied"],
             "grid_cells_unknown": grid_stats["cells_unknown"],

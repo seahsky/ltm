@@ -378,6 +378,7 @@ def main(argv: Optional[list] = None) -> int:
             "disable_ltm": disable_ltm,
             "disable_rerank": disable_rerank,
             "backbone": args.backbone,
+            "detector": args.detector,
         },
         backbone=args.backbone,
         remembr_builder=remembr_builder,
