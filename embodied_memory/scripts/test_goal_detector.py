@@ -220,14 +220,23 @@ def case_locate_returns_none_when_snap_too_far():
 
 def case_debug_log_records_empty_parse_with_decoded_text():
     """On the c1 RACE run, 16/16 locate() calls returned None and we had no
-    visibility into WHY (regex? prompt? snap?). The diagnostic log captures
-    the raw Qwen-VL output on every failure so the next preflight surfaces
-    the actual format and we fix the right thing."""
+    visibility into WHY. The diagnostic log captures the raw Qwen-VL output
+    on every failure so the next preflight surfaces the actual format. c2
+    showed the truncation was head-only and hid the model's actual output;
+    we now extract the assistant turn explicitly."""
     import json
     import tempfile
+    # Realistic shape: chat-template prompt echo (long) + assistant response
+    # at the end. Mirrors what processor.batch_decode(skip_special_tokens=False)
+    # returns from Qwen2-VL — the c2 logs proved this.
     raw_qwen_text = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n<|vision_start|>"
+        + ("<|image_pad|>" * 80)
+        + "<|vision_end|>Please locate the chair...<|im_end|>\n"
+        "<|im_start|>assistant\n"
         "<|object_ref_start|>chair<|object_ref_end|>"
-        "<|box_start|>(120,120),(160,160)<|box_end|>"
+        "<|box_start|>(120,120),(160,160)<|box_end|><|im_end|>"
     )
     proc = _MockProcessor(raw_qwen_text)
     pathfinder = _MockPathfinder(snap_target=np.zeros(3, dtype=np.float32))
@@ -246,9 +255,6 @@ def case_debug_log_records_empty_parse_with_decoded_text():
         )
         # Regex doesn't accept parens -> empty parse -> None
         assert out is None
-        # The log file must exist (nested dir auto-created) with one entry
-        # whose reason is empty_parse and whose decoded text contains the raw
-        # paren-format bbox tokens we want to diagnose.
         assert os.path.isfile(log_path), f"debug log not written to {log_path}"
         with open(log_path) as f:
             lines = [ln for ln in f.read().splitlines() if ln.strip()]
@@ -256,8 +262,37 @@ def case_debug_log_records_empty_parse_with_decoded_text():
         entry = json.loads(lines[0])
         assert entry["reason"] == "empty_parse", entry
         assert entry["goal_category"] == "chair", entry
-        assert "<|box_start|>(120,120)" in entry["decoded"], entry
+        # The headline diagnostic: the assistant output must contain the model's
+        # actual generated tokens (the paren-format bbox), NOT the prompt scaffolding.
+        assert "<|box_start|>(120,120)" in entry["assistant_output"], entry
+        assert "<|image_pad|>" not in entry["assistant_output"], entry
+        # decoded_head shows the prompt structure; decoded_tail catches any
+        # cases where the assistant marker is missing.
+        assert "system" in entry["decoded_head"], entry
     print("  case_debug_log_records_empty_parse_with_decoded_text: OK")
+
+
+def case_extract_assistant_output_handles_chat_template():
+    """Pure helper test: the assistant-output extractor pulls the right slice."""
+    text = (
+        "<|im_start|>system\nfoo<|im_end|>\n"
+        "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>q<|im_end|>\n"
+        "<|im_start|>assistant\nthe chair is here<|im_end|>"
+    )
+    out = gd._extract_assistant_output(text, max_chars=800)
+    assert out.startswith("the chair is here"), out
+    assert "<|image_pad|>" not in out, out
+    # No marker -> tail fallback with sentinel.
+    out2 = gd._extract_assistant_output("just some prose with no markers", max_chars=800)
+    assert "[no-assistant-marker]" in out2, out2
+    # Truncation marker fires when output exceeds max_chars.
+    long_text = "<|im_start|>assistant\n" + ("x" * 2000)
+    out3 = gd._extract_assistant_output(long_text, max_chars=100)
+    assert out3.endswith("...[truncated]"), out3[-30:]
+    assert len(out3) <= 100 + len("...[truncated]"), len(out3)
+    # Empty input -> empty output.
+    assert gd._extract_assistant_output("") == ""
+    print("  case_extract_assistant_output_handles_chat_template: OK")
 
 
 def case_debug_log_disabled_when_path_none():
@@ -319,6 +354,7 @@ def main() -> int:
     case_locate_picks_lowest_depth_bbox_among_multiple()
     case_debug_log_records_empty_parse_with_decoded_text()
     case_debug_log_disabled_when_path_none()
+    case_extract_assistant_output_handles_chat_template()
     print("All cases passed.")
     return 0
 

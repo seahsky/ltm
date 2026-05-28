@@ -39,6 +39,35 @@ _BBOX_RE = re.compile(
 )
 
 
+def _extract_assistant_output(text: str, max_chars: int = 800) -> str:
+    """Pull the model's generated tokens out of a chat-template-formatted decode.
+
+    Qwen2-VL's processor.batch_decode(..., skip_special_tokens=False) returns
+    the full prompt + response. The prompt portion is large (system prompt +
+    hundreds of <|image_pad|> tokens for a 256x256 image); the model's actual
+    generation comes after ``<|im_start|>assistant\\n``. We slice that out so
+    the failure log shows the diagnostic signal (was a bbox emitted? prose
+    only? empty?) without being drowned in scaffolding.
+
+    Falls back to the last ``max_chars`` chars of the input if the assistant
+    marker isn't found (defensive: keeps the log useful even if the chat
+    template format shifts).
+    """
+    if not text:
+        return ""
+    marker = "<|im_start|>assistant"
+    idx = text.find(marker)
+    if idx >= 0:
+        tail = text[idx + len(marker):]
+        # Strip the leading newline the chat template emits.
+        tail = tail.lstrip("\n")
+        return tail[:max_chars] + ("...[truncated]" if len(tail) > max_chars else "")
+    # Marker not found: surface the literal tail so the format is still
+    # diagnosable.
+    tail = text[-max_chars:]
+    return f"[no-assistant-marker]...{tail}"
+
+
 def parse_qwen_bbox(
     text: str,
     image_hw: Tuple[int, int],
@@ -276,8 +305,20 @@ class GoalDetector:
                 "reason": reason,
                 "goal_category": goal_category,
                 "decoded_len": len(text),
-                # Truncate so a verbose Qwen output doesn't blow up the log file.
-                "decoded": (text[:1000] + "...[truncated]") if len(text) > 1000 else text,
+                # The decoded text begins with the chat-template echo (system
+                # prompt + hundreds of <|image_pad|> vision tokens). Naive
+                # head-only truncation hides the model's actual generated
+                # output, which lives AFTER the <|im_start|>assistant marker.
+                # Extract it explicitly so the log surfaces the diagnostic
+                # signal we actually need (whether the model emitted box
+                # tokens, prose, or nothing). c2 wasted a 24-min matrix on
+                # this — never again.
+                "assistant_output": _extract_assistant_output(text, max_chars=800),
+                # Keep the head as a sanity check (confirms the prompt
+                # structure looks right) and the tail in case our marker is
+                # missing for some reason.
+                "decoded_head": text[:200],
+                "decoded_tail": text[-300:] if len(text) > 200 else "",
                 **extra,
             }
             with open(self.debug_log_path, "a") as f:
