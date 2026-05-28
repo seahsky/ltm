@@ -135,3 +135,115 @@ def back_project_pinhole(
     pt_cam = np.array([x_cam, y_cam, z_cam, 1.0], dtype=np.float32)
     pt_world = (agent_pose @ pt_cam)[:3]
     return pt_world.astype(np.float32)
+
+
+# ----------------------------------------------------------------------
+# GoalDetector
+# ----------------------------------------------------------------------
+
+
+class GoalDetector:
+    """Precise final-approach goal localizer.
+
+    Reuses the already-loaded Qwen2-VL captioner (no new GPU memory) to emit
+    a bbox for the goal category, then back-projects through depth + agent
+    pose and snaps to the Habitat navmesh.
+    """
+
+    def __init__(
+        self,
+        model,
+        processor,
+        pathfinder,
+        max_snap_dist: float = 0.5,
+        max_new_tokens: int = 64,
+        device: Optional[str] = None,
+    ):
+        self.model = model
+        self.processor = processor
+        self.pathfinder = pathfinder
+        self.max_snap_dist = float(max_snap_dist)
+        self.max_new_tokens = int(max_new_tokens)
+        self.device = device
+
+    def locate(
+        self,
+        rgb: np.ndarray,
+        depth: np.ndarray,
+        goal_category: str,
+        agent_pose: np.ndarray,
+        intrinsics: Dict[str, float],
+    ) -> Optional[np.ndarray]:
+        """Return a navmesh-snapped 3D goal point, or None.
+
+        Pipeline:
+          1. Prompt Qwen2-VL: "Please locate the {goal_category} ..."
+          2. Parse <|box_start|>...<|box_end|> tokens.
+          3. For each bbox, compute robust depth at center; pick the bbox
+             with the *lowest* center depth (closest physical surface).
+          4. Back-project (uc, vc, d_center) -> 3D world point.
+          5. pathfinder.snap_point(point). If the snap jumped further than
+             ``max_snap_dist``, return None (off-navmesh).
+        """
+        text = self._infer(rgb, goal_category)
+        image_hw = (rgb.shape[0], rgb.shape[1])
+        bboxes = parse_qwen_bbox(text, image_hw=image_hw)
+        if not bboxes:
+            bboxes = parse_qwen_bbox(text, image_hw=image_hw, normalized=True)
+        if not bboxes:
+            return None
+
+        best = None
+        best_depth = float("inf")
+        for (x1, y1, x2, y2) in bboxes:
+            uc = (x1 + x2) // 2
+            vc = (y1 + y2) // 2
+            d = robust_depth_at_pixel(depth, u=uc, v=vc, patch=5)
+            if d is None:
+                continue
+            if d < best_depth:
+                best_depth = d
+                best = (uc, vc, d)
+        if best is None:
+            return None
+
+        uc, vc, d = best
+        world_pt = back_project_pinhole(
+            u=uc, v=vc, depth=d, intrinsics=intrinsics, agent_pose=agent_pose,
+        )
+        if world_pt is None:
+            return None
+
+        snapped = np.asarray(self.pathfinder.snap_point(world_pt), dtype=np.float32)
+        if not np.all(np.isfinite(snapped)):
+            return None
+        if float(np.linalg.norm(snapped - world_pt)) > self.max_snap_dist:
+            return None
+        return snapped
+
+    def _infer(self, rgb: np.ndarray, goal_category: str) -> str:
+        """One forward pass through Qwen2-VL for grounding.
+
+        Returns the decoded text (which contains <|box_start|>...<|box_end|>
+        tokens on a successful detection).
+        """
+        from PIL import Image
+        img = Image.fromarray(rgb)
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text",
+                 "text": f"Please locate the {goal_category} in this image "
+                         f"and return its bounding box."},
+            ],
+        }]
+        prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = self.processor(text=prompt, images=img, return_tensors="pt")
+        if self.device is not None:
+            inputs = inputs.to(self.device)
+        # BatchEncoding (transformers) is a dict subclass; mock objects may not be.
+        generate_kwargs: Dict = dict(inputs) if isinstance(inputs, dict) else {"input_ids": inputs.input_ids}
+        out_ids = self.model.generate(**generate_kwargs, max_new_tokens=self.max_new_tokens)
+        decoded = self.processor.batch_decode(out_ids, skip_special_tokens=False)
+        return decoded[0] if decoded else ""

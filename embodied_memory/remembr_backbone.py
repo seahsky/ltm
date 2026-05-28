@@ -195,6 +195,21 @@ class ReMEmbRBuilder:
     def stub_mode(self) -> bool:
         return self._stub_mode
 
+    @property
+    def model(self):
+        """Read-only handle to the loaded Qwen2-VL model (None until built)."""
+        return self._model
+
+    @property
+    def processor(self):
+        """Read-only handle to the loaded Qwen2-VL processor (None until built)."""
+        return self._processor
+
+    @property
+    def device(self):
+        """Device the model is loaded on (None until built)."""
+        return getattr(self, "_device", None)
+
     def attach_text_embed_fn(self, fn: Callable[[str], np.ndarray]):
         """Late-binding setter — convenient when the embedder is owned by the
         bridge/perception layer and constructed after this object."""
