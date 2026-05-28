@@ -118,9 +118,10 @@ def back_project_pinhole(
     """Back-project (u, v, depth) through the pinhole camera and agent pose
     into a 3D world point.
 
-    Camera convention matches Habitat: x-right, y-up, looking along -z. A
-    depth of D at the principal point in the identity pose gives world
-    point (0, 0, -D).
+    Camera convention matches the codebase (frontier_planner.py OccupancyGrid):
+    x-right, y-up, camera +Z is forward (depth = +Zc). At yaw=0, agent faces
+    +z in world; a pixel at the principal point with depth=D back-projects to
+    world point (0, 0, +D).
     """
     if depth is None or not np.isfinite(depth) or depth <= 0.0:
         return None
@@ -128,10 +129,10 @@ def back_project_pinhole(
     fy = float(intrinsics["fy"])
     cx = float(intrinsics["cx"])
     cy = float(intrinsics["cy"])
-    # Camera-frame point. Habitat camera looks down -z.
+    # Camera-frame point. Codebase convention: +Z is forward (depth = +Zc).
     x_cam = (float(u) - cx) * depth / fx
     y_cam = -(float(v) - cy) * depth / fy   # image y points down; world y up
-    z_cam = -depth
+    z_cam = depth
     pt_cam = np.array([x_cam, y_cam, z_cam, 1.0], dtype=np.float32)
     pt_world = (agent_pose @ pt_cam)[:3]
     return pt_world.astype(np.float32)
@@ -188,8 +189,11 @@ class GoalDetector:
         text = self._infer(rgb, goal_category)
         image_hw = (rgb.shape[0], rgb.shape[1])
         bboxes = parse_qwen_bbox(text, image_hw=image_hw)
-        if not bboxes:
-            bboxes = parse_qwen_bbox(text, image_hw=image_hw, normalized=True)
+        # We do NOT fall back to normalized=True: Qwen2-VL-2B-Instruct emits
+        # pixel-space coordinates by default. Re-interpreting slightly-out-of-
+        # bounds pixel coords as normalized [0,1000] would produce a spurious
+        # bbox at a different location. If the pre-flight smoke surfaces
+        # normalized output instead, flip this default.
         if not bboxes:
             return None
 

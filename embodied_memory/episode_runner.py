@@ -58,7 +58,7 @@ class RunSummary:
     n_stop_signals: int = 0           # decisions where backbone emitted a grounded STOP
     n_detector_called: int = 0
     n_detector_localized: int = 0
-    n_detector_offnavmesh: int = 0
+    n_detector_locate_failed: int = 0
     n_detector_approach_success: int = 0
     n_keyframes_observed: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
@@ -83,7 +83,7 @@ class RunSummary:
             "n_stop_signals": self.n_stop_signals,
             "n_detector_called": self.n_detector_called,
             "n_detector_localized": self.n_detector_localized,
-            "n_detector_offnavmesh": self.n_detector_offnavmesh,
+            "n_detector_locate_failed": self.n_detector_locate_failed,
             "n_detector_approach_success": self.n_detector_approach_success,
             "n_keyframes_observed": self.n_keyframes_observed,
             "modules_invoked": self.modules_invoked,
@@ -116,8 +116,10 @@ def _decide_stop_or_approach(
       action=None,        approach_waypoint=wp    -> caller must navigate
                                                      toward ``wp`` (3D world)
     Updates ``counters`` (keyed by 'n_detector_called', 'n_detector_localized',
-    'n_detector_offnavmesh') in place. Pure: no I/O, no side effects beyond
-    the counters dict.
+    'n_detector_locate_failed') in place. 'n_detector_locate_failed' counts any
+    None return from locate() — no-bbox, parse failure, invalid depth, OR
+    off-navmesh snap (all locate() failure modes, not exclusively off-navmesh).
+    Pure: no I/O, no side effects beyond the counters dict.
     """
     if not detector_enabled or detector is None:
         return ACTION_STOP, None
@@ -127,7 +129,7 @@ def _decide_stop_or_approach(
         agent_pose=agent_pose, intrinsics=intrinsics,
     )
     if wp is None:
-        counters["n_detector_offnavmesh"] = counters.get("n_detector_offnavmesh", 0) + 1
+        counters["n_detector_locate_failed"] = counters.get("n_detector_locate_failed", 0) + 1
         return ACTION_STOP, None
     counters["n_detector_localized"] = counters.get("n_detector_localized", 0) + 1
     return None, np.asarray(wp, dtype=np.float32)
@@ -279,7 +281,7 @@ class EpisodeRunner:
             summary.n_stop_signals += int(ep_metrics.get("n_stop_signals", 0))
             summary.n_detector_called += int(ep_metrics.get("n_detector_called", 0))
             summary.n_detector_localized += int(ep_metrics.get("n_detector_localized", 0))
-            summary.n_detector_offnavmesh += int(ep_metrics.get("n_detector_offnavmesh", 0))
+            summary.n_detector_locate_failed += int(ep_metrics.get("n_detector_locate_failed", 0))
             summary.n_detector_approach_success += int(ep_metrics.get("n_detector_approach_success", 0))
             # Per-episode row used by analyze_ablation.py to pair runs.
             summary.episodes.append({
@@ -301,7 +303,7 @@ class EpisodeRunner:
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
                 "n_detector_called": int(ep_metrics.get("n_detector_called", 0)),
                 "n_detector_localized": int(ep_metrics.get("n_detector_localized", 0)),
-                "n_detector_offnavmesh": int(ep_metrics.get("n_detector_offnavmesh", 0)),
+                "n_detector_locate_failed": int(ep_metrics.get("n_detector_locate_failed", 0)),
                 "n_detector_approach_success": int(ep_metrics.get("n_detector_approach_success", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
                 "min_distance_to_goal": ep_metrics.get("min_distance_to_goal"),
@@ -348,6 +350,10 @@ class EpisodeRunner:
         is_oracle = self.backbone == "oracle"
         step, ep = self.source.reset(ep_idx)
         self.planner.reset(agent_pos=step.agent_state.position)
+        # Reset per-episode detector approach state so a stale waypoint from
+        # episode N (e.g. step-budget exhausted mid-approach) never leaks into
+        # episode N+1.
+        self._approach_waypoint = None
         if self.bridge is not None:
             self.bridge.begin_episode(ep.episode_id, scene_id=ep.scene_id)
 
@@ -383,7 +389,7 @@ class EpisodeRunner:
         ep_metrics_counters: Dict[str, Any] = {
             "n_detector_called": 0,
             "n_detector_localized": 0,
-            "n_detector_offnavmesh": 0,
+            "n_detector_locate_failed": 0,
             "n_detector_approach_success": 0,
             "n_detector_approach_stop_distance": float("nan"),
         }
@@ -564,11 +570,15 @@ class EpisodeRunner:
             # Convert candidate → action.
             if current_candidate is None:
                 action = ACTION_FORWARD
-            elif current_candidate.metadata.get("stop_signal", False):
+            elif current_candidate.metadata.get("stop_signal", False) and self._approach_waypoint is None:
                 # Detector intercept (Task 4): if --detector is on, ask the
                 # GoalDetector to localize the goal and navigate the last
                 # metre. None -> fall back to immediate STOP (monotonicity:
                 # detector-ON is expectation->=detector-OFF).
+                # Guard: only intercept on the FIRST stop_signal tick
+                # (approach_wp=None). Subsequent ticks with approach_wp set
+                # fall through to the elif branch below, which continues
+                # steering toward the already-installed waypoint.
                 action, approach_wp = _decide_stop_or_approach(
                     detector_enabled=self.detector_enabled,
                     detector=self.goal_detector,
@@ -758,7 +768,7 @@ class EpisodeRunner:
         ep_log["n_stop_signals"] = n_stop_signals
         ep_log["n_detector_called"] = int(ep_metrics_counters["n_detector_called"])
         ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
-        ep_log["n_detector_offnavmesh"] = int(ep_metrics_counters["n_detector_offnavmesh"])
+        ep_log["n_detector_locate_failed"] = int(ep_metrics_counters["n_detector_locate_failed"])
         ep_log["n_detector_approach_success"] = int(ep_metrics_counters["n_detector_approach_success"])
         ep_log["n_detector_approach_stop_distance"] = float(ep_metrics_counters["n_detector_approach_stop_distance"])
         ep_log["min_distance_to_goal"] = min_distance_to_goal
@@ -790,7 +800,7 @@ class EpisodeRunner:
             "n_stop_signals": n_stop_signals,
             "n_detector_called": int(ep_metrics_counters["n_detector_called"]),
             "n_detector_localized": int(ep_metrics_counters["n_detector_localized"]),
-            "n_detector_offnavmesh": int(ep_metrics_counters["n_detector_offnavmesh"]),
+            "n_detector_locate_failed": int(ep_metrics_counters["n_detector_locate_failed"]),
             "n_detector_approach_success": int(ep_metrics_counters["n_detector_approach_success"]),
             "n_detector_approach_stop_distance": float(ep_metrics_counters["n_detector_approach_stop_distance"]),
             "grid_cells_free": grid_stats["cells_free"],

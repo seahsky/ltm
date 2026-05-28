@@ -104,7 +104,7 @@ def _intrinsics():
 
 def case_detector_off_emits_stop_unchanged():
     counters = {"n_detector_called": 0, "n_detector_localized": 0,
-                "n_detector_offnavmesh": 0}
+                "n_detector_locate_failed": 0}
     action, approach_wp = _decide_stop_or_approach(
         detector_enabled=False, detector=None,
         rgb=np.zeros((256, 256, 3), dtype=np.uint8),
@@ -117,13 +117,13 @@ def case_detector_off_emits_stop_unchanged():
     assert action == ACTION_STOP
     assert approach_wp is None
     assert counters == {"n_detector_called": 0, "n_detector_localized": 0,
-                        "n_detector_offnavmesh": 0}
+                        "n_detector_locate_failed": 0}
     print("  case_detector_off_emits_stop_unchanged: OK")
 
 
 def case_detector_on_locate_none_falls_back_to_stop():
     counters = {"n_detector_called": 0, "n_detector_localized": 0,
-                "n_detector_offnavmesh": 0}
+                "n_detector_locate_failed": 0}
     det = _MockDetector(returns=None)
     action, approach_wp = _decide_stop_or_approach(
         detector_enabled=True, detector=det,
@@ -139,14 +139,14 @@ def case_detector_on_locate_none_falls_back_to_stop():
     assert det.calls == 1
     assert counters["n_detector_called"] == 1
     assert counters["n_detector_localized"] == 0
-    assert counters["n_detector_offnavmesh"] == 1
+    assert counters["n_detector_locate_failed"] == 1  # regression guard for Issue 4 rename
     print("  case_detector_on_locate_none_falls_back_to_stop: OK")
 
 
 def case_detector_on_locate_returns_waypoint_installs_approach():
     counters = {"n_detector_called": 0, "n_detector_localized": 0,
-                "n_detector_offnavmesh": 0}
-    wp = np.array([1.5, 0.0, -2.3], dtype=np.float32)
+                "n_detector_locate_failed": 0}
+    wp = np.array([1.5, 0.0, 2.3], dtype=np.float32)
     det = _MockDetector(returns=wp)
     action, approach_wp = _decide_stop_or_approach(
         detector_enabled=True, detector=det,
@@ -161,8 +161,30 @@ def case_detector_on_locate_returns_waypoint_installs_approach():
     assert np.allclose(approach_wp, wp, atol=1e-6)
     assert counters["n_detector_called"] == 1
     assert counters["n_detector_localized"] == 1
-    assert counters["n_detector_offnavmesh"] == 0
+    assert counters["n_detector_locate_failed"] == 0
     print("  case_detector_on_locate_returns_waypoint_installs_approach: OK")
+
+
+def case_detector_counters_match_renamed_key():
+    """Regression: counter name is n_detector_locate_failed, not n_detector_offnavmesh."""
+    counters = {"n_detector_called": 0, "n_detector_localized": 0,
+                "n_detector_locate_failed": 0}
+    det = _MockDetector(returns=None)
+    action, approach_wp = _decide_stop_or_approach(
+        detector_enabled=True, detector=det,
+        rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+        depth=np.full((256, 256), 2.0, dtype=np.float32),
+        goal_category="chair",
+        agent_pose=np.eye(4, dtype=np.float32),
+        intrinsics=_intrinsics(),
+        counters=counters,
+    )
+    assert action == ACTION_STOP
+    assert approach_wp is None
+    assert counters["n_detector_called"] == 1
+    assert counters["n_detector_localized"] == 0
+    assert counters["n_detector_locate_failed"] == 1, counters
+    print("  case_detector_counters_match_renamed_key: OK")
 
 
 def main() -> int:
@@ -170,6 +192,7 @@ def main() -> int:
     case_detector_off_emits_stop_unchanged()
     case_detector_on_locate_none_falls_back_to_stop()
     case_detector_on_locate_returns_waypoint_installs_approach()
+    case_detector_counters_match_renamed_key()
     print("All cases passed.")
     return 0
 

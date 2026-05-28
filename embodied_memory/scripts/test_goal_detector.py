@@ -89,7 +89,8 @@ def case_back_project_pinhole_identity_pose():
     pt = gd.back_project_pinhole(u=128, v=128, depth=2.0,
                                   intrinsics=intrinsics, agent_pose=agent_pose)
     assert pt is not None
-    assert np.allclose(pt, np.array([0.0, 0.0, -2.0], dtype=np.float32), atol=1e-5), pt
+    # Codebase convention: +Z forward (depth=+Zc); principal point → world (0,0,+D).
+    assert np.allclose(pt, np.array([0.0, 0.0, 2.0], dtype=np.float32), atol=1e-5), pt
     print("  case_back_project_pinhole_identity_pose: OK")
 
 
@@ -99,7 +100,9 @@ def case_back_project_pinhole_translated_pose():
     agent_pose[:3, 3] = np.array([5.0, 1.5, 3.0], dtype=np.float32)
     pt = gd.back_project_pinhole(u=128, v=128, depth=2.0,
                                   intrinsics=intrinsics, agent_pose=agent_pose)
-    assert np.allclose(pt, np.array([5.0, 1.5, 1.0], dtype=np.float32), atol=1e-5), pt
+    # Agent at (5,1.5,3) facing +z; center pixel depth=2 → camera (0,0,+2) →
+    # world (5, 1.5, 3+2) = (5, 1.5, 5).
+    assert np.allclose(pt, np.array([5.0, 1.5, 5.0], dtype=np.float32), atol=1e-5), pt
     print("  case_back_project_pinhole_translated_pose: OK")
 
 
@@ -159,8 +162,9 @@ def _intrinsics():
 def case_locate_returns_point_when_bbox_and_snap_ok():
     proc = _MockProcessor("the chair is at <|box_start|>120,120,160,160<|box_end|>")
     # back-project of center (140,140) at depth 2.0 with identity pose gives
-    # roughly (0.094, -0.094, -2.0); we set the mock snap target near that.
-    snap = np.array([0.1, 0.0, -2.0], dtype=np.float32)
+    # roughly (0.094, -0.094, +2.0) under the +Z-forward convention; snap target
+    # is nearby so the snap-distance guard (0.5m) allows it.
+    snap = np.array([0.1, 0.0, 2.0], dtype=np.float32)
     pathfinder = _MockPathfinder(snap_target=snap)
     det = gd.GoalDetector(_MockModel(), proc, pathfinder, max_snap_dist=0.5)
     rgb = np.zeros((256, 256, 3), dtype=np.uint8)
@@ -223,7 +227,7 @@ def case_locate_picks_lowest_depth_bbox_among_multiple():
         "two chairs: <|box_start|>80,80,100,100<|box_end|> "
         "and <|box_start|>130,130,150,150<|box_end|>"
     )
-    snap = np.array([0.5, 0.0, -1.0], dtype=np.float32)
+    snap = np.array([0.5, 0.0, 1.0], dtype=np.float32)
     pathfinder = _MockPathfinder(snap_target=snap)
     det = gd.GoalDetector(_MockModel(), proc, pathfinder, max_snap_dist=10.0)
     depth = np.full((256, 256), 3.0, dtype=np.float32)
