@@ -347,8 +347,19 @@ def main(argv: Optional[list] = None) -> int:
     if args.detector:
         if args.backbone != "remembr":
             parser.error("--detector requires --backbone remembr (needs Qwen2-VL handles)")
-        if remembr_builder is None or remembr_builder.model is None:
-            parser.error("--detector: ReMEmbR builder/model not initialised")
+        if remembr_builder is None:
+            parser.error("--detector: ReMEmbR builder not initialised")
+        # ReMEmbRBuilder loads the captioner lazily on first caption_and_index();
+        # we need the handles NOW because GoalDetector stores them by reference
+        # at construction (locate() would crash on a None handle otherwise).
+        # Force the load. Under REMEMBR_STRICT=1 a load failure raises; otherwise
+        # the builder enters stub mode and .model stays None, which we surface.
+        remembr_builder._lazy_load_captioner()
+        if remembr_builder.model is None:
+            parser.error(
+                "--detector: Qwen2-VL captioner failed to load "
+                "(builder in stub mode — set REMEMBR_STRICT=1 to see the underlying error)"
+            )
         # Pathfinder lives on the Habitat sim, which the EpisodeSource owns;
         # EpisodeRunner wires it in lazily before the first locate() call.
         from embodied_memory.goal_detector import GoalDetector
