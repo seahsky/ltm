@@ -165,6 +165,49 @@ def case_detector_on_locate_returns_waypoint_installs_approach():
     print("  case_detector_on_locate_returns_waypoint_installs_approach: OK")
 
 
+def case_pathfinder_wired_before_decide_in_run_episode():
+    """Regression for c5 crash: ``GoalDetector`` is constructed with
+    ``pathfinder=None`` in ``run_hm3d_pol`` (the Habitat sim doesn't exist
+    yet at that point) and is wired lazily inside ``_run_episode``. If the
+    wiring runs AFTER ``_decide_stop_or_approach`` (which calls
+    ``detector.locate(...)`` -> ``pathfinder.snap_point(...)``), the first
+    detector tick crashes with 'NoneType has no attribute snap_point'.
+
+    Pin the contract via source inspection: the wiring assignment must
+    appear in ``_run_episode`` BEFORE any ``_decide_stop_or_approach``
+    call site within the same method body.
+    """
+    src = (_EMB_DIR / "episode_runner.py").read_text()
+    run_ep = "def _run_episode("
+    assert run_ep in src
+    body_start = src.index(run_ep)
+    # Heuristic: scan until the next top-level def or class (same indent).
+    # All _run_episode body lines are indented >= 8 spaces; the next
+    # method/class returns to 4 spaces. We slice to that boundary.
+    nl = src.index("\n", body_start)
+    lines = src[nl + 1:].splitlines()
+    body_lines = []
+    for ln in lines:
+        if ln and not ln.startswith(" ") and not ln.startswith("\t"):
+            break
+        # detect end of method body — next 4-space def/class at method level
+        if ln.startswith("    def ") or ln.startswith("    class "):
+            break
+        body_lines.append(ln)
+    body = "\n".join(body_lines)
+
+    wire = "self.goal_detector.pathfinder = "
+    call = "_decide_stop_or_approach("
+    assert wire in body, "wiring assignment missing from _run_episode"
+    assert call in body, "_decide_stop_or_approach call missing from _run_episode"
+    assert body.index(wire) < body.index(call), (
+        "pathfinder wiring must come BEFORE _decide_stop_or_approach in _run_episode "
+        "(c5 crashed because the only existing wiring lived inside the post-locate "
+        "branch and never ran on the first detector call)"
+    )
+    print("  case_pathfinder_wired_before_decide_in_run_episode: OK")
+
+
 def case_detector_counters_match_renamed_key():
     """Regression: counter name is n_detector_locate_failed, not n_detector_offnavmesh."""
     counters = {"n_detector_called": 0, "n_detector_localized": 0,
@@ -193,6 +236,7 @@ def main() -> int:
     case_detector_on_locate_none_falls_back_to_stop()
     case_detector_on_locate_returns_waypoint_installs_approach()
     case_detector_counters_match_renamed_key()
+    case_pathfinder_wired_before_decide_in_run_episode()
     print("All cases passed.")
     return 0
 

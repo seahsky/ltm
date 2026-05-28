@@ -354,6 +354,19 @@ class EpisodeRunner:
         # episode N (e.g. step-budget exhausted mid-approach) never leaks into
         # episode N+1.
         self._approach_waypoint = None
+        # Wire the goal detector's pathfinder from the freshly-reset sim. We
+        # construct GoalDetector with pathfinder=None in run_hm3d_pol (the
+        # sim doesn't exist yet at that point) and update it here per episode
+        # because each scene resets the sim and its pathfinder. Re-wire even
+        # if non-None: across episodes from different scenes the old reference
+        # would be stale. c5 caught this — GoalDetector.locate() crashed
+        # with 'NoneType has no attribute snap_point' because the only existing
+        # wiring lived inside the post-locate "install waypoint" branch and
+        # so could never run on the first detector call.
+        if self.goal_detector is not None:
+            _src_sim = self.source.get_sim()
+            if _src_sim is not None and hasattr(_src_sim, "pathfinder"):
+                self.goal_detector.pathfinder = _src_sim.pathfinder
         if self.bridge is not None:
             self.bridge.begin_episode(ep.episode_id, scene_id=ep.scene_id)
 
@@ -591,10 +604,10 @@ class EpisodeRunner:
                 )
                 if action is None:
                     # Install detector waypoint and drive toward it THIS step.
+                    # Pathfinder is wired once per episode at _run_episode entry
+                    # (see comment there); locate() already ran with a valid
+                    # pathfinder to reach this branch.
                     self._approach_waypoint = approach_wp
-                    _src_sim = self.source.get_sim()
-                    if self.goal_detector.pathfinder is None and _src_sim is not None:
-                        self.goal_detector.pathfinder = _src_sim.pathfinder
                     synthetic = _detector_candidate(
                         approach_wp, step.agent_state.position,
                     )
