@@ -158,6 +158,24 @@ def _detector_candidate(approach_wp_xyz, agent_pos):
     )
 
 
+def _approach_arrived(force_repropose, agent_pos, approach_wp, approach_radius):
+    """Return ``(arrived: bool, stop_distance_xz: float)``. Arrived iff the
+    follower signalled done (``force_repropose``) OR the agent is already within
+    ``approach_radius`` of the snapped waypoint (soft backstop). Pure: no I/O.
+
+    ``stop_distance_xz`` is the floor-plane (x, z) distance from the agent to the
+    raw waypoint, recorded for the n_detector_approach_stop_distance counter.
+    """
+    stop_distance = float(
+        np.linalg.norm(
+            np.array([agent_pos[0], agent_pos[2]])
+            - np.array([approach_wp[0], approach_wp[2]])
+        )
+    )
+    arrived = bool(force_repropose or stop_distance < approach_radius)
+    return arrived, stop_distance
+
+
 class EpisodeRunner:
     """Drive N episodes, log to ``out_dir``, return a RunSummary."""
 
@@ -197,6 +215,11 @@ class EpisodeRunner:
         # straight to the episode goal, bypassing the candidate/scorer/memory
         # machinery. Lazily constructed per-episode in _init_oracle_follower.
         self.follower = None
+        # Dedicated tighter follower for the detector final-approach (c7): a
+        # separate ShortestPathFollower with goal_radius=0.25 so the agent stops
+        # closer to the snapped goal than the 0.5 m normal-nav re-propose radius.
+        # Lazily built in _init_approach_follower; None when there is no sim.
+        self.approach_follower = None
         self._oracle_goal_radius = 1.0
         # Navmesh point-goal locomotion (Phase-2 C1 fix): the same
         # ShortestPathFollower steers toward the agent's SELF-CHOSEN waypoint
@@ -205,6 +228,12 @@ class EpisodeRunner:
         # waypoint selection is unchanged; only locomotion uses the navmesh.
         # goal_radius ≈ propose_reached_m so "reached" aligns with re-propose.
         self._waypoint_goal_radius = 0.5
+        # Tighter radius for the detector final-approach follower (c7). Stopping
+        # at 0.25 m of the snapped goal (vs 0.5 m for normal nav) recovers binary
+        # SPL@0.1 m, which the 0.5 m re-propose radius could not reach.
+        self._approach_goal_radius = float(
+            os.environ.get("DETECTOR_APPROACH_RADIUS", "0.25")
+        )
         self._waypoint_force_repropose = False
         # Goal detector for precise final-approach (Task 3).
         self.goal_detector = goal_detector
@@ -613,16 +642,17 @@ class EpisodeRunner:
                     )
                     action = self._waypoint_action(
                         synthetic, step.agent_state.position, step.agent_state.rotation_yaw,
+                        use_approach_follower=True,
                     )
-                    if self._waypoint_force_repropose:
-                        # Already at the snapped waypoint -> success ring.
+                    arrived, stop_dist = _approach_arrived(
+                        self._waypoint_force_repropose,
+                        step.agent_state.position, approach_wp,
+                        self._approach_goal_radius,
+                    )
+                    if arrived:
+                        # At the snapped waypoint (follower-STOP or inside ring).
                         ep_metrics_counters["n_detector_approach_success"] += 1
-                        ep_metrics_counters["n_detector_approach_stop_distance"] = float(
-                            np.linalg.norm(
-                                np.array([step.agent_state.position[0], step.agent_state.position[2]])
-                                - np.array([approach_wp[0], approach_wp[2]])
-                            )
-                        )
+                        ep_metrics_counters["n_detector_approach_stop_distance"] = stop_dist
                         action = ACTION_STOP
                         self._approach_waypoint = None
                 # else: action is ACTION_STOP from the helper -> emit it
@@ -632,15 +662,16 @@ class EpisodeRunner:
                 synthetic = _detector_candidate(wp, step.agent_state.position)
                 action = self._waypoint_action(
                     synthetic, step.agent_state.position, step.agent_state.rotation_yaw,
+                    use_approach_follower=True,
                 )
-                if self._waypoint_force_repropose:
+                arrived, stop_dist = _approach_arrived(
+                    self._waypoint_force_repropose,
+                    step.agent_state.position, wp,
+                    self._approach_goal_radius,
+                )
+                if arrived:
                     ep_metrics_counters["n_detector_approach_success"] += 1
-                    ep_metrics_counters["n_detector_approach_stop_distance"] = float(
-                        np.linalg.norm(
-                            np.array([step.agent_state.position[0], step.agent_state.position[2]])
-                            - np.array([wp[0], wp[2]])
-                        )
-                    )
+                    ep_metrics_counters["n_detector_approach_stop_distance"] = stop_dist
                     action = ACTION_STOP
                     self._approach_waypoint = None
             else:
@@ -958,7 +989,25 @@ class EpisodeRunner:
             sim, goal_radius=self._waypoint_goal_radius, return_one_hot=False
         )
 
-    def _waypoint_action(self, candidate, agent_pos, agent_yaw) -> int:
+    def _init_approach_follower(self) -> None:
+        """Build the dedicated tighter follower for the detector final-approach
+        (c7). Identical to ``_init_waypoint_follower`` but with
+        ``goal_radius=self._approach_goal_radius`` (0.25 m) so the agent stops
+        closer to the snapped goal. Leaves ``self.approach_follower = None`` when
+        there is no sim, preserving the grid ``step_controller`` fallback."""
+        sim = self.source.get_sim()
+        if sim is None:
+            self.approach_follower = None
+            return
+        from habitat.tasks.nav.shortest_path_follower import ShortestPathFollower
+
+        self.approach_follower = ShortestPathFollower(
+            sim, goal_radius=self._approach_goal_radius, return_one_hot=False
+        )
+
+    def _waypoint_action(
+        self, candidate, agent_pos, agent_yaw, use_approach_follower: bool = False
+    ) -> int:
         """Next discrete action toward the chosen waypoint via the navmesh
         ShortestPathFollower (Phase-2 C1 fix).
 
@@ -969,12 +1018,20 @@ class EpisodeRunner:
         episode). When no sim is available (cached mode) it degrades to the
         occupancy-grid ``step_controller`` so that path keeps working.
         """
-        from .frontier_planner import ACTION_TURN_LEFT
+        from .frontier_planner import ACTION_STOP, ACTION_TURN_LEFT
 
         self._waypoint_force_repropose = False
-        if self.follower is None:
-            self._init_waypoint_follower()
-        if self.follower is None:
+        # Detector final-approach uses the tighter 0.25 m follower; normal nav
+        # uses the shared 0.5 m one. Lazily build whichever is requested.
+        if use_approach_follower:
+            if self.approach_follower is None:
+                self._init_approach_follower()
+            follower = self.approach_follower
+        else:
+            if self.follower is None:
+                self._init_waypoint_follower()
+            follower = self.follower
+        if follower is None:
             return self.planner.step_controller(candidate, agent_pos, agent_yaw)
 
         wx, wz = float(candidate.world_xy[0]), float(candidate.world_xy[1])
@@ -990,7 +1047,7 @@ class EpisodeRunner:
             except Exception:
                 pass  # off-navmesh or unsupported snap → steer to the raw point
 
-        raw = self.follower.get_next_action(goal)
+        raw = follower.get_next_action(goal)
         if raw is None:
             # Reached/unreachable: drop the waypoint and re-propose; don't STOP.
             self._waypoint_force_repropose = True
@@ -998,12 +1055,23 @@ class EpisodeRunner:
         if isinstance(raw, str):
             from .habitat_env import _ACTION_NAMES
             try:
-                return _ACTION_NAMES.index(raw)
+                action_id = _ACTION_NAMES.index(raw)
             except ValueError:
                 self._waypoint_force_repropose = True
                 return ACTION_TURN_LEFT
+            if action_id == ACTION_STOP:
+                # Follower signals arrival via the STOP action. Treat it like the
+                # None path: flag "done" and TURN (locomotion never emits STOP;
+                # the approach branches decide STOP themselves via _approach_arrived).
+                self._waypoint_force_repropose = True
+                return ACTION_TURN_LEFT
+            return action_id
         if isinstance(raw, (int, np.integer)):
-            return int(raw)
+            action_id = int(raw)
+            if action_id == ACTION_STOP:
+                self._waypoint_force_repropose = True
+                return ACTION_TURN_LEFT
+            return action_id
         self._waypoint_force_repropose = True
         return ACTION_TURN_LEFT
 

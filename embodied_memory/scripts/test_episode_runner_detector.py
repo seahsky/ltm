@@ -80,6 +80,7 @@ def _bootstrap():
 
 er_mod = _bootstrap()
 _decide_stop_or_approach = er_mod._decide_stop_or_approach  # NEW helper (Step 3)
+_approach_arrived = er_mod._approach_arrived  # NEW helper (c7)
 ACTION_STOP = er_mod.ACTION_STOP
 
 
@@ -230,6 +231,50 @@ def case_detector_counters_match_renamed_key():
     print("  case_detector_counters_match_renamed_key: OK")
 
 
+def case_approach_arrived_via_force_repropose():
+    """The follower-STOP/None path (force_repropose=True) counts as arrival
+    even when the agent is still far from the raw waypoint."""
+    arrived, stop_distance = _approach_arrived(
+        True, [1.0, 0.0, 1.0], [5.0, 0.0, 5.0], 0.25
+    )
+    assert arrived is True
+    assert np.isclose(stop_distance, float(np.sqrt(32.0)), atol=1e-6), stop_distance
+    print("  case_approach_arrived_via_force_repropose: OK")
+
+
+def case_approach_arrived_via_soft_backstop():
+    """Inside the tight 0.25 m ring, arrival fires without a follower signal."""
+    arrived, stop_distance = _approach_arrived(
+        False, [5.1, 0.0, 5.0], [5.0, 0.0, 5.0], 0.25
+    )
+    assert arrived is True
+    assert np.isclose(stop_distance, 0.1, atol=1e-6), stop_distance
+    print("  case_approach_arrived_via_soft_backstop: OK")
+
+
+def case_approach_not_arrived_when_far_and_no_signal():
+    """No follower signal + outside the ring → keep approaching (no premature STOP)."""
+    arrived, stop_distance = _approach_arrived(
+        False, [0.0, 0.0, 0.0], [5.0, 0.0, 5.0], 0.25
+    )
+    assert arrived is False
+    assert np.isclose(stop_distance, float(np.sqrt(50.0)), atol=1e-6), stop_distance
+    print("  case_approach_not_arrived_when_far_and_no_signal: OK")
+
+
+def case_approach_uses_tight_follower():
+    """Source-scan: the dedicated 0.25 m approach follower is wired and the
+    approach branches use it; _waypoint_action treats follower-STOP as arrival."""
+    src = (_EMB_DIR / "episode_runner.py").read_text()
+    assert "def _init_approach_follower" in src
+    assert "self.approach_follower" in src
+    assert "_approach_goal_radius" in src
+    assert '"0.25"' in src  # default DETECTOR_APPROACH_RADIUS
+    assert "use_approach_follower=True" in src
+    assert "ACTION_STOP" in src  # referenced in _waypoint_action arrival wiring
+    print("  case_approach_uses_tight_follower: OK")
+
+
 def main() -> int:
     print("episode_runner detector intercept tests")
     case_detector_off_emits_stop_unchanged()
@@ -237,6 +282,10 @@ def main() -> int:
     case_detector_on_locate_returns_waypoint_installs_approach()
     case_detector_counters_match_renamed_key()
     case_pathfinder_wired_before_decide_in_run_episode()
+    case_approach_arrived_via_force_repropose()
+    case_approach_arrived_via_soft_backstop()
+    case_approach_not_arrived_when_far_and_no_signal()
+    case_approach_uses_tight_follower()
     print("All cases passed.")
     return 0
 
