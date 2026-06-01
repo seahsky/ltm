@@ -81,6 +81,7 @@ def _bootstrap():
 er_mod = _bootstrap()
 _decide_stop_or_approach = er_mod._decide_stop_or_approach  # NEW helper (Step 3)
 _approach_arrived = er_mod._approach_arrived  # NEW helper (c7)
+_detector_memory_agrees = er_mod._detector_memory_agrees  # NEW helper (c9)
 ACTION_STOP = er_mod.ACTION_STOP
 
 
@@ -262,6 +263,98 @@ def case_approach_not_arrived_when_far_and_no_signal():
     print("  case_approach_not_arrived_when_far_and_no_signal: OK")
 
 
+def case_memory_agrees_when_near_sighting():
+    """Detector point within agree_radius of a same-category LTM sighting -> agree."""
+    wp = np.array([5.0, 0.0, 5.0], dtype=np.float32)
+    sightings = [np.array([4.0, 6.0], dtype=np.float32)]  # xz, dist=sqrt(2)~1.41 < 2.0
+    assert _detector_memory_agrees(wp, sightings, 2.0) is True
+    print("  case_memory_agrees_when_near_sighting: OK")
+
+
+def case_memory_disagrees_when_far_from_all_sightings():
+    """Detector point far from every sighting -> disagree (wrong-instance guard)."""
+    wp = np.array([5.0, 0.0, 5.0], dtype=np.float32)
+    sightings = [np.array([0.0, 0.0], dtype=np.float32),   # dist ~7.07
+                 np.array([10.0, 10.0], dtype=np.float32)]  # dist ~7.07
+    assert _detector_memory_agrees(wp, sightings, 2.0) is False
+    print("  case_memory_disagrees_when_far_from_all_sightings: OK")
+
+
+def case_memory_gate_cold_no_sightings():
+    """Empty sighting list (cold visit, no recall) -> disagree (cold suppression)."""
+    wp = np.array([5.0, 0.0, 5.0], dtype=np.float32)
+    assert _detector_memory_agrees(wp, [], 2.0) is False
+    print("  case_memory_gate_cold_no_sightings: OK")
+
+
+def case_memory_gate_disabled_when_none():
+    """mem_world_xys=None -> gate disabled (legacy c7 always-commit behavior)."""
+    wp = np.array([5.0, 0.0, 5.0], dtype=np.float32)
+    assert _detector_memory_agrees(wp, None, 2.0) is True
+    print("  case_memory_gate_disabled_when_none: OK")
+
+
+def case_decide_gates_to_stop_on_disagreement():
+    """_decide_stop_or_approach: locate succeeds but memory disagrees -> STOP,
+    n_detector_gated incremented; n_detector_localized still counts the locate."""
+    counters = {"n_detector_called": 0, "n_detector_localized": 0,
+                "n_detector_locate_failed": 0, "n_detector_gated": 0}
+    wp = np.array([5.0, 0.0, 5.0], dtype=np.float32)
+    det = _MockDetector(returns=wp)
+    action, approach_wp = _decide_stop_or_approach(
+        detector_enabled=True, detector=det,
+        rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+        depth=np.full((256, 256), 2.0, dtype=np.float32),
+        goal_category="chair",
+        agent_pose=np.eye(4, dtype=np.float32),
+        intrinsics=_intrinsics(),
+        counters=counters,
+        mem_world_xys=[np.array([0.0, 0.0], dtype=np.float32)],  # far -> disagree
+        agree_radius=2.0,
+    )
+    assert action == ACTION_STOP
+    assert approach_wp is None
+    assert counters["n_detector_localized"] == 1
+    assert counters["n_detector_gated"] == 1
+    print("  case_decide_gates_to_stop_on_disagreement: OK")
+
+
+def case_decide_commits_on_agreement():
+    """_decide_stop_or_approach: locate succeeds and memory agrees -> approach;
+    n_detector_gated stays 0."""
+    counters = {"n_detector_called": 0, "n_detector_localized": 0,
+                "n_detector_locate_failed": 0, "n_detector_gated": 0}
+    wp = np.array([5.0, 0.0, 5.0], dtype=np.float32)
+    det = _MockDetector(returns=wp)
+    action, approach_wp = _decide_stop_or_approach(
+        detector_enabled=True, detector=det,
+        rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+        depth=np.full((256, 256), 2.0, dtype=np.float32),
+        goal_category="chair",
+        agent_pose=np.eye(4, dtype=np.float32),
+        intrinsics=_intrinsics(),
+        counters=counters,
+        mem_world_xys=[np.array([5.5, 5.0], dtype=np.float32)],  # dist 0.5 -> agree
+        agree_radius=2.0,
+    )
+    assert action is None
+    assert np.allclose(approach_wp, wp, atol=1e-6)
+    assert counters["n_detector_localized"] == 1
+    assert counters["n_detector_gated"] == 0
+    print("  case_decide_commits_on_agreement: OK")
+
+
+def case_memory_gate_wired():
+    """Source-scan: the detector-memory agreement gate is wired end-to-end."""
+    src = (_EMB_DIR / "episode_runner.py").read_text()
+    assert "def _detector_memory_agrees" in src
+    assert "n_detector_gated" in src
+    assert "_detector_mem_agree_m" in src
+    assert '"2.0"' in src  # default DETECTOR_MEM_AGREE_M
+    assert "mem_world_xys" in src
+    print("  case_memory_gate_wired: OK")
+
+
 def case_approach_uses_tight_follower():
     """Source-scan: the dedicated 0.25 m approach follower is wired and the
     approach branches use it; _waypoint_action treats follower-STOP as arrival."""
@@ -286,6 +379,13 @@ def main() -> int:
     case_approach_arrived_via_soft_backstop()
     case_approach_not_arrived_when_far_and_no_signal()
     case_approach_uses_tight_follower()
+    case_memory_agrees_when_near_sighting()
+    case_memory_disagrees_when_far_from_all_sightings()
+    case_memory_gate_cold_no_sightings()
+    case_memory_gate_disabled_when_none()
+    case_decide_gates_to_stop_on_disagreement()
+    case_decide_commits_on_agreement()
+    case_memory_gate_wired()
     print("All cases passed.")
     return 0
 

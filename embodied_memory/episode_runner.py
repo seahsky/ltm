@@ -59,6 +59,7 @@ class RunSummary:
     n_detector_called: int = 0
     n_detector_localized: int = 0
     n_detector_locate_failed: int = 0
+    n_detector_gated: int = 0
     n_detector_approach_success: int = 0
     n_keyframes_observed: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
@@ -84,6 +85,7 @@ class RunSummary:
             "n_detector_called": self.n_detector_called,
             "n_detector_localized": self.n_detector_localized,
             "n_detector_locate_failed": self.n_detector_locate_failed,
+            "n_detector_gated": self.n_detector_gated,
             "n_detector_approach_success": self.n_detector_approach_success,
             "n_keyframes_observed": self.n_keyframes_observed,
             "modules_invoked": self.modules_invoked,
@@ -108,6 +110,8 @@ def _decide_stop_or_approach(
     agent_pose,
     intrinsics,
     counters: Dict[str, Any],
+    mem_world_xys=None,
+    agree_radius: float = 2.0,
 ):
     """Decide what to do at a stop_signal=True candidate.
 
@@ -116,10 +120,16 @@ def _decide_stop_or_approach(
       action=None,        approach_waypoint=wp    -> caller must navigate
                                                      toward ``wp`` (3D world)
     Updates ``counters`` (keyed by 'n_detector_called', 'n_detector_localized',
-    'n_detector_locate_failed') in place. 'n_detector_locate_failed' counts any
-    None return from locate() — no-bbox, parse failure, invalid depth, OR
-    off-navmesh snap (all locate() failure modes, not exclusively off-navmesh).
-    Pure: no I/O, no side effects beyond the counters dict.
+    'n_detector_locate_failed', 'n_detector_gated') in place.
+    'n_detector_locate_failed' counts any None return from locate() — no-bbox,
+    parse failure, invalid depth, OR off-navmesh snap (all locate() failure
+    modes, not exclusively off-navmesh).
+
+    c9 detector-memory gate: after a successful localize, the waypoint is
+    committed only if it concurs with a retrieved same-category LTM sighting
+    (``mem_world_xys`` within ``agree_radius``); otherwise we fall back to plain
+    STOP and bump 'n_detector_gated'. ``mem_world_xys=None`` disables the gate
+    (legacy c7 behavior). Pure: no I/O, no side effects beyond the counters dict.
     """
     if not detector_enabled or detector is None:
         return ACTION_STOP, None
@@ -132,7 +142,13 @@ def _decide_stop_or_approach(
         counters["n_detector_locate_failed"] = counters.get("n_detector_locate_failed", 0) + 1
         return ACTION_STOP, None
     counters["n_detector_localized"] = counters.get("n_detector_localized", 0) + 1
-    return None, np.asarray(wp, dtype=np.float32)
+    wp = np.asarray(wp, dtype=np.float32)
+    if not _detector_memory_agrees(wp, mem_world_xys, agree_radius):
+        # Detector disagrees with the LTM (wrong-instance or cold) -> don't
+        # commit; fall back to plain STOP (monotonic with detector-OFF).
+        counters["n_detector_gated"] = counters.get("n_detector_gated", 0) + 1
+        return ACTION_STOP, None
+    return None, wp
 
 
 def _detector_candidate(approach_wp_xyz, agent_pos):
@@ -174,6 +190,28 @@ def _approach_arrived(force_repropose, agent_pos, approach_wp, approach_radius):
     )
     arrived = bool(force_repropose or stop_distance < approach_radius)
     return arrived, stop_distance
+
+
+def _detector_memory_agrees(approach_wp, mem_world_xys, agree_radius):
+    """Return True iff the detector-localized waypoint concurs with the LTM (c9).
+
+    ``mem_world_xys`` is the list of (x, z) world positions of retrieved
+    same-category LTM sightings at this decision. Agreement = the detector's
+    localized point is within ``agree_radius`` (floor-plane) of at least one
+    sighting. This gates out c7's two failure modes: wrong-instance grounding
+    (detected object far from where memory saw the goal) and cold visits.
+
+    Sentinel: ``mem_world_xys is None`` disables the gate (legacy c7 behavior,
+    always agree). An empty list means the gate is ON but no sighting was
+    recalled (cold) -> disagree. Pure: no I/O.
+    """
+    if mem_world_xys is None:
+        return True
+    wp_xz = np.array([approach_wp[0], approach_wp[2]])
+    for sx in mem_world_xys:
+        if float(np.linalg.norm(wp_xz - np.array([sx[0], sx[1]]))) < agree_radius:
+            return True
+    return False
 
 
 class EpisodeRunner:
@@ -233,6 +271,13 @@ class EpisodeRunner:
         # SPL@0.1 m, which the 0.5 m re-propose radius could not reach.
         self._approach_goal_radius = float(
             os.environ.get("DETECTOR_APPROACH_RADIUS", "0.25")
+        )
+        # c9 detector-memory agreement gate: commit to the detector's precise
+        # approach only when its localized point is within this radius of a
+        # retrieved same-category LTM sighting. Suppresses wrong-instance
+        # grounding + cold-visit firing (the two c7 regressions).
+        self._detector_mem_agree_m = float(
+            os.environ.get("DETECTOR_MEM_AGREE_M", "2.0")
         )
         self._waypoint_force_repropose = False
         # Goal detector for precise final-approach (Task 3).
@@ -311,6 +356,7 @@ class EpisodeRunner:
             summary.n_detector_called += int(ep_metrics.get("n_detector_called", 0))
             summary.n_detector_localized += int(ep_metrics.get("n_detector_localized", 0))
             summary.n_detector_locate_failed += int(ep_metrics.get("n_detector_locate_failed", 0))
+            summary.n_detector_gated += int(ep_metrics.get("n_detector_gated", 0))
             summary.n_detector_approach_success += int(ep_metrics.get("n_detector_approach_success", 0))
             # Per-episode row used by analyze_ablation.py to pair runs.
             summary.episodes.append({
@@ -333,6 +379,7 @@ class EpisodeRunner:
                 "n_detector_called": int(ep_metrics.get("n_detector_called", 0)),
                 "n_detector_localized": int(ep_metrics.get("n_detector_localized", 0)),
                 "n_detector_locate_failed": int(ep_metrics.get("n_detector_locate_failed", 0)),
+                "n_detector_gated": int(ep_metrics.get("n_detector_gated", 0)),
                 "n_detector_approach_success": int(ep_metrics.get("n_detector_approach_success", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
                 "min_distance_to_goal": ep_metrics.get("min_distance_to_goal"),
@@ -432,6 +479,7 @@ class EpisodeRunner:
             "n_detector_called": 0,
             "n_detector_localized": 0,
             "n_detector_locate_failed": 0,
+            "n_detector_gated": 0,
             "n_detector_approach_success": 0,
             "n_detector_approach_stop_distance": float("nan"),
         }
@@ -448,6 +496,10 @@ class EpisodeRunner:
 
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
+        # Same-category LTM-sighting candidates from the latest proposal; held
+        # across ticks so the detector-memory gate (c9) can read them when the
+        # stop_signal tick fires. Refreshed each propose step.
+        mem_cands: List[FrontierCandidate] = []
         last_propose_step: int = -10**9  # forces a proposal on the first loop tick
         # Run-6 instrumentation: action mix over the episode (non-oracle path).
         action_counts = {ACTION_STOP: 0, ACTION_FORWARD: 0,
@@ -630,6 +682,11 @@ class EpisodeRunner:
                     agent_pose=self._agent_pose_matrix(step.agent_state),
                     intrinsics=self._camera_intrinsics(),
                     counters=ep_metrics_counters,
+                    # c9 gate: same-category LTM sighting positions from the
+                    # latest proposal. Empty (cold) -> detector falls back to STOP.
+                    mem_world_xys=[mc.world_xy for mc in mem_cands
+                                   if mc.source == "memory"],
+                    agree_radius=self._detector_mem_agree_m,
                 )
                 if action is None:
                     # Install detector waypoint and drive toward it THIS step.
@@ -813,6 +870,7 @@ class EpisodeRunner:
         ep_log["n_detector_called"] = int(ep_metrics_counters["n_detector_called"])
         ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
         ep_log["n_detector_locate_failed"] = int(ep_metrics_counters["n_detector_locate_failed"])
+        ep_log["n_detector_gated"] = int(ep_metrics_counters["n_detector_gated"])
         ep_log["n_detector_approach_success"] = int(ep_metrics_counters["n_detector_approach_success"])
         ep_log["n_detector_approach_stop_distance"] = float(ep_metrics_counters["n_detector_approach_stop_distance"])
         ep_log["min_distance_to_goal"] = min_distance_to_goal
@@ -845,6 +903,7 @@ class EpisodeRunner:
             "n_detector_called": int(ep_metrics_counters["n_detector_called"]),
             "n_detector_localized": int(ep_metrics_counters["n_detector_localized"]),
             "n_detector_locate_failed": int(ep_metrics_counters["n_detector_locate_failed"]),
+            "n_detector_gated": int(ep_metrics_counters["n_detector_gated"]),
             "n_detector_approach_success": int(ep_metrics_counters["n_detector_approach_success"]),
             "n_detector_approach_stop_distance": float(ep_metrics_counters["n_detector_approach_stop_distance"]),
             "grid_cells_free": grid_stats["cells_free"],
