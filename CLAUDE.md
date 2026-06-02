@@ -88,6 +88,23 @@ the memory stack itself was unchanged from Run 8.
 
 ## Next milestone
 
+**Detector arc CLOSED — headline config is detector OFF (2026-06-02, Run 11; see
+`PHASE2_ABLATION_REPORT.md` Run 11).** The goal-detector binary-SPL push (c1–c9) is
+finished. c7 (precise 0.25 m approach + a counter re-diagnosis: Habitat's follower
+signals arrival via the STOP action, so `n_detector_approach_success` was a mis-wired
+metric — confirmed 0→8) and c9 (detector–memory agreement gate, `DETECTOR_MEM_AGREE_M`,
+`n_detector_gated`) both ran the full 6-cell RACE matrix. **The caption-grounding detector
+is net-neutral-to-negative under every variant — detector OFF strictly dominates** (WARM
+soft-SPL S3 0.344 vs ON 0.231; binary SPL 0.051 vs 0.000). The gate fires correctly
+(`n_detector_gated` 0→6) but over-suppresses (S3 gated 6/7 → 1 commit): a **detector-quality
+ceiling, not a radius knob**. The detector code stays env-gated and OFF by default; the
+standard non-detector path is unaffected. **The LTM thesis reproduced a 3rd time** (OFF
+S3−S1 soft-SPL +0.2343, p=0.001 — Phase C +0.240, c7 +0.217, c9 +0.234). Higher **binary**
+SPL@0.1 m now needs a strong object detector (GroundingDINO/OWLv2/Detic) — a separate
+project on the orthogonal axis — or is accepted as perception-bound. On-thesis ways to push
+the *positive* result further: widen the revisit matrix (below) or train the LTM's own heads
+(`train_predictor` / `train_scorer` / coarse-affordance) on embodied data.
+
 **Fold the revisit eval into the standard harness — DONE (2026-05-27).** Phase C
 confirmed the LTM effect generalizes; the visit-order revisit analysis is now a
 **first-class mode of the standard analyzer**: `python

@@ -1801,3 +1801,72 @@ ObjectNav 2022 winner was 0.50; restoring the Run 9 baseline + the c6 succ@1m up
 would already be a complete milestone). Continue to c9 if pushing toward the **0.50
 SOTA-equivalent target** is worth the GPU spend.
 
+---
+
+# Run 11 — Goal-detector c7–c9: re-diagnosis + memory-agreement gate → **detector arc CLOSED, OFF wins** (RACE, 2026-06-02)
+
+Two commits (`2a99a4b` c7, `b2a6fa4` c9) on both `main` and `lifelong-revisit-eval`.
+TDD throughout (`test_episode_runner_detector.py` 5 → 9 → 16 cases). **Verdict: the
+Qwen2-VL caption-grounding detector is net-neutral-to-negative under every variant; the
+strictly-best configuration is detector OFF. The LTM thesis reproduced a 3rd time.**
+
+## c7 — precise approach + counter re-diagnosis
+
+The Run-10 handoff blamed c6's binary-SPL regression on "the approach loop never emits
+`ACTION_STOP`; episodes time out." **This was wrong.** Habitat's `ShortestPathFollower`
+signals arrival by returning the **STOP action** (id 0), not `None`; the `int`
+passthrough in `_waypoint_action` returned `0` directly, so the episode *did* stop, but
+`_waypoint_force_repropose` never set → `n_detector_approach_success` stayed 0/96. **A
+mis-wired metric, not "never stops"** (arithmetic proof: c6 mean n_steps 48.6 ≪ 250).
+
+c7 (a) gave the approach a dedicated `ShortestPathFollower` with `goal_radius=0.25`
+(env `DETECTOR_APPROACH_RADIUS`), and (b) fixed the counter via a pure `_approach_arrived`
+helper. **RACE confirmed the re-diagnosis: `n_detector_approach_success` 0 → 8.** But
+binary SPL did *not* recover (s3-det warm 0.035 ≪ 0.30 target), and the detector *halved*
+the soft-SPL gain (S3−S1 +0.217 OFF → +0.098 ON) and regressed cold (−0.094). Root cause:
+the detector grounds **the wrong object instance** ~half the time, stopping early far from
+goal. Stop *radius* was never the bottleneck — stop *target* was.
+
+## c9 — detector–memory agreement gate
+
+Commit the precise approach only if the localized point is within `DETECTOR_MEM_AGREE_M`
+(default 2.0 m) of a retrieved same-category LTM sighting; else fall back to plain STOP +
+bump a new `n_detector_gated` counter. Pure helper `_detector_memory_agrees`. Designed to
+suppress both c7 failure modes (cold-fire + wrong-instance).
+
+**RACE result: the gate fires correctly but the detector still net-hurts.**
+
+| WARM (n=12) | soft-SPL S3 | binary SPL S3 | soft-SPL S3−S1 | cold S3−S1 | gate counter |
+|---|---|---|---|---|---|
+| **detector OFF** | **0.344** | **0.051** | **+0.2343** (90% CI [+0.099,+0.377], p=0.001) | +0.022 | — |
+| detector ON (gated) | 0.231 | **0.000** | +0.1209 (p=0.011) | −0.152 | `n_detector_gated` 0→6 |
+
+- Gate mechanically correct: S1-det gated all 6 localizations (no LTM → no sightings); S3-det
+  gated 6 of 7 → only **1** commit all run.
+- It recovered only ~0.02 of the ~0.13 soft-SPL gap c7 opened (ON +0.098 → +0.121, still ≪ OFF
+  +0.234), and **zeroed warm binary SPL** (0.051 → 0.000).
+- **Diagnosis: a detector-QUALITY ceiling, not a radius knob.** The gate over-suppresses because
+  caption-grounded points rarely co-locate (<2.0 m) with a memory sighting; loosening the radius
+  re-admits wrong-instance hits, tightening admits fewer. No setting wins.
+
+## Conclusion
+
+- **Detector arc CLOSED.** Across c1–c6 (Run 10), c7 (precise), c9 (gated) the caption-grounding
+  detector is net-neutral-to-negative under every variant. **Headline config = detector OFF**
+  (soft-SPL +0.234, binary 0.051 — strictly dominates ON). The detector code stays in the repo,
+  env-gated and off by default; the standard non-detector path is unaffected.
+- **Thesis reproduced a 3rd time:** detector-OFF S3−S1 soft-SPL **+0.2343, p=0.001** (Phase C
+  +0.240, c7 +0.217, c9 +0.234). The lifelong LTM effect is locked in.
+- **Binary SPL is perception-bound at 0.1 m.** The only real lever is a strong object detector
+  (GroundingDINO / OWLv2 / Detic) — a separate project on the orthogonal (non-thesis) axis — or
+  accept the ceiling. The on-thesis way to push further is training the LTM's own learnable heads
+  on embodied data (`train_predictor` / `train_scorer` / coarse-affordance).
+
+## File index (Run 11)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/episode_runner.py` | c7: `approach_follower` (0.25 m), `_approach_arrived`, STOP-action arrival wiring in `_waypoint_action`. c9: `_detector_memory_agrees`, `DETECTOR_MEM_AGREE_M`, `n_detector_gated` counter through the RunSummary chain, gate at the stop-signal firing site. |
+| `embodied_memory/scripts/test_episode_runner_detector.py` | 5 → 16 cases (c7: 4 approach/arrival; c9: 7 gate/agreement + source-scans). |
+| `runs/detector-c7-*`, `runs/detector-c9-*` | 6-cell matrices (RACE). |
+
