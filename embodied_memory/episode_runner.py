@@ -344,11 +344,11 @@ class EpisodeRunner:
         # retrieval cosine clears this gate AND the caption confirms the goal.
         # Layers on top of the backbone's keyword-STOP; env-tunable.
         self._arrival_stop_cos = float(os.environ.get("ARRIVAL_STOP_COS", "0.4"))
-        # Proximity radius for the arrival STOP (m). The memory waypoint is ~a goal
-        # viewpoint, so being within this of it ≈ being at the goal. Checked every
-        # tick on candidate.distance_m (decoupled from the follower's exact-arrival
-        # signal, which fired too rarely in arrival-1).
-        self._arrival_stop_radius = float(os.environ.get("ARRIVAL_STOP_RADIUS", "0.5"))
+        # Proximity radius for the arrival STOP (m). MUST exceed the follower
+        # goal_radius (_waypoint_goal_radius=0.5) so the agent crosses into the ring
+        # while approaching — a ring AT 0.5m never triggers because the follower
+        # stops the agent there (arrival-2 fired 0×). 0.75 catches the approach.
+        self._arrival_stop_radius = float(os.environ.get("ARRIVAL_STOP_RADIUS", "0.75"))
         # ReMEmbR pair is required for backbone='remembr' but optional otherwise
         # so the frontier-only path keeps its constructor signature simple.
         if backbone == "remembr" and (remembr_builder is None or remembr_planner is None):
@@ -817,12 +817,16 @@ class EpisodeRunner:
                     step.agent_state.position,
                     step.agent_state.rotation_yaw,
                 )
-                # Waypoint-arrival STOP (proximity): STOP if the agent is within
-                # _arrival_stop_radius of a confident MEMORY waypoint (a remembered
-                # goal position) and the caption confirms the goal → terminate here
-                # (oracle-ladder proxy). Checked every tick on distance_m, decoupled
-                # from the follower's exact-arrival signal (which fired too rarely).
-                _near = (
+                # Waypoint-arrival STOP: STOP if the agent is at a confident MEMORY
+                # waypoint (a remembered goal position) and the caption confirms the
+                # goal → terminate here (oracle-ladder proxy). "At" = the follower
+                # reports reached OR the agent is within _arrival_stop_radius. The OR
+                # is load-bearing: the follower's goal_radius (0.5m) means distance_m
+                # bottoms out at ~0.5m, so a pure proximity ring at 0.5m never
+                # triggers (arrival-2 fired 0×). The radius is set ABOVE the follower
+                # radius so proximity catches the approach, and the force_repropose
+                # term guarantees ≥ the follower-reached fires.
+                _near = self._waypoint_force_repropose or (
                     current_candidate is not None
                     and float(current_candidate.distance_m) < self._arrival_stop_radius
                 )

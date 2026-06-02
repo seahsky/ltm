@@ -400,8 +400,10 @@ def case_arrival_stop_wired():
     # proximity trigger (not follower-exact-arrival): radius gate on distance_m
     assert "_arrival_stop_radius" in src
     assert "ARRIVAL_STOP_RADIUS" in src
-    assert '"0.5"' in src  # default proximity radius
+    assert '"0.75"' in src  # default proximity radius (must exceed follower 0.5m)
     assert "distance_m" in src
+    # proximity OR follower-reached (the OR is load-bearing — see arrival-2)
+    assert "_waypoint_force_repropose or" in src
     # reuses remembr_backbone's whole-word caption matcher
     assert "_caption_mentions" in src and "_goal_terms" in src
     print("  case_arrival_stop_wired: OK")
