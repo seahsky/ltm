@@ -63,7 +63,8 @@ def _bootstrap():
     _stub_submodule("embodied_memory.perception",
                     ["CLIPKeyframeEncoder", "Keyframe", "SemanticCaptioner"])
     _stub_submodule("embodied_memory.remembr_backbone",
-                    ["ReMEmbRBuilder", "ReMEmbRPlanner"])
+                    ["ReMEmbRBuilder", "ReMEmbRPlanner",
+                     "_caption_mentions", "_goal_terms"])
     hab = types.ModuleType("embodied_memory.habitat_env")
     hab._ACTION_NAMES = [
         "stop", "move_forward", "turn_left", "turn_right", "look_up", "look_down",
@@ -83,8 +84,16 @@ _decide_stop_or_approach = er_mod._decide_stop_or_approach  # NEW helper (Step 3
 _approach_arrived = er_mod._approach_arrived  # NEW helper (c7)
 _detector_memory_agrees = er_mod._detector_memory_agrees  # NEW helper (c9)
 _oracle_stop_override = er_mod._oracle_stop_override  # NEW helper (oracle ladder)
+_arrival_stop = er_mod._arrival_stop  # NEW helper (waypoint-arrival STOP)
 ACTION_STOP = er_mod.ACTION_STOP
 ACTION_FORWARD = er_mod.ACTION_FORWARD
+
+
+class _Cand:
+    """Minimal stand-in for a FrontierCandidate (source + raw_score)."""
+    def __init__(self, source, raw_score):
+        self.source = source
+        self.raw_score = raw_score
 
 
 # ----------------------------------------------------------------------
@@ -346,6 +355,53 @@ def case_decide_commits_on_agreement():
     print("  case_decide_commits_on_agreement: OK")
 
 
+def case_arrival_stop_fires_on_confident_memory_arrival():
+    """Arrived at a high-cosine memory waypoint with caption confirm -> STOP."""
+    cand = _Cand("memory", 0.55)
+    assert _arrival_stop(True, cand, True, 0.4) is True
+    print("  case_arrival_stop_fires_on_confident_memory_arrival: OK")
+
+
+def case_arrival_stop_requires_arrival():
+    """Not yet arrived -> never STOP (keep navigating)."""
+    cand = _Cand("memory", 0.55)
+    assert _arrival_stop(False, cand, True, 0.4) is False
+    print("  case_arrival_stop_requires_arrival: OK")
+
+
+def case_arrival_stop_requires_memory_source():
+    """Frontier/remembr waypoint arrival -> no STOP (only memory recalls)."""
+    assert _arrival_stop(True, _Cand("frontier", 0.9), True, 0.4) is False
+    assert _arrival_stop(True, None, True, 0.4) is False
+    print("  case_arrival_stop_requires_memory_source: OK")
+
+
+def case_arrival_stop_requires_high_cosine():
+    """Low-confidence memory recall -> no STOP (avoid wrong-instance stops)."""
+    assert _arrival_stop(True, _Cand("memory", 0.30), True, 0.4) is False
+    print("  case_arrival_stop_requires_high_cosine: OK")
+
+
+def case_arrival_stop_requires_caption_confirm():
+    """Arrived at a confident memory waypoint but caption doesn't mention the
+    goal -> no STOP."""
+    assert _arrival_stop(True, _Cand("memory", 0.55), False, 0.4) is False
+    print("  case_arrival_stop_requires_caption_confirm: OK")
+
+
+def case_arrival_stop_wired():
+    """Source-scan: waypoint-arrival STOP wired in runner + caption matcher reused."""
+    src = (_EMB_DIR / "episode_runner.py").read_text()
+    assert "def _arrival_stop" in src
+    assert "n_arrival_stop" in src
+    assert "_arrival_stop_cos" in src
+    assert "ARRIVAL_STOP_COS" in src
+    assert '"0.4"' in src  # default cosine gate
+    # reuses remembr_backbone's whole-word caption matcher
+    assert "_caption_mentions" in src and "_goal_terms" in src
+    print("  case_arrival_stop_wired: OK")
+
+
 def case_oracle_stop_forces_stop_within_radius():
     """Oracle-STOP: inside the GT success ring -> force STOP regardless of action."""
     assert _oracle_stop_override(ACTION_FORWARD, 0.05, 0.1) == ACTION_STOP
@@ -425,6 +481,12 @@ def main() -> int:
     case_oracle_stop_passthrough_outside_radius()
     case_oracle_stop_passthrough_unknown_d2g()
     case_oracle_ladder_wired()
+    case_arrival_stop_fires_on_confident_memory_arrival()
+    case_arrival_stop_requires_arrival()
+    case_arrival_stop_requires_memory_source()
+    case_arrival_stop_requires_high_cosine()
+    case_arrival_stop_requires_caption_confirm()
+    case_arrival_stop_wired()
     print("All cases passed.")
     return 0
 

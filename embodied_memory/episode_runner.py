@@ -36,7 +36,12 @@ from .frontier_planner import (
 )
 from .memory_bridge import EmbodiedMemoryBridge
 from .perception import CLIPKeyframeEncoder, Keyframe, SemanticCaptioner
-from .remembr_backbone import ReMEmbRBuilder, ReMEmbRPlanner
+from .remembr_backbone import (
+    ReMEmbRBuilder,
+    ReMEmbRPlanner,
+    _caption_mentions,
+    _goal_terms,
+)
 
 if TYPE_CHECKING:
     from .goal_detector import GoalDetector
@@ -61,6 +66,7 @@ class RunSummary:
     n_detector_locate_failed: int = 0
     n_detector_gated: int = 0
     n_detector_approach_success: int = 0
+    n_arrival_stop: int = 0
     n_keyframes_observed: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
     ablation: Dict[str, Any] = field(default_factory=dict)
@@ -87,6 +93,7 @@ class RunSummary:
             "n_detector_locate_failed": self.n_detector_locate_failed,
             "n_detector_gated": self.n_detector_gated,
             "n_detector_approach_success": self.n_detector_approach_success,
+            "n_arrival_stop": self.n_arrival_stop,
             "n_keyframes_observed": self.n_keyframes_observed,
             "modules_invoked": self.modules_invoked,
             "ablation": self.ablation,
@@ -224,6 +231,25 @@ def _oracle_stop_override(action, dist_to_goal, radius):
     return action
 
 
+def _arrival_stop(arrived, candidate, caption_confirms, cos_threshold):
+    """Waypoint-arrival STOP — the realistic proxy for oracle-STOP.
+
+    The oracle ladder (2026-06-02) showed the LTM's navigation already reaches the
+    goal viewpoint in ~75% of warm episodes; the only thing failing is the STOP
+    decision (caption-keyword STOP fires on a mere object mention, decoupled from
+    goal proximity). Memory waypoints ARE remembered goal positions, so arriving at
+    a confident one ≈ being at the goal. STOP iff: the follower has ARRIVED at the
+    chosen waypoint, it is a MEMORY candidate, its retrieval cosine clears
+    ``cos_threshold``, AND the current caption confirms the goal object. Pure."""
+    if not arrived:
+        return False
+    if candidate is None or getattr(candidate, "source", None) != "memory":
+        return False
+    if float(getattr(candidate, "raw_score", 0.0)) < cos_threshold:
+        return False
+    return bool(caption_confirms)
+
+
 class EpisodeRunner:
     """Drive N episodes, log to ``out_dir``, return a RunSummary."""
 
@@ -309,6 +335,11 @@ class EpisodeRunner:
         self.oracle_stop = bool(oracle_stop)
         self.oracle_location = bool(oracle_location)
         self.oracle_stop_radius = float(oracle_stop_radius)
+        # Waypoint-arrival STOP (oracle-ladder finding: termination is the
+        # bottleneck). STOP when the agent arrives at a memory waypoint whose
+        # retrieval cosine clears this gate AND the caption confirms the goal.
+        # Layers on top of the backbone's keyword-STOP; env-tunable.
+        self._arrival_stop_cos = float(os.environ.get("ARRIVAL_STOP_COS", "0.4"))
         # ReMEmbR pair is required for backbone='remembr' but optional otherwise
         # so the frontier-only path keeps its constructor signature simple.
         if backbone == "remembr" and (remembr_builder is None or remembr_planner is None):
@@ -379,6 +410,7 @@ class EpisodeRunner:
             summary.n_detector_localized += int(ep_metrics.get("n_detector_localized", 0))
             summary.n_detector_locate_failed += int(ep_metrics.get("n_detector_locate_failed", 0))
             summary.n_detector_gated += int(ep_metrics.get("n_detector_gated", 0))
+            summary.n_arrival_stop += int(ep_metrics.get("n_arrival_stop", 0))
             summary.n_detector_approach_success += int(ep_metrics.get("n_detector_approach_success", 0))
             # Per-episode row used by analyze_ablation.py to pair runs.
             summary.episodes.append({
@@ -402,6 +434,7 @@ class EpisodeRunner:
                 "n_detector_localized": int(ep_metrics.get("n_detector_localized", 0)),
                 "n_detector_locate_failed": int(ep_metrics.get("n_detector_locate_failed", 0)),
                 "n_detector_gated": int(ep_metrics.get("n_detector_gated", 0)),
+                "n_arrival_stop": int(ep_metrics.get("n_arrival_stop", 0)),
                 "n_detector_approach_success": int(ep_metrics.get("n_detector_approach_success", 0)),
                 "distance_to_goal": ep_metrics.get("distance_to_goal"),
                 "min_distance_to_goal": ep_metrics.get("min_distance_to_goal"),
@@ -503,6 +536,7 @@ class EpisodeRunner:
             "n_detector_locate_failed": 0,
             "n_detector_gated": 0,
             "n_detector_approach_success": 0,
+            "n_arrival_stop": 0,
             "n_detector_approach_stop_distance": float("nan"),
         }
         # Closest the agent ever gets to a goal viewpoint over the episode
@@ -775,10 +809,20 @@ class EpisodeRunner:
                     step.agent_state.rotation_yaw,
                 )
                 if self._waypoint_force_repropose:
-                    # Follower reports the waypoint reached/unreachable → drop it
-                    # so the next tick re-proposes a fresh target (locomotion
-                    # never STOPs; only keyword-STOP / stop_signal ends an ep).
-                    current_candidate = None
+                    # Waypoint-arrival STOP: arrived at a confident MEMORY waypoint
+                    # (a remembered goal position) and the caption confirms the
+                    # goal → terminate here (oracle-ladder proxy). Else drop the
+                    # waypoint and re-propose a fresh target as before.
+                    _confirms = _caption_mentions(
+                        keyframe.caption, _goal_terms(ep.target_category)
+                    ) is not None
+                    if _arrival_stop(True, current_candidate, _confirms,
+                                     self._arrival_stop_cos):
+                        action = ACTION_STOP
+                        ep_metrics_counters["n_arrival_stop"] += 1
+                        current_candidate = None
+                    else:
+                        current_candidate = None
 
             # Oracle-STOP diagnostic: force STOP once the agent is within the GT
             # success ring (isolates the termination layer — measures how much
@@ -916,6 +960,7 @@ class EpisodeRunner:
         ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
         ep_log["n_detector_locate_failed"] = int(ep_metrics_counters["n_detector_locate_failed"])
         ep_log["n_detector_gated"] = int(ep_metrics_counters["n_detector_gated"])
+        ep_log["n_arrival_stop"] = int(ep_metrics_counters["n_arrival_stop"])
         ep_log["n_detector_approach_success"] = int(ep_metrics_counters["n_detector_approach_success"])
         ep_log["n_detector_approach_stop_distance"] = float(ep_metrics_counters["n_detector_approach_stop_distance"])
         ep_log["min_distance_to_goal"] = min_distance_to_goal
@@ -949,6 +994,7 @@ class EpisodeRunner:
             "n_detector_localized": int(ep_metrics_counters["n_detector_localized"]),
             "n_detector_locate_failed": int(ep_metrics_counters["n_detector_locate_failed"]),
             "n_detector_gated": int(ep_metrics_counters["n_detector_gated"]),
+            "n_arrival_stop": int(ep_metrics_counters["n_arrival_stop"]),
             "n_detector_approach_success": int(ep_metrics_counters["n_detector_approach_success"]),
             "n_detector_approach_stop_distance": float(ep_metrics_counters["n_detector_approach_stop_distance"]),
             "grid_cells_free": grid_stats["cells_free"],
