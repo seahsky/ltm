@@ -214,6 +214,16 @@ def _detector_memory_agrees(approach_wp, mem_world_xys, agree_radius):
     return False
 
 
+def _oracle_stop_override(action, dist_to_goal, radius):
+    """Oracle-STOP diagnostic: force ACTION_STOP once the agent is within
+    ``radius`` (GT geodesic distance to goal), isolating the termination layer
+    from the rest of the policy. Passes ``action`` through unchanged when the
+    GT distance is unknown (None) or outside the ring. Pure: no I/O."""
+    if dist_to_goal is not None and float(dist_to_goal) <= radius:
+        return ACTION_STOP
+    return action
+
+
 class EpisodeRunner:
     """Drive N episodes, log to ``out_dir``, return a RunSummary."""
 
@@ -233,6 +243,9 @@ class EpisodeRunner:
         remembr_builder: Optional[ReMEmbRBuilder] = None,
         remembr_planner: Optional[ReMEmbRPlanner] = None,
         goal_detector: Optional["GoalDetector"] = None,
+        oracle_stop: bool = False,
+        oracle_location: bool = False,
+        oracle_stop_radius: float = 0.1,
     ):
         self.source = source
         self.planner = planner
@@ -287,6 +300,15 @@ class EpisodeRunner:
         # to that waypoint for subsequent ticks until ShortestPathFollower
         # reports reached -> emit STOP (Task 4 implements the intercept).
         self._approach_waypoint: Optional[np.ndarray] = None
+        # Oracle-ladder diagnostics (bottleneck isolation; NOT used in headline
+        # configs). oracle_location steers to the GT goal (removes the
+        # exploration+retrieval layer); oracle_stop forces STOP within
+        # oracle_stop_radius of the GT goal (removes the termination layer).
+        # Both keep the rest of the S3 policy intact so each layer's ceiling is
+        # measured independently. See _oracle_stop_override + the loop hooks.
+        self.oracle_stop = bool(oracle_stop)
+        self.oracle_location = bool(oracle_location)
+        self.oracle_stop_radius = float(oracle_stop_radius)
         # ReMEmbR pair is required for backbone='remembr' but optional otherwise
         # so the frontier-only path keeps its constructor signature simple.
         if backbone == "remembr" and (remembr_builder is None or remembr_planner is None):
@@ -661,6 +683,21 @@ class EpisodeRunner:
                         "retrieval_counts": {k: len(v) for k, v in retrieval.items()},
                     })
 
+            # Oracle-location diagnostic: steer to the GT goal (isolates
+            # exploration + retrieval). Overrides only the NAVIGATION target —
+            # a backbone stop_signal candidate is left intact so the agent's own
+            # termination logic still decides when to STOP.
+            if self.oracle_location and not (
+                current_candidate is not None
+                and current_candidate.metadata.get("stop_signal", False)
+            ):
+                _goal = getattr(ep, "target_position", None)
+                if _goal is not None:
+                    current_candidate = _detector_candidate(
+                        np.asarray(_goal, dtype=np.float32),
+                        step.agent_state.position,
+                    )
+
             # Convert candidate → action.
             if current_candidate is None:
                 action = ACTION_FORWARD
@@ -742,6 +779,14 @@ class EpisodeRunner:
                     # so the next tick re-proposes a fresh target (locomotion
                     # never STOPs; only keyword-STOP / stop_signal ends an ep).
                     current_candidate = None
+
+            # Oracle-STOP diagnostic: force STOP once the agent is within the GT
+            # success ring (isolates the termination layer — measures how much
+            # binary success a perfect STOP recovers). step.info carries the
+            # current geodesic distance_to_goal.
+            if self.oracle_stop:
+                _d2g = step.info.get("distance_to_goal") if step.info else None
+                action = _oracle_stop_override(action, _d2g, self.oracle_stop_radius)
 
             # Step the env.
             action_counts[action] = action_counts.get(action, 0) + 1

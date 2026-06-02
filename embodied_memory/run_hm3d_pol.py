@@ -225,6 +225,23 @@ def main(argv: Optional[list] = None) -> int:
              "events (default off; on requires --backbone remembr because the "
              "detector reuses ReMEmbR's loaded Qwen2-VL handles).",
     )
+    parser.add_argument(
+        "--oracle-stop", action="store_true",
+        help="Oracle-ladder diagnostic: force STOP once within --oracle-stop-radius "
+             "(GT geodesic) of the goal, isolating the termination layer. Keeps the "
+             "rest of the policy intact.",
+    )
+    parser.add_argument(
+        "--oracle-location", action="store_true",
+        help="Oracle-ladder diagnostic: steer to the GT goal position (isolates the "
+             "exploration+retrieval layer); the agent's own STOP logic still decides "
+             "termination.",
+    )
+    parser.add_argument(
+        "--oracle-stop-radius", type=float, default=0.1,
+        help="Success ring for --oracle-stop (default 0.1 m, the probed success "
+             "distance).",
+    )
     parser.add_argument("--affordance-from-runs", type=str, nargs="+", default=None,
                         help="Build a per-(category, room) success-rate table "
                              "from prior runs/<dir>/ JSONs and condition coarse-"
@@ -398,11 +415,16 @@ def main(argv: Optional[list] = None) -> int:
             "disable_rerank": disable_rerank,
             "backbone": args.backbone,
             "detector": args.detector,
+            "oracle_stop": args.oracle_stop,
+            "oracle_location": args.oracle_location,
         },
         backbone=args.backbone,
         remembr_builder=remembr_builder,
         remembr_planner=remembr_planner,
         goal_detector=goal_detector,
+        oracle_stop=args.oracle_stop,
+        oracle_location=args.oracle_location,
+        oracle_stop_radius=args.oracle_stop_radius,
     )
 
     summary = runner.run(args.n_episodes)

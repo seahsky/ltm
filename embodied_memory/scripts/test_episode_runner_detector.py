@@ -82,7 +82,9 @@ er_mod = _bootstrap()
 _decide_stop_or_approach = er_mod._decide_stop_or_approach  # NEW helper (Step 3)
 _approach_arrived = er_mod._approach_arrived  # NEW helper (c7)
 _detector_memory_agrees = er_mod._detector_memory_agrees  # NEW helper (c9)
+_oracle_stop_override = er_mod._oracle_stop_override  # NEW helper (oracle ladder)
 ACTION_STOP = er_mod.ACTION_STOP
+ACTION_FORWARD = er_mod.ACTION_FORWARD
 
 
 # ----------------------------------------------------------------------
@@ -344,6 +346,39 @@ def case_decide_commits_on_agreement():
     print("  case_decide_commits_on_agreement: OK")
 
 
+def case_oracle_stop_forces_stop_within_radius():
+    """Oracle-STOP: inside the GT success ring -> force STOP regardless of action."""
+    assert _oracle_stop_override(ACTION_FORWARD, 0.05, 0.1) == ACTION_STOP
+    print("  case_oracle_stop_forces_stop_within_radius: OK")
+
+
+def case_oracle_stop_passthrough_outside_radius():
+    """Outside the ring -> action unchanged (agent keeps navigating)."""
+    assert _oracle_stop_override(ACTION_FORWARD, 0.5, 0.1) == ACTION_FORWARD
+    print("  case_oracle_stop_passthrough_outside_radius: OK")
+
+
+def case_oracle_stop_passthrough_unknown_d2g():
+    """No GT distance available -> never force STOP (safe passthrough)."""
+    assert _oracle_stop_override(ACTION_FORWARD, None, 0.1) == ACTION_FORWARD
+    print("  case_oracle_stop_passthrough_unknown_d2g: OK")
+
+
+def case_oracle_ladder_wired():
+    """Source-scan: oracle-STOP/location toggles wired in runner + CLI."""
+    src = (_EMB_DIR / "episode_runner.py").read_text()
+    assert "def _oracle_stop_override" in src
+    assert "self.oracle_stop" in src
+    assert "self.oracle_location" in src
+    assert "oracle_stop_radius" in src
+    # location override steers to the GT goal inside the loop
+    assert "target_position" in src
+    cli = (_EMB_DIR / "run_hm3d_pol.py").read_text()
+    assert "--oracle-stop" in cli
+    assert "--oracle-location" in cli
+    print("  case_oracle_ladder_wired: OK")
+
+
 def case_memory_gate_wired():
     """Source-scan: the detector-memory agreement gate is wired end-to-end."""
     src = (_EMB_DIR / "episode_runner.py").read_text()
@@ -386,6 +421,10 @@ def main() -> int:
     case_decide_gates_to_stop_on_disagreement()
     case_decide_commits_on_agreement()
     case_memory_gate_wired()
+    case_oracle_stop_forces_stop_within_radius()
+    case_oracle_stop_passthrough_outside_radius()
+    case_oracle_stop_passthrough_unknown_d2g()
+    case_oracle_ladder_wired()
     print("All cases passed.")
     return 0
 
