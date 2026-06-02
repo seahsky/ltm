@@ -58,9 +58,19 @@ DS="${DS_DIR}/${NAME}.json.gz"
 
 banner() { printf '\n========== %s ==========\n' "$1"; }
 
-# --- 1. git pull ---
-banner "[1/7] git pull --ff-only"
-git pull --ff-only || { echo "FATAL: git pull failed"; exit 1; }
+# --- 1. git pull + re-exec ---
+# Re-exec the freshly-pulled script so edits take effect THIS run. Without this,
+# `git pull` rewrites the file mid-run while bash is still executing the
+# pre-pull version (the inode it already opened) -> a fixed command in a later
+# step silently runs its OLD form. The guard pulls once, then re-launches the
+# updated script with the same args.
+banner "[1/7] git pull --ff-only (+ re-exec so edits apply this run)"
+if [ -z "${ORACLE_LADDER_RELAUNCHED:-}" ]; then
+  git pull --ff-only || { echo "FATAL: git pull failed"; exit 1; }
+  export ORACLE_LADDER_RELAUNCHED=1
+  exec bash "$0" "$@"
+fi
+echo "  (relaunched on freshly-pulled script — HEAD $(git rev-parse --short HEAD))"
 
 # --- 2. conda setup ---
 banner "[2/7] conda setup (source scripts/race-setup.sh)"
