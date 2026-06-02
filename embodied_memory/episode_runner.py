@@ -231,17 +231,21 @@ def _oracle_stop_override(action, dist_to_goal, radius):
     return action
 
 
-def _arrival_stop(arrived, candidate, caption_confirms, cos_threshold):
+def _arrival_stop(near, candidate, caption_confirms, cos_threshold):
     """Waypoint-arrival STOP — the realistic proxy for oracle-STOP.
 
     The oracle ladder (2026-06-02) showed the LTM's navigation already reaches the
     goal viewpoint in ~75% of warm episodes; the only thing failing is the STOP
     decision (caption-keyword STOP fires on a mere object mention, decoupled from
-    goal proximity). Memory waypoints ARE remembered goal positions, so arriving at
-    a confident one ≈ being at the goal. STOP iff: the follower has ARRIVED at the
-    chosen waypoint, it is a MEMORY candidate, its retrieval cosine clears
-    ``cos_threshold``, AND the current caption confirms the goal object. Pure."""
-    if not arrived:
+    goal proximity). Memory waypoints ARE remembered goal positions, so being at a
+    confident one ≈ being at the goal. STOP iff: the agent is NEAR (within the
+    proximity radius of) the chosen waypoint, it is a MEMORY candidate, its
+    retrieval cosine clears ``cos_threshold``, AND the current caption confirms the
+    goal object. ``near`` is proximity-based (checked every tick on the waypoint's
+    distance_m), mirroring oracle-STOP's distance semantics against the REMEMBERED
+    goal instead of the GT one — far more reliable than the follower's exact
+    arrival signal (arrival-1: that fired only 2× / 16 eps). Pure."""
+    if not near:
         return False
     if candidate is None or getattr(candidate, "source", None) != "memory":
         return False
@@ -340,6 +344,11 @@ class EpisodeRunner:
         # retrieval cosine clears this gate AND the caption confirms the goal.
         # Layers on top of the backbone's keyword-STOP; env-tunable.
         self._arrival_stop_cos = float(os.environ.get("ARRIVAL_STOP_COS", "0.4"))
+        # Proximity radius for the arrival STOP (m). The memory waypoint is ~a goal
+        # viewpoint, so being within this of it ≈ being at the goal. Checked every
+        # tick on candidate.distance_m (decoupled from the follower's exact-arrival
+        # signal, which fired too rarely in arrival-1).
+        self._arrival_stop_radius = float(os.environ.get("ARRIVAL_STOP_RADIUS", "0.5"))
         # ReMEmbR pair is required for backbone='remembr' but optional otherwise
         # so the frontier-only path keeps its constructor signature simple.
         if backbone == "remembr" and (remembr_builder is None or remembr_planner is None):
@@ -808,21 +817,26 @@ class EpisodeRunner:
                     step.agent_state.position,
                     step.agent_state.rotation_yaw,
                 )
-                if self._waypoint_force_repropose:
-                    # Waypoint-arrival STOP: arrived at a confident MEMORY waypoint
-                    # (a remembered goal position) and the caption confirms the
-                    # goal → terminate here (oracle-ladder proxy). Else drop the
-                    # waypoint and re-propose a fresh target as before.
-                    _confirms = _caption_mentions(
-                        keyframe.caption, _goal_terms(ep.target_category)
-                    ) is not None
-                    if _arrival_stop(True, current_candidate, _confirms,
-                                     self._arrival_stop_cos):
-                        action = ACTION_STOP
-                        ep_metrics_counters["n_arrival_stop"] += 1
-                        current_candidate = None
-                    else:
-                        current_candidate = None
+                # Waypoint-arrival STOP (proximity): STOP if the agent is within
+                # _arrival_stop_radius of a confident MEMORY waypoint (a remembered
+                # goal position) and the caption confirms the goal → terminate here
+                # (oracle-ladder proxy). Checked every tick on distance_m, decoupled
+                # from the follower's exact-arrival signal (which fired too rarely).
+                _near = (
+                    current_candidate is not None
+                    and float(current_candidate.distance_m) < self._arrival_stop_radius
+                )
+                _confirms = _caption_mentions(
+                    keyframe.caption, _goal_terms(ep.target_category)
+                ) is not None
+                if _arrival_stop(_near, current_candidate, _confirms,
+                                 self._arrival_stop_cos):
+                    action = ACTION_STOP
+                    ep_metrics_counters["n_arrival_stop"] += 1
+                    current_candidate = None
+                elif self._waypoint_force_repropose:
+                    # Follower reports reached/unreachable → drop & re-propose.
+                    current_candidate = None
 
             # Oracle-STOP diagnostic: force STOP once the agent is within the GT
             # success ring (isolates the termination layer — measures how much

@@ -397,6 +397,11 @@ def case_arrival_stop_wired():
     assert "_arrival_stop_cos" in src
     assert "ARRIVAL_STOP_COS" in src
     assert '"0.4"' in src  # default cosine gate
+    # proximity trigger (not follower-exact-arrival): radius gate on distance_m
+    assert "_arrival_stop_radius" in src
+    assert "ARRIVAL_STOP_RADIUS" in src
+    assert '"0.5"' in src  # default proximity radius
+    assert "distance_m" in src
     # reuses remembr_backbone's whole-word caption matcher
     assert "_caption_mentions" in src and "_goal_terms" in src
     print("  case_arrival_stop_wired: OK")
