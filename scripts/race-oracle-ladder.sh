@@ -99,8 +99,12 @@ fi
 # --- 5. pre-flight: oracle-both on 1 ep (GO/NO-GO: flags don't crash; STOP fires) ---
 banner "[5/7] pre-flight: setting=3 --oracle-location --oracle-stop  scene=wcojb4TFT35  n=1"
 PREFLIGHT_DIR="runs/${TAG}-preflight"
+# --no-strict-pass: oracle-location beelines to the GT goal so memory is never
+# CHOSEN -> the 'memory_influences' pass-condition is FALSE by design and would
+# exit non-zero. The ladder readout comes from diagnose_pipeline, not the gate,
+# so disable strict pass and treat a real exception (non-zero) as the only abort.
 REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
-    --backbone remembr --setting 3 --oracle-location --oracle-stop \
+    --backbone remembr --setting 3 --oracle-location --oracle-stop --no-strict-pass \
     --episodes-path "$DS" --scene wcojb4TFT35 --target chair --n-episodes 1 \
     --out-dir "$PREFLIGHT_DIR" 2>&1 | tee "${PREFLIGHT_DIR}.log"
 rc=${PIPESTATUS[0]}
@@ -124,7 +128,7 @@ for CELL in "${CELLS[@]}"; do
   banner "[6/7] run: ${NAME_C} (${ARGS_C}) -> $out_dir"
   # shellcheck disable=SC2086
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
-      --backbone remembr $ARGS_C --episodes-path "$DS" \
+      --backbone remembr $ARGS_C --no-strict-pass --episodes-path "$DS" \
       --scene all --target "$TARGET" --n-episodes "$N_EPISODES" \
       --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
   rc=${PIPESTATUS[0]}
