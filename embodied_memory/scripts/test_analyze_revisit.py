@@ -156,6 +156,32 @@ def case_warm_delta_pairs_only_warm_positive():
     print("  case warm_delta_pairs_only_warm_positive: OK")
 
 
+def case_compare_runs_pairs_b_minus_a():
+    # Two same-setting runs (e.g. heuristic vs trained R), paired by
+    # (scene, episode_id). compare_runs returns B - A on warm + cold, soft + spl.
+    a = [
+        _ep("S", "a", "chair", 0, soft=0.10, spl=0.0),  # cold
+        _ep("S", "b", "chair", 6, soft=0.20, spl=0.0),  # warm
+        _ep("S", "d", "chair", 11, soft=0.30, spl=0.0),  # warm
+    ]
+    b = [
+        _ep("S", "a", "chair", 0, soft=0.30, spl=0.0),  # cold
+        _ep("S", "b", "chair", 6, soft=0.50, spl=1.0),  # warm
+        _ep("S", "d", "chair", 11, soft=0.60, spl=0.0),  # warm
+    ]
+    ar.assign_visit_order(a)
+    ar.assign_visit_order(b)
+    res = ar.compare_runs(a, b, n_bootstrap=2000)
+    # warm soft deltas [0.5-0.2, 0.6-0.3] = [0.3, 0.3] -> mean 0.3
+    assert res["warm_soft"]["n"] == 2, res["warm_soft"]["n"]
+    assert abs(res["warm_soft"]["mean"] - 0.3) < 1e-9, res["warm_soft"]["mean"]
+    # cold soft delta [0.3-0.1] = 0.2
+    assert abs(res["cold_soft"]["mean"] - 0.2) < 1e-9, res["cold_soft"]["mean"]
+    # warm binary spl deltas [1-0, 0-0] = [1,0] -> mean 0.5
+    assert abs(res["warm_spl"]["mean"] - 0.5) < 1e-9, res["warm_spl"]["mean"]
+    print("  case compare_runs_pairs_b_minus_a: OK")
+
+
 def case_warm_delta_negative():
     s1 = [_ep("S", "b", "chair", 6, soft=0.8), _ep("S", "d", "chair", 11, soft=0.7)]
     s3 = [_ep("S", "b", "chair", 6, soft=0.2), _ep("S", "d", "chair", 11, soft=0.3)]
@@ -358,6 +384,7 @@ def main() -> int:
     case_stratified_summary_splits_cold_warm()
     case_memory_fire_rate_on_warm()
     case_warm_delta_pairs_only_warm_positive()
+    case_compare_runs_pairs_b_minus_a()
     case_warm_delta_negative()
     case_classify_gate_c_rare_firing()
     case_classify_gate_a_fires_and_helps()

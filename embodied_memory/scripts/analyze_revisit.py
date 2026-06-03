@@ -300,6 +300,72 @@ def paired_cold_delta(
 
 
 # ----------------------------------------------------------------------
+# direct two-run comparison (e.g. trained-R vs heuristic-R, same setting)
+# ----------------------------------------------------------------------
+
+
+def compare_runs(
+    a_eps: List[RevisitEpisode],
+    b_eps: List[RevisitEpisode],
+    n_bootstrap: int = 5000,
+) -> Dict[str, Any]:
+    """Paired B - A deltas between two runs of the SAME setting.
+
+    Both runs must cover the SAME episodes (same dataset); pairs on
+    ``(scene_id, episode_id)``. Used to compare two variants of Setting 3 (e.g.
+    a trained importance head vs the heuristic) head-to-head, instead of each
+    vs the memory-off S1. ``assign_visit_order`` must have been called on both.
+    Returns warm/cold deltas on soft-SPL and binary SPL.
+    """
+    return {
+        "warm_soft": paired_warm_delta(a_eps, b_eps, n_bootstrap, metric="soft_spl"),
+        "cold_soft": paired_cold_delta(a_eps, b_eps, n_bootstrap, metric="soft_spl"),
+        "warm_spl": paired_warm_delta(a_eps, b_eps, n_bootstrap, metric="spl"),
+        "cold_spl": paired_cold_delta(a_eps, b_eps, n_bootstrap, metric="spl"),
+    }
+
+
+def print_compare(run_a: RevisitRun, run_b: RevisitRun, n_bootstrap: int) -> None:
+    """Report the head-to-head paired delta (B - A) between two same-setting runs."""
+    assign_visit_order(run_a.episodes)
+    assign_visit_order(run_b.episodes)
+
+    print("=== compare (B - A; same episodes, paired by scene/category/visit) ===")
+    print(f"  A = {run_a.name}  (setting={run_a.setting})")
+    print(f"  B = {run_b.name}  (setting={run_b.setting})")
+    print()
+
+    print("=== warm/cold stratified means ===")
+    for tag, r in (("A", run_a), ("B", run_b)):
+        summ = stratified_summary(r.episodes)
+        print(f"[{tag}: {r.name}]")
+        print(_fmt_block("cold", summ["cold"]))
+        print(_fmt_block("warm", summ["warm"]))
+    print()
+
+    res = compare_runs(run_a.episodes, run_b.episodes, n_bootstrap=n_bootstrap)
+    print("=== paired soft-SPL delta B - A, bootstrap, 90% CI ===")
+    _print_delta(f"WARM  {run_b.name} - {run_a.name}", res["warm_soft"])
+    _print_delta(f"COLD  {run_b.name} - {run_a.name}", res["cold_soft"])
+    print()
+    print("=== paired binary SPL delta B - A, bootstrap, 90% CI ===")
+    _print_delta(f"WARM  {run_b.name} - {run_a.name}", res["warm_spl"])
+    _print_delta(f"COLD  {run_b.name} - {run_a.name}", res["cold_spl"])
+    print()
+    wm = res["warm_soft"]
+    if wm["mean"] > 0 and wm["p_le_zero"] < 0.1:
+        verdict = f"B beats A on warm soft-SPL (p={wm['p_le_zero']:.3f})."
+    elif wm["mean"] > 0:
+        verdict = (f"B higher on warm soft-SPL but not significant "
+                   f"(p={wm['p_le_zero']:.3f}) — directional only.")
+    elif wm["mean"] < 0 and (1.0 - wm["p_le_zero"]) < 0.1:
+        verdict = f"A beats B on warm soft-SPL (p={1.0 - wm['p_le_zero']:.3f})."
+    else:
+        verdict = "no significant warm soft-SPL difference (statistical tie)."
+    print(f"=== verdict ===\n  {verdict}\n")
+
+
+# ----------------------------------------------------------------------
 # Gate A classification
 # ----------------------------------------------------------------------
 
@@ -466,10 +532,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Visit-order (revisit) ablation analysis")
     parser.add_argument("run_dirs", nargs="+", help="Run directories (>=2; need S1 and S3).")
     parser.add_argument("--bootstrap", type=int, default=5000)
+    parser.add_argument("--compare", action="store_true",
+                        help="Head-to-head paired B - A delta between exactly two "
+                             "same-setting runs (e.g. heuristic-R vs trained-R S3), "
+                             "instead of the S1/S2/S3 Gate-A report.")
     args = parser.parse_args(argv)
 
     if len(args.run_dirs) < 2:
         parser.error("at least two run directories are required")
+
+    if args.compare:
+        if len(args.run_dirs) != 2:
+            parser.error("--compare needs exactly two run directories (A B)")
+        run_a, run_b = (load_revisit_run(p) for p in args.run_dirs)
+        print_compare(run_a, run_b, args.bootstrap)
+        return 0
 
     runs = [load_revisit_run(p) for p in args.run_dirs]
     print_report(runs, args.bootstrap)
