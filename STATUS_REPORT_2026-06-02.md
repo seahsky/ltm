@@ -126,8 +126,32 @@ over-suppresses (S3-det gated 6 of 7 localizations → 1 commit) because caption
 points rarely co-locate with a memory sighting — a **detector-quality ceiling, not a
 radius knob**. Headline config is **detector OFF**. The thesis reproduced a **3rd time**
 (detector-OFF S3−S1 soft-SPL +0.2343, p=0.001 — Phase C +0.240, c7 +0.217, c9 +0.234).
-Binary SPL@0.1 m needs a strong detector (GroundingDINO/OWLv2/Detic) or is accepted as
-perception-bound.
+
+### 2.5 Bottleneck isolation — oracle ladder + waypoint-arrival STOP (Run 12)
+
+A component-level diagnosis (`diagnose_pipeline.py`, no GPU) showed observe + retrieve
+both *work* on warm visits (observation rate 1.0, retrieval on-target 0.66); several warm
+episodes reach `min_d2g = 0.00` yet fail — the agent reaches the goal but STOPs elsewhere.
+The **oracle ladder** quantified it:
+
+| Cell (warm succ@0.1m) | nomem | ours | oracle-loc | **oracle-stop** | oracle-both |
+|---|---|---|---|---|---|
+| succ@0.1m | 0.250 | 0.167 | 0.500 | **0.750** | 0.667 |
+
+**`ours → oracle-stop`: 0.167 → 0.750 from a perfect STOP alone** (agent's own nav
+untouched) → termination is the entire recoverable gap. But the *realizable* proxy
+(`_arrival_stop`: STOP at a confident memory waypoint + caption-confirm) was **net-zero**
+across 3 iterations (arrival-1/2/3) — because **the memory waypoint is a *viewing pose*
+(~0.5–1.5 m from the object), not the goal point.** Stopping there lands outside the 0.1 m
+ring by construction; oracle-STOP reached 0.75 only by using **GT distance** to catch the
+transient closest approach.
+
+**Conclusion:** binary SPL@0.1 m is **genuinely localization-bound**, confirmed from two
+angles — caption-grounding can't localize the object to 0.1 m (detector arc), and memory
+recall gives a viewing pose not the goal (arrival arc). Only GT closes it. The thesis
+reproduced a **6th time** (soft-SPL S3−S1 +0.21–0.24, p≈0.001–0.002). Headline config
+stays **detector OFF + arrival-STOP off-by-default**; binary SPL@0.1 m needs a real
+detector (GroundingDINO/OWLv2/Detic) or a relaxed success ring — both out of thesis scope.
 
 ---
 

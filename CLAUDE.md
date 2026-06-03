@@ -88,6 +88,23 @@ the memory stack itself was unchanged from Run 8.
 
 ## Next milestone
 
+**Embodied binary-SPL work CLOSED — localization-bound (2026-06-03, Run 12; see
+`PHASE2_ABLATION_REPORT.md` Run 12).** A component diagnosis (`diagnose_pipeline.py`)
+showed observe+retrieve work on warm visits; the **oracle ladder**
+(`scripts/race-oracle-ladder.sh`, `--oracle-stop`/`--oracle-location`) proved
+**termination is the entire recoverable gap** — a perfect STOP lifts warm succ@0.1m
+0.167 → **0.750**. But the realizable proxy (`_arrival_stop`: STOP at a confident memory
+waypoint + caption-confirm; `ARRIVAL_STOP_COS`/`ARRIVAL_STOP_RADIUS`) was **net-zero
+across 3 iterations** because **the memory waypoint is a VIEWING POSE (~0.5–1.5m from the
+object), not the goal point** — stopping there is outside the 0.1m ring by construction.
+**So binary SPL@0.1m is genuinely localization-bound** (confirmed twice: caption-grounding
+can't localize to 0.1m, memory recall is a viewing pose). The LTM thesis reproduced a
+**6th time** (warm soft-SPL S3−S1 +0.21–0.24, p≈0.001). Headline config: **detector OFF,
+arrival-STOP off-by-default**; `success@1m ≈ 0.67` warm is the comparable-metric headline.
+Remaining binary-SPL levers (real <0.1m detector; relaxed success ring) are out of thesis
+scope. On-thesis ways to push the *positive* result: widen the revisit matrix or train the
+LTM heads (below).
+
 **Detector arc CLOSED — headline config is detector OFF (2026-06-02, Run 11; see
 `PHASE2_ABLATION_REPORT.md` Run 11).** The goal-detector binary-SPL push (c1–c9) is
 finished. c7 (precise 0.25 m approach + a counter re-diagnosis: Habitat's follower

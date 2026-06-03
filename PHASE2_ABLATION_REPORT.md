@@ -1870,3 +1870,97 @@ suppress both c7 failure modes (cold-fire + wrong-instance).
 | `embodied_memory/scripts/test_episode_runner_detector.py` | 5 → 16 cases (c7: 4 approach/arrival; c9: 7 gate/agreement + source-scans). |
 | `runs/detector-c7-*`, `runs/detector-c9-*` | 6-cell matrices (RACE). |
 
+
+---
+
+# Run 12 — Bottleneck isolation: oracle ladder proves termination, but the realizable STOP is localization-bound (RACE, 2026-06-02 → 06-03)
+
+After Run 11 closed the detector arc ("binary SPL is perception-bound"), a
+component-level diagnosis re-opened and then **precisely characterized** the
+binary-SPL gap. Net result: **the LTM thesis is confirmed a 6th time; the binary
+SPL@0.1 m ceiling is 0.75 but is reachable only with GT distance — no realizable
+signal (caption-grounding detector OR memory recall) closes it.** This is a clean,
+complete, mechanistic explanation, not a loose end.
+
+## Step 1 — log-mining diagnosis (`diagnose_pipeline.py`, no GPU)
+
+Mined the `episode_*.json` the runner already writes to decompose
+observe → retrieve → reach → terminate. On the c9 logs, **warm S3**:
+observation_rate **1.000** (the agent always sees the target — exploration is
+NOT the bottleneck), retrieval on-target **0.659** (retrieval mostly works),
+succ@1m **0.667** vs succ@0.1m **0.167**. **Smoking gun:** several warm episodes
+have `min_d2g = 0.00` yet `success = false` — the agent physically reaches the
+goal viewpoint but STOPs elsewhere (the caption-keyword STOP fires on a mere
+object mention, decoupled from goal proximity). → termination is the suspect.
+
+## Step 2 — oracle ladder (`scripts/race-oracle-ladder.sh`, 5 cells)
+
+Added `--oracle-stop` (force STOP at GT-d2g < radius; isolates termination) and
+`--oracle-location` (steer to GT goal; isolates exploration+retrieval) on top of
+the S3 policy; existing `--backbone oracle` = both. **Warm succ@0.1 m:**
+
+| Cell | warm succ@0.1m | note |
+|---|---|---|
+| nomem (S1) | 0.250 | baseline |
+| ours (S3) | 0.167 | current full system |
+| oracle-loc | 0.500 | perfect target, own STOP |
+| **oracle-stop** | **0.750** | own nav, perfect STOP |
+| oracle-both | 0.667 | (confounded: oracle-loc steers to the raw GT object point, often off-navmesh → follower spins; the agent's own memory waypoints are *better* nav targets) |
+
+**`ours → oracle-stop`: 0.167 → 0.750 (+0.58, ~4.5×) from a perfect STOP alone**,
+with the agent's own memory-guided navigation untouched and efficient paths (SPL
+0.58–0.95). So the LTM's navigation already reaches the goal viewpoint in ~75 % of
+warm episodes — **termination is the entire recoverable gap.**
+
+## Step 3 — waypoint-arrival STOP (the realizable proxy), 3 iterations
+
+`_arrival_stop`: STOP when the agent is at a confident MEMORY waypoint (a
+remembered goal position) — cosine ≥ `ARRIVAL_STOP_COS` (0.4) + caption confirms
+(reusing `remembr_backbone._caption_mentions`). Env-tunable, layered on
+keyword-STOP, fires only on memory waypoints (S1/S2 unaffected).
+
+| Run | trigger | n_arrival_stop (S3) | warm succ@0.1m | warm binary SPL |
+|---|---|---|---|---|
+| arrival-1 | follower-exact-arrival | 2 | 0.250 | 0.115 |
+| arrival-2 | proximity R=0.5 | **0** (R == follower goal_radius → ring never crossed) | 0.167 | 0.051 |
+| arrival-3 | proximity R=0.75 OR follower | 3 | 0.167 | 0.053 |
+
+Every variant lands at **baseline**: ~2 successes, binary SPL ~0.05, soft-SPL
+~0.34. When the STOP fires correctly it's at a waypoint already destined for a
+keyword-STOP success; otherwise it false-stops at a wrong-instance recall or stops
+~0.7 m out (outside the ring). **Net-zero.**
+
+## Why the ceiling is unreachable without GT (the finding)
+
+**The memory waypoint is a VIEWING POSE — the agent's past `agent_position` when
+it saw the goal, ~0.5–1.5 m from the object — not the goal point.** Stopping at it
+lands the agent outside the 0.1 m success ring by construction. Oracle-STOP reached
+0.75 by forcing STOP on **GT distance < 0.1 m**, catching the *transient* instant
+the agent's path passes closest to the object en route to its viewing-pose
+waypoint; nothing the agent knows flags that instant. So binary SPL@0.1 m is
+**genuinely localization-bound**, now confirmed from two independent angles:
+**detector arc** (caption-grounding can't localize the object to 0.1 m → net-neutral)
+and **arrival-STOP arc** (memory recall is a viewing pose, not the goal → can't stop
+within 0.1 m). Only GT closes it.
+
+## Conclusion (embodied path)
+
+- **Thesis confirmed 6×:** warm soft-SPL S3−S1 = +0.21 to +0.24, p ≈ 0.001–0.002
+  (Phase C, c7, c9, arrival-1/2/3). The lifelong LTM improves navigation; the
+  effect is attributed to the LTM modules (S2−S1 ≈ 0) and is robust.
+- **Binary SPL@0.1 m is localization-bound** — ceiling 0.75 needs GT; no realizable
+  signal reaches it. This is the mechanistic explanation of the gap, not a defect.
+- **success@1 m (standard ObjectNav metric) ≈ 0.67 warm** — the honest headline.
+- **Remaining binary-SPL levers are out of scope:** a real object detector that
+  localizes to < 0.1 m (caption-grounding shown insufficient), or relaxing the
+  success ring. Neither is on the memory thesis's critical path.
+
+## File index (Run 12)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/scripts/diagnose_pipeline.py` | Log-mining diagnostics (observation rate, retrieval relevance via nearest-keyframe caption, trajectory dump). TDD `test_diagnose_pipeline.py` (11 cases). |
+| `embodied_memory/episode_runner.py` | `_oracle_stop_override`, `_arrival_stop`; `oracle_stop`/`oracle_location`/`oracle_stop_radius`, `ARRIVAL_STOP_COS`/`ARRIVAL_STOP_RADIUS`, `n_arrival_stop` counter. |
+| `embodied_memory/run_hm3d_pol.py` | `--oracle-stop` / `--oracle-location` / `--oracle-stop-radius` flags. |
+| `scripts/race-oracle-ladder.sh` | 5-cell oracle ladder driver (+ re-exec guard for the mid-run git-pull race). |
+| `runs/oracle-2-*`, `runs/arrival-{1,2,3}-*` | RACE matrices. |
