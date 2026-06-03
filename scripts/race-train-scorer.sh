@@ -59,6 +59,8 @@ TARGET="any"
 TRAIN_RUNS=""          # if set, reuse these run dirs as training data (skip gen)
 N_TRAIN="30"           # episodes to generate for training when TRAIN_RUNS empty
 EPOCHS="8"
+LABEL_MODE="soft_spl"  # scorer label: soft_spl | goal_object | success | spl
+REUSE_BASELINES=""     # "S1DIR S3HEURDIR": skip re-running S1 + S3-heuristic cells
 DEGENERATE_MAX="0.5"   # abort if > this fraction of train captions are degenerate
 
 while [ $# -gt 0 ]; do
@@ -72,6 +74,8 @@ while [ $# -gt 0 ]; do
     --train-runs)        TRAIN_RUNS="$2"; shift 2 ;;
     --n-train)           N_TRAIN="$2"; shift 2 ;;
     --epochs)            EPOCHS="$2"; shift 2 ;;
+    --label-mode)        LABEL_MODE="$2"; shift 2 ;;
+    --reuse-baselines)   REUSE_BASELINES="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -176,12 +180,12 @@ if frac > max_frac:
 print("  OK: captions are discriminative enough to train on.")
 PY
 
-# --- 6. train the importance (R) head (SBERT space; soft_spl labels) ---
-banner "[6/8] train scorer -> $CKPT (encoder=sbert label=soft_spl epochs=$EPOCHS)"
+# --- 6. train the importance (R) head (SBERT space) ---
+banner "[6/8] train scorer -> $CKPT (encoder=sbert label=$LABEL_MODE epochs=$EPOCHS)"
 mkdir -p "$(dirname "$CKPT")"
 # shellcheck disable=SC2086
 python -m dialogue_memory.train_scorer --embodied $TRAIN_RUNS \
-    --encoder sbert --label-mode soft_spl --epochs "$EPOCHS" --out "$CKPT" \
+    --encoder sbert --label-mode "$LABEL_MODE" --epochs "$EPOCHS" --out "$CKPT" \
   || { echo "FATAL: scorer training failed."; exit 1; }
 [ -f "$CKPT" ] || { echo "FATAL: checkpoint not written: $CKPT"; exit 1; }
 
@@ -198,11 +202,21 @@ run_cell() {  # $1=setting  $2=out_dir  $3=extra args
   c="$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['n_episodes_completed'])" "${out}/summary.json" 2>/dev/null || echo 0)"
   [ "$c" = "$N_EPISODES" ] || echo "WARN: setting $S completed ${c}/${N_EPISODES} episodes."
 }
-S1="runs/${TAG}-s1"
-S3H="runs/${TAG}-s3-heur"
 S3T="runs/${TAG}-s3-trained"
-run_cell 1 "$S1" ""
-run_cell 3 "$S3H" ""
+if [ -n "$REUSE_BASELINES" ]; then
+  # S1 + S3-heuristic are scorer-independent; reuse a prior tag's cells to
+  # skip ~2/3 of the GPU cost when only the trained head changed.
+  # shellcheck disable=SC2086
+  set -- $REUSE_BASELINES
+  S1="$1"; S3H="$2"
+  [ -d "$S1" ] && [ -d "$S3H" ] || { echo "FATAL: --reuse-baselines dirs missing: '$S1' '$S3H'"; exit 1; }
+  banner "[7/8] reuse baselines: S1=$S1  S3-heur=$S3H (skipping their re-run)"
+else
+  S1="runs/${TAG}-s1"
+  S3H="runs/${TAG}-s3-heur"
+  run_cell 1 "$S1" ""
+  run_cell 3 "$S3H" ""
+fi
 run_cell 3 "$S3T" "--scorer-ckpt $CKPT"
 
 # --- 8. head-to-head Gate-A analysis (two calls; analyzer keys by setting) ---

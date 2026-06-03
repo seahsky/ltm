@@ -144,6 +144,55 @@ def case_infer_dims_nondefault_shapes():
     assert hidden_dim == 128, hidden_dim
 
 
+def case_goal_object_label_mentions_target():
+    from embodied_memory.embodied_dataset import caption_has_goal_object
+    assert caption_has_goal_object("a wooden chair next to a small table") is True
+    assert caption_has_goal_object("a cozy bedroom with a bed and a window") is True
+
+
+def case_goal_object_label_synonym():
+    from embodied_memory.embodied_dataset import caption_has_goal_object
+    # 'couch' is a sofa synonym; 'television' is a tv_monitor synonym.
+    assert caption_has_goal_object("a living room with a leather couch") is True
+    assert caption_has_goal_object("a television mounted on the wall") is True
+
+
+def case_goal_object_label_word_boundary():
+    from embodied_memory.embodied_dataset import caption_has_goal_object
+    # 'bedroom' must NOT satisfy the 'bed' goal (word-boundary), and a generic
+    # corridor caption with no goal object is negative.
+    assert caption_has_goal_object("a bedroom doorway with white walls") is False
+    assert caption_has_goal_object("a well-lit hallway with hardwood floors") is False
+
+
+def case_goal_object_label_in_dataset_mode():
+    # The dataset must accept the new label mode and label per-caption.
+    from embodied_memory.embodied_dataset import (
+        EmbodiedImportanceDataset,
+        EmbodiedSample,
+    )
+    assert "goal_object" in EmbodiedImportanceDataset.SUPPORTED_LABELS
+
+    def _mk(cap, success):
+        return EmbodiedSample(
+            episode_idx=0, episode_id="e", scene_id="s", target_category="chair",
+            success=success, spl=0.0, step_idx=0, caption=cap,
+            agent_pos=np.zeros(3, dtype=np.float32), agent_yaw=0.0,
+        )
+
+    class _Enc:
+        def encode(self, t):
+            return np.zeros(8, dtype=np.float32)
+
+    ds = EmbodiedImportanceDataset(
+        [_mk("a wooden chair", False), _mk("an empty hallway", True)],
+        encoder=_Enc(), label_mode="goal_object",
+    )
+    # label is goal-object-mention, INDEPENDENT of episode success.
+    assert _approx(ds._label(ds._samples[0]), 1.0), "chair caption -> 1.0"
+    assert _approx(ds._label(ds._samples[1]), 0.0), "hallway caption -> 0.0"
+
+
 def case_sbert_training_encoder_normalizes():
     # The embodied scorer MUST train in the same L2-normalized SBERT space the
     # bridge scores in. Stub the SBERT model with a non-unit vector and assert
@@ -287,6 +336,10 @@ def main():
     cases = [
         case_infer_dims_from_first_linear,
         case_infer_dims_nondefault_shapes,
+        case_goal_object_label_mentions_target,
+        case_goal_object_label_synonym,
+        case_goal_object_label_word_boundary,
+        case_goal_object_label_in_dataset_mode,
         case_sbert_training_encoder_normalizes,
         case_infer_dims_missing_key_raises,
         case_relevance_uses_scorer_when_set,

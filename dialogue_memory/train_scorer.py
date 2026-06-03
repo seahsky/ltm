@@ -661,9 +661,11 @@ def _cli(argv=None):
     p.add_argument("--encoder", default="clip", choices=("clip", "sbert"),
                    help="Text encoder for --embodied (clip matches embodied LTM joint space).")
     p.add_argument("--label-mode", default="soft_spl",
-                   choices=("success", "spl", "soft_spl"),
-                   help="Embodied label semantics. Default soft_spl because Phase-1 "
-                        "has 0 binary successes; success/spl labels will collapse.")
+                   choices=("success", "spl", "soft_spl", "goal_object"),
+                   help="Embodied label semantics. soft_spl is episode-level (proved "
+                        "unlearnable for a caption head — Val Acc flat). goal_object is "
+                        "per-keyframe: 1 iff the caption names a goal object — a "
+                        "content-determined target the caption-embedding head can learn.")
     p.add_argument("--keep-per-episode-top-k", type=int, default=None,
                    help="Optional per-episode subsample (uniform stride) to reduce "
                         "the long tail of nearly-identical captions.")

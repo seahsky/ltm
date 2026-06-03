@@ -41,10 +41,35 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+# HM3D ObjectNav goal categories + caption synonyms (mirrors
+# remembr_backbone._GOAL_SYNONYMS; duplicated here to keep this a light module
+# that doesn't pull the VLM stack). Used by the "goal_object" scorer label: a
+# keyframe is important iff its caption names a findable goal object — a
+# content-determined, per-keyframe signal the caption-embedding head can learn
+# (episode-level soft_spl proved unlearnable, Val Acc flat 0.32).
+_GOAL_OBJECT_TERMS: Tuple[str, ...] = (
+    "chair", "bed", "plant", "potted plant", "houseplant", "toilet",
+    "tv", "television", "monitor", "screen", "sofa", "couch",
+)
+
+
+def caption_has_goal_object(caption: str) -> bool:
+    """True iff the caption names any HM3D goal object as a whole word.
+
+    Word-boundary matched so 'bedroom' does NOT satisfy 'bed'. Pure (regex
+    only) — unit-testable without torch/habitat.
+    """
+    cap = str(caption).lower()
+    for t in _GOAL_OBJECT_TERMS:
+        if re.search(r"\b" + re.escape(t) + r"\b", cap):
+            return True
+    return False
 
 try:
     import torch
@@ -206,7 +231,7 @@ class EmbodiedImportanceDataset(Dataset):
     "will-be-mentioned" supervision of the MSC scorer (a binary classification).
     """
 
-    SUPPORTED_LABELS = ("success", "soft_spl", "spl")
+    SUPPORTED_LABELS = ("success", "soft_spl", "spl", "goal_object")
 
     def __init__(
         self,
@@ -258,6 +283,11 @@ class EmbodiedImportanceDataset(Dataset):
             return 1.0 if s.success else 0.0
         if self.label_mode == "spl":
             return float(s.spl)
+        if self.label_mode == "goal_object":
+            # Per-keyframe relevance: does this caption depict a goal object?
+            # Independent of episode outcome — a sighting is memory-worthy
+            # whether or not THIS episode succeeded.
+            return 1.0 if caption_has_goal_object(s.caption) else 0.0
         return float(s.extra.get("soft_spl", s.spl))
 
     def __len__(self) -> int:
