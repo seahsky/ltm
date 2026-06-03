@@ -1964,3 +1964,86 @@ within 0.1 m). Only GT closes it.
 | `embodied_memory/run_hm3d_pol.py` | `--oracle-stop` / `--oracle-location` / `--oracle-stop-radius` flags. |
 | `scripts/race-oracle-ladder.sh` | 5-cell oracle ladder driver (+ re-exec guard for the mid-run git-pull race). |
 | `runs/oracle-2-*`, `runs/arrival-{1,2,3}-*` | RACE matrices. |
+
+# Run 13 — Train the LTM importance (R) head on embodied outcomes → heuristic is at/near the ceiling (RACE, 2026-06-03)
+
+**On-thesis lever (after binary-SPL closed in Run 12): train the LTM's own heads
+instead of re-measuring the frozen stack.** The hierarchical consolidator keeps only
+the top-k keyframes by importance `I = αR + βU + γN` (α=0.4 dominant); that top-k *is*
+the fine LTM that retrieval queries against. R was, by default, a length/keyword
+**heuristic**. This run makes R a **trained head** (the proposal's `train_scorer`),
+learned from embodied data, and measures whether learning R beats the heuristic on the
+revisit soft-SPL gain.
+
+**The load-bearing fix nobody had done.** The trainers existed but their checkpoints
+were *never loaded at inference* — `consolidation._compute_relevance` used the heuristic
+regardless. So "training" was inert. Run 13's deliverable is the **wiring**
+(`load_scorer` → `DialogueConsolidation(relevance_scorer=…)` → bridge `scorer_ckpt` →
+`--scorer-ckpt`), with a loud raise on any encoder-dim mismatch so a silent heuristic
+fallback can't masquerade as a null result. Train on val_mini single-goal episodes,
+evaluate on the revisit set (disjoint episodes; same 2-scene × {chair,bed} controlled
+starts as Phase C).
+
+## Two labels, two outcomes
+
+**(d1) Episode soft-SPL label → REGRESSED.** Labeling every keyframe with its episode's
+soft-SPL is barely a function of the *caption* the head embeds → **unlearnable**
+(Val Acc flat 0.32 across 8 epochs). R collapses to a poorly-discriminating near-constant,
+so it goes ~inert in `I`, **novelty (N) dominates** keyframe selection, the fine LTM fills
+with novel-but-useless observations, and they **over-fire at rerank (mem_chosen 210→625)
+and cause thrashing** (worst episodes: `replan_stuck` 191/164, agent spins in place).
+
+**(d2) Per-keyframe `goal_object` label → RECOVERS to heuristic-competitive.** Label each
+keyframe **1.0 iff its caption names an HM3D goal object** as a whole word
+(chair/bed/sofa/couch/tv/plant/toilet; "bedroom" ≠ "bed"), independent of episode outcome
+— a *content-determined* target the caption-embedding head can actually learn (Val Acc
+**0.32→0.76**, val loss 0.69→0.45). The over-firing pathology is gone (mem_chosen back to
+202 ≈ heuristic's 210).
+
+## Result (WARM revisits, n = 12 paired; revisit set = Phase-C 2-scene × {chair,bed})
+
+| variant | warm soft-SPL **S3−S1** (gate) | warm binary SPL S3−S1 | succ@1m | mem_chosen / steps | train Val Acc |
+|---|---|---|---|---|---|
+| **heuristic R** (default) | **+0.2357** [+0.100,+0.378] p=.001 | +0.0527 p=.36 | 0.667 | 210 / 55.8 | n/a |
+| soft_spl R (d1) | +0.1251 — regressed | +0.0000 | 0.500 | 625 / 93.1 | 0.32 flat (unlearnable) |
+| **goal_object R** (d2) | **+0.1941** [+0.102,+0.296] p=.000 | +0.1094 p=.11 | 0.583 | 202 / 62.4 | 0.32→0.76 (learns) |
+
+COLD control (n=4): heuristic S3−S1 = −0.008 (n.s.); **goal_object = −0.152 [−0.318,−0.043]
+(significantly NEGATIVE).**
+
+## Reading
+
+- **On the headline gate, `goal_object` ties the heuristic.** +0.194 vs +0.236 — the 0.042
+  gap is tiny against the ~0.2 CI widths; both p ≤ 0.001. Statistically indistinguishable.
+- **A hint of a binary-SPL edge** (+0.109 vs +0.053, ~2×) — interesting given Run 12
+  established binary SPL@0.1 m is localization-bound — but n=12, p=0.11: **suggestive, not
+  proven**. Not claimed.
+- **The one *significant* difference cuts against the learned head: COLD visits.** The
+  content head over-eagerly stores/recalls goal-object keyframes on *first* visits (no useful
+  prior) and misleads → cold S3−S1 significantly negative.
+
+## Verdict
+
+**The hand-tuned heuristic R is at or near the ceiling for this LTM.** A naive label
+(soft_spl) *degrades* the LTM by destroying R's selectivity; a content-aligned label
+(goal_object) *recovers* to heuristic-competitive on warm visits but **does not exceed it
+and harms cold-start** → the heuristic stays the better default. The exercise nonetheless
+(a) **proved the consolidation-importance path is load-bearing** (a bad R demonstrably
+breaks the LTM, a good R restores it), and (b) reproduced the LTM thesis an **8th time**
+(heuristic warm soft-SPL S3−S1 = +0.2357, p=0.001). The scorer-head lever is **closed**:
+training does not beat the heuristic here. Remaining on-thesis pushes are orthogonal —
+widen the revisit matrix (higher-n estimate) or apply the now-proven train+wire pattern to
+the predictor (U) / coarse-affordance heads.
+
+## File index (Run 13)
+
+| Path | Purpose |
+|---|---|
+| `dialogue_memory/train_scorer.py` | `load_scorer()` / `_infer_scorer_dims()` (rebuild head from ckpt); `--encoder sbert` now L2-normalizes to match the bridge's cosine index; `--label-mode goal_object`. |
+| `dialogue_memory/consolidation.py` | `DialogueConsolidation(relevance_scorer, scorer_embed_dim)`; `_relevance_base` uses the head when set + dims match, else the heuristic (dialogue/MSC path unchanged). |
+| `embodied_memory/embodied_dataset.py` | `caption_has_goal_object()` + `label_mode="goal_object"` (per-keyframe, outcome-independent). |
+| `embodied_memory/memory_bridge.py` | `scorer_ckpt=` loads + wires the head; **raises** on encoder-dim mismatch. |
+| `embodied_memory/run_hm3d_pol.py` | `--scorer-ckpt` flag (Setting 3), recorded in run_config. |
+| `embodied_memory/scripts/test_scorer_wiring.py` | 15 Habitat/torch-free TDD cases (dim inference, relevance wiring, normalization, goal_object labeler, source-scans). |
+| `scripts/race-train-scorer.sh` | train+eval driver: caption preflight → train → S1/S3-heuristic/S3-trained head-to-head; `--label-mode`, `--reuse-baselines`, re-exec guard. |
+| `models/embodied/scorer-scorer-d{1,2}.pt`, `runs/scorer-d{1,2}-*` | RACE checkpoints + runs. |

@@ -88,6 +88,25 @@ the memory stack itself was unchanged from Run 8.
 
 ## Next milestone
 
+**Scorer-head training CLOSED — heuristic R is at/near the ceiling (2026-06-03, Run 13;
+see `PHASE2_ABLATION_REPORT.md` Run 13).** On-thesis attempt to *train* the LTM's own
+importance head (R in `I = αR + βU + γN`, which gates the top-k fine-layer writes that
+retrieval queries against) rather than re-measure the frozen stack. Wired the dormant
+`train_scorer` checkpoints into inference for the first time (`load_scorer` →
+`DialogueConsolidation(relevance_scorer=…)` → bridge `scorer_ckpt` → `--scorer-ckpt`,
+with a loud raise on encoder-dim mismatch). **Two labels: (d1) episode soft-SPL is
+unlearnable for a caption head (Val Acc flat 0.32) → R goes inert → memory over-fires
+(210→625) and thrashes → REGRESSES (warm soft-SPL S3−S1 +0.236→+0.125). (d2) a
+per-keyframe `goal_object` label (caption names an HM3D goal object) IS learnable (Val Acc
+0.32→0.76), kills the over-fire, and RECOVERS to heuristic-competitive on warm (+0.194 vs
++0.236 — statistical tie) — but does NOT beat it and significantly HURTS cold-start
+(−0.152).** Verdict: the hand-tuned heuristic R is at/near the ceiling; training doesn't
+beat it here. The exercise proved the consolidation-importance path is load-bearing (a bad
+R breaks the LTM, a good R restores it) and reproduced the thesis an **8th time** (heuristic
+warm +0.2357, p=0.001). Driver `scripts/race-train-scorer.sh`. Remaining on-thesis pushes
+(orthogonal): widen the revisit matrix (higher-n estimate) or apply the now-proven
+train+wire pattern to the predictor (U) / coarse-affordance heads.
+
 **Embodied binary-SPL work CLOSED — localization-bound (2026-06-03, Run 12; see
 `PHASE2_ABLATION_REPORT.md` Run 12).** A component diagnosis (`diagnose_pipeline.py`)
 showed observe+retrieve work on warm visits; the **oracle ladder**

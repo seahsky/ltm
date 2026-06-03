@@ -153,6 +153,28 @@ reproduced a **6th time** (soft-SPL S3−S1 +0.21–0.24, p≈0.001–0.002). He
 stays **detector OFF + arrival-STOP off-by-default**; binary SPL@0.1 m needs a real
 detector (GroundingDINO/OWLv2/Detic) or a relaxed success ring — both out of thesis scope.
 
+### 2.6 Training the LTM importance (R) head — heuristic is at/near the ceiling (Run 13)
+
+On-thesis attempt to *train* the LTM's own importance head rather than re-measure the
+frozen stack. R (in `I = αR + βU + γN`, α=0.4) gates the top-k keyframes consolidated into
+the fine LTM that retrieval queries against; it was a length/keyword **heuristic**. We wired
+the dormant `train_scorer` checkpoints into inference for the first time (they had never
+been loaded — "training" was inert) and ran a head-to-head on the revisit set.
+
+- **Episode soft-SPL label → regressed.** Unlearnable for a caption-embedding head (Val Acc
+  flat 0.32) → R inert → memory over-fires (mem_chosen 210→625) and thrashes → warm
+  soft-SPL S3−S1 **+0.236 → +0.125**.
+- **Per-keyframe `goal_object` label (caption names a goal object) → recovers.** Learnable
+  (Val Acc 0.32→0.76), no over-fire (202), warm soft-SPL S3−S1 **+0.194** — a statistical
+  **tie** with the heuristic's +0.236 (CIs overlap, both p≤0.001). A noisy binary-SPL edge
+  (+0.109 vs +0.053, n=12 p=0.11) and a **significant cold-start regression** (−0.152).
+
+**Verdict: the hand-tuned heuristic R is at/near the ceiling — training does not beat it.**
+The exercise proved the consolidation-importance path is load-bearing (a bad R breaks the
+LTM, a good R restores it) and reproduced the thesis an **8th time** (heuristic +0.2357,
+p=0.001). The scorer-head lever is closed; remaining on-thesis pushes (widen the matrix; the
+predictor/affordance heads) are orthogonal.
+
 ---
 
 ## 3. Literature comparison
