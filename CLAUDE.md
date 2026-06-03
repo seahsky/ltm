@@ -103,9 +103,19 @@ per-keyframe `goal_object` label (caption names an HM3D goal object) IS learnabl
 (−0.152).** Verdict: the hand-tuned heuristic R is at/near the ceiling; training doesn't
 beat it here. The exercise proved the consolidation-importance path is load-bearing (a bad
 R breaks the LTM, a good R restores it) and reproduced the thesis an **8th time** (heuristic
-warm +0.2357, p=0.001). Driver `scripts/race-train-scorer.sh`. Remaining on-thesis pushes
-(orthogonal): widen the revisit matrix (higher-n estimate) or apply the now-proven
-train+wire pattern to the predictor (U) / coarse-affordance heads.
+warm +0.2357, p=0.001). Driver `scripts/race-train-scorer.sh`.
+
+**Run 14 (2026-06-04) confirms + refines this at scale.** Widened the revisit matrix to
+6 categories × 2 scenes (n=26 warm / 10 cold) and added a **direct paired
+trained-vs-heuristic test** (`analyze_revisit.py --compare`). Head-to-head: trained − heuristic
+warm soft-SPL = **+0.060, 90% CI [−0.019, +0.150], p=0.116 — NOT significant (parity)**, so
+"heuristic at/near ceiling" holds on soft-SPL. The one *significant* head-to-head difference
+favors the **heuristic** (binary SPL@0.1 m −0.043, CI excludes 0; succ@1m 0.577 vs 0.538). But
+two Run-13 artifacts were corrected: the n=4 cold regression was **noise** (n=10 cold trained ≥
+heuristic), and the trained head is **~20% more step-efficient** (94.5 vs 119.7). Net: a
+precision-vs-efficiency tradeoff at parity, not a winner — **heuristic stays the default when
+exact arrival matters; scorer-head lever stays CLOSED**. Remaining on-thesis pushes
+(orthogonal): the predictor (U) / coarse-affordance heads, or a blended precision-aware R.
 
 **Embodied binary-SPL work CLOSED — localization-bound (2026-06-03, Run 12; see
 `PHASE2_ABLATION_REPORT.md` Run 12).** A component diagnosis (`diagnose_pipeline.py`)

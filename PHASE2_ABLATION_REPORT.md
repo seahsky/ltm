@@ -2047,3 +2047,73 @@ the predictor (U) / coarse-affordance heads.
 | `embodied_memory/scripts/test_scorer_wiring.py` | 15 Habitat/torch-free TDD cases (dim inference, relevance wiring, normalization, goal_object labeler, source-scans). |
 | `scripts/race-train-scorer.sh` | train+eval driver: caption preflight → train → S1/S3-heuristic/S3-trained head-to-head; `--label-mode`, `--reuse-baselines`, re-exec guard. |
 | `models/embodied/scorer-scorer-d{1,2}.pt`, `runs/scorer-d{1,2}-*` | RACE checkpoints + runs. |
+
+# Run 14 — Widen the revisit matrix + direct trained-vs-heuristic test → parity on soft-SPL, precision/efficiency tradeoff (RACE, 2026-06-04)
+
+Run 13 closed the scorer-head lever on an **n=12-warm** matrix (chair+bed × 2 scenes),
+where the trained `goal_object` head looked like a tie that slightly trailed the heuristic
+and significantly hurt cold-start. To resolve the small-sample ambiguity, we widened the
+revisit matrix to **6 categories (chair, bed, sofa, toilet, tv_monitor, plant) × 2 scenes**,
+giving **n=26 warm / n=10 cold** paired visits, and added a **direct paired
+trained-vs-heuristic bootstrap** (`analyze_revisit.py --compare`) so the two Setting-3
+variants are compared head-to-head rather than each vs the memory-off S1.
+
+## Both heads beat memory-off (thesis reproduced again)
+
+Each vs S1, WARM (n=26): heuristic warm soft-SPL S3−S1 = **+0.1147** (p=0.005); trained =
+**+0.1744** (p<0.001). (Absolute deltas are lower than the chair+bed-only matrix's ~+0.23
+because the added categories — plant / tv_monitor / toilet — are harder and lift the
+memory-off baseline's relative room to improve; only the head-to-head on the *same* matrix
+is comparable across heads.)
+
+## The decisive statistic — direct paired trained − heuristic (n=26 warm)
+
+| metric (WARM) | trained − heuristic | 90% CI | verdict |
+|---|---|---|---|
+| **soft-SPL** (primary) | **+0.0597** | [−0.0192, +0.1499] | **n.s., p=0.116 — tie, leans trained** |
+| **binary SPL@0.1 m** | **−0.0431** | [−0.0887, −0.0085] | **significant — heuristic wins** |
+| succ@1m | 0.538 vs 0.577 | — | heuristic higher |
+| steps (efficiency) | 94.5 vs 119.7 | — | trained ~20% fewer |
+| cold soft-SPL | +0.0448 | [0.000, 0.115] | marginal (p=0.115) |
+
+## Reading
+
+- **On the primary metric the two heads are at PARITY.** The trained head's +0.060 warm
+  soft-SPL edge is **not significant** (p=0.116; CI straddles 0). Run 13's "the hand-tuned
+  heuristic R is at/near the ceiling" therefore **holds on soft-SPL** — a learned head
+  reaches it but cannot significantly exceed it on this eval.
+- **The only significant head-to-head difference favors the heuristic** — binary SPL@0.1 m
+  (−0.043, CI excludes 0), echoed by succ@1m (0.538 vs 0.577). Interpretation: the
+  heuristic's caption-length bias occasionally stores the precise final-approach keyframe,
+  yielding more exact arrivals; the learned importance favors keyframes that guide *toward*
+  the goal region efficiently but not always to the 0.1 m ring.
+- **Two Run-13 artifacts were corrected by the larger sample:** (1) the d2 cold regression
+  (−0.152, n=4) was **noise** — at n=10 the trained head's cold soft-SPL is *higher* than
+  the heuristic's (0.252 vs 0.207); (2) the trained head is **~20% more step-efficient**
+  (94.5 vs 119.7 warm steps), a real and previously-unmeasured advantage.
+- Memory firing healthy under both (warm mem_chosen 783 trained / 892 heuristic; no
+  over-fire or thrash).
+- Cold deltas are positive (not the expected ~0 control) because the LTM persists across the
+  whole interleaved run, so by a category's *first* visit the agent has already mapped the
+  scene while searching other categories — cross-category lifelong knowledge, not a leak.
+
+## Verdict
+
+**At scale the learned `goal_object` head and the hand-tuned heuristic are at parity on the
+primary soft-SPL metric; the choice between them is a precision-vs-efficiency tradeoff, not
+a clear winner.** Trained buys ~20% fewer steps at a *significant* cost to binary SPL@0.1 m;
+heuristic buys exact-arrival precision at a step-efficiency cost. **The heuristic remains the
+better default when exact arrival matters** (the binary metric is the one significant
+difference). The scorer-head lever stays **closed**: training matches but does not beat the
+heuristic on soft-SPL. The thesis reproduced again (both S3 ≫ S1). The remaining on-thesis
+levers are orthogonal — the predictor (U) / coarse-affordance heads, or a blended/precision-
+aware R that keeps the trained head's efficiency while recovering the heuristic's binary edge.
+
+## File index (Run 14)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/scripts/analyze_revisit.py` | `compare_runs()` / `print_compare()` + `--compare A B`: direct paired B−A bootstrap (warm+cold, soft-SPL + binary) between two same-setting runs; reuses the tested `paired_warm/cold_delta`. Runs on existing JSONs (no GPU). |
+| `embodied_memory/scripts/test_analyze_revisit.py` | `case_compare_runs_pairs_b_minus_a` (B−A pairing on warm/cold/soft/binary). |
+| `runs/scorer-d3-{s1,s3-heur,s3-trained}` | 6-cat × 2-scene RACE matrix (n=36 episodes/setting). |
+| `models/embodied/scorer-scorer-d3.pt` | goal_object head trained on `runs/scorer-d1-train` (Val Acc 0.32→0.74). |

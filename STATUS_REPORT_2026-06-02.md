@@ -175,6 +175,15 @@ LTM, a good R restores it) and reproduced the thesis an **8th time** (heuristic 
 p=0.001). The scorer-head lever is closed; remaining on-thesis pushes (widen the matrix; the
 predictor/affordance heads) are orthogonal.
 
+**Run 14 — widened matrix (6 cats × 2 scenes, n=26 warm) + direct paired test — confirms
+parity.** A head-to-head `--compare` of the two Setting-3 variants gives trained − heuristic
+warm soft-SPL = **+0.060, p=0.116 (not significant)** → parity on the primary metric, so the
+"ceiling" holds. The only *significant* head-to-head difference favors the **heuristic**
+(binary SPL@0.1 m −0.043, CI excludes 0). Corrected from Run 13: the n=4 cold regression was
+noise (n=10 cold trained ≥ heuristic), and the trained head is **~20% more step-efficient**
+(94.5 vs 119.7 steps). Net: a precision-vs-efficiency tradeoff at parity, not a winner. The
+heuristic stays the default; the scorer-head lever stays closed.
+
 ---
 
 ## 3. Literature comparison
