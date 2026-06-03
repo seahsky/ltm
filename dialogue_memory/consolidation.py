@@ -41,12 +41,21 @@ class DialogueConsolidation:
                  alpha: float = 0.4,  # 信息丰富度权重
                  beta: float = 0.3,   # 独特性权重
                  gamma: float = 0.3,  # 新颖度权重
-                 top_k: int = 5):     # 每个 session 保留的关键片段数
+                 top_k: int = 5,      # 每个 session 保留的关键片段数
+                 relevance_scorer=None,      # trained R head (emb -> [0,1]); None = heuristic
+                 scorer_embed_dim: int = None):
         self.ltm = ltm
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
         self.top_k = top_k
+
+        # Optional trained importance (R) head. When set, _compute_relevance
+        # uses scorer(segment.embedding) instead of the length/keyword heuristic
+        # — but only for segments whose embedding matches the head's input dim
+        # (scorer_embed_dim). Default None keeps the dialogue path unchanged.
+        self.relevance_scorer = relevance_scorer
+        self.scorer_embed_dim = scorer_embed_dim
 
         # 历史记录（用于计算 surprise）
         self.info_richness_history = []
@@ -81,18 +90,25 @@ class DialogueConsolidation:
     # is False. Successful and absent (dialogue path) keep weight 1.0.
     FAILED_EPISODE_RELEVANCE_WEIGHT = 0.25
 
-    def _compute_relevance(self, segment: DialogueSegment) -> float:
-        """
-        计算信息丰富度 (Relevance)
+    def _relevance_base(self, segment: DialogueSegment) -> float:
+        """Base relevance in [0,1] BEFORE the failed-episode multiplier.
 
-        基于:
-        1. 对话长度
-        2. 是否包含个人信息
-        3. 是否是关键问题
-        4. (embodied only) episode_success — failed episodes get a R multiplier
-           of FAILED_EPISODE_RELEVANCE_WEIGHT. Missing metadata defaults to 1.0
-           so the dialogue path is unchanged.
+        Uses the trained importance (R) head when one is set AND the segment
+        carries an embedding whose dim matches the head's input
+        (``scorer_embed_dim``). Otherwise falls back to the length/keyword
+        heuristic. The dim guard means a stale/mismatched checkpoint degrades
+        gracefully to the heuristic rather than raising.
         """
+        if self.relevance_scorer is not None and segment.embedding is not None:
+            emb = segment.embedding
+            dim_ok = (
+                self.scorer_embed_dim is None
+                or int(emb.shape[-1]) == int(self.scorer_embed_dim)
+            )
+            if dim_ok:
+                return float(self.relevance_scorer(emb))
+
+        # Heuristic fallback (original behaviour).
         text = f"{segment.utterance} {segment.response or ''}"
 
         # 基础分数: 长度归一化
@@ -112,7 +128,21 @@ class DialogueConsolidation:
         question_score = sum(1 for kw in question_keywords if kw.lower() in text.lower()) * 0.1
         question_score = min(question_score, 0.5)
 
-        score = 0.4 * length_score + 0.4 * personal_score + 0.2 * question_score
+        return 0.4 * length_score + 0.4 * personal_score + 0.2 * question_score
+
+    def _compute_relevance(self, segment: DialogueSegment) -> float:
+        """
+        计算信息丰富度 (Relevance)
+
+        基于:
+        1. 对话长度
+        2. 是否包含个人信息
+        3. 是否是关键问题
+        4. (embodied only) episode_success — failed episodes get a R multiplier
+           of FAILED_EPISODE_RELEVANCE_WEIGHT. Missing metadata defaults to 1.0
+           so the dialogue path is unchanged.
+        """
+        score = self._relevance_base(segment)
 
         meta = segment.metadata or {}
         if "episode_success" in meta and not bool(meta.get("episode_success")):

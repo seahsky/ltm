@@ -248,6 +248,13 @@ def main(argv: Optional[list] = None) -> int:
                              "layer prompts on the most-successful room per "
                              "category. Empty/zero rates fall back to the "
                              "category-only prompt.")
+    parser.add_argument("--scorer-ckpt", type=str, default=None,
+                        help="Path to a trained ImportanceScorer checkpoint "
+                             "(dialogue_memory.train_scorer). When set, the "
+                             "consolidator's relevance term R is the head's "
+                             "score on the SBERT caption embedding instead of "
+                             "the length/keyword heuristic — gating which "
+                             "keyframes enter the fine LTM. Setting 3 only.")
 
     args = parser.parse_args(argv)
 
@@ -338,7 +345,13 @@ def main(argv: Optional[list] = None) -> int:
             disable_rerank=disable_rerank,
             clip_encoder=clip_encoder,
             affordance_table=affordance_table,
+            scorer_ckpt=args.scorer_ckpt,
         )
+        if args.scorer_ckpt:
+            print(
+                f"[run_hm3d_pol] trained importance (R) head loaded from "
+                f"{args.scorer_ckpt}"
+            )
     print(
         f"[run_hm3d_pol] ablation: backbone={args.backbone} "
         f"setting={resolved_setting} disable_stm={disable_stm} "
@@ -417,6 +430,7 @@ def main(argv: Optional[list] = None) -> int:
             "detector": args.detector,
             "oracle_stop": args.oracle_stop,
             "oracle_location": args.oracle_location,
+            "scorer_ckpt": args.scorer_ckpt,
         },
         backbone=args.backbone,
         remembr_builder=remembr_builder,

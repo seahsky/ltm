@@ -370,6 +370,46 @@ class ScorerTrainer:
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
 
+def _infer_scorer_dims(state_dict) -> Tuple[int, int]:
+    """Recover ``(embed_dim, hidden_dim)`` from an ImportanceScorer state_dict.
+
+    Checkpoints store only the weights, not the constructor args, so to rebuild
+    the module before ``load_state_dict`` we read the first Linear's weight
+    shape. ``ImportanceScorer.net[0]`` is ``Linear(embed_dim, hidden_dim)``
+    whose weight is stored ``[hidden_dim, embed_dim]``.
+
+    Pure: reads ``.shape`` only — works on torch tensors or numpy arrays, so it
+    is unit-testable without torch.
+    """
+    w = state_dict.get("net.0.weight")
+    if w is None:
+        raise KeyError(
+            "state_dict missing 'net.0.weight'; not an ImportanceScorer checkpoint"
+        )
+    shape = tuple(w.shape)
+    if len(shape) != 2:
+        raise ValueError(f"net.0.weight must be 2-D, got shape {shape}")
+    hidden_dim, embed_dim = int(shape[0]), int(shape[1])
+    return embed_dim, hidden_dim
+
+
+def load_scorer(path: str, device: str = None) -> "ScorerTrainer":
+    """Load a trained ImportanceScorer checkpoint into a ready ScorerTrainer.
+
+    Infers ``embed_dim`` / ``hidden_dim`` from the checkpoint (see
+    ``_infer_scorer_dims``) so the caller need not know how the head was sized —
+    the embodied head is 768-d SBERT, the MSC head is wider CLIP-text.
+    ``ScorerTrainer.compute_importance(emb) -> float`` is the inference hook.
+    """
+    checkpoint = torch.load(path, map_location=device or "cpu")
+    embed_dim, hidden_dim = _infer_scorer_dims(checkpoint["model_state_dict"])
+    trainer = ScorerTrainer(embed_dim=embed_dim, hidden_dim=hidden_dim, device=device)
+    trainer.model.load_state_dict(checkpoint["model_state_dict"])
+    trainer.model.eval()
+    trainer.embed_dim = embed_dim  # expose for the consumer's dim guard
+    return trainer
+
+
 def train_scorer(data_path: str,
                  encoder,
                  embed_dim: int = 3072,
@@ -582,7 +622,25 @@ def _build_text_encoder(name: str):
         return _CLIPTextAdapter()
     if name == "sbert":
         from .encoder import SentenceTransformerEncoder
-        return SentenceTransformerEncoder()
+        # The embodied LTM indexes (and the consolidator scores) L2-NORMALIZED
+        # SBERT vectors (run_hm3d_pol._build_text_encoder wraps with
+        # l2_normalize_encoder so the FAISS-L2 fine layer reads as cosine).
+        # Train the R head in the SAME space — otherwise the MLP trains on raw
+        # SBERT magnitudes and sees unit vectors at inference (silent OOD;
+        # the dim guard can't catch it since both are 384-d).
+        from embodied_memory.text_encode_util import l2_normalize_encoder
+        base = SentenceTransformerEncoder()
+        norm_encode = l2_normalize_encoder(base.encode)
+
+        class _NormalizedSBERT:
+            def encode(self, text: str):
+                return norm_encode(text)
+
+            @property
+            def embed_dim(self):
+                return base.embed_dim
+
+        return _NormalizedSBERT()
     raise ValueError(f"unknown encoder: {name!r} (expected one of: clip, sbert)")
 
 

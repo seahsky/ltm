@@ -214,6 +214,7 @@ class EmbodiedMemoryBridge:
         disable_rerank: bool = False,
         clip_encoder: Optional[Any] = None,
         affordance_table: Optional[Dict[str, Dict[str, float]]] = None,
+        scorer_ckpt: Optional[str] = None,
     ):
         if text_encode_fn is None:
             raise ValueError("text_encode_fn (str -> np.ndarray) is required")
@@ -256,13 +257,38 @@ class EmbodiedMemoryBridge:
         # clip_encoder is supplied, else SBERT-text space as a fallback).
         self.ltm = HierarchicalLTM(embed_dim=self._ltm_embed_dim)
 
-        # 2. Consolidator (uses default α/β/γ; top_k tunable).
+        # 2. Consolidator (uses default α/β/γ; top_k tunable). Optionally load a
+        # trained importance (R) head: when scorer_ckpt is given, the relevance
+        # term R is the head's score on the SBERT caption embedding instead of
+        # the length/keyword heuristic. The dim guard (scorer_embed_dim) lets a
+        # mismatched checkpoint degrade gracefully to the heuristic.
+        relevance_scorer = None
+        scorer_embed_dim = None
+        self.scorer_ckpt = scorer_ckpt
+        if scorer_ckpt:
+            from dialogue_memory.train_scorer import load_scorer
+            self._scorer = load_scorer(scorer_ckpt)
+            relevance_scorer = self._scorer.compute_importance
+            scorer_embed_dim = getattr(self._scorer, "embed_dim", None)
+            # Guard against a silent heuristic fallback: if the head's input dim
+            # doesn't match the SBERT caption-embedding dim the consolidator
+            # scores, _relevance_base degrades to the heuristic and the run would
+            # read as "scorer had no effect" for the WRONG reason. Make it loud.
+            if scorer_embed_dim is not None and int(scorer_embed_dim) != int(self._ltm_embed_dim):
+                raise ValueError(
+                    f"scorer_ckpt embed_dim {scorer_embed_dim} != LTM/SBERT dim "
+                    f"{self._ltm_embed_dim}: the trained R head would silently "
+                    f"fall back to the heuristic. Re-train with the SAME text "
+                    f"encoder (e.g. --encoder sbert) the bridge indexes with."
+                )
         self.consolidator = DialogueConsolidation(
             ltm=self.ltm,
             alpha=0.4,
             beta=0.3,
             gamma=0.3,
             top_k=consolidation_top_k,
+            relevance_scorer=relevance_scorer,
+            scorer_embed_dim=scorer_embed_dim,
         )
 
         # 3. Pattern clusterer + mid layer. Dim matches the LTM (CLIP space
