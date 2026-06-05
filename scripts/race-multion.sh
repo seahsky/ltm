@@ -43,6 +43,9 @@ TAG="multion-a1"
 SETTINGS="1 2 3"
 N_EPISODES=""
 TARGET="any"
+# K-scaled step budget: the 250-step single-goal default starves a K=3
+# mission (multion-micro: 0 sub-goals reached, best min_d2g 4.5 m at cap).
+MAX_STEPS="750"
 
 # --- arg parse ---
 while [ $# -gt 0 ]; do
@@ -56,6 +59,7 @@ while [ $# -gt 0 ]; do
     --settings)        SETTINGS="$2"; shift 2 ;;
     --n-episodes)      N_EPISODES="$2"; shift 2 ;;
     --target)          TARGET="$2"; shift 2 ;;
+    --max-steps)       MAX_STEPS="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -115,11 +119,11 @@ fi
 OUT_DIRS=""
 for S in $SETTINGS; do
   out_dir="runs/${TAG}-s$S"
-  banner "[5/6] run: setting=$S backbone=remembr K=$K found-radius=$FOUND_RADIUS -> $out_dir"
+  banner "[5/6] run: setting=$S backbone=remembr K=$K found-radius=$FOUND_RADIUS max-steps=$MAX_STEPS -> $out_dir"
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --episodes-path "$DS" \
       --scene all --target "$TARGET" --n-episodes "$N_EPISODES" \
-      --found-radius "$FOUND_RADIUS" \
+      --found-radius "$FOUND_RADIUS" --max-steps "$MAX_STEPS" \
       --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
   rc=${PIPESTATUS[0]}
   # Judge completeness by episodes written, not exit code (S1/S2 can't meet
