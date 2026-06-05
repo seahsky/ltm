@@ -77,6 +77,14 @@ else
   echo "[4/5] $HM3D_SCENE_DIR missing — skip"
 fi
 
+# --- 4b. email-notified run wrapper ---------------------------------------
+# `nrun <command...>` tees the run to runs/notify-*.log and emails a report
+# (success or crash) via scripts/notify-run.sh. Needs RESEND_API_KEY /
+# NOTIFY_EMAIL_TO in .env (see .env.example); unconfigured -> runs fine,
+# just no email. Launch under nohup/tmux so it survives disconnect:
+#   nohup nrun bash scripts/race-revisit.sh --tag wide-1 &
+nrun() { bash "$REPO_ROOT/scripts/notify-run.sh" "$@"; }
+
 # --- 5. status block -----------------------------------------------------
 echo "[5/5] Status"
 echo "  python:   $(command -v python)"
