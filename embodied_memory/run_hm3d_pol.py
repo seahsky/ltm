@@ -180,6 +180,14 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--cached-bundle", type=str, default=None)
     parser.add_argument("--n-episodes", type=int, default=5)
     parser.add_argument("--target", type=str, default="chair")
+    parser.add_argument("--target-sequence", type=str, default=None,
+                        help="MultiON: comma-separated ordered goal categories "
+                             "(e.g. 'chair,bed,toilet'). Overrides the "
+                             "per-episode info['object_categories'] chain from "
+                             "a multion dataset; omit both for single-goal.")
+    parser.add_argument("--found-radius", type=float, default=1.0,
+                        help="MultiON sub-goal 'found' radius in metres "
+                             "(geodesic; advance also needs a caption confirm).")
     parser.add_argument("--out-dir", type=str, default="runs/pol-001")
     parser.add_argument("--max-steps", type=int, default=250)
     parser.add_argument("--image-hw", type=int, default=256)
@@ -411,6 +419,10 @@ def main(argv: Optional[list] = None) -> int:
 
     # 7. source + runner.
     source = _build_source(args)
+    target_sequence = None
+    if args.target_sequence:
+        target_sequence = [s.strip() for s in args.target_sequence.split(",")
+                           if s.strip()]
     runner = EpisodeRunner(
         source=source,
         planner=planner,
@@ -431,6 +443,8 @@ def main(argv: Optional[list] = None) -> int:
             "oracle_stop": args.oracle_stop,
             "oracle_location": args.oracle_location,
             "scorer_ckpt": args.scorer_ckpt,
+            "target_sequence": target_sequence,
+            "found_radius": args.found_radius,
         },
         backbone=args.backbone,
         remembr_builder=remembr_builder,
@@ -439,6 +453,8 @@ def main(argv: Optional[list] = None) -> int:
         oracle_stop=args.oracle_stop,
         oracle_location=args.oracle_location,
         oracle_stop_radius=args.oracle_stop_radius,
+        target_categories=target_sequence,
+        found_radius=args.found_radius,
     )
 
     summary = runner.run(args.n_episodes)
