@@ -153,6 +153,47 @@ def memory_candidate_audit(
     }
 
 
+def _episode_stopped(ep: Dict[str, Any], max_steps: int = 250) -> bool:
+    """Did the episode terminate via a STOP action (vs timing out)?
+
+    Precedence chain (newest logs first, degrading gracefully on old logs):
+      1. ``action_stop`` — the runner's per-episode STOP-action count
+         (flattened to the episode top level via controller_log).
+      2. last serialized step's ``action == 0`` (ACTION_STOP) — keyframe
+         cadence means this can miss a STOP between keyframes, but it never
+         false-positives.
+      3. ``n_steps < max_steps`` — STOP is the only way an episode ends
+         before exhausting the step budget; ``metadata.max_steps`` is used
+         when the log carries it, else the caller's default (CLI default 250).
+    """
+    if ep.get("action_stop") is not None:
+        return int(ep["action_stop"]) > 0
+    steps = ep.get("steps") or []
+    if steps and steps[-1].get("action") is not None:
+        return int(steps[-1]["action"]) == 0
+    n_steps = ep.get("n_steps")
+    if n_steps is None:
+        return False
+    budget = (ep.get("metadata") or {}).get("max_steps", max_steps)
+    return int(n_steps) < int(budget)
+
+
+def benchmark_success(ep: Dict[str, Any], radius: float = 1.0,
+                      max_steps: int = 250) -> bool:
+    """The HM3D ObjectNav benchmark success: agent issued STOP within
+    ``radius`` (benchmark default 1.0 m) of the goal.
+
+    Recoverable from existing logs with no GPU: STOP terminates the episode,
+    so the final-step ``distance_to_goal`` IS the distance at STOP. Distinct
+    from both prior reported numbers — ``success`` (@0.1 m, 10x too strict)
+    and ``success_1m`` (STOP-independent reach).
+    """
+    if not _episode_stopped(ep, max_steps=max_steps):
+        return False
+    d2g = ep.get("distance_to_goal")
+    return d2g is not None and float(d2g) < float(radius)
+
+
 # ----------------------------------------------------------------------
 # file I/O + reporting (not unit-tested; pure helpers above are)
 # ----------------------------------------------------------------------
@@ -258,14 +299,55 @@ def report_run(run_dir: str, dump_trajectories: bool = False) -> None:
         print(f"  trajectories -> {out}")
 
 
+def report_benchmark_success(run_dir: str, radii=(1.0, 0.5)) -> None:
+    """Recompute the true HM3D benchmark success (STOP within radius) per run,
+    split cold/warm, with the existing reach diagnostics for contrast."""
+    episodes = _load_episodes(run_dir)
+    if not episodes:
+        print(f"\n=== {run_dir}: no episode_*.json found ===")
+        return
+    cold_flags = classify_visits(episodes)
+
+    def _mean(xs: list) -> float:
+        return sum(xs) / len(xs) if xs else float("nan")
+
+    buckets: Dict[str, List[Tuple[Dict[str, Any], bool]]] = {
+        "all": [], "cold": [], "warm": []}
+    for ep, is_cold in zip(episodes, cold_flags):
+        buckets["all"].append((ep, is_cold))
+        buckets["cold" if is_cold else "warm"].append((ep, is_cold))
+
+    print(f"\n=== {os.path.basename(run_dir.rstrip('/'))}  "
+          f"({len(episodes)} episodes) — benchmark success (STOP within r) ===")
+    header = (f"  {'split':<5} {'n':>3} "
+              + "".join(f"{'benchmark_success@' + str(r) + 'm':>23}" for r in radii)
+              + f" {'stop_rate':>10} {'succ@1m':>8} {'succ@0.1m':>10}")
+    print(header)
+    for bucket in ("all", "cold", "warm"):
+        eps = [ep for ep, _ in buckets[bucket]]
+        if not eps:
+            continue
+        bench = ["".join(f"{_mean([1.0 if benchmark_success(ep, radius=r) else 0.0 for ep in eps]):>23.3f}")
+                 for r in radii]
+        stop_rate = _mean([1.0 if _episode_stopped(ep) else 0.0 for ep in eps])
+        succ1 = _mean([1.0 if ep.get("success_1m") else 0.0 for ep in eps])
+        succ01 = _mean([1.0 if ep.get("success") else 0.0 for ep in eps])
+        print(f"  {bucket:<5} {len(eps):>3} " + "".join(bench)
+              + f" {stop_rate:>10.3f} {succ1:>8.3f} {succ01:>10.3f}")
+
+
 def main(argv: List[str]) -> int:
     dump = "--trajectories" in argv
+    benchmark = "--benchmark" in argv
     run_dirs = [a for a in argv if not a.startswith("--")]
     if not run_dirs:
         print(__doc__)
         return 2
     for rd in run_dirs:
-        report_run(rd, dump_trajectories=dump)
+        if benchmark:
+            report_benchmark_success(rd)
+        else:
+            report_run(rd, dump_trajectories=dump)
     return 0
 
 
