@@ -343,6 +343,53 @@ def case_k3_partial_progress_no_stop_until_timeout():
     print("  case_k3_partial_progress_no_stop_until_timeout: OK")
 
 
+# ----------------------------------------------------------------------
+# 3. absorbing-loop diagnostics (multion-micro2: turn-forever ep with 741
+#    re-proposes; wall-pushing eps with 700+ forwards and zero displacement
+#    while collision_escape stayed 0 — that counter belongs to the dead
+#    grid-controller path, so the follower era needs its own counters)
+# ----------------------------------------------------------------------
+
+
+def case_waypoint_outcome_pure():
+    # not a follower-done tick -> no classification
+    assert er._waypoint_outcome(False, 0.4) is None
+    # done within goal_radius+slack -> reached
+    assert er._waypoint_outcome(True, 0.4) == "reached"
+    assert er._waypoint_outcome(True, 0.79) == "reached"
+    # done while still far -> the follower gave up: unreachable
+    assert er._waypoint_outcome(True, 2.0) == "unreachable"
+    # no candidate distance available -> conservative: unreachable
+    assert er._waypoint_outcome(True, None) == "unreachable"
+    print("  case_waypoint_outcome_pure: OK")
+
+
+def case_forward_no_progress_pure():
+    assert er._forward_no_progress(ACTION_FORWARD, 0.01) is True
+    assert er._forward_no_progress(ACTION_FORWARD, 0.2) is False
+    # non-forward actions never count (turning in place is not wall-pushing)
+    assert er._forward_no_progress(er.ACTION_TURN_LEFT, 0.0) is False
+    print("  case_forward_no_progress_pure: OK")
+
+
+def case_runner_logs_loop_diagnostics():
+    # The stub source never moves the agent (position pinned at zeros) and the
+    # stub planner always drives FORWARD -> every forward must be flagged
+    # no-progress; the no-sim grid fallback never sets force_repropose ->
+    # waypoint counters stay 0 but the keys must exist in the episode log.
+    runner = _mk_runner(_StubSource(seq=None))
+    ep_log, _ = runner._run_episode(0)
+    for key in ("n_waypoint_reached", "n_waypoint_unreachable",
+                "n_forward_no_progress"):
+        assert key in ep_log, f"missing diagnostic key: {key}"
+    assert ep_log["action_forward"] > 0
+    assert ep_log["n_forward_no_progress"] == ep_log["action_forward"], \
+        (ep_log["n_forward_no_progress"], ep_log["action_forward"])
+    assert ep_log["n_waypoint_reached"] == 0
+    assert ep_log["n_waypoint_unreachable"] == 0
+    print("  case_runner_logs_loop_diagnostics: OK")
+
+
 def main() -> int:
     print("multion sub-goal cursor sanity tests")
     case_far_not_found()
@@ -354,6 +401,9 @@ def main() -> int:
     case_single_goal_run_has_no_multion_keys()
     case_k3_run_advances_cursor_and_stops()
     case_k3_partial_progress_no_stop_until_timeout()
+    case_waypoint_outcome_pure()
+    case_forward_no_progress_pure()
+    case_runner_logs_loop_diagnostics()
     print("All cases passed.")
     return 0
 

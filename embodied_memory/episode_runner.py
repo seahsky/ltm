@@ -282,6 +282,38 @@ def _advance_subgoal(
     return True, subgoal_idx >= n_subgoals - 1
 
 
+def _waypoint_outcome(
+    force_repropose: bool,
+    dist_to_waypoint_m,
+    goal_radius: float = 0.5,
+    slack: float = 0.3,
+):
+    """Classify a follower "done" tick (multion-micro2 diagnostics).
+
+    The navmesh follower signals done via None/STOP without saying why;
+    ``_waypoint_action`` maps both to TURN + force_repropose. Disambiguate by
+    distance: within ``goal_radius + slack`` -> ``"reached"``; still far (or
+    unknown distance) -> ``"unreachable"`` — the turn-forever absorbing loop
+    is 700+ consecutive unreachables. Returns None on a normal tick. Pure.
+    """
+    if not force_repropose:
+        return None
+    if dist_to_waypoint_m is None:
+        return "unreachable"
+    return ("reached" if float(dist_to_waypoint_m) <= goal_radius + slack
+            else "unreachable")
+
+
+def _forward_no_progress(
+    action: int, displacement_m: float, min_progress_m: float = 0.05
+) -> bool:
+    """True iff a FORWARD action produced ~no displacement — collision
+    sliding (wall-pushing). The grid-era ``collision_escape`` counter never
+    fires under the navmesh follower, so this is its follower-era analogue
+    (multion-micro2: 729 forwards moved the agent 0.07 m total). Pure."""
+    return action == ACTION_FORWARD and float(displacement_m) < float(min_progress_m)
+
+
 class EpisodeRunner:
     """Drive N episodes, log to ``out_dir``, return a RunSummary."""
 
@@ -501,6 +533,9 @@ class EpisodeRunner:
                 "replan_scheduled": int(ep_metrics.get("replan_scheduled", 0)),
                 "replan_forced": int(ep_metrics.get("replan_forced", 0)),
                 "replan_stuck": int(ep_metrics.get("replan_stuck", 0)),
+                "n_waypoint_reached": int(ep_metrics.get("n_waypoint_reached", 0)),
+                "n_waypoint_unreachable": int(ep_metrics.get("n_waypoint_unreachable", 0)),
+                "n_forward_no_progress": int(ep_metrics.get("n_forward_no_progress", 0)),
                 "remembr_stub_mode": ep_metrics.get("remembr_stub_mode"),
                 "remembr_sample_caption": ep_metrics.get("remembr_sample_caption"),
             })
@@ -586,6 +621,11 @@ class EpisodeRunner:
             "n_detector_approach_success": 0,
             "n_arrival_stop": 0,
             "n_detector_approach_stop_distance": float("nan"),
+            # Absorbing-loop diagnostics (multion-micro2): follower-done
+            # ticks split reached/unreachable + collision-slide forwards.
+            "n_waypoint_reached": 0,
+            "n_waypoint_unreachable": 0,
+            "n_forward_no_progress": 0,
         }
         # Closest the agent ever gets to a goal viewpoint over the episode
         # (geodesic). success@0.1m is perception-bound with caption-only
@@ -916,6 +956,22 @@ class EpisodeRunner:
                     step.agent_state.position,
                     step.agent_state.rotation_yaw,
                 )
+                # Absorbing-loop diagnostics: classify follower "done" ticks.
+                # A run of consecutive unreachables IS the turn-forever loop
+                # (multion-micro2 ep0: 741 re-proposes, forward 2/749).
+                _wp_dist = None
+                if current_candidate is not None:
+                    _wp_dist = float(np.hypot(
+                        float(current_candidate.world_xy[0])
+                        - float(step.agent_state.position[0]),
+                        float(current_candidate.world_xy[1])
+                        - float(step.agent_state.position[2]),
+                    ))
+                _outcome = _waypoint_outcome(
+                    self._waypoint_force_repropose, _wp_dist
+                )
+                if _outcome is not None:
+                    ep_metrics_counters[f"n_waypoint_{_outcome}"] += 1
                 # Waypoint-arrival STOP: STOP if the agent is at a confident MEMORY
                 # waypoint (a remembered goal position) and the caption confirms the
                 # goal → terminate here (oracle-ladder proxy). "At" = the follower
@@ -959,11 +1015,23 @@ class EpisodeRunner:
 
             # Step the env.
             action_counts[action] = action_counts.get(action, 0) + 1
+            _pos_before_step = np.asarray(
+                step.agent_state.position, dtype=np.float64
+            )
             step = self.source.step(action)
             self.planner.update(
                 step.depth, step.agent_state.position, step.agent_state.rotation_yaw
             )
             _track_d2g(step)
+            # Collision-slide diagnostic: a FORWARD that moved the agent ~0 m
+            # (wall-pushing; collision_escape is grid-controller-only and
+            # never fires under the navmesh follower).
+            _disp = float(np.linalg.norm(
+                np.asarray(step.agent_state.position, dtype=np.float64)
+                - _pos_before_step
+            ))
+            if _forward_no_progress(action, _disp):
+                ep_metrics_counters["n_forward_no_progress"] += 1
 
             # MultiON per-tick advance check (gated: K==1 is untouched).
             if multion:
@@ -1120,6 +1188,9 @@ class EpisodeRunner:
         ep_log["n_frontier_chosen"] = n_frontier_chosen
         ep_log["n_remembr_chosen"] = n_remembr_chosen
         ep_log["n_stop_signals"] = n_stop_signals
+        ep_log["n_waypoint_reached"] = int(ep_metrics_counters["n_waypoint_reached"])
+        ep_log["n_waypoint_unreachable"] = int(ep_metrics_counters["n_waypoint_unreachable"])
+        ep_log["n_forward_no_progress"] = int(ep_metrics_counters["n_forward_no_progress"])
         ep_log["n_detector_called"] = int(ep_metrics_counters["n_detector_called"])
         ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
         ep_log["n_detector_locate_failed"] = int(ep_metrics_counters["n_detector_locate_failed"])

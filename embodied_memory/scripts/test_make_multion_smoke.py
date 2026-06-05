@@ -171,6 +171,66 @@ def case_build_skips_unusable_c1():
 
 
 # ----------------------------------------------------------------------
+# nearest-first starts + short-hop orderings (multion-micro2 fix: the
+# revisit picker is farthest-first by design, which starved the cold
+# first hop — best min_d2g 4.52 m at the step cap, 0 subgoals found)
+# ----------------------------------------------------------------------
+
+
+def case_pick_start_poses_nearest_first():
+    poses = [
+        {"position": [12.0, 0.0, 12.0], "rotation": [0.0, 0.0, 0.0, 1.0]},
+        {"position": [9.0, 0.0, 9.0], "rotation": [0.0, 0.0, 0.0, 1.0]},
+        # 0.71 m from the vp -> dropped by min_dist
+        {"position": [1.5, 0.0, 1.5], "rotation": [0.0, 0.0, 0.0, 1.0]},
+    ]
+    vps = [[1.0, 0.0, 1.0]]
+    got = mm.pick_start_poses(poses, vps, n=2, min_dist=2.0)
+    assert [p["position"] for p in got] == [[9.0, 0.0, 9.0], [12.0, 0.0, 12.0]], \
+        [p["position"] for p in got]
+    print("  case pick_start_poses_nearest_first: OK")
+
+
+def case_build_uses_nearest_start():
+    # chair has two donor poses, (9,9) d~11.3 and (12,12) d~15.6 from its vp:
+    # the multion start must be the NEAREST eligible one (cold first hop),
+    # not the revisit picker's farthest-first choice.
+    content = _content()
+    eps = mm.build_multion_episodes(content, [["chair", "bed", "toilet"]],
+                                    min_dist=2.0)
+    (ep,) = eps
+    assert ep["start_position"] == [9.0, 0.0, 9.0], ep["start_position"]
+    print("  case build_uses_nearest_start: OK")
+
+
+def case_short_hop_order():
+    gbc = _content()["goals_by_category"]
+    # chair vp (1,1): bed vp (4,4) d~4.24 < toilet vp (7,2) d~6.08
+    assert mm.short_hop_order(["chair", "toilet", "bed"], gbc) == \
+        ["chair", "bed", "toilet"]
+    # bed vp (4,4): toilet (7,2) d~3.61 < chair (1,1) d~4.24
+    assert mm.short_hop_order(["bed", "chair", "toilet"], gbc) == \
+        ["bed", "toilet", "chair"]
+    # K<=2 unchanged
+    assert mm.short_hop_order(["chair", "bed"], gbc) == ["chair", "bed"]
+    print("  case short_hop_order: OK")
+
+
+def case_dataset_short_hops_and_dedup():
+    content = _content()
+    ds = mm.build_dataset(content, k=3, n_episodes=4, seed=7, min_dist=2.0)
+    gbc = content["goals_by_category"]
+    chains = [tuple(ep["info"]["object_categories"]) for ep in ds["episodes"]]
+    assert chains, "no episodes built"
+    for ch in chains:
+        assert list(ch) == mm.short_hop_order(list(ch), gbc), \
+            f"chain not short-hop ordered: {ch}"
+    # reordering collapses same-c1 permutations of one set -> must be deduped
+    assert len(set(chains)) == len(chains), chains
+    print("  case dataset_short_hops_and_dedup: OK")
+
+
+# ----------------------------------------------------------------------
 # build_dataset + round-trip
 # ----------------------------------------------------------------------
 
@@ -279,6 +339,10 @@ def main() -> int:
     case_build_sets_c1_and_info_chain()
     case_build_start_not_goal_adjacent()
     case_build_skips_unusable_c1()
+    case_pick_start_poses_nearest_first()
+    case_build_uses_nearest_start()
+    case_short_hop_order()
+    case_dataset_short_hops_and_dedup()
     case_dataset_preserves_goals_for_all_k()
     case_dataset_seeded_reproducible()
     case_roundtrip_via_write_dataset()
