@@ -78,12 +78,23 @@ else
 fi
 
 # --- 4b. email-notified run wrapper ---------------------------------------
-# `nrun <command...>` tees the run to runs/notify-*.log and emails a report
-# (success or crash) via scripts/notify-run.sh. Needs RESEND_API_KEY /
-# NOTIFY_EMAIL_TO in .env (see .env.example); unconfigured -> runs fine,
-# just no email. Launch under nohup/tmux so it survives disconnect:
-#   nohup nrun bash scripts/race-revisit.sh --tag wide-1 &
-nrun() { bash "$REPO_ROOT/scripts/notify-run.sh" "$@"; }
+# `nrun <command...>` SELF-DETACHES (nohup + background, survives SSH
+# disconnect — do NOT prefix nohup yourself: nrun is a shell function and
+# nohup can't launch functions), tees the run to runs/notify-*.log and
+# emails a report (success or crash) via scripts/notify-run.sh. Needs
+# RESEND_API_KEY / NOTIFY_EMAIL_TO in .env (see .env.example);
+# unconfigured -> runs fine, just no email.
+#   nrun bash scripts/race-revisit.sh --tag wide-1
+#   tail -f runs/notify-wide-1-*.log
+# For a foreground (blocking) run: bash scripts/notify-run.sh <command...>
+nrun() {
+  local log_dir="${NOTIFY_RUN_LOG_DIR:-$REPO_ROOT/runs}"
+  mkdir -p "$log_dir"
+  local out="$log_dir/nrun-$(date +%Y%m%d-%H%M%S).out"
+  nohup bash "$REPO_ROOT/scripts/notify-run.sh" "$@" > "$out" 2>&1 &
+  disown
+  echo "[nrun] detached (pid $!) — follow with: tail -f $out"
+}
 
 # --- 5. status block -----------------------------------------------------
 echo "[5/5] Status"

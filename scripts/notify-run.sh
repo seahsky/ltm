@@ -12,9 +12,10 @@
 #   nohup bash scripts/notify-run.sh bash scripts/race-revisit.sh --tag wide-1 &
 #   tail -f runs/notify-wide-1-*.log
 #
-# Or via the alias from `source scripts/race-setup.sh`:
+# Or via the alias from `source scripts/race-setup.sh` — nrun SELF-detaches
+# (it is a shell function, so do NOT prefix nohup; nohup can't run functions):
 #
-#   nohup nrun bash scripts/race-revisit.sh --tag wide-1 &
+#   nrun bash scripts/race-revisit.sh --tag wide-1
 #
 # Config: RESEND_API_KEY / NOTIFY_EMAIL_TO in .env at the repo root (see
 # .env.example). Unconfigured -> the run still works, just no email.
