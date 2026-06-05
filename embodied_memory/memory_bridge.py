@@ -416,6 +416,68 @@ class EmbodiedMemoryBridge:
             return {"fine": [], "mid": [], "coarse": []}
 
         self.modules_invoked["consolidation"] = True
+        inserted = self._consolidate_pending(
+            episode_success=episode_success, episode_idx=episode_idx
+        )
+
+        self._episodes_seen += 1
+        if episode_success:
+            self._successful_episodes_seen += 1
+
+        # Trigger mid-layer clustering periodically (over consolidated fine
+        # segments, not raw stm — we want stable input).
+        if (
+            self._successful_episodes_seen > 0
+            and self._successful_episodes_seen % self.cluster_every_n_episodes == 0
+        ):
+            self._refresh_mid_clusters()
+
+        self._pending = []
+        return inserted
+
+    def consolidate_subgoal_boundary(self, episode_idx: int) -> Dict[str, List[str]]:
+        """MultiON event-boundary consolidation: flush the STM buffer into the
+        fine LTM at a sub-goal ADVANCE, mid-episode.
+
+        Without this, ``observe_keyframe`` only buffers to ``_pending`` and the
+        fine layer ``propose_memory_candidates`` queries is written exclusively
+        at episode END — so a c_{i+1} sighted while hunting c_i was structurally
+        unrecallable in the same episode (multion-micro3: S3 ep0
+        n_memory_candidates=0 all episode). NOT ``consolidate()``: that method
+        bumps ``_episodes_seen`` / ``_successful_episodes_seen`` and can trip
+        ``_refresh_mid_clusters``, which would corrupt S2/S3 attribution and the
+        mid-cluster cadence if invoked mid-episode. This method shares only the
+        fine-write path and:
+
+          * stamps ``episode_success=False`` (outcome unknown mid-episode;
+            conservative — routes through FAILED_EPISODE_RELEVANCE_WEIGHT and
+            keeps the entries out of the success-only mid layer);
+          * never touches episode counters nor mid-layer clustering;
+          * under ``disable_ltm`` (S2) just drains ``_pending`` — STM-only
+            purity, no flags, no writes;
+          * under ``disable_stm`` (S1) ``_pending`` is already empty → no-op;
+            ``modules_invoked['consolidation']`` flips only on an actual write.
+        """
+        if self.disable_ltm:
+            self._pending = []
+            return {"fine": [], "mid": [], "coarse": []}
+        if not self._pending:
+            return {"fine": [], "mid": [], "coarse": []}
+
+        self.modules_invoked["consolidation"] = True
+        inserted = self._consolidate_pending(
+            episode_success=False, episode_idx=episode_idx
+        )
+        self._pending = []
+        return inserted
+
+    def _consolidate_pending(
+        self, episode_success: bool, episode_idx: int
+    ) -> Dict[str, List[str]]:
+        """Shared fine-write path: segments from ``_pending`` →
+        ``consolidator.consolidate_session`` top-k → patch embodied metadata
+        back onto the inserted entries. Does NOT touch episode counters, the
+        mid layer, or ``_pending`` (callers drain it)."""
         segments = []
         for rec in self._pending:
             # Index the fine layer on the caption TEXT embedding (SBERT) —
@@ -489,19 +551,6 @@ class EmbodiedMemoryBridge:
                             })
                             break
 
-        self._episodes_seen += 1
-        if episode_success:
-            self._successful_episodes_seen += 1
-
-        # Trigger mid-layer clustering periodically (over consolidated fine
-        # segments, not raw stm — we want stable input).
-        if (
-            self._successful_episodes_seen > 0
-            and self._successful_episodes_seen % self.cluster_every_n_episodes == 0
-        ):
-            self._refresh_mid_clusters()
-
-        self._pending = []
         return inserted
 
     def _refresh_mid_clusters(self):

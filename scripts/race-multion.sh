@@ -88,7 +88,8 @@ source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; exit 1; }
 banner "[3/6] pre-test code verify (multion suites + regression suites)"
 for T in test_make_multion_smoke test_advance_subgoal test_analyze_multion \
          test_analyze_revisit test_analyze_ablation test_make_revisit_smoke \
-         test_propose_candidates test_spl_guard test_episode_order; do
+         test_propose_candidates test_spl_guard test_episode_order \
+         test_filter_near_candidates test_memory_bridge_consolidate; do
   python "embodied_memory/scripts/${T}.py" \
     || { echo "FATAL: ${T} failed — not spending on the live run."; exit 1; }
 done
@@ -141,6 +142,25 @@ n = sum(len(json.load(open(p)).get('subgoals_found') or [])
         if not p.endswith('_error.json'))
 print(n)" "$out_dir" 2>/dev/null || echo "?")"
   echo "  setting $S: total subgoals_found events = ${n_adv}"
+  # Per-episode digest (micro4 gates, readable straight off the emailed log):
+  # thrash-gone = rerank << n_steps + n_propose_reached small; within-episode
+  # memory = n_memory_candidates > 0 in the SAME episode (micro3: 0).
+  echo "  per-episode digest (thrash + within-episode memory):"
+  python -c "
+import glob, json, sys
+for p in sorted(glob.glob(sys.argv[1] + '/episode_*.json')):
+    if p.endswith('_error.json'):
+        continue
+    e = json.load(open(p))
+    cats = ','.join(e.get('target_categories') or [str(e.get('target_category'))])
+    print('    ep%-3s %-22s rerank=%s/%s reached=%s filt_near=%s '
+          'mem_cand=%s mem_chosen=%s adv=%s' % (
+        e.get('episode_idx'), cats,
+        e.get('rerank_calls'), e.get('n_steps'),
+        e.get('n_propose_reached'), e.get('n_candidates_filtered_near'),
+        e.get('n_memory_candidates'), e.get('n_memory_chosen'),
+        len(e.get('subgoals_found') or [])))" "$out_dir" \
+    || echo "  WARN: per-episode digest failed for $out_dir"
   OUT_DIRS="$OUT_DIRS $out_dir"
 done
 

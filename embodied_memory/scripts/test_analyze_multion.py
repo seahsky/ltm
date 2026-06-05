@@ -153,6 +153,45 @@ def case_gap_by_subgoal_index():
     print("  case_gap_by_subgoal_index: OK")
 
 
+def case_gap_verdict_micro3_shape_is_none():
+    # The exact multion-micro3 bug: deltas [-0.5, 0, 0] are a SHRINKING gap,
+    # but the old inline check (rows[-1] > rows[0]) printed "gap GROWS"
+    # because 0 > -0.5.
+    assert am.gap_growth_verdict(_rows([-0.5, 0.0, 0.0])) is None
+    print("  case_gap_verdict_micro3_shape_is_none: OK")
+
+
+def case_gap_verdict_monotone_positive_fires():
+    msg = am.gap_growth_verdict(_rows([0.0, 0.3, 0.6]))
+    assert msg is not None and "gap GROWS" in msg, msg
+    print("  case_gap_verdict_monotone_positive_fires: OK")
+
+
+def case_gap_verdict_non_monotonic_is_none():
+    # A dip breaks the compounding story even if the last delta is positive.
+    assert am.gap_growth_verdict(_rows([0.0, 0.5, 0.2])) is None
+    print("  case_gap_verdict_non_monotonic_is_none: OK")
+
+
+def case_gap_verdict_single_row_is_none():
+    assert am.gap_growth_verdict(_rows([0.9])) is None
+    assert am.gap_growth_verdict(_rows([])) is None
+    print("  case_gap_verdict_single_row_is_none: OK")
+
+
+def case_gap_verdict_flat_positive_fires():
+    # Sustained positive gap counts: non-decreasing AND ends above zero.
+    msg = am.gap_growth_verdict(_rows([0.4, 0.4]))
+    assert msg is not None and "gap GROWS" in msg, msg
+    print("  case_gap_verdict_flat_positive_fires: OK")
+
+
+def _rows(deltas):
+    """Minimal gap-table rows; the verdict only reads ``delta``."""
+    return [{"subgoal_idx": i, "n": 2, "rate_a": 0.0, "rate_b": 0.0,
+             "delta": float(d)} for i, d in enumerate(deltas)]
+
+
 def case_advance_step_costs_split_by_memory():
     # step-cost of an advance = step_idx delta from the previous advance
     # (episode start for the first). Split by memory_assisted.
@@ -250,6 +289,11 @@ def main() -> int:
     case_paired_delta_ppl_skips_undefined()
     case_paired_delta_no_scene_collision()
     case_gap_by_subgoal_index()
+    case_gap_verdict_micro3_shape_is_none()
+    case_gap_verdict_monotone_positive_fires()
+    case_gap_verdict_non_monotonic_is_none()
+    case_gap_verdict_single_row_is_none()
+    case_gap_verdict_flat_positive_fires()
     case_advance_step_costs_split_by_memory()
     case_load_and_report()
     case_non_multion_episodes_skipped()

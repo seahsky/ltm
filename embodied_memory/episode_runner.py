@@ -282,6 +282,51 @@ def _advance_subgoal(
     return True, subgoal_idx >= n_subgoals - 1
 
 
+def _filter_near_candidates(
+    cands: List[FrontierCandidate],
+    agent_xy,
+    min_target_m: float,
+):
+    """Drop pool candidates already within ``min_target_m`` of the agent —
+    the reached-thrash absorbing loop (multion-micro3 ep0: ~700 of 749 steps
+    spun re-propose → turn toward a near pick → "reached" → re-propose,
+    because the pool kept yielding candidates inside the 0.5 m reached
+    radius). Returns ``(filtered, n_dropped)``.
+
+    * Strict ``<`` (matching ``_advance_subgoal`` and the ``candidate_reached``
+      trigger): a candidate at exactly ``min_target_m`` can never re-trigger
+      "reached", so it survives.
+    * ``stop_signal`` candidates are NEVER dropped — they are near by design.
+    * If EVERY non-stop candidate would drop, the ORIGINAL list is returned
+      unchanged (n_dropped 0) so the agent is never left waypoint-less; the
+      cooldown backstop bounds the loop in that pathological geometry.
+    Pure: no I/O."""
+    ax, az = float(agent_xy[0]), float(agent_xy[1])
+    kept: List[FrontierCandidate] = []
+    n_dropped = 0
+    for c in cands:
+        if c.metadata.get("stop_signal", False):
+            kept.append(c)
+            continue
+        d = float(np.hypot(float(c.world_xy[0]) - ax, float(c.world_xy[1]) - az))
+        if d < float(min_target_m):
+            n_dropped += 1
+            continue
+        kept.append(c)
+    if n_dropped and not any(
+        not c.metadata.get("stop_signal", False) for c in kept
+    ):
+        return list(cands), 0
+    return kept, n_dropped
+
+
+def _cooldown_elapsed(step_idx: int, last_fire_step: int, cooldown: int) -> bool:
+    """True iff at least ``cooldown`` steps passed since ``last_fire_step`` —
+    the reached-triggered re-propose backstop (bounds ``rerank_calls`` even
+    when the near-filter falls back on an all-near pool). Pure."""
+    return (int(step_idx) - int(last_fire_step)) >= int(cooldown)
+
+
 def _waypoint_outcome(
     force_repropose: bool,
     dist_to_waypoint_m,
@@ -453,6 +498,29 @@ class EpisodeRunner:
             os.environ.get("REMEMBR_PROPOSE_REACHED_M", "0.5")
         )
 
+        # Reached-thrash escape (multion-micro3 ep0: ~700/749 steps burned in
+        # a re-propose→turn→"reached" absorbing loop). Multion-gated behavior:
+        # (a) pool candidates nearer than min_target_m are dropped before
+        # rerank (_filter_near_candidates: stop_signal preserved, falls back
+        # to the unfiltered pool when all non-stop picks are near), and (b) a
+        # reached-triggered re-propose fires at most once per cooldown window
+        # (_cooldown_elapsed). K=1 behavior is byte-identical; the counters
+        # n_propose_reached / n_candidates_filtered_near log unconditionally.
+        self.min_target_m: float = float(
+            os.environ.get("REMEMBR_MIN_TARGET_M", str(self.propose_reached_m))
+        )
+        self.propose_cooldown: int = int(
+            os.environ.get("REMEMBR_PROPOSE_COOLDOWN", "3")
+        )
+
+        # MultiON within-episode consolidation extension seam (OFF by default):
+        # when > 0, ALSO flush STM→fine every N keyframes, on top of the
+        # event-boundary (sub-goal advance) consolidation that is the default
+        # multion path. Not wired into any driver yet.
+        self.multion_consolidate_period: int = int(
+            os.environ.get("MULTION_CONSOLIDATE_PERIOD", "0")
+        )
+
         os.makedirs(out_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -536,6 +604,8 @@ class EpisodeRunner:
                 "n_waypoint_reached": int(ep_metrics.get("n_waypoint_reached", 0)),
                 "n_waypoint_unreachable": int(ep_metrics.get("n_waypoint_unreachable", 0)),
                 "n_forward_no_progress": int(ep_metrics.get("n_forward_no_progress", 0)),
+                "n_propose_reached": int(ep_metrics.get("n_propose_reached", 0)),
+                "n_candidates_filtered_near": int(ep_metrics.get("n_candidates_filtered_near", 0)),
                 "remembr_stub_mode": ep_metrics.get("remembr_stub_mode"),
                 "remembr_sample_caption": ep_metrics.get("remembr_sample_caption"),
             })
@@ -626,6 +696,10 @@ class EpisodeRunner:
             "n_waypoint_reached": 0,
             "n_waypoint_unreachable": 0,
             "n_forward_no_progress": 0,
+            # Reached-thrash escape diagnostics (multion-micro3): reached-
+            # triggered re-proposes + near-candidates dropped from the pool.
+            "n_propose_reached": 0,
+            "n_candidates_filtered_near": 0,
         }
         # Closest the agent ever gets to a goal viewpoint over the episode
         # (geodesic). success@0.1m is perception-bound with caption-only
@@ -666,6 +740,9 @@ class EpisodeRunner:
         # memory_assisted attribution: n_memory_chosen snapshot at the moment
         # the current sub-goal became active.
         _mem_chosen_at_subgoal_start = 0
+        # Keyframes observed since the last within-episode consolidation —
+        # only consulted when MULTION_CONSOLIDATE_PERIOD > 0 (off by default).
+        _kf_since_boundary = 0
         # L_opt = sum of ordered geodesic legs at episode start; each leg is
         # anchored at the previous leg's realizing viewpoint (start pose for
         # leg 1). Any unreachable leg -> sum reachable legs + partial flag.
@@ -688,6 +765,8 @@ class EpisodeRunner:
         # stop_signal tick fires. Refreshed each propose step.
         mem_cands: List[FrontierCandidate] = []
         last_propose_step: int = -10**9  # forces a proposal on the first loop tick
+        # Last step a REACHED-triggered re-propose fired (cooldown backstop).
+        last_reached_propose_step: int = -10**9
         # Run-6 instrumentation: action mix over the episode (non-oracle path).
         action_counts = {ACTION_STOP: 0, ACTION_FORWARD: 0,
                          ACTION_TURN_LEFT: 0, ACTION_TURN_RIGHT: 0}
@@ -744,10 +823,21 @@ class EpisodeRunner:
                 and float(getattr(current_candidate, "distance_m", 1e9))
                 < self.propose_reached_m
             )
+            if multion and candidate_reached and not _cooldown_elapsed(
+                step.step_idx, last_reached_propose_step, self.propose_cooldown
+            ):
+                # Cooldown backstop (multion-gated): a reached-triggered
+                # re-propose may fire at most once per cooldown window, so
+                # pathological all-near geometry can't re-propose every tick.
+                # Scheduled / no-candidate triggers are unaffected.
+                candidate_reached = False
             due_to_propose = (step.step_idx - last_propose_step) >= self.propose_period
             if not multion_force_stop and (
                 current_candidate is None or due_to_propose or candidate_reached
             ):
+                if candidate_reached:
+                    ep_metrics_counters["n_propose_reached"] += 1
+                    last_reached_propose_step = int(step.step_idx)
                 last_propose_step = int(step.step_idx)
                 cands = self._propose_candidates(
                     step, ep, goal_override=active_category if multion else None
@@ -791,6 +881,19 @@ class EpisodeRunner:
                         mc.candidate_id = len(cands) + i + 1000  # offset so logs are unambiguous
                     all_cands = cands + mem_cands
                     n_memory_candidates += len(mem_cands)
+                    if multion:
+                        # Reached-thrash escape: drop already-reached
+                        # waypoints from the pool — applied once after the
+                        # memory merge so frontier + remembr + memory are
+                        # covered uniformly (stop_signal survives; falls back
+                        # to the unfiltered pool when all non-stop are near).
+                        all_cands, _n_near = _filter_near_candidates(
+                            all_cands,
+                            (float(step.agent_state.position[0]),
+                             float(step.agent_state.position[2])),
+                            self.min_target_m,
+                        )
+                        ep_metrics_counters["n_candidates_filtered_near"] += _n_near
 
                     rerank_result, retrieval = self.bridge.rerank(
                         candidates=all_cands,
@@ -1064,6 +1167,17 @@ class EpisodeRunner:
                         if _finished:
                             multion_force_stop = True
                         else:
+                            # Event-boundary consolidation (multion-micro3 fix):
+                            # flush the c_i-hunt keyframes from STM into the
+                            # fine LTM NOW, so the immediate re-query below for
+                            # c_{i+1} can recall sightings made THIS episode.
+                            # End-of-episode consolidation was structurally too
+                            # late — n_memory_candidates stayed 0 all episode.
+                            if self.bridge is not None:
+                                self.bridge.consolidate_subgoal_boundary(
+                                    episode_idx=ep_idx
+                                )
+                                _kf_since_boundary = 0
                             active_category = subgoal_seq[subgoal_idx]
                             # The recall moment: force an immediate LTM
                             # re-query for the NEW category by resetting the
@@ -1107,6 +1221,17 @@ class EpisodeRunner:
                 )
                 stm_captions.append(keyframe.caption)
                 ep_log["steps"].append(self._serialize_step(step, keyframe))
+                # Periodic within-episode consolidation (extension seam, OFF
+                # by default — event-boundary consolidation at sub-goal
+                # advance is the multion default).
+                _kf_since_boundary += 1
+                if (
+                    multion
+                    and self.multion_consolidate_period > 0
+                    and _kf_since_boundary >= self.multion_consolidate_period
+                ):
+                    self.bridge.consolidate_subgoal_boundary(episode_idx=ep_idx)
+                    _kf_since_boundary = 0
 
             if step.done:
                 break
@@ -1191,6 +1316,8 @@ class EpisodeRunner:
         ep_log["n_waypoint_reached"] = int(ep_metrics_counters["n_waypoint_reached"])
         ep_log["n_waypoint_unreachable"] = int(ep_metrics_counters["n_waypoint_unreachable"])
         ep_log["n_forward_no_progress"] = int(ep_metrics_counters["n_forward_no_progress"])
+        ep_log["n_propose_reached"] = int(ep_metrics_counters["n_propose_reached"])
+        ep_log["n_candidates_filtered_near"] = int(ep_metrics_counters["n_candidates_filtered_near"])
         ep_log["n_detector_called"] = int(ep_metrics_counters["n_detector_called"])
         ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
         ep_log["n_detector_locate_failed"] = int(ep_metrics_counters["n_detector_locate_failed"])
@@ -1262,6 +1389,8 @@ class EpisodeRunner:
             "n_arrival_stop": int(ep_metrics_counters["n_arrival_stop"]),
             "n_detector_approach_success": int(ep_metrics_counters["n_detector_approach_success"]),
             "n_detector_approach_stop_distance": float(ep_metrics_counters["n_detector_approach_stop_distance"]),
+            "n_propose_reached": int(ep_metrics_counters["n_propose_reached"]),
+            "n_candidates_filtered_near": int(ep_metrics_counters["n_candidates_filtered_near"]),
             "grid_cells_free": grid_stats["cells_free"],
             "grid_cells_occupied": grid_stats["cells_occupied"],
             "grid_cells_unknown": grid_stats["cells_unknown"],

@@ -225,6 +225,23 @@ def gap_by_subgoal_index(
     return rows
 
 
+def gap_growth_verdict(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """Verdict line for the gap-by-sub-goal-index table, or None.
+
+    Fires iff the S3-S1 deltas are monotonically non-decreasing across the
+    sub-goal index AND the final delta is positive — i.e. the gap actually
+    grows (or sustains) into positive territory. The old inline check
+    (``rows[-1]["delta"] > rows[0]["delta"]``) mislabeled multion-micro3's
+    shrinking gap ``[-0.5, 0, 0]`` as growth because ``0 > -0.5``. The
+    message string is kept byte-identical for log-greps. Pure."""
+    if len(rows) < 2:
+        return None
+    deltas = [float(r["delta"]) for r in rows]
+    if all(b >= a for a, b in zip(deltas, deltas[1:])) and deltas[-1] > 0:
+        return "  -> gap GROWS with sub-goal index (compounding signal)."
+    return None
+
+
 def advance_step_costs(episodes: List[MultionEpisode]) -> Dict[str, List[float]]:
     """Step-cost of each advance (step_idx delta from the previous advance;
     episode start for the first), split by whether a memory candidate was
@@ -302,8 +319,9 @@ def print_report(runs: List[MultionRun], n_bootstrap: int) -> None:
     for row in rows:
         print(f"  {row['subgoal_idx']:>3} {row['n']:>3} {row['rate_a']:>8.3f} "
               f"{row['rate_b']:>8.3f} {row['delta']:>+8.3f}")
-    if len(rows) >= 2 and rows[-1]["delta"] > rows[0]["delta"]:
-        print("  -> gap GROWS with sub-goal index (compounding signal).")
+    verdict = gap_growth_verdict(rows)
+    if verdict:
+        print(verdict)
     print()
 
     print("=== advance step-cost (S3): recall-assisted vs not ===")

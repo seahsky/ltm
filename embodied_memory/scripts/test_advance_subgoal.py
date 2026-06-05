@@ -161,24 +161,69 @@ class _RR:
     debug_info = {"top_scores": []}
 
 
+class _RRSelect:
+    """Rerank result that selects a specific candidate (by its text prefix —
+    the same ``go to (x.x, y.y)`` matching _chosen_candidate_index uses)."""
+
+    def __init__(self, cand):
+        self.selected = SimpleNamespace(
+            response=f"go to ({cand.world_xy[0]:.1f}, {cand.world_xy[1]:.1f})",
+            final_score=0.9,
+        )
+        self.debug_info = {"top_scores": []}
+
+
 class _StubBridge:
+    """Recording fake of EmbodiedMemoryBridge with a tiny in-memory fine
+    store: ``observe_keyframe`` buffers to ``_pending``;
+    ``consolidate_subgoal_boundary`` / ``consolidate`` move the buffer into
+    ``_fine`` (and record the call); ``propose_memory_candidates`` returns one
+    memory candidate iff a fine-store caption mentions the target category —
+    so within-episode recall is observable end-to-end at the runner level."""
+
     text_encode_fn = staticmethod(lambda s: np.zeros(8, dtype=np.float32))
-    _pending: list = []
+
+    def __init__(self):
+        self._pending: list = []
+        self._fine: list = []
+        self.boundary_calls: list = []   # episode_idx per boundary call
+        self.end_calls: list = []        # (episode_success, episode_idx)
 
     def begin_episode(self, *a, **k):
-        pass
+        self._pending = []
 
-    def observe_keyframe(self, *a, **k):
-        pass
+    def observe_keyframe(self, keyframe, action=None, reward=0.0, success=False):
+        self._pending.append(keyframe)
 
-    def propose_memory_candidates(self, *a, **k):
+    def consolidate_subgoal_boundary(self, episode_idx):
+        self.boundary_calls.append(int(episode_idx))
+        self._fine.extend(self._pending)
+        self._pending = []
+        return {"fine": [], "mid": [], "coarse": []}
+
+    def propose_memory_candidates(self, agent_pos, agent_yaw, target_category,
+                                  planner_world_xys=None, top_k=3):
+        for kf in self._fine:
+            if _caption_mentions_stub(getattr(kf, "caption", ""),
+                                      _goal_terms_stub(target_category)):
+                return [er.FrontierCandidate(
+                    candidate_id=-1,
+                    world_xy=np.array([2.0, 2.0], dtype=np.float32),
+                    grid_rc=(-1, -1), distance_m=2.8, bearing_rad=0.0,
+                    cluster_size=0, raw_score=0.9, source="memory",
+                    metadata={})]
         return []
 
-    def rerank(self, **k):
+    def rerank(self, candidates, **k):
+        mem = next((c for c in candidates if c.source == "memory"), None)
+        if mem is not None:
+            return _RRSelect(mem), {}
         return _RR(), {}
 
-    def consolidate(self, *a, **k):
-        pass
+    def consolidate(self, episode_success, episode_idx):
+        self.end_calls.append((bool(episode_success), int(episode_idx)))
+        self._fine.extend(self._pending)
+        self._pending = []
 
     def stats(self):
         return {}
@@ -344,6 +389,68 @@ def case_k3_partial_progress_no_stop_until_timeout():
 
 
 # ----------------------------------------------------------------------
+# 2b. within-episode (sub-goal-boundary) consolidation — the multion-micro3
+#     thesis blocker: observe_keyframe only buffered to STM and the fine LTM
+#     was written at episode END, so a c_{i+1} sighted while hunting c_i was
+#     structurally unrecallable in the SAME episode (S3 ep0:
+#     n_memory_candidates=0 all episode).
+# ----------------------------------------------------------------------
+
+
+def case_boundary_consolidation_called_per_advance():
+    # K=3, all found: boundary consolidation fires on the two NON-final
+    # advances only; end-of-episode consolidate fires exactly once.
+    runner = _mk_runner(_StubSource(seq=["chair", "bed", "toilet"]))
+    ep_log, _ = runner._run_episode(0)
+    assert len(ep_log["subgoals_found"]) == 3
+    assert runner.bridge.boundary_calls == [0, 0], runner.bridge.boundary_calls
+    assert len(runner.bridge.end_calls) == 1, runner.bridge.end_calls
+    print("  case_boundary_consolidation_called_per_advance: OK")
+
+
+def case_single_goal_no_boundary_consolidation():
+    # K=1 byte-identity: the boundary path must never fire.
+    runner = _mk_runner(_StubSource(seq=None))
+    runner._run_episode(0)
+    assert runner.bridge.boundary_calls == [], runner.bridge.boundary_calls
+    assert len(runner.bridge.end_calls) == 1
+    print("  case_single_goal_no_boundary_consolidation: OK")
+
+
+class _SightAheadSource(_StubSource):
+    """c2 (bed) is SIGHTED in captions from t=1 — while c1 (chair) is still
+    being hunted — but only becomes near at t=8; chair is near at t=3. The
+    bed-mentioning keyframes buffered during the chair hunt must reach the
+    fine store at the chair advance so the bed hunt can recall them."""
+
+    _SCHED = {"chair": 3, "bed": 8}  # distance schedule
+
+    def _caption(self):
+        seen = []
+        if self.t >= 1:
+            seen.append("bed")
+        if self.t >= 2:
+            seen.append("chair")
+        return "a room with " + " and a ".join(seen) if seen else "an empty hallway"
+
+
+def case_within_episode_recall_assists_next_subgoal():
+    runner = _mk_runner(_SightAheadSource(seq=["chair", "bed"]))
+    ep_log, metrics = runner._run_episode(0)
+    found = ep_log["subgoals_found"]
+    assert [f["category"] for f in found] == ["chair", "bed"], found
+    # The chair-hunt keyframes (captions mentioning bed) were consolidated at
+    # the advance, so the bed hunt surfaced a memory candidate IN THIS episode…
+    assert metrics["n_memory_candidates"] > 0, metrics["n_memory_candidates"]
+    assert metrics["n_memory_chosen"] > 0, metrics["n_memory_chosen"]
+    # …and the bed advance is attributed to memory.
+    assert found[0]["memory_assisted"] is False, found[0]
+    assert found[1]["memory_assisted"] is True, found[1]
+    assert ep_log["recall_assisted_advances"] == 1
+    print("  case_within_episode_recall_assists_next_subgoal: OK")
+
+
+# ----------------------------------------------------------------------
 # 3. absorbing-loop diagnostics (multion-micro2: turn-forever ep with 741
 #    re-proposes; wall-pushing eps with 700+ forwards and zero displacement
 #    while collision_escape stayed 0 — that counter belongs to the dead
@@ -401,6 +508,9 @@ def main() -> int:
     case_single_goal_run_has_no_multion_keys()
     case_k3_run_advances_cursor_and_stops()
     case_k3_partial_progress_no_stop_until_timeout()
+    case_boundary_consolidation_called_per_advance()
+    case_single_goal_no_boundary_consolidation()
+    case_within_episode_recall_assists_next_subgoal()
     case_waypoint_outcome_pure()
     case_forward_no_progress_pure()
     case_runner_logs_loop_diagnostics()
