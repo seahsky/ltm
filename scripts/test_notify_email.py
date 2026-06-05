@@ -361,6 +361,37 @@ check("content-type json",
 body = json.loads(req.data.decode())
 check("body is payload", body["subject"] == "s" and body["to"] == ["t@x.com"])
 check("no sleep on success", slept == [])
+# Resend sits behind Cloudflare, which 403s the default Python-urllib UA
+# (error 1010) — a real User-Agent must be set.
+ua = req.get_header("User-agent") or ""
+check("custom user-agent set", ua and "python-urllib" not in ua.lower(), ua)
+
+# HTTPError bodies (e.g. Resend validation errors) must be surfaced
+import contextlib
+
+
+def make_urlopen_httperror(captured=None):
+    state = {"calls": 0}
+
+    def fake(req, timeout=None):
+        state["calls"] += 1
+        raise urllib.error.HTTPError(
+            req.get_full_url(), 403, "Forbidden", {},
+            io.BytesIO(b'{"message":"You can only send testing emails"}'))
+
+    fake.state = state
+    return fake
+
+
+buf = io.StringIO()
+with contextlib.redirect_stderr(buf):
+    ok = ne.send_with_retries(payload, "k",
+                              urlopen=make_urlopen_httperror(),
+                              sleep=lambda s: None)
+check("httperror -> False, no raise", ok is False)
+check("httperror body surfaced",
+      "You can only send testing emails" in buf.getvalue(),
+      buf.getvalue()[-300:])
 
 slept = []
 fake = make_urlopen(2)

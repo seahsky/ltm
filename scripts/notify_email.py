@@ -33,6 +33,7 @@ import os
 import socket
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -270,7 +271,10 @@ def send_with_retries(payload, api_key, urlopen=urllib.request.urlopen,
         req = urllib.request.Request(
             RESEND_URL, data=body, method="POST",
             headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"},
+                     "Content-Type": "application/json",
+                     # Cloudflare 403s (error 1010) the default
+                     # Python-urllib UA — send a real one.
+                     "User-Agent": "ltm-notify-run/1.0"},
         )
         try:
             with urlopen(req, timeout=60) as resp:
@@ -279,6 +283,15 @@ def send_with_retries(payload, api_key, urlopen=urllib.request.urlopen,
                     return True
                 print(f"[notify] Resend HTTP {status} "
                       f"(attempt {attempt + 1})", file=sys.stderr)
+        except urllib.error.HTTPError as e:
+            # surface the response body — Resend puts the actual
+            # validation error there (e.g. unverified recipient)
+            try:
+                detail = e.read().decode(errors="replace")[:500]
+            except Exception:  # noqa: BLE001
+                detail = ""
+            print(f"[notify] send attempt {attempt + 1} failed: {e} {detail}",
+                  file=sys.stderr)
         except Exception as e:  # noqa: BLE001 — never load-bearing
             print(f"[notify] send attempt {attempt + 1} failed: {e}",
                   file=sys.stderr)
