@@ -254,6 +254,34 @@ def _arrival_stop(near, candidate, caption_confirms, cos_threshold):
     return bool(caption_confirms)
 
 
+def _advance_subgoal(
+    dist_to_active,
+    caption_confirms: bool,
+    subgoal_idx: int,
+    n_subgoals: int,
+    found_radius: float,
+):
+    """MultiON advance decision — the one load-bearing core-loop change.
+
+    Returns ``(found, finished)`` for the ACTIVE sub-goal: ``found`` iff the
+    agent is within ``found_radius`` (geodesic, env-adjudicated like Habitat's
+    own success check) AND the current caption confirms the category (the
+    agent-side signal). ``finished`` iff that found sub-goal was the last one.
+
+    Lenient strictness (confirmed design): a wrong-category confirm never
+    aborts — it simply doesn't advance (Progress stays clean). ``None``
+    distance (no sim / unreachable / base EpisodeSource) never advances.
+    Boundary: ``dist == found_radius`` is NOT found (strict <). Pure: no I/O.
+    """
+    if dist_to_active is None:
+        return False, False
+    if float(dist_to_active) >= float(found_radius):
+        return False, False
+    if not caption_confirms:
+        return False, False
+    return True, subgoal_idx >= n_subgoals - 1
+
+
 class EpisodeRunner:
     """Drive N episodes, log to ``out_dir``, return a RunSummary."""
 
@@ -276,6 +304,8 @@ class EpisodeRunner:
         oracle_stop: bool = False,
         oracle_location: bool = False,
         oracle_stop_radius: float = 0.1,
+        target_categories: Optional[List[str]] = None,
+        found_radius: float = 1.0,
     ):
         self.source = source
         self.planner = planner
@@ -284,6 +314,15 @@ class EpisodeRunner:
         self.captioner = captioner
         self.out_dir = out_dir
         self.target_category = target_category
+        # MultiON (sequential semantic ObjectNav): ordered K-chain of goal
+        # categories. Per-episode info["object_categories"] (from the multion
+        # dataset builder) takes precedence; this is the CLI --target-sequence
+        # override. None + no info key -> single-goal behaviour, byte-identical
+        # (every multion branch in _run_episode is gated behind K > 1).
+        self.target_categories = list(target_categories) if target_categories else None
+        # Sub-goal "found" radius (m). MultiON-standard forgiving radius; the
+        # advance also requires a caption confirm (see _advance_subgoal).
+        self.found_radius = float(found_radius)
         self.keyframe_every_m = keyframe_every_m
         self.max_steps_per_episode = max_steps_per_episode
         self.run_config = dict(run_config or {})
@@ -559,6 +598,49 @@ class EpisodeRunner:
             if v is not None:
                 min_d2g = min(min_d2g, float(v))
 
+        # MultiON sub-goal cursor. The ordered chain comes from the episode
+        # (info["object_categories"], surfaced into Episode.metadata by the
+        # source) or the CLI --target-sequence override; absent both, the
+        # single-goal path below is byte-identical (every multion branch is
+        # gated behind K > 1). Native Habitat success/spl/distance_to_goal
+        # stay c1-only; Progress/PPL are computed here.
+        subgoal_seq: List[str] = []
+        if not is_oracle:
+            ep_meta = getattr(ep, "metadata", None)
+            if isinstance(ep_meta, dict):
+                subgoal_seq = [
+                    str(c) for c in (ep_meta.get("object_categories") or [])
+                ]
+            if not subgoal_seq and self.target_categories:
+                subgoal_seq = list(self.target_categories)
+        if not subgoal_seq:
+            subgoal_seq = [str(ep.target_category)]
+        n_subgoals = len(subgoal_seq)
+        multion = n_subgoals > 1 and not is_oracle
+        subgoal_idx = 0
+        active_category: str = subgoal_seq[0]
+        subgoals_found: List[Dict[str, Any]] = []
+        multion_force_stop = False
+        path_len_taken = 0.0
+        _last_pos = np.asarray(step.agent_state.position, dtype=np.float64)
+        # memory_assisted attribution: n_memory_chosen snapshot at the moment
+        # the current sub-goal became active.
+        _mem_chosen_at_subgoal_start = 0
+        # L_opt = sum of ordered geodesic legs at episode start; each leg is
+        # anchored at the previous leg's realizing viewpoint (start pose for
+        # leg 1). Any unreachable leg -> sum reachable legs + partial flag.
+        geodesic_optimal = 0.0
+        geodesic_optimal_partial = False
+        if multion:
+            _anchor = np.asarray(step.agent_state.position, dtype=np.float32)
+            for _cat in subgoal_seq:
+                _leg = self.source.nearest_category_viewpoint(_anchor, _cat)
+                if _leg is None or not np.isfinite(float(_leg[0])):
+                    geodesic_optimal_partial = True
+                    continue
+                geodesic_optimal += float(_leg[0])
+                _anchor = np.asarray(_leg[1], dtype=np.float32)
+
         stm_captions: List[str] = []
         current_candidate: Optional[FrontierCandidate] = None
         # Same-category LTM-sighting candidates from the latest proposal; held
@@ -623,9 +705,20 @@ class EpisodeRunner:
                 < self.propose_reached_m
             )
             due_to_propose = (step.step_idx - last_propose_step) >= self.propose_period
-            if current_candidate is None or due_to_propose or candidate_reached:
+            if not multion_force_stop and (
+                current_candidate is None or due_to_propose or candidate_reached
+            ):
                 last_propose_step = int(step.step_idx)
-                cands = self._propose_candidates(step, ep)
+                cands = self._propose_candidates(
+                    step, ep, goal_override=active_category if multion else None
+                )
+                if multion and subgoal_idx < n_subgoals - 1 and cands:
+                    # STOP-vs-advance: before the final sub-goal a backbone
+                    # stop_signal must not terminate the episode — drop it and
+                    # keep navigating; the per-tick advance check (distance +
+                    # caption) decides the sub-goal hand-off instead.
+                    cands = [c for c in cands
+                             if not c.metadata.get("stop_signal", False)]
                 if cands:
                     # raw_top1 is the planner's pick BEFORE memory injection,
                     # so the disagreement counter measures "did rerank+memory
@@ -648,7 +741,8 @@ class EpisodeRunner:
                     mem_cands = self.bridge.propose_memory_candidates(
                         agent_pos=step.agent_state.position,
                         agent_yaw=step.agent_state.rotation_yaw,
-                        target_category=ep.target_category,
+                        target_category=(active_category if multion
+                                         else ep.target_category),
                         planner_world_xys=[c.world_xy for c in cands],
                         top_k=3,
                     )
@@ -662,7 +756,8 @@ class EpisodeRunner:
                         candidates=all_cands,
                         query_text=keyframe.caption,
                         stm_captions=stm_captions[-5:],
-                        target_category=ep.target_category,
+                        target_category=(active_category if multion
+                                         else ep.target_category),
                         query_visual_embedding=keyframe.visual_embedding,
                     )
                     rerank_calls += 1
@@ -742,7 +837,10 @@ class EpisodeRunner:
                     )
 
             # Convert candidate → action.
-            if current_candidate is None:
+            if multion_force_stop:
+                # MultiON: final sub-goal found on a previous tick — terminate.
+                action = ACTION_STOP
+            elif current_candidate is None:
                 action = ACTION_FORWARD
             elif current_candidate.metadata.get("stop_signal", False) and self._approach_waypoint is None:
                 # Detector intercept (Task 4): if --detector is on, ask the
@@ -758,7 +856,8 @@ class EpisodeRunner:
                     detector=self.goal_detector,
                     rgb=step.rgb,
                     depth=step.depth,
-                    goal_category=self.target_category,
+                    goal_category=(active_category if multion
+                                   else self.target_category),
                     agent_pose=self._agent_pose_matrix(step.agent_state),
                     intrinsics=self._camera_intrinsics(),
                     counters=ep_metrics_counters,
@@ -831,13 +930,21 @@ class EpisodeRunner:
                     and float(current_candidate.distance_m) < self._arrival_stop_radius
                 )
                 _confirms = _caption_mentions(
-                    keyframe.caption, _goal_terms(ep.target_category)
+                    keyframe.caption,
+                    _goal_terms(active_category if multion
+                                else ep.target_category),
                 ) is not None
                 if _arrival_stop(_near, current_candidate, _confirms,
                                  self._arrival_stop_cos):
-                    action = ACTION_STOP
-                    ep_metrics_counters["n_arrival_stop"] += 1
-                    current_candidate = None
+                    if multion and subgoal_idx < n_subgoals - 1:
+                        # STOP-vs-advance: never STOP before the final
+                        # sub-goal — drop the waypoint and let the per-tick
+                        # advance check decide the hand-off.
+                        current_candidate = None
+                    else:
+                        action = ACTION_STOP
+                        ep_metrics_counters["n_arrival_stop"] += 1
+                        current_candidate = None
                 elif self._waypoint_force_repropose:
                     # Follower reports reached/unreachable → drop & re-propose.
                     current_candidate = None
@@ -857,6 +964,45 @@ class EpisodeRunner:
                 step.depth, step.agent_state.position, step.agent_state.rotation_yaw
             )
             _track_d2g(step)
+
+            # MultiON per-tick advance check (gated: K==1 is untouched).
+            if multion:
+                _pos = np.asarray(step.agent_state.position, dtype=np.float64)
+                path_len_taken += float(np.linalg.norm(_pos - _last_pos))
+                _last_pos = _pos
+                if not multion_force_stop:
+                    _dist = self.source.distance_to_category(
+                        step.agent_state.position, active_category
+                    )
+                    _conf = _caption_mentions(
+                        keyframe.caption, _goal_terms(active_category)
+                    ) is not None
+                    _found, _finished = _advance_subgoal(
+                        _dist, _conf, subgoal_idx, n_subgoals, self.found_radius
+                    )
+                    if _found:
+                        subgoals_found.append({
+                            "category": active_category,
+                            "subgoal_idx": subgoal_idx,
+                            "step_idx": int(step.step_idx),
+                            "distance": float(_dist),
+                            "memory_assisted": bool(
+                                n_memory_chosen > _mem_chosen_at_subgoal_start
+                            ),
+                            "path_len_at_found": float(path_len_taken),
+                        })
+                        subgoal_idx += 1
+                        _mem_chosen_at_subgoal_start = n_memory_chosen
+                        if _finished:
+                            multion_force_stop = True
+                        else:
+                            active_category = subgoal_seq[subgoal_idx]
+                            # The recall moment: force an immediate LTM
+                            # re-query for the NEW category by resetting the
+                            # propose-cadence clock and dropping the waypoint.
+                            current_candidate = None
+                            self._approach_waypoint = None
+                            last_propose_step = -10**9
 
             # Re-bearing-rel is needed for the controller next iteration; we
             # recompute the candidate's bearing relative to the current yaw.
@@ -983,6 +1129,36 @@ class EpisodeRunner:
         ep_log["n_detector_approach_stop_distance"] = float(ep_metrics_counters["n_detector_approach_stop_distance"])
         ep_log["min_distance_to_goal"] = min_distance_to_goal
         ep_log["success_1m"] = success_1m
+        # MultiON metrics (only when K > 1; single-goal logs are unchanged).
+        # Native success/spl/distance_to_goal above stay c1-only by design;
+        # Progress = k_found/K and PPL = Progress * L_opt / max(L_taken, L_opt)
+        # are the multion headline metrics.
+        if multion:
+            k_found = len(subgoals_found)
+            progress = k_found / float(n_subgoals)
+            success_multion = k_found == n_subgoals
+            if geodesic_optimal > 0.0:
+                _ratio = geodesic_optimal / max(path_len_taken, geodesic_optimal)
+                ppl = progress * _ratio
+                spl_multion = _ratio if success_multion else 0.0
+            else:
+                # No reachable leg at all -> path-weighting undefined.
+                ppl = None
+                spl_multion = None
+            ep_log["is_multion"] = True
+            ep_log["target_categories"] = list(subgoal_seq)
+            ep_log["found_radius"] = float(self.found_radius)
+            ep_log["subgoals_found"] = subgoals_found
+            ep_log["progress"] = progress
+            ep_log["success_multion"] = success_multion
+            ep_log["ppl"] = ppl
+            ep_log["spl_multion"] = spl_multion
+            ep_log["path_len_taken"] = float(path_len_taken)
+            ep_log["geodesic_optimal"] = float(geodesic_optimal)
+            ep_log["geodesic_optimal_partial"] = bool(geodesic_optimal_partial)
+            ep_log["recall_assisted_advances"] = sum(
+                1 for s in subgoals_found if s["memory_assisted"]
+            )
         ep_log["grid_cells_free"] = grid_stats["cells_free"]
         ep_log["grid_cells_occupied"] = grid_stats["cells_occupied"]
         ep_log["grid_cells_unknown"] = grid_stats["cells_unknown"]
@@ -1027,7 +1203,9 @@ class EpisodeRunner:
     # helpers
     # ------------------------------------------------------------------
 
-    def _propose_candidates(self, step: Step, ep) -> List[FrontierCandidate]:
+    def _propose_candidates(
+        self, step: Step, ep, goal_override: Optional[str] = None
+    ) -> List[FrontierCandidate]:
         """Dispatch primary candidate generation by backbone.
 
         ``frontier`` uses the Phase-1 stand-in (depth → occupancy grid →
@@ -1047,9 +1225,10 @@ class EpisodeRunner:
             return self.planner.propose(
                 step.agent_state.position, step.agent_state.rotation_yaw
             )
-        # remembr
+        # remembr — goal_override carries the multion ACTIVE sub-goal category
+        # (None on the single-goal path, preserving the legacy expression).
         llm_cands = self.remembr_planner.propose(
-            goal=ep.target_category or self.target_category,
+            goal=goal_override or ep.target_category or self.target_category,
             agent_pose=step.agent_state.position,
             agent_yaw=step.agent_state.rotation_yaw,
             current_step=int(step.step_idx),

@@ -80,7 +80,8 @@ def _bootstrap():
     _stub_submodule("embodied_memory.perception",
                     ["CLIPKeyframeEncoder", "Keyframe", "SemanticCaptioner"])
     _stub_submodule("embodied_memory.remembr_backbone",
-                    ["ReMEmbRBuilder", "ReMEmbRPlanner"])
+                    ["ReMEmbRBuilder", "ReMEmbRPlanner",
+                     "_caption_mentions", "_goal_terms"])
     # habitat_env stub: only its _ACTION_NAMES list is needed (by the oracle
     # action map); the real module imports AgentState which the episode_source
     # stub doesn't provide, so we can't load it here.
@@ -507,6 +508,9 @@ def case_oracle_short_circuit():
     r.keyframe_every_m = 5
     r.follower = None
     r._oracle_goal_radius = 1.0
+    # _run_episode dereferences these before the oracle short-circuit (the
+    # detector wiring is per-episode; the __new__ bypass skips __init__).
+    r.goal_detector = None
 
     propose_calls: list = []
     r._propose_candidates = lambda *a, **kw: propose_calls.append(1) or []

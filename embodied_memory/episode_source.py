@@ -93,6 +93,26 @@ class EpisodeSource:
         else None. Used by the oracle backbone's ShortestPathFollower."""
         return None
 
+    # -- MultiON per-sub-goal distance seam -----------------------------
+    # Habitat's native distance_to_goal is c1-only; the multion sub-goal
+    # cursor needs the geodesic distance to the ACTIVE category. Base
+    # implementations return None so the runner stays habitat-free in unit
+    # tests (None never advances a sub-goal — see _advance_subgoal).
+
+    def distance_to_category(self, agent_pos, category: str) -> Optional[float]:
+        """Geodesic distance (m) from ``agent_pos`` to the nearest goal
+        view_point of ``category`` in the current scene, or None when unknown
+        / unreachable / unsupported by this source."""
+        return None
+
+    def nearest_category_viewpoint(
+        self, agent_pos, category: str
+    ) -> Optional[Tuple[float, List[float]]]:
+        """``(geodesic_distance, viewpoint_position)`` of the nearest goal
+        view_point of ``category``, or None. Used once per episode to anchor
+        the ordered L_opt legs for Progress/PPL."""
+        return None
+
     # Convenience: iterate fully scripted episodes (cached mode shortcut).
     def iter_steps(self, episode_idx: int) -> Iterator[Step]:
         """For cached sources only: replay an episode without action input."""
