@@ -401,10 +401,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Visit-order (revisit) analysis: cold/warm stratify, warm-paired "
              "soft-SPL delta + S2 decomposition + Gate-A verdict "
              "(delegates to analyze_revisit).")
+    parser.add_argument("--multion", action="store_true",
+        help="MultiON (sequential semantic ObjectNav) analysis: per-setting "
+             "Progress/PPL, paired S3-S1 deltas, gap-by-sub-goal-index table "
+             "(delegates to analyze_multion).")
     args = parser.parse_args(argv)
 
     if len(args.run_dirs) < 2:
         parser.error("at least two run directories are required")
+
+    if args.multion:
+        # Lazy import, mirroring --revisit (analyze_multion imports us at
+        # module top for the bootstrap helpers).
+        import analyze_multion  # noqa: E402
+        runs = [analyze_multion.load_multion_run(p) for p in args.run_dirs]
+        analyze_multion.print_report(runs, args.bootstrap)
+        return 0
 
     if args.revisit:
         # Lazy import: avoids the circular import (analyze_revisit imports us at
