@@ -22,6 +22,26 @@ from .episode_source import AgentState, Episode, EpisodeSource, Step
 _ACTION_NAMES = ["stop", "move_forward", "turn_left", "turn_right", "look_up", "look_down"]
 
 
+def _category_viewpoints_from_content(
+    content: Dict[str, Any], category: str
+) -> List[List[float]]:
+    """All goal view_point positions for ``category`` from an ObjectNav
+    content dict (``goals_by_category`` keys look like
+    ``<scene>.basis.glb_<category>`` — suffix-matched so multi-token
+    categories like ``tv_monitor`` resolve correctly). Pure: no I/O."""
+    suffix = f"_{category}"
+    out: List[List[float]] = []
+    for key, instances in (content.get("goals_by_category") or {}).items():
+        if not key.endswith(suffix):
+            continue
+        for inst in instances or []:
+            for vp in inst.get("view_points") or []:
+                pos = (vp.get("agent_state") or {}).get("position")
+                if pos:
+                    out.append(list(pos))
+    return out
+
+
 class HabitatObjectNavSource(EpisodeSource):
     """ObjectNav on HM3D via habitat-lab.
 
@@ -69,6 +89,13 @@ class HabitatObjectNavSource(EpisodeSource):
         self._env = None
         self._current_episode: Optional[Episode] = None
         self._step_count = 0
+        # MultiON per-category viewpoint cache, keyed (scene_label, category).
+        # Loaded lazily from the dataset's content/<scene>.json.gz — we do NOT
+        # depend on habitat-lab attaching goals_by_category to the episode
+        # object. Viewpoints are static per scene, so the cache persists.
+        self._cat_vps_cache: Dict[Tuple[str, str], List[List[float]]] = {}
+        self._scene_content_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._current_scene_label: Optional[str] = None
 
     @staticmethod
     def _default_scene_dataset_path() -> Optional[str]:
@@ -253,12 +280,25 @@ class HabitatObjectNavSource(EpisodeSource):
             scene_label = base.split(".", 1)[0]
         else:
             scene_label = self._scene_ids[0]
+        self._current_scene_label = scene_label
+        metadata: Dict[str, Any] = {
+            "source": "habitat_live", "max_steps": self.max_steps,
+        }
+        # MultiON: surface the ordered category chain (written by
+        # make_multion_smoke into the episode's info dict) so the runner's
+        # sub-goal cursor can read it from Episode.metadata. Absent the key,
+        # single-goal episodes carry no chain — behaviour unchanged.
+        ep_info = getattr(env.current_episode, "info", None)
+        if isinstance(ep_info, dict) and ep_info.get("object_categories"):
+            metadata["object_categories"] = [
+                str(c) for c in ep_info["object_categories"]
+            ]
         episode = Episode(
             episode_id=str(getattr(env.current_episode, "episode_id", episode_idx)),
             scene_id=scene_label,
             target_category=getattr(env.current_episode, "object_category", "unknown"),
             target_position=target_pos,
-            metadata={"source": "habitat_live", "max_steps": self.max_steps},
+            metadata=metadata,
         )
         step = self._make_step(obs, action=None, reward=0.0, done=False, info={})
         self._current_episode = episode
@@ -295,6 +335,86 @@ class HabitatObjectNavSource(EpisodeSource):
         if self._env is None:
             return None
         return getattr(self._env, "sim", None) or getattr(self._env, "_sim", None)
+
+    # ------------------------------------------------------------------
+    # MultiON per-sub-goal distance seam
+    # ------------------------------------------------------------------
+
+    def _scene_content(self, scene_label: str) -> Optional[Dict[str, Any]]:
+        """Load (and cache) the dataset content dict for ``scene_label`` from
+        ``content/<scene>.json.gz`` next to ``episodes_path``."""
+        if scene_label in self._scene_content_cache:
+            return self._scene_content_cache[scene_label]
+        content: Optional[Dict[str, Any]] = None
+        if self.episodes_path:
+            path = os.path.join(
+                os.path.dirname(self.episodes_path), "content",
+                f"{scene_label}.json.gz",
+            )
+            if os.path.exists(path):
+                import gzip
+                import json
+                try:
+                    with gzip.open(path, "rt", encoding="utf-8") as f:
+                        content = json.load(f)
+                except Exception:
+                    content = None
+        self._scene_content_cache[scene_label] = content
+        return content
+
+    def _category_viewpoints(self, category: str) -> List[List[float]]:
+        scene = self._current_scene_label or self._scene_ids[0]
+        key = (scene, category)
+        if key not in self._cat_vps_cache:
+            content = self._scene_content(scene)
+            self._cat_vps_cache[key] = (
+                _category_viewpoints_from_content(content, category)
+                if content else []
+            )
+        return self._cat_vps_cache[key]
+
+    def distance_to_category(self, agent_pos, category: str) -> Optional[float]:
+        """Geodesic distance to the nearest goal view_point of ``category``
+        via the sim's multi-goal shortest path. ``inf`` (unreachable), no sim,
+        or no viewpoints -> None (a None never advances a sub-goal)."""
+        sim = self.get_sim()
+        vps = self._category_viewpoints(category)
+        if sim is None or not vps:
+            return None
+        try:
+            d = sim.geodesic_distance(
+                np.asarray(agent_pos, dtype=np.float32),
+                [np.asarray(v, dtype=np.float32) for v in vps],
+            )
+        except Exception:
+            return None
+        if d is None or not np.isfinite(float(d)):
+            return None
+        return float(d)
+
+    def nearest_category_viewpoint(self, agent_pos, category: str):
+        """``(geodesic_distance, viewpoint_position)`` of the nearest
+        view_point of ``category`` (the L_opt leg anchor), or None."""
+        sim = self.get_sim()
+        vps = self._category_viewpoints(category)
+        if sim is None or not vps:
+            return None
+        best_d, best_vp = None, None
+        for vp in vps:
+            try:
+                d = sim.geodesic_distance(
+                    np.asarray(agent_pos, dtype=np.float32),
+                    np.asarray(vp, dtype=np.float32),
+                )
+            except Exception:
+                continue
+            if d is None or not np.isfinite(float(d)):
+                continue
+            if best_d is None or float(d) < best_d:
+                best_d, best_vp = float(d), list(vp)
+        if best_d is None:
+            return None
+        return best_d, best_vp
 
     # ------------------------------------------------------------------
     # helpers

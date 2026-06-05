@@ -219,6 +219,57 @@ def case_roundtrip_via_write_dataset():
     print("  case roundtrip_via_write_dataset: OK")
 
 
+# ----------------------------------------------------------------------
+# habitat_env._category_viewpoints_from_content (pure parser for the
+# per-category distance seam; loaded with stubbed deps, no habitat)
+# ----------------------------------------------------------------------
+
+
+def _load_habitat_env_module():
+    import importlib.util
+    import types
+    from pathlib import Path
+
+    emb_dir = Path(__file__).resolve().parent.parent
+    if "embodied_memory" not in sys.modules:
+        pkg = types.ModuleType("embodied_memory")
+        pkg.__path__ = [str(emb_dir)]
+        sys.modules["embodied_memory"] = pkg
+    src = types.ModuleType("embodied_memory.episode_source")
+    for a in ("AgentState", "Episode", "EpisodeSource", "Step"):
+        setattr(src, a, type(a, (), {}))
+    sys.modules["embodied_memory.episode_source"] = src
+    spec = importlib.util.spec_from_file_location(
+        "embodied_memory.habitat_env", str(emb_dir / "habitat_env.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["embodied_memory.habitat_env"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def case_category_viewpoints_suffix_match():
+    he = _load_habitat_env_module()
+    content = {
+        "goals_by_category": {
+            "scene.basis.glb_tv_monitor": [
+                _goal([0, 0, 0], [_vp([1, 0, 1]), _vp([2, 0, 2])])],
+            "scene.basis.glb_monitor_stand": [_goal([9, 0, 9], [_vp([8, 0, 8])])],
+            "scene.basis.glb_chair": [_goal([5, 0, 5], [_vp([4, 0, 4])])],
+        },
+    }
+    # multi-token category resolves via suffix match (NOT rsplit on '_').
+    # Suffix matching mirrors make_revisit_smoke._goals_key, which the whole
+    # revisit pipeline already uses for these keys; the real HM3D category
+    # set (chair/bed/sofa/toilet/plant/tv_monitor) has no suffix collisions.
+    vps = he._category_viewpoints_from_content(content, "tv_monitor")
+    assert vps == [[1, 0, 1], [2, 0, 2]], vps
+    vps_chair = he._category_viewpoints_from_content(content, "chair")
+    assert vps_chair == [[4, 0, 4]], vps_chair
+    assert he._category_viewpoints_from_content(content, "plant") == []
+    assert he._category_viewpoints_from_content({}, "chair") == []
+    print("  case category_viewpoints_suffix_match: OK")
+
+
 def main() -> int:
     print("make_multion_smoke sanity tests")
     case_co_occurring_categories()
@@ -232,6 +283,7 @@ def main() -> int:
     case_dataset_seeded_reproducible()
     case_roundtrip_via_write_dataset()
     case_dataset_category_filter()
+    case_category_viewpoints_suffix_match()
     print("All cases passed.")
     return 0
 
