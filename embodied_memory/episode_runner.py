@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -282,10 +283,31 @@ def _advance_subgoal(
     return True, subgoal_idx >= n_subgoals - 1
 
 
+def _farthest_from_points(cands: List[FrontierCandidate], points):
+    """The non-stop candidate FARTHEST from ``points`` (max over candidates of
+    the min floor-plane distance to any point) — the least-bad pick when every
+    non-stop candidate sits inside the unreachable blacklist (full2 ep5: the
+    raw-pool fallback re-admitted the bad waypoint and the agent turned in
+    place for 724 ticks). ``None`` when there is no non-stop candidate. Pure."""
+    pts = [(float(p[0]), float(p[1])) for p in points]
+    best = None
+    best_d = -1.0
+    for c in cands:
+        if c.metadata.get("stop_signal", False):
+            continue
+        cx, cz = float(c.world_xy[0]), float(c.world_xy[1])
+        d = min((float(np.hypot(cx - px, cz - pz)) for px, pz in pts),
+                default=float("inf"))
+        if d > best_d:
+            best, best_d = c, d
+    return best
+
+
 def _filter_candidates_near_points(
     cands: List[FrontierCandidate],
     points,
     radius: float,
+    prefer_farthest: bool = False,
 ):
     """Drop pool candidates within ``radius`` (strict ``<``, floor-plane) of
     ANY of ``points`` — the shared engine behind the reached-thrash near-filter
@@ -293,8 +315,14 @@ def _filter_candidates_near_points(
     (points = follower-unreachable waypoints). Returns ``(filtered, n_dropped)``.
 
     * ``stop_signal`` candidates are NEVER dropped — near by design.
-    * If EVERY non-stop candidate would drop, the ORIGINAL list is returned
-      unchanged (n_dropped 0) so the agent is never left waypoint-less.
+    * If EVERY non-stop candidate would drop, the fallback keeps the agent
+      from going waypoint-less:
+      - ``prefer_farthest=False`` (default, near-filter call site): the
+        ORIGINAL list is returned unchanged (n_dropped 0).
+      - ``prefer_farthest=True`` (blacklist call site): keep only the single
+        non-stop candidate FARTHEST from ``points`` (+ stop candidates) —
+        returning the raw pool re-admitted the blacklisted waypoint and froze
+        full2 ep5 in a turn-in-place loop.
     Pure: no I/O."""
     if not points:
         return cands, 0
@@ -314,6 +342,12 @@ def _filter_candidates_near_points(
     if n_dropped and not any(
         not c.metadata.get("stop_signal", False) for c in kept
     ):
+        if prefer_farthest:
+            far = _farthest_from_points(cands, pts)
+            if far is not None:
+                kept = [c for c in cands
+                        if c.metadata.get("stop_signal", False) or c is far]
+                return kept, n_dropped - 1
         return list(cands), 0
     return kept, n_dropped
 
@@ -373,6 +407,29 @@ def _forward_no_progress(
     fires under the navmesh follower, so this is its follower-era analogue
     (multion-micro2: 729 forwards moved the agent 0.07 m total). Pure."""
     return action == ACTION_FORWARD and float(displacement_m) < float(min_progress_m)
+
+
+def _should_snap_unreachable(n: int, threshold: int) -> bool:
+    """True iff ``n`` consecutive follower-unreachable ticks reached the snap
+    threshold (``>=``; 0 disables). full2 ep5: the blacklist alone could not
+    break the loop because the never-moving agent kept re-clustering the same
+    geometry — the escape snaps the waypoint onto the navmesh instead. Pure."""
+    return int(threshold) > 0 and int(n) >= int(threshold)
+
+
+def _no_progress_escape(window, min_events: int, window_size: int) -> bool:
+    """True iff the rolling window of per-tick ``_forward_no_progress`` flags
+    is FULL and carries >= ``min_events`` no-progress forwards (0 disables).
+
+    The grid-era ``collision_escape`` needs two CONSECUTIVE forwards, but the
+    full2 ep4 wall-loop alternates FORWARD/TURN so it never fired —
+    ``_forward_no_progress`` was computed every tick yet only counted. A
+    windowed predicate catches the alternating shape. Pure."""
+    if int(min_events) <= 0:
+        return False
+    if len(window) < int(window_size):
+        return False
+    return sum(1 for w in window if w) >= int(min_events)
 
 
 class EpisodeRunner:
@@ -538,6 +595,28 @@ class EpisodeRunner:
         self.unreachable_blacklist_m: float = float(
             os.environ.get("REMEMBR_UNREACHABLE_BLACKLIST_M", "0.5")
         )
+        # Snap escape (full2 ep5, turn-in-place): after N CONSECUTIVE
+        # follower-unreachable ticks, snap the current waypoint to the nearest
+        # navmesh point (sim.pathfinder.snap_point) and re-commit it once —
+        # the blacklist alone can't break the loop because the never-moving
+        # agent re-clusters the same geometry at coordinates drifting outside
+        # the blacklist radius. Multion-gated; 0 disables; no-sim fallback is
+        # the existing blacklist+drop.
+        self.unreachable_snap_n: int = int(
+            os.environ.get("REMEMBR_UNREACHABLE_SNAP_N", "8")
+        )
+        # Windowed no-progress escape (full2 ep4, forward-into-wall): when
+        # >= MIN of the last WINDOW ticks were no-progress forwards, blacklist
+        # the committed waypoint, drop it, and force a re-propose. The
+        # grid-era collision_escape needs two consecutive forwards and never
+        # fires under the alternating FORWARD/TURN wall-loop. Multion-gated;
+        # MIN=0 disables.
+        self.no_progress_window: int = int(
+            os.environ.get("REMEMBR_NO_PROGRESS_WINDOW", "20")
+        )
+        self.no_progress_min: int = int(
+            os.environ.get("REMEMBR_NO_PROGRESS_MIN", "12")
+        )
 
         # MultiON within-episode consolidation extension seam (OFF by default):
         # when > 0, ALSO flush STM→fine every N keyframes, on top of the
@@ -634,6 +713,8 @@ class EpisodeRunner:
                 "n_candidates_filtered_near": int(ep_metrics.get("n_candidates_filtered_near", 0)),
                 "n_candidates_filtered_unreachable": int(
                     ep_metrics.get("n_candidates_filtered_unreachable", 0)),
+                "n_unreachable_escape": int(ep_metrics.get("n_unreachable_escape", 0)),
+                "n_no_progress_escape": int(ep_metrics.get("n_no_progress_escape", 0)),
                 "remembr_stub_mode": ep_metrics.get("remembr_stub_mode"),
                 "remembr_sample_caption": ep_metrics.get("remembr_sample_caption"),
             })
@@ -730,6 +811,11 @@ class EpisodeRunner:
             "n_candidates_filtered_near": 0,
             # Unreachable-waypoint blacklist drops (multion-full1 third mode).
             "n_candidates_filtered_unreachable": 0,
+            # Stuck-loop escapes (multion-full2 post-mortem): snap escape on
+            # consecutive unreachables (ep5) + windowed no-progress escape
+            # (ep4). Multion-gated actions; counters log unconditionally.
+            "n_unreachable_escape": 0,
+            "n_no_progress_escape": 0,
         }
         # Closest the agent ever gets to a goal viewpoint over the episode
         # (geodesic). success@0.1m is perception-bound with caption-only
@@ -800,6 +886,16 @@ class EpisodeRunner:
         # Waypoints the follower reported unreachable this episode (multion
         # blacklist — filtered from later proposal pools).
         unreachable_xys: List[np.ndarray] = []
+        # Snap-escape state (full2 ep5): consecutive follower-unreachable
+        # ticks; reset on "reached" or a progressing forward.
+        consecutive_unreachable = 0
+        # No-progress-escape state (full2 ep4): rolling window of per-tick
+        # _forward_no_progress flags. Multion-only (None otherwise) — keeps
+        # K=1 byte-identical AND avoids dereferencing the escape knobs on the
+        # oracle path (test_propose_candidates builds an oracle runner via
+        # __new__, skipping __init__).
+        no_progress_window: Optional[deque] = (
+            deque(maxlen=max(1, self.no_progress_window)) if multion else None)
         # Run-6 instrumentation: action mix over the episode (non-oracle path).
         action_counts = {ACTION_STOP: 0, ACTION_FORWARD: 0,
                          ACTION_TURN_LEFT: 0, ACTION_TURN_RIGHT: 0}
@@ -937,11 +1033,16 @@ class EpisodeRunner:
                         ep_metrics_counters["n_candidates_filtered_near"] += _n_near
                         # Unreachable-waypoint blacklist (full1 third mode):
                         # never re-offer a waypoint the follower already
-                        # reported unreachable this episode.
+                        # reported unreachable this episode. prefer_farthest
+                        # (full2 ep5): when EVERY non-stop candidate is
+                        # blacklisted, keep the least-bad (farthest) one
+                        # instead of the raw pool, which re-admitted the bad
+                        # waypoint and froze the agent turning in place.
                         if unreachable_xys and self.unreachable_blacklist_m > 0:
                             all_cands, _n_bl = _filter_candidates_near_points(
                                 all_cands, unreachable_xys,
                                 self.unreachable_blacklist_m,
+                                prefer_farthest=True,
                             )
                             ep_metrics_counters["n_candidates_filtered_unreachable"] += _n_bl
 
@@ -1126,6 +1227,8 @@ class EpisodeRunner:
                 )
                 if _outcome is not None:
                     ep_metrics_counters[f"n_waypoint_{_outcome}"] += 1
+                    if _outcome == "reached":
+                        consecutive_unreachable = 0
                     if (
                         multion
                         and _outcome == "unreachable"
@@ -1139,6 +1242,44 @@ class EpisodeRunner:
                             np.asarray(current_candidate.world_xy,
                                        dtype=np.float32)
                         )
+                        # Snap escape (full2 ep5): the blacklist alone never
+                        # broke the loop — the agent never moves, so the
+                        # planner re-clusters the same geometry at
+                        # coordinates drifting outside the blacklist radius.
+                        # After N consecutive unreachables, snap the waypoint
+                        # to the nearest navmesh point and re-commit it once.
+                        # No sim / snap failure -> blacklist+drop (above).
+                        consecutive_unreachable += 1
+                        if _should_snap_unreachable(
+                            consecutive_unreachable, self.unreachable_snap_n
+                        ):
+                            _sim = self.source.get_sim()
+                            _snapped = None
+                            if _sim is not None:
+                                try:
+                                    _wp = current_candidate.world_xy
+                                    _g = np.array(
+                                        [float(_wp[0]),
+                                         float(step.agent_state.position[1]),
+                                         float(_wp[1])], dtype=np.float32)
+                                    _sp = _sim.pathfinder.snap_point(_g)
+                                    _sp = np.array(
+                                        [float(_sp[0]), float(_sp[1]),
+                                         float(_sp[2])], dtype=np.float32)
+                                    if np.all(np.isfinite(_sp)):
+                                        _snapped = _sp
+                                except Exception:
+                                    _snapped = None  # off-navmesh / no snap
+                            if _snapped is not None:
+                                current_candidate.world_xy = np.array(
+                                    [_snapped[0], _snapped[2]],
+                                    dtype=np.float32)
+                                # Keep the snapped waypoint committed: clear
+                                # the follower-done flag so the drop branch
+                                # below doesn't immediately re-propose.
+                                self._waypoint_force_repropose = False
+                                ep_metrics_counters["n_unreachable_escape"] += 1
+                                consecutive_unreachable = 0
                 # Waypoint-arrival STOP: STOP if the agent is at a confident MEMORY
                 # waypoint (a remembered goal position) and the caption confirms the
                 # goal → terminate here (oracle-ladder proxy). "At" = the follower
@@ -1197,8 +1338,35 @@ class EpisodeRunner:
                 np.asarray(step.agent_state.position, dtype=np.float64)
                 - _pos_before_step
             ))
-            if _forward_no_progress(action, _disp):
+            _no_prog = _forward_no_progress(action, _disp)
+            if _no_prog:
                 ep_metrics_counters["n_forward_no_progress"] += 1
+            elif action == ACTION_FORWARD:
+                # A progressing forward breaks the snap-escape streak.
+                consecutive_unreachable = 0
+            if multion:
+                no_progress_window.append(_no_prog)
+            # Windowed no-progress escape (full2 ep4: 656 no-progress forwards
+            # counted, zero acted on — the FORWARD/TURN alternation kept the
+            # grid-era collision_escape from ever firing). When the window is
+            # full of mostly no-progress forwards: blacklist the committed
+            # waypoint (the same list the unreachable filter consumes), drop
+            # it, and force a re-propose next tick.
+            if (
+                multion
+                and current_candidate is not None
+                and _no_progress_escape(
+                    no_progress_window, self.no_progress_min,
+                    self.no_progress_window,
+                )
+            ):
+                unreachable_xys.append(
+                    np.asarray(current_candidate.world_xy, dtype=np.float32)
+                )
+                current_candidate = None
+                last_propose_step = -10**9
+                no_progress_window.clear()
+                ep_metrics_counters["n_no_progress_escape"] += 1
 
             # MultiON per-tick advance check (gated: K==1 is untouched).
             if multion:
@@ -1384,6 +1552,8 @@ class EpisodeRunner:
         ep_log["n_candidates_filtered_near"] = int(ep_metrics_counters["n_candidates_filtered_near"])
         ep_log["n_candidates_filtered_unreachable"] = int(
             ep_metrics_counters["n_candidates_filtered_unreachable"])
+        ep_log["n_unreachable_escape"] = int(ep_metrics_counters["n_unreachable_escape"])
+        ep_log["n_no_progress_escape"] = int(ep_metrics_counters["n_no_progress_escape"])
         ep_log["n_detector_called"] = int(ep_metrics_counters["n_detector_called"])
         ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
         ep_log["n_detector_locate_failed"] = int(ep_metrics_counters["n_detector_locate_failed"])
@@ -1459,6 +1629,8 @@ class EpisodeRunner:
             "n_candidates_filtered_near": int(ep_metrics_counters["n_candidates_filtered_near"]),
             "n_candidates_filtered_unreachable": int(
                 ep_metrics_counters["n_candidates_filtered_unreachable"]),
+            "n_unreachable_escape": int(ep_metrics_counters["n_unreachable_escape"]),
+            "n_no_progress_escape": int(ep_metrics_counters["n_no_progress_escape"]),
             # Bookkeeping fix (multion-full1 post-mortem): these three were
             # written to the episode JSON but never returned in ep_metrics, so
             # the summary.json per-episode rows read 0 via .get() defaults —
