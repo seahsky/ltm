@@ -375,6 +375,13 @@ def case_single_goal_unfiltered_byte_identity():
     assert ep_log["rerank_calls"] >= 16, ep_log["rerank_calls"]
     assert any(c["id"] == 1 for d in ep_log["decisions"]
                for c in d["candidates"])
+    # Every decision records WHY it proposed (multion-full1 post-mortem: a
+    # per-tick re-propose mode existed that no counter attributed).
+    triggers = [d["trigger"] for d in ep_log["decisions"]]
+    assert triggers[0] == "no_candidate", triggers[:3]
+    assert triggers.count("reached") >= 15, triggers
+    assert all(t in ("no_candidate", "scheduled", "reached")
+               for t in triggers), triggers
     print("  case_single_goal_unfiltered_byte_identity: OK")
 
 

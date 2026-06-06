@@ -89,7 +89,8 @@ banner "[3/6] pre-test code verify (multion suites + regression suites)"
 for T in test_make_multion_smoke test_advance_subgoal test_analyze_multion \
          test_analyze_revisit test_analyze_ablation test_make_revisit_smoke \
          test_propose_candidates test_spl_guard test_episode_order \
-         test_filter_near_candidates test_memory_bridge_consolidate; do
+         test_filter_near_candidates test_memory_bridge_consolidate \
+         test_diagnose_propose_triggers; do
   python "embodied_memory/scripts/${T}.py" \
     || { echo "FATAL: ${T} failed — not spending on the live run."; exit 1; }
 done

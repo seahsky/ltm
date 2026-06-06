@@ -835,6 +835,14 @@ class EpisodeRunner:
             if not multion_force_stop and (
                 current_candidate is None or due_to_propose or candidate_reached
             ):
+                # Record WHY this propose fired (multion-full1 post-mortem: a
+                # per-tick re-propose mode existed that no counter attributed;
+                # diagnose_propose_triggers.py mines this field).
+                propose_trigger = (
+                    "no_candidate" if current_candidate is None
+                    else "reached" if candidate_reached
+                    else "scheduled"
+                )
                 if candidate_reached:
                     ep_metrics_counters["n_propose_reached"] += 1
                     last_reached_propose_step = int(step.step_idx)
@@ -937,6 +945,7 @@ class EpisodeRunner:
 
                     ep_log["decisions"].append({
                         "step_idx": int(step.step_idx),
+                        "trigger": propose_trigger,
                         "raw_top1_id": int(raw_top1.candidate_id),
                         "raw_top1_world_xy": raw_top1.world_xy.tolist(),
                         "raw_top1_score": float(raw_top1.raw_score),
