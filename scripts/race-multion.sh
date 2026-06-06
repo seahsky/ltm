@@ -155,10 +155,12 @@ for p in sorted(glob.glob(sys.argv[1] + '/episode_*.json')):
     e = json.load(open(p))
     cats = ','.join(e.get('target_categories') or [str(e.get('target_category'))])
     print('    ep%-3s %-22s rerank=%s/%s reached=%s filt_near=%s '
-          'mem_cand=%s mem_chosen=%s adv=%s' % (
+          'filt_unreach=%s wp_unreach=%s mem_cand=%s mem_chosen=%s adv=%s' % (
         e.get('episode_idx'), cats,
         e.get('rerank_calls'), e.get('n_steps'),
         e.get('n_propose_reached'), e.get('n_candidates_filtered_near'),
+        e.get('n_candidates_filtered_unreachable'),
+        e.get('n_waypoint_unreachable'),
         e.get('n_memory_candidates'), e.get('n_memory_chosen'),
         len(e.get('subgoals_found') or [])))" "$out_dir" \
     || echo "  WARN: per-episode digest failed for $out_dir"

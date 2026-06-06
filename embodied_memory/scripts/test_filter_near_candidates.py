@@ -200,6 +200,48 @@ def case_cooldown_elapsed_pure():
 
 
 # ----------------------------------------------------------------------
+# 2b. pure: _filter_candidates_near_points (the unreachable-waypoint
+#     blacklist — multion-full1 third absorbing mode: the follower reports
+#     the chosen frontier waypoint unreachable, the candidate is dropped,
+#     and the planner re-proposes the SAME cluster next tick, forever:
+#     S1 6/8 eps, S3 3/8, top pick re-chosen 593-732x)
+# ----------------------------------------------------------------------
+
+
+def case_blacklist_point_dropped_far_survives():
+    cands = [_cand(1, (5.0, 5.0)), _cand(2, (8.0, 0.0))]
+    out, n = er._filter_candidates_near_points(cands, [(5.2, 5.0)], 0.5)
+    assert [c.candidate_id for c in out] == [2], out
+    assert n == 1, n
+    print("  case_blacklist_point_dropped_far_survives: OK")
+
+
+def case_blacklist_multiple_points():
+    cands = [_cand(1, (5.0, 5.0)), _cand(2, (8.0, 0.0)), _cand(3, (1.0, 1.0))]
+    out, n = er._filter_candidates_near_points(
+        cands, [(5.0, 5.0), (1.2, 1.0)], 0.5)
+    assert [c.candidate_id for c in out] == [2], out
+    assert n == 2, n
+    print("  case_blacklist_multiple_points: OK")
+
+
+def case_blacklist_preserves_stop_and_falls_back():
+    # stop candidates survive; all non-stop blacklisted -> original list.
+    cands = [_cand(1, (0.0, 0.0), stop=True), _cand(2, (5.0, 5.0))]
+    out, n = er._filter_candidates_near_points(cands, [(5.0, 5.0)], 0.5)
+    assert [c.candidate_id for c in out] == [1, 2], out
+    assert n == 0, n
+    print("  case_blacklist_preserves_stop_and_falls_back: OK")
+
+
+def case_blacklist_empty_points_noop():
+    cands = [_cand(1, (5.0, 5.0))]
+    out, n = er._filter_candidates_near_points(cands, [], 0.5)
+    assert out == cands and n == 0
+    print("  case_blacklist_empty_points_noop: OK")
+
+
+# ----------------------------------------------------------------------
 # 3. runner-level (stubs from test_advance_subgoal.py)
 # ----------------------------------------------------------------------
 
@@ -341,9 +383,9 @@ class _StubSource:
         return 3.0, np.array([1.0, 0.0, 1.0], dtype=np.float32)
 
 
-def _mk_runner(source, planner):
+def _mk_runner(source, planner, cls=None):
     tmp = tempfile.mkdtemp(prefix="filter-near-test-")
-    return er.EpisodeRunner(
+    return (cls or er.EpisodeRunner)(
         source=source, planner=planner, bridge=_StubBridge(),
         clip_encoder=None, captioner=None, out_dir=tmp,
         target_category="chair", keyframe_every_m=1,
@@ -400,6 +442,76 @@ def case_multion_cooldown_bounds_repropose():
     print("  case_multion_cooldown_bounds_repropose: OK")
 
 
+# ----------------------------------------------------------------------
+# 3b. runner-level: unreachable-waypoint blacklist (full1 third mode)
+# ----------------------------------------------------------------------
+
+
+class _UnreachableTopPlanner(_BasePlanner):
+    """Pool always led by the same 'best' waypoint — which the follower will
+    report unreachable — plus a reachable alternative. The full1 absorbing
+    geometry: unreachable -> drop -> SAME cluster re-proposed -> forever."""
+
+    def propose(self, pos, yaw):
+        return [
+            er.FrontierCandidate(
+                candidate_id=1, world_xy=np.array([5.0, 5.0], dtype=np.float32),
+                grid_rc=(0, 0), distance_m=7.1, bearing_rad=0.0, cluster_size=3,
+                raw_score=0.9, source="frontier", metadata={}),
+            er.FrontierCandidate(
+                candidate_id=2, world_xy=np.array([8.0, 0.0], dtype=np.float32),
+                grid_rc=(0, 0), distance_m=8.0, bearing_rad=0.0, cluster_size=1,
+                raw_score=0.5, source="frontier", metadata={}),
+        ]
+
+
+class _UnreachableFollowerRunner(er.EpisodeRunner):
+    """Waypoint (5,5) is navmesh-unreachable: the follower signals 'done'
+    while the agent is still far (force_repropose + TURN, exactly what
+    _waypoint_action does on a None/STOP from the real follower)."""
+
+    def _waypoint_action(self, candidate, agent_pos, agent_yaw,
+                         use_approach_follower=False):
+        if (abs(float(candidate.world_xy[0]) - 5.0) < 1e-6
+                and abs(float(candidate.world_xy[1]) - 5.0) < 1e-6):
+            self._waypoint_force_repropose = True
+            return er.ACTION_TURN_LEFT
+        self._waypoint_force_repropose = False
+        return ACTION_FORWARD
+
+
+def case_multion_blacklists_unreachable_waypoint():
+    runner = _mk_runner(_StubSource(seq=["chair", "bed", "toilet"]),
+                        _UnreachableTopPlanner(),
+                        cls=_UnreachableFollowerRunner)
+    ep_log, metrics = runner._run_episode(0)
+    # The bad waypoint is tried ONCE, blacklisted, and never re-chosen.
+    assert ep_log["n_waypoint_unreachable"] == 1, ep_log["n_waypoint_unreachable"]
+    assert ep_log["n_candidates_filtered_unreachable"] >= 1, ep_log
+    assert ep_log["rerank_calls"] <= 6, ep_log["rerank_calls"]
+    chosen_ids = [d["chosen_id"] for d in ep_log["decisions"]]
+    assert chosen_ids[0] == 1 and all(c == 2 for c in chosen_ids[1:]), chosen_ids
+    # Bookkeeping fix: the counters reach ep_metrics (summary rows showed 0
+    # in multion-full1 while the episode JSONs carried 662 — misled the
+    # post-mortem).
+    assert metrics["n_waypoint_unreachable"] == ep_log["n_waypoint_unreachable"]
+    assert metrics["n_waypoint_reached"] == ep_log["n_waypoint_reached"]
+    assert metrics["n_forward_no_progress"] == ep_log["n_forward_no_progress"]
+    print("  case_multion_blacklists_unreachable_waypoint: OK")
+
+
+def case_single_goal_unreachable_loop_preserved():
+    # K=1 byte-identity: no blacklist — the unreachable top pick is re-chosen
+    # every tick exactly as before (the legacy loop, deliberately preserved).
+    runner = _mk_runner(_StubSource(seq=None), _UnreachableTopPlanner(),
+                        cls=_UnreachableFollowerRunner)
+    ep_log, metrics = runner._run_episode(0)
+    assert ep_log["n_waypoint_unreachable"] >= 15, ep_log["n_waypoint_unreachable"]
+    assert ep_log["rerank_calls"] >= 16, ep_log["rerank_calls"]
+    assert ep_log["n_candidates_filtered_unreachable"] == 0, ep_log
+    print("  case_single_goal_unreachable_loop_preserved: OK")
+
+
 def main() -> int:
     print("reached-thrash escape sanity tests")
     case_near_dropped_far_survives()
@@ -409,9 +521,15 @@ def main() -> int:
     case_boundary_distance_survives()
     case_agent_offset_uses_world_frame()
     case_cooldown_elapsed_pure()
+    case_blacklist_point_dropped_far_survives()
+    case_blacklist_multiple_points()
+    case_blacklist_preserves_stop_and_falls_back()
+    case_blacklist_empty_points_noop()
     case_multion_filters_near_candidates()
     case_single_goal_unfiltered_byte_identity()
     case_multion_cooldown_bounds_repropose()
+    case_multion_blacklists_unreachable_waypoint()
+    case_single_goal_unreachable_loop_preserved()
     print("All cases passed.")
     return 0
 

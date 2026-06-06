@@ -282,6 +282,42 @@ def _advance_subgoal(
     return True, subgoal_idx >= n_subgoals - 1
 
 
+def _filter_candidates_near_points(
+    cands: List[FrontierCandidate],
+    points,
+    radius: float,
+):
+    """Drop pool candidates within ``radius`` (strict ``<``, floor-plane) of
+    ANY of ``points`` — the shared engine behind the reached-thrash near-filter
+    (points = [agent position]) and the unreachable-waypoint blacklist
+    (points = follower-unreachable waypoints). Returns ``(filtered, n_dropped)``.
+
+    * ``stop_signal`` candidates are NEVER dropped — near by design.
+    * If EVERY non-stop candidate would drop, the ORIGINAL list is returned
+      unchanged (n_dropped 0) so the agent is never left waypoint-less.
+    Pure: no I/O."""
+    if not points:
+        return cands, 0
+    pts = [(float(p[0]), float(p[1])) for p in points]
+    kept: List[FrontierCandidate] = []
+    n_dropped = 0
+    for c in cands:
+        if c.metadata.get("stop_signal", False):
+            kept.append(c)
+            continue
+        cx, cz = float(c.world_xy[0]), float(c.world_xy[1])
+        if any(float(np.hypot(cx - px, cz - pz)) < float(radius)
+               for px, pz in pts):
+            n_dropped += 1
+            continue
+        kept.append(c)
+    if n_dropped and not any(
+        not c.metadata.get("stop_signal", False) for c in kept
+    ):
+        return list(cands), 0
+    return kept, n_dropped
+
+
 def _filter_near_candidates(
     cands: List[FrontierCandidate],
     agent_xy,
@@ -293,31 +329,11 @@ def _filter_near_candidates(
     because the pool kept yielding candidates inside the 0.5 m reached
     radius). Returns ``(filtered, n_dropped)``.
 
-    * Strict ``<`` (matching ``_advance_subgoal`` and the ``candidate_reached``
-      trigger): a candidate at exactly ``min_target_m`` can never re-trigger
-      "reached", so it survives.
-    * ``stop_signal`` candidates are NEVER dropped — they are near by design.
-    * If EVERY non-stop candidate would drop, the ORIGINAL list is returned
-      unchanged (n_dropped 0) so the agent is never left waypoint-less; the
-      cooldown backstop bounds the loop in that pathological geometry.
-    Pure: no I/O."""
-    ax, az = float(agent_xy[0]), float(agent_xy[1])
-    kept: List[FrontierCandidate] = []
-    n_dropped = 0
-    for c in cands:
-        if c.metadata.get("stop_signal", False):
-            kept.append(c)
-            continue
-        d = float(np.hypot(float(c.world_xy[0]) - ax, float(c.world_xy[1]) - az))
-        if d < float(min_target_m):
-            n_dropped += 1
-            continue
-        kept.append(c)
-    if n_dropped and not any(
-        not c.metadata.get("stop_signal", False) for c in kept
-    ):
-        return list(cands), 0
-    return kept, n_dropped
+    Strict ``<`` (matching ``_advance_subgoal`` and the ``candidate_reached``
+    trigger): a candidate at exactly ``min_target_m`` can never re-trigger
+    "reached", so it survives. stop_signal preservation + all-near fallback
+    semantics live in ``_filter_candidates_near_points``. Pure: no I/O."""
+    return _filter_candidates_near_points(cands, [agent_xy], min_target_m)
 
 
 def _cooldown_elapsed(step_idx: int, last_fire_step: int, cooldown: int) -> bool:
@@ -512,6 +528,16 @@ class EpisodeRunner:
         self.propose_cooldown: int = int(
             os.environ.get("REMEMBR_PROPOSE_COOLDOWN", "3")
         )
+        # Unreachable-waypoint blacklist (multion-full1 third absorbing mode:
+        # follower reports the chosen frontier waypoint navmesh-unreachable →
+        # candidate dropped → the planner re-proposes the SAME cluster next
+        # tick → turn-forever; S1 6/8 eps, S3 3/8, top pick re-chosen up to
+        # 732×). Multion-gated: waypoints the follower reported unreachable
+        # this episode are filtered from later pools (same stop-preserving /
+        # never-empty fallback as the near-filter). 0 disables.
+        self.unreachable_blacklist_m: float = float(
+            os.environ.get("REMEMBR_UNREACHABLE_BLACKLIST_M", "0.5")
+        )
 
         # MultiON within-episode consolidation extension seam (OFF by default):
         # when > 0, ALSO flush STM→fine every N keyframes, on top of the
@@ -606,6 +632,8 @@ class EpisodeRunner:
                 "n_forward_no_progress": int(ep_metrics.get("n_forward_no_progress", 0)),
                 "n_propose_reached": int(ep_metrics.get("n_propose_reached", 0)),
                 "n_candidates_filtered_near": int(ep_metrics.get("n_candidates_filtered_near", 0)),
+                "n_candidates_filtered_unreachable": int(
+                    ep_metrics.get("n_candidates_filtered_unreachable", 0)),
                 "remembr_stub_mode": ep_metrics.get("remembr_stub_mode"),
                 "remembr_sample_caption": ep_metrics.get("remembr_sample_caption"),
             })
@@ -700,6 +728,8 @@ class EpisodeRunner:
             # triggered re-proposes + near-candidates dropped from the pool.
             "n_propose_reached": 0,
             "n_candidates_filtered_near": 0,
+            # Unreachable-waypoint blacklist drops (multion-full1 third mode).
+            "n_candidates_filtered_unreachable": 0,
         }
         # Closest the agent ever gets to a goal viewpoint over the episode
         # (geodesic). success@0.1m is perception-bound with caption-only
@@ -767,6 +797,9 @@ class EpisodeRunner:
         last_propose_step: int = -10**9  # forces a proposal on the first loop tick
         # Last step a REACHED-triggered re-propose fired (cooldown backstop).
         last_reached_propose_step: int = -10**9
+        # Waypoints the follower reported unreachable this episode (multion
+        # blacklist — filtered from later proposal pools).
+        unreachable_xys: List[np.ndarray] = []
         # Run-6 instrumentation: action mix over the episode (non-oracle path).
         action_counts = {ACTION_STOP: 0, ACTION_FORWARD: 0,
                          ACTION_TURN_LEFT: 0, ACTION_TURN_RIGHT: 0}
@@ -902,6 +935,15 @@ class EpisodeRunner:
                             self.min_target_m,
                         )
                         ep_metrics_counters["n_candidates_filtered_near"] += _n_near
+                        # Unreachable-waypoint blacklist (full1 third mode):
+                        # never re-offer a waypoint the follower already
+                        # reported unreachable this episode.
+                        if unreachable_xys and self.unreachable_blacklist_m > 0:
+                            all_cands, _n_bl = _filter_candidates_near_points(
+                                all_cands, unreachable_xys,
+                                self.unreachable_blacklist_m,
+                            )
+                            ep_metrics_counters["n_candidates_filtered_unreachable"] += _n_bl
 
                     rerank_result, retrieval = self.bridge.rerank(
                         candidates=all_cands,
@@ -1084,6 +1126,19 @@ class EpisodeRunner:
                 )
                 if _outcome is not None:
                     ep_metrics_counters[f"n_waypoint_{_outcome}"] += 1
+                    if (
+                        multion
+                        and _outcome == "unreachable"
+                        and current_candidate is not None
+                    ):
+                        # Blacklist the failed waypoint so the next proposal
+                        # pool can't re-offer the same cluster (full1: the
+                        # top pick was re-chosen 593-732× in a turn-forever
+                        # loop after every unreachable drop).
+                        unreachable_xys.append(
+                            np.asarray(current_candidate.world_xy,
+                                       dtype=np.float32)
+                        )
                 # Waypoint-arrival STOP: STOP if the agent is at a confident MEMORY
                 # waypoint (a remembered goal position) and the caption confirms the
                 # goal → terminate here (oracle-ladder proxy). "At" = the follower
@@ -1327,6 +1382,8 @@ class EpisodeRunner:
         ep_log["n_forward_no_progress"] = int(ep_metrics_counters["n_forward_no_progress"])
         ep_log["n_propose_reached"] = int(ep_metrics_counters["n_propose_reached"])
         ep_log["n_candidates_filtered_near"] = int(ep_metrics_counters["n_candidates_filtered_near"])
+        ep_log["n_candidates_filtered_unreachable"] = int(
+            ep_metrics_counters["n_candidates_filtered_unreachable"])
         ep_log["n_detector_called"] = int(ep_metrics_counters["n_detector_called"])
         ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
         ep_log["n_detector_locate_failed"] = int(ep_metrics_counters["n_detector_locate_failed"])
@@ -1400,6 +1457,16 @@ class EpisodeRunner:
             "n_detector_approach_stop_distance": float(ep_metrics_counters["n_detector_approach_stop_distance"]),
             "n_propose_reached": int(ep_metrics_counters["n_propose_reached"]),
             "n_candidates_filtered_near": int(ep_metrics_counters["n_candidates_filtered_near"]),
+            "n_candidates_filtered_unreachable": int(
+                ep_metrics_counters["n_candidates_filtered_unreachable"]),
+            # Bookkeeping fix (multion-full1 post-mortem): these three were
+            # written to the episode JSON but never returned in ep_metrics, so
+            # the summary.json per-episode rows read 0 via .get() defaults —
+            # the emailed digest showed 0/0 while ep2's episode JSON carried
+            # n_waypoint_unreachable=662, mis-directing the diagnosis.
+            "n_waypoint_reached": int(ep_metrics_counters["n_waypoint_reached"]),
+            "n_waypoint_unreachable": int(ep_metrics_counters["n_waypoint_unreachable"]),
+            "n_forward_no_progress": int(ep_metrics_counters["n_forward_no_progress"]),
             "grid_cells_free": grid_stats["cells_free"],
             "grid_cells_occupied": grid_stats["cells_occupied"],
             "grid_cells_unknown": grid_stats["cells_unknown"],
