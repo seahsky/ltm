@@ -134,8 +134,22 @@ favors the **heuristic** (binary SPL@0.1 m −0.043, CI excludes 0; succ@1m 0.57
 two Run-13 artifacts were corrected: the n=4 cold regression was **noise** (n=10 cold trained ≥
 heuristic), and the trained head is **~20% more step-efficient** (94.5 vs 119.7). Net: a
 precision-vs-efficiency tradeoff at parity, not a winner — **heuristic stays the default when
-exact arrival matters; scorer-head lever stays CLOSED**. Remaining on-thesis pushes
-(orthogonal): the predictor (U) / coarse-affordance heads, or a blended precision-aware R.
+exact arrival matters; scorer-head lever stays CLOSED**.
+**Predictor (U) head training CLOSED too — it REGRESSES warm (2026-06-08, Run 18;
+`PHASE2_ABLATION_REPORT.md` Run 18).** The β-weight `U` head was trained as a *self-supervised*
+next-caption forward model (`U=(1−cos(pred,actual))/2`), deliberately avoiding the scorer-d1
+weak-label trap. Full fresh wide-matrix run (build eval set → 30 training eps → S1/S3-heur/S3-
+trained-u). **Trained U REGRESSES the thesis-relevant warm condition: warm soft-SPL S3−S1 +0.112
+(heuristic, 10th repro, p=0.011) → +0.061 (trained, p=0.069, CI straddles 0)** — the *same
+over-fire signature as scorer-d1*: warm `mem_chosen` 856→1165 (+36%, the forward model assigns
+high surprise to most captions, inflating `I` broadly → over-retrieval → thrash), warm `succ@1m`
+collapses 0.577→0.385 (exactly back to S1), min_d2g worse; ~8% fewer steps (same efficiency-for-
+precision trade as the scorer). Cold cross-category transfer survives (both p=0.001). Verdict:
+**both trainable importance heads (R, U) are at/near or below the hand-tuned heuristic ceiling —
+training doesn't beat the heuristics here**; the consolidation-importance path is load-bearing (a
+mis-weighted head breaks the LTM via over-fire). Driver `scripts/race-train-predictor.sh`. The
+only untouched LTM head is now the **coarse-layer affordance** head. Remaining on-thesis pushes
+(orthogonal): the coarse-affordance head, or a blended precision-aware importance weight.
 **Run 17 (2026-06-07) completed the wide matrix's module attribution** (`race-wide-s2.sh`,
 S2 on the exact scorer-d3 dataset): warm S2−S1 = +0.012 n.s. / binary exactly 0.000, warm
 S3−S2 = **+0.103, p=0.017** (binary +0.074, p=0.039) — **~90% of the soft-SPL effect and

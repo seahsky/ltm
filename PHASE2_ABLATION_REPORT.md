@@ -2289,3 +2289,61 @@ wide-matrix claim: memory lifts warm soft-SPL +0.115 (p=0.005) and benchmark SR 
 |---|---|
 | `scripts/race-wide-s2.sh` | S2 on the existing scorer-d3 dataset (no rebuild) + 3-setting revisit analysis |
 | `runs/wide-s2` | the S2 arm (36 eps, commit 0f0a6f3) |
+
+# Run 18 — Train the LTM surprise (U) head → it REGRESSES warm; both trainable importance heads are at/near the heuristic ceiling (RACE, 2026-06-08)
+
+The second (and last self-supervised) on-thesis training lever. After Run 13/14 showed the
+importance **R** head (`train_scorer`, α weight) doesn't beat the hand-tuned heuristic, this
+trains the **U** head (`train_predictor`, β weight in `I = αR + βU + γN`) — a **self-supervised
+next-caption forward model**: given the running caption history, predict the next caption
+embedding; surprise `U = (1 − cos(predicted, actual)) / 2` gates the top-k fine-layer writes.
+Self-supervision deliberately sidesteps the scorer-d1 weak-label trap (no episode-outcome label
+to be unlearnable). Full fresh run: a new 6-category × 2-scene wide revisit eval set (36 eps),
+30 fresh val_mini S3 episodes as training data, train the head (`--encoder sbert`, history-len 5,
+8 epochs), then three eval cells in separate processes — **S1, S3-heuristic-U, S3-trained-U**
+(`--predictor-ckpt`). Exit 0, 5h51m, commit `9704e0b`. Driver `scripts/race-train-predictor.sh`.
+
+## Head-to-head (paired bootstrap vs the common S1, 90% CI, n=26 warm / 10 cold)
+
+| | WARM soft-SPL S3−S1 | WARM binary SPL S3−S1 | warm mem_chosen | warm succ@1m | warm min_d2g | warm steps |
+|---|---|---|---|---|---|---|
+| **heuristic U (baseline)** | **+0.1120, [+0.030, +0.198], p=0.011** | +0.0655, p=0.064 | 856 | 0.577 | 3.693 m | 118.2 |
+| **trained U head** | **+0.0613, [−0.007, +0.135], p=0.069 — n.s.** | +0.0310, p=0.272 | **1165** | **0.385** | 4.598 m | 109.2 |
+| S1 reference | — | — | 0 | 0.385 | 3.813 m | 127.6 |
+
+## Verdict — clean negative, identical shape to the scorer head
+
+**The trained U head REGRESSES the thesis-relevant warm condition** (+0.112 → +0.061; the 90% CI
+now straddles zero, p 0.011 → 0.069) and the heuristic strictly dominates by ≈+0.05 soft-SPL.
+The regression is **mechanistic, not noise** — the same over-fire signature as scorer-d1:
+
+- **Memory over-fires.** Warm `mem_chosen` 856 → **1165 (+36%)**, cold 211 → 278. The forward
+  model assigns high surprise to most captions (the Qwen-VL caption stream is diverse and hard to
+  predict), inflating `I` broadly → more top-k fine-layer writes → over-retrieval → thrash. The
+  heuristic U (cosine novelty against existing memory) is more conservative and discriminative.
+- **Arrival collapses.** Warm `succ@1m` 0.577 → **0.385 — exactly back to S1's 0.385**; `min_d2g`
+  3.693 → 4.598 m. The extra (often wrong-instance) memory picks steer the agent off the goal.
+- **Same efficiency-for-precision trade as the scorer head:** trained is ~8% fewer steps
+  (118.2 → 109.2) while losing reach — not a win.
+- **Cold cross-category transfer survives** (heuristic +0.157, trained +0.139, both p=0.001):
+  the over-fire hurts the *precise-arrival* warm case, not the coarse scene-mapping cold case.
+
+The heuristic baseline reproduced the wide-matrix thesis a **10th time** (warm S3−S1 +0.112,
+p=0.011 ≈ Run 14's +0.115). Net: **both trainable importance heads — R (scorer) and U
+(predictor) — are at/near or below the hand-tuned heuristic ceiling; training does not beat the
+heuristics at this scale.** The exercise re-confirms the consolidation-importance path is
+load-bearing (a mis-weighted head measurably breaks the LTM via over-fire), which is itself
+evidence the mechanism is the right one. **The importance-head training chapter is CLOSED.** The
+only untouched LTM head is the **coarse-layer affordance** head.
+
+## File index (Run 18)
+
+| Path | Purpose |
+|---|---|
+| `scripts/race-train-predictor.sh` | full predictor run: build wide eval set → train U head → S1/S3-heur/S3-trained-u head-to-head |
+| `dialogue_memory/train_predictor.py` | `load_predictor`, `_cosine_surprise`, `compute_surprise_norm` (inference wiring) |
+| `dialogue_memory/consolidation.py` | `utility_predictor` path in `_compute_uniqueness` (history = last 5 utterances, reset per session) |
+| `embodied_memory/memory_bridge.py` | `predictor_ckpt` load + loud dim-mismatch raise |
+| `embodied_memory/scripts/test_predictor_wiring.py` | 13-case TDD suite for the wiring |
+| `models/embodied/predictor-predictor-e1.pt` | the trained U head checkpoint |
+| `runs/predictor-e1-s{1,s3-heur,s3-trained-u}` | the three eval cells (36 eps each, commit 9704e0b) |
