@@ -24,6 +24,13 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || { echo "FATAL: cannot cd to repo root"; exit 1; }
 
+# Pure-stdlib log mining — no conda env needed (unlike the other race-*
+# drivers this one does NOT source race-setup.sh). In a fresh shell `python`
+# may not exist (Ubuntu ships python3 only); fall back to python3.
+PY="$(command -v python || command -v python3)" \
+  || { echo "FATAL: neither python nor python3 on PATH"; exit 1; }
+echo "using interpreter: $PY"
+
 # Default = the Run-13/14 wide-matrix runs + any revisit-tagged runs found
 # on disk (these dirs exist on RACE only). Override by passing run dirs as
 # args.
@@ -47,7 +54,7 @@ git pull --ff-only || { echo "FATAL: git pull failed"; exit 1; }
 
 # --- 2. sanity tests (habitat/torch-free; abort on fail) ---
 banner "[2/3] sanity: test_diagnose_benchmark.py"
-python embodied_memory/scripts/test_diagnose_benchmark.py \
+"$PY" embodied_memory/scripts/test_diagnose_benchmark.py \
   || { echo "FATAL: benchmark-success sanity suite failed."; exit 1; }
 
 # --- 3. recompute benchmark success over existing logs ---
@@ -60,12 +67,12 @@ if [ ${#EXISTING[@]} -eq 0 ]; then
   exit 1
 fi
 banner "[3/3] benchmark success recompute (${#EXISTING[@]} run dirs)"
-python embodied_memory/scripts/diagnose_pipeline.py --benchmark "${EXISTING[@]}"
+"$PY" embodied_memory/scripts/diagnose_pipeline.py --benchmark "${EXISTING[@]}"
 
 # Spot-check the at-STOP assumption on one stopped episode: STOP terminates
 # the episode, so final distance_to_goal should be distance-at-STOP.
 banner "spot-check: one action_stop>0 episode (d2g is at-STOP)"
-python - "${EXISTING[@]}" <<'EOF'
+"$PY" - "${EXISTING[@]}" <<'EOF'
 import glob, json, os, sys
 for rd in sys.argv[1:]:
     for p in sorted(glob.glob(os.path.join(rd, "episode_*.json"))):
