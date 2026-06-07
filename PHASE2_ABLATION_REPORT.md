@@ -2246,3 +2246,46 @@ stopped, so reach = at-STOP). Stakeholder report corrected in the three spots th
 | `embodied_memory/scripts/diagnose_pipeline.py --benchmark` | at-STOP success recompute over episode JSONs (radius sweep, cold/warm split, stop-precedence rules) |
 | `embodied_memory/scripts/test_diagnose_benchmark.py` | 8-case sanity suite (stop precedence, radius boundary, reach≠success) |
 | `scripts/race-benchmark-success.sh` | one-shot driver (pull → sanity → recompute → at-STOP spot-check); python3 fallback, no conda needed |
+
+# Run 17 — Wide-matrix S2 fill: the Phase-C decomposition holds at n=26 — the effect is LTM-specific (RACE, 2026-06-07)
+
+Run 14's wide matrix (6 categories × 2 scenes) ran only S1/S3, leaving the module
+attribution to Phase C's smaller chair+bed matrix (where S2−S1 was exactly 0.000).
+`scripts/race-wide-s2.sh` filled in S2 (STM-only) on the **exact same dataset** (no
+rebuild — the paired analysis needs the episodes S1/S3 ran; the intervening multion
+commits are K=1 byte-identical by test, so the arms are comparable across code versions).
+36/36 episodes, 2h02m.
+
+## Decomposition (paired bootstrap, 90% CI)
+
+| contrast | WARM soft-SPL (n=26) | WARM binary SPL (n=26) |
+|---|---|---|
+| S3−S1 (total) | +0.1147, p=0.005 | +0.0739, p=0.039 |
+| **S2−S1 (STM only)** | **+0.0121, [+0.000, +0.031], p=0.123 — n.s.** | **+0.0000 exactly** |
+| **S3−S2 (LTM-specific)** | **+0.1026, [+0.023, +0.186], p=0.017** | **+0.0739, p=0.039** |
+
+S2's run signature confirms the arm is what it claims: mem_chosen 0, fire_rate 0, LTM
+0/0/0. **~90% of the soft-SPL effect and 100% of the binary-precision effect attribute to
+the LTM modules (consolidation + hierarchical LTM + rerank, the proposal's modules 2–4);
+the STM contributes a small non-significant lean (+0.012)** — consistent with Phase C's
+exact zero on the easier matrix. This is the **9th reproduction** of the warm S3 > S1
+thesis and the **2nd clean decomposition**, now at the wider n.
+
+Footnotes: (a) cold S3−S1 = +0.157 (p<0.001) is NOT ~0 — as in Run 14, the LTM persists
+across the interleaved run, so a category's first visit already benefits from scenes
+mapped while hunting *other* categories: cross-category lifelong transfer, not a leak.
+(b) wide-s2's ep32 shows the legacy K=1 unreachable loop (wp_unreach=238) — expected:
+the full2–full4 escapes are multion-gated precisely so this arm stays comparable.
+
+## Verdict
+
+**The wide-matrix gain is LTM-specific, like Phase C's.** The complete, now fully-attributed
+wide-matrix claim: memory lifts warm soft-SPL +0.115 (p=0.005) and benchmark SR 31%→50%
+(Run 16), of which effectively all is the hierarchical LTM stack — STM alone does ~nothing.
+
+## File index (Run 17)
+
+| Path | Purpose |
+|---|---|
+| `scripts/race-wide-s2.sh` | S2 on the existing scorer-d3 dataset (no rebuild) + 3-setting revisit analysis |
+| `runs/wide-s2` | the S2 arm (36 eps, commit 0f0a6f3) |

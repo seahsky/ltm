@@ -136,6 +136,12 @@ heuristic), and the trained head is **~20% more step-efficient** (94.5 vs 119.7)
 precision-vs-efficiency tradeoff at parity, not a winner — **heuristic stays the default when
 exact arrival matters; scorer-head lever stays CLOSED**. Remaining on-thesis pushes
 (orthogonal): the predictor (U) / coarse-affordance heads, or a blended precision-aware R.
+**Run 17 (2026-06-07) completed the wide matrix's module attribution** (`race-wide-s2.sh`,
+S2 on the exact scorer-d3 dataset): warm S2−S1 = +0.012 n.s. / binary exactly 0.000, warm
+S3−S2 = **+0.103, p=0.017** (binary +0.074, p=0.039) — **~90% of the soft-SPL effect and
+100% of the binary-precision effect is LTM-specific**, reproducing Phase C's decomposition
+at n=26 (9th warm-thesis reproduction). Cold S3−S1 +0.157 is cross-category lifelong
+transfer (scene mapped while hunting other categories), not a leak.
 
 **Embodied binary-SPL work CLOSED — localization-bound (2026-06-03, Run 12; see
 `PHASE2_ABLATION_REPORT.md` Run 12).** A component diagnosis (`diagnose_pipeline.py`)
