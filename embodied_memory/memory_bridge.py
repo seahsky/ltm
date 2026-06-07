@@ -19,6 +19,7 @@ The ``dialogue_memory/`` modules are imported as-is — we never modify them.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -304,6 +305,15 @@ class EmbodiedMemoryBridge:
                     f"fall back to the heuristic. Re-train with the SAME text "
                     f"encoder (e.g. --encoder sbert) the bridge indexes with."
                 )
+        # Per-episode U calibration (trained-U only). The forward model's raw
+        # surprise has little spread (~0.30 ± 0.05) — a near-constant offset
+        # that flattens the top-k write selection; rank/z-score normalization
+        # across the episode restores discriminative spread. Default 'zscore'
+        # when a predictor is loaded (inert otherwise — the consolidator gates
+        # on utility_predictor); REMEMBR_U_CALIB overrides (none|rank|zscore).
+        uniqueness_calibration = (
+            os.environ.get("REMEMBR_U_CALIB", "zscore") if predictor_ckpt else "none"
+        )
         self.consolidator = DialogueConsolidation(
             ltm=self.ltm,
             alpha=0.4,
@@ -314,6 +324,7 @@ class EmbodiedMemoryBridge:
             scorer_embed_dim=scorer_embed_dim,
             utility_predictor=utility_predictor,
             predictor_embed_dim=predictor_embed_dim,
+            uniqueness_calibration=uniqueness_calibration,
         )
 
         # 3. Pattern clusterer + mid layer. Dim matches the LTM (CLIP space

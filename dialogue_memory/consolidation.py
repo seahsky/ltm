@@ -12,9 +12,44 @@ I(τ_i) = α * R_i + β * U_i + γ * N_i
 """
 
 import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Sequence
 from dataclasses import dataclass
 from .ltm import HierarchicalLTM, MemoryEntry
+
+
+def _calibrate_uniqueness_pool(raw_us: Sequence[float], mode: str) -> List[float]:
+    """Re-spread a per-episode pool of raw U (surprise) values so the top-k
+    write selection is driven by *relative* within-episode surprise rather
+    than a near-constant offset.
+
+    - ``"none"``   : identity (returns the values unchanged).
+    - ``"rank"``   : percentile rank in [0,1] — the i-th smallest -> i/(n-1);
+                     a singleton -> 0.5. Scale-free, robust, full spread.
+    - ``"zscore"`` : ``sigmoid((u - mean)/std)`` — re-centers to ~0.5 and
+                     widens; a degenerate (zero-variance) pool -> all 0.5
+                     (no divide-by-zero). Preserves relative magnitude.
+
+    Pure numpy; monotone in the input (order preserved). Used only on the
+    trained-U pool — the heuristic path never calls this.
+    """
+    xs = [float(u) for u in raw_us]
+    n = len(xs)
+    if mode == "none" or n == 0:
+        return xs
+    if n == 1:
+        return [0.5]
+    if mode == "rank":
+        order = np.argsort(np.argsort(np.asarray(xs)))  # 0..n-1 ranks
+        return [float(r) / (n - 1) for r in order]
+    if mode == "zscore":
+        arr = np.asarray(xs, dtype=np.float64)
+        std = float(arr.std())
+        if std < 1e-6:
+            return [0.5] * n
+        z = (arr - float(arr.mean())) / std
+        return [float(1.0 / (1.0 + np.exp(-zi))) for zi in z]
+    raise ValueError(f"unknown uniqueness_calibration {mode!r} "
+                     "(expected none|rank|zscore)")
 
 
 @dataclass
@@ -46,7 +81,8 @@ class DialogueConsolidation:
                  scorer_embed_dim: int = None,
                  utility_predictor=None,     # trained U head ((hist_emb, emb) -> [0,1]); None = heuristic
                  predictor_embed_dim: int = None,
-                 predictor_history_len: int = 5):
+                 predictor_history_len: int = 5,
+                 uniqueness_calibration: str = "none"):  # none|zscore|rank (trained-U only)
         self.ltm = ltm
         self.alpha = alpha
         self.beta = beta
@@ -70,6 +106,13 @@ class DialogueConsolidation:
         self.utility_predictor = utility_predictor
         self.predictor_embed_dim = predictor_embed_dim
         self.predictor_history_len = int(predictor_history_len)
+        # Per-episode calibration of the trained U pool (none|zscore|rank).
+        # Even a correctly-trained forward model gives U with little spread
+        # (~0.30 ± 0.05) — a near-constant offset that flattens the top-k
+        # write selection. Rank/z-score normalization across the episode's
+        # segments restores discriminative spread. Applied ONLY when a trained
+        # predictor is set, so the heuristic/dialogue path is byte-identical.
+        self.uniqueness_calibration = uniqueness_calibration
         # Prior utterances this session (trained-U history). Training pairs
         # never cross episodes, so consolidate_session RESETS this.
         self._utterance_history: List[str] = []
@@ -279,6 +322,25 @@ class DialogueConsolidation:
         for seg in segments:
             score, breakdown = self.compute_importance(seg, encoder_func)
             scored_segments.append((seg, score, breakdown))
+
+        # Per-episode U calibration (trained-U only): re-spread the surprise
+        # pool so the top-k selection reflects relative within-episode surprise
+        # instead of a flat offset. Gated on a trained predictor so the
+        # heuristic/dialogue path is byte-identical. Recompute the total from
+        # the calibrated U (I = αR + βU_cal + γN) and keep the raw under
+        # 'uniqueness_raw' for traceability.
+        if (self.utility_predictor is not None
+                and self.uniqueness_calibration != "none"):
+            raw_us = [bd["uniqueness"] for _, _, bd in scored_segments]
+            cal_us = _calibrate_uniqueness_pool(raw_us, self.uniqueness_calibration)
+            recalibrated = []
+            for (seg, _old, bd), u_cal in zip(scored_segments, cal_us):
+                u_raw = bd["uniqueness"]
+                new_total = bd["total"] + self.beta * (u_cal - u_raw)
+                bd = {**bd, "uniqueness_raw": u_raw,
+                      "uniqueness": u_cal, "total": new_total}
+                recalibrated.append((seg, new_total, bd))
+            scored_segments = recalibrated
 
         # 按重要性排序
         scored_segments.sort(key=lambda x: x[1], reverse=True)

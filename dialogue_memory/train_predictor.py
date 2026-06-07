@@ -132,11 +132,30 @@ class PredictionTrainer:
     def __init__(self,
                  embed_dim: int = 3072,
                  hidden_dim: int = 1024,
-                 device: str = None):
+                 device: str = None,
+                 loss: str = "mse"):
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = PredictionMLP(embed_dim, hidden_dim).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
-        self.criterion = nn.MSELoss()
+        # loss='cosine' trains directly on (1 - cos), the SAME quantity the
+        # inference readout (compute_surprise_norm) reports. The default 'mse'
+        # optimizes a magnitude axis the cosine readout discards (and on raw
+        # SBERT vectors is ~1e-3-scale) — kept as default so the MSC dialogue
+        # path is byte-identical. The embodied trainer requests 'cosine'.
+        self.loss = loss
+        if loss == "cosine":
+            self._cos = nn.CosineEmbeddingLoss()
+            self.criterion = self._cosine_criterion
+        elif loss == "mse":
+            self.criterion = nn.MSELoss()
+        else:
+            raise ValueError(f"unknown loss {loss!r} (expected 'mse' or 'cosine')")
+
+    def _cosine_criterion(self, predicted, target):
+        """1 - cos(predicted, target), averaged over the batch (target sign
+        +1 = predictions should align with the next embedding)."""
+        y = torch.ones(predicted.shape[0], device=predicted.device)
+        return self._cos(predicted, target, y)
 
     def train_step(self,
                    history_batch: torch.Tensor,
@@ -462,7 +481,9 @@ def train_predictor_embodied(run_dirs,
     train_loader = DataLoader(Subset(full, train_idx), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(Subset(full, val_idx), batch_size=batch_size) if val_idx else None
 
-    trainer = PredictionTrainer(embed_dim=embed_dim)
+    # Train on (1 - cos): the embodied U readout is cosine surprise, so the
+    # objective must match it (closes the loss/readout mismatch).
+    trainer = PredictionTrainer(embed_dim=embed_dim, loss="cosine")
     best_val_loss = float('inf')
 
     print(f"\n开始训练 (device: {trainer.device}) on embodied captions ...")

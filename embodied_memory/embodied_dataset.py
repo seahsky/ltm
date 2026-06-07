@@ -79,6 +79,20 @@ except ImportError:  # pragma: no cover — torch is in the env
     Dataset = object  # type: ignore[misc,assignment]
 
 
+def _l2norm(v) -> "np.ndarray":
+    """Return ``v`` as a unit-norm float32 vector (zero vector unchanged, no
+    NaN). The predictor MLP is consumed at inference on L2-normalized SBERT
+    embeddings (``run_hm3d_pol`` wraps the encoder in ``l2_normalize_encoder``;
+    the LTM fine layer is a cosine index that requires unit vectors). The bare
+    ``SentenceTransformerEncoder.encode`` used at TRAIN time returns non-unit
+    vectors (norm ~5-9), so training pairs must be normalized here or the MLP
+    learns on a different scale than it sees at inference — a train/serve skew
+    that corrupts the cosine surprise readout."""
+    v = np.asarray(v, dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 1e-8 else v
+
+
 # ----------------------------------------------------------------------
 # raw sample loader
 # ----------------------------------------------------------------------
@@ -205,8 +219,10 @@ class EmbodiedPredictionDataset(Dataset):
 
     def __getitem__(self, idx):
         history_str, next_cap, _ = self._pairs[idx]
-        history_emb = np.asarray(self.encoder.encode(history_str), dtype=np.float32)
-        next_emb = np.asarray(self.encoder.encode(next_cap), dtype=np.float32)
+        # L2-normalize both to match the unit-norm inputs seen at inference
+        # (see _l2norm) — closes the train/serve scale skew.
+        history_emb = _l2norm(self.encoder.encode(history_str))
+        next_emb = _l2norm(self.encoder.encode(next_cap))
         if torch is None:
             return history_emb, next_emb
         return torch.from_numpy(history_emb), torch.from_numpy(next_emb)
