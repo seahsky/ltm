@@ -75,6 +75,7 @@ def _install_stubs():
         nn.Sequential = lambda *a, **k: _Module()
         nn.MSELoss = lambda *a, **k: _Module()
         nn.BCELoss = lambda *a, **k: _Module()
+        nn.CosineEmbeddingLoss = lambda *a, **k: _Module()
         torch.nn = nn
         utils = types.ModuleType("torch.utils")
         data = types.ModuleType("torch.utils.data")
@@ -130,7 +131,9 @@ from dialogue_memory.train_predictor import (  # noqa: E402
 from dialogue_memory.consolidation import (  # noqa: E402
     DialogueConsolidation,
     DialogueSegment,
+    _calibrate_uniqueness_pool,
 )
+from embodied_memory.embodied_dataset import _l2norm  # noqa: E402
 
 
 def _approx(a, b, tol=1e-6):
@@ -340,6 +343,165 @@ def case_cli_exposes_predictor_ckpt():
         "flag not recorded in run_config"
 
 
+# ----------------------------------------------------------------------
+# Tier-1 ①  train/serve normalization skew fix — _l2norm + cosine loss
+#   The trained U head was fed UN-normalized SBERT targets at training
+#   (bare SentenceTransformerEncoder, norm ~5-9) but L2-NORMALIZED inputs at
+#   inference (run_hm3d_pol wraps the encoder in l2_normalize_encoder). The
+#   MLP's ReLU thresholds tuned to norm-7 activations then see norm-1 inputs
+#   -> off-distribution -> corrupt predicted direction -> garbage cosine
+#   readout. Fix: normalize training pairs AND train with cosine loss so the
+#   objective matches the (1-cos)/2 readout (MSE optimizes a magnitude axis
+#   the readout discards).
+# ----------------------------------------------------------------------
+def case_l2norm_unit_norm_and_zero_guard():
+    v = np.array([3.0, 4.0], dtype=np.float32)        # norm 5
+    out = _l2norm(v)
+    assert _approx(float(np.linalg.norm(out)), 1.0), out
+    assert _approx(out[0], 0.6) and _approx(out[1], 0.8), out
+    z = np.zeros(4, dtype=np.float32)                 # zero -> unchanged, no NaN
+    zo = _l2norm(z)
+    assert not np.any(np.isnan(zo)) and _approx(float(np.linalg.norm(zo)), 0.0)
+
+
+def case_dataset_getitem_normalizes_pairs():
+    # __getitem__ must L2-normalize BOTH history and next embeddings so the
+    # training distribution matches the unit-norm inputs seen at inference.
+    src = (REPO / "embodied_memory" / "embodied_dataset.py").read_text()
+    assert "_l2norm(" in src, "dataset must normalize via _l2norm"
+    # both the history and the target are normalized (two call sites)
+    assert src.count("_l2norm(") >= 2, "both history and next must be normalized"
+
+
+def case_trainer_supports_cosine_loss_and_embodied_uses_it():
+    # PredictionTrainer must accept loss='cosine' (1-cos, matches readout);
+    # the embodied trainer must request it. (Behaviour needs real torch;
+    # source-scan the wiring, mirroring the P4/P5 pattern.)
+    src = (REPO / "dialogue_memory" / "train_predictor.py").read_text()
+    assert "loss" in src and "cosine" in src, "cosine-loss option missing"
+    assert "CosineEmbeddingLoss" in src or "1 - cos" in src or "1.0 - cos" in src, \
+        "cosine criterion not implemented"
+    assert 'loss="cosine"' in src or "loss='cosine'" in src, \
+        "train_predictor_embodied must request cosine loss"
+    # MSC dialogue trainer must stay on the default (MSE) — byte-identity.
+    assert 'loss: str = "mse"' in src or "loss='mse'" in src or 'loss="mse"' in src, \
+        "default loss must remain mse for the dialogue path"
+
+
+# ----------------------------------------------------------------------
+# Tier-1 ②  per-episode U calibration — _calibrate_uniqueness_pool
+#   Even a correctly-trained forward model gives U with almost no spread
+#   (~0.30 ± 0.05): a near-constant offset that flattens the top-k write
+#   selection (R and N decide; the surprise ordering is lost). Rank / z-score
+#   normalization across the episode restores discriminative spread.
+# ----------------------------------------------------------------------
+def case_calibrate_none_is_identity():
+    xs = [0.30, 0.31, 0.29, 0.32]
+    out = _calibrate_uniqueness_pool(xs, "none")
+    assert all(_approx(a, b) for a, b in zip(out, xs)), out
+
+
+def case_calibrate_rank_spreads_full_range_and_monotone():
+    xs = [0.30, 0.31, 0.29, 0.32]          # tight cluster
+    out = _calibrate_uniqueness_pool(xs, "rank")
+    assert sorted(out) == [0.0, 1/3, 2/3, 1.0] or all(
+        _approx(a, b) for a, b in zip(sorted(out), [0.0, 1/3, 2/3, 1.0])
+    ), out
+    # monotone with input: the smallest raw -> 0, the largest -> 1
+    assert _approx(out[2], 0.0), out      # 0.29 is smallest
+    assert _approx(out[3], 1.0), out      # 0.32 is largest
+    assert _approx(float(np.mean(out)), 0.5), out
+
+
+def case_calibrate_rank_singleton():
+    assert all(_approx(a, 0.5) for a in _calibrate_uniqueness_pool([0.3], "rank"))
+
+
+def case_calibrate_zscore_centers_and_widens():
+    xs = [0.30, 0.31, 0.29, 0.32]
+    out = _calibrate_uniqueness_pool(xs, "zscore")
+    assert _approx(float(np.mean(out)), 0.5, tol=1e-3), np.mean(out)   # re-centered
+    # spread must widen vs the raw tight cluster
+    assert (max(out) - min(out)) > (max(xs) - min(xs)), (out, xs)
+    # monotone (sigmoid of z preserves order)
+    assert out[2] == min(out) and out[3] == max(out), out
+
+
+def case_calibrate_zscore_degenerate_no_div0():
+    out = _calibrate_uniqueness_pool([0.3, 0.3, 0.3], "zscore")
+    assert all(_approx(a, 0.5) for a in out) and not any(np.isnan(out)), out
+
+
+class _RecordingLTM(_StubLTM):
+    def __init__(self):
+        super().__init__()
+        self.metas = []
+
+    def insert(self, level, embedding, content, metadata):
+        self.metas.append(metadata)
+        return super().insert(level, embedding, content, metadata)
+
+
+def case_calibration_applied_when_predictor_set():
+    # predictor returns the segment's first embedding coord -> raw U varies
+    # per segment; with calibration='rank' the stored breakdown carries the
+    # calibrated uniqueness + the raw under 'uniqueness_raw', and total is
+    # recomputed I = αR + βU_cal + γN.
+    def pred(h, e):
+        return float(e[0])
+
+    ltm = _RecordingLTM()
+    cons = DialogueConsolidation(
+        ltm=ltm, utility_predictor=pred, predictor_embed_dim=4,
+        uniqueness_calibration="rank", top_k=10, beta=0.3,
+    )
+    enc = _recording_encoder([])
+    segs = [_seg_u(f"u{i}", np.array([v, 0, 0, 0], dtype=np.float32))
+            for i, v in enumerate([0.30, 0.31, 0.29, 0.32])]
+    cons.consolidate_session(segs, enc, dialogue_id=0)
+    bds = [m["breakdown"] for m in ltm.metas]
+    assert all("uniqueness_raw" in bd for bd in bds), "raw U not preserved"
+    cal = sorted(bd["uniqueness"] for bd in bds)
+    assert all(_approx(a, b) for a, b in zip(cal, [0.0, 1/3, 2/3, 1.0])), cal
+    # total consistency: I == αR + βU_cal + γN for each
+    for bd in bds:
+        exp = (cons.alpha * bd["relevance"] + cons.beta * bd["uniqueness"]
+               + cons.gamma * bd["novelty"])
+        assert _approx(bd["total"], exp), (bd["total"], exp)
+
+
+def case_calibration_inert_without_predictor():
+    # calibration must NOT touch the heuristic/dialogue path: with no
+    # predictor, uniqueness_calibration is ignored and the breakdown matches
+    # the byte-identical heuristic (no 'uniqueness_raw' key, U unchanged).
+    ltm = _RecordingLTM()
+    cons = DialogueConsolidation(
+        ltm=ltm, uniqueness_calibration="rank", top_k=10,
+    )
+    enc = _recording_encoder([])
+    emb = np.ones(768, dtype=np.float32)
+    cons.consolidate_session(
+        [_seg_u("i love my favorite chair", emb), _seg_u("a wall", emb)],
+        enc, dialogue_id=0)
+    bds = [m["breakdown"] for m in ltm.metas]
+    assert all("uniqueness_raw" not in bd for bd in bds), \
+        "calibration must be inert without a predictor"
+    # second segment's U is still the heuristic |R2-R1|*2 (capped)
+    r1, r2 = cons.info_richness_history[0], cons.info_richness_history[1]
+    expected = min(abs(r2 - r1) * 2.0, 1.0)
+    u2 = [bd for bd in bds][-1]["uniqueness"] if len(bds) == 2 else None
+    # bds order follows top_k sort, so find the 'a wall' breakdown by richness
+    # (simpler: just assert the heuristic value appears among the breakdowns)
+    assert any(_approx(bd["uniqueness"], expected) for bd in bds), \
+        (expected, [bd["uniqueness"] for bd in bds])
+
+
+def case_bridge_threads_uniqueness_calibration():
+    src = (REPO / "embodied_memory" / "memory_bridge.py").read_text()
+    assert "uniqueness_calibration" in src, "calibration not threaded to consolidator"
+    assert "REMEMBR_U_CALIB" in src, "calibration env knob missing"
+
+
 def main():
     cases = [
         case_predictor_infer_dims_from_first_linear,
@@ -355,6 +517,19 @@ def main():
         case_history_resets_per_consolidate_session,
         case_bridge_threads_predictor_ckpt,
         case_cli_exposes_predictor_ckpt,
+        # Tier-1 ① normalization-skew fix
+        case_l2norm_unit_norm_and_zero_guard,
+        case_dataset_getitem_normalizes_pairs,
+        case_trainer_supports_cosine_loss_and_embodied_uses_it,
+        # Tier-1 ② per-episode U calibration
+        case_calibrate_none_is_identity,
+        case_calibrate_rank_spreads_full_range_and_monotone,
+        case_calibrate_rank_singleton,
+        case_calibrate_zscore_centers_and_widens,
+        case_calibrate_zscore_degenerate_no_div0,
+        case_calibration_applied_when_predictor_set,
+        case_calibration_inert_without_predictor,
+        case_bridge_threads_uniqueness_calibration,
     ]
     failed = 0
     for c in cases:
