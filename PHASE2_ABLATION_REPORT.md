@@ -2117,3 +2117,88 @@ aware R that keeps the trained head's efficiency while recovering the heuristic'
 | `embodied_memory/scripts/test_analyze_revisit.py` | `case_compare_runs_pairs_b_minus_a` (B−A pairing on warm/cold/soft/binary). |
 | `runs/scorer-d3-{s1,s3-heur,s3-trained}` | 6-cat × 2-scene RACE matrix (n=36 episodes/setting). |
 | `models/embodied/scorer-scorer-d3.pt` | goal_object head trained on `runs/scorer-d1-train` (Val Acc 0.32→0.74). |
+
+# Run 15 — MultiON port: cold K=3 chains are a clean NULL after a four-run absorbing-mode hunt (RACE, 2026-06-05 → 06-07)
+
+Run 7's structural diagnosis — single-goal ObjectNav doesn't reward recall — motivated a
+**MultiON port**: chain K=3 semantic categories per episode so a c_{i+1} glimpsed while
+hunting c_i is recallable when the goal advances, the regime where within-episode memory
+should *compound*. Pre-registered hypothesis: S3 Progress/PPL ≫ S1, and the S3−S1 gap
+GROWS with sub-goal index. Harness: `make_multion_smoke.py` K-chain builder (chain in
+`info["object_categories"]`; native metrics stay c1-only), per-tick sub-goal cursor
+(`_advance_subgoal`: geodesic dist < found_radius AND caption confirm; all gated K>1),
+Progress = k/K and PPL as headline metrics, `analyze_ablation --multion` with paired
+bootstrap + gap-by-index. 2 scenes × 8 orderings (dedup → n=14) × {S1,S2,S3}, 1050 steps.
+
+## The arc: each run found and killed an absorbing mode
+
+| run | n | headline | absorbing mode found |
+|---|---|---|---|
+| micro1–3 | 2–4 | 0 advances → first advances | 250-step starvation; farthest-first starts (builder reused revisit contract); **within-episode recall structurally impossible** (LTM only written at episode end → `consolidate_subgoal_boundary` fix); reached-thrash |
+| full1 | 8 | first positive lean (n.s.) | unreachable-waypoint loop (top pick re-chosen 593–732×) → blacklist |
+| full2 | 8 | **S3−S2 +0.167 p=0.022; S3−S1 +0.125 p=0.095** | turn-in-place (raw-pool fallback re-admitted blacklisted waypoint) + wall-forward (no-progress counted, never acted on) |
+| full3 | 14 | **REVERSED: S3−S1 −0.095 p=0.92, PPL sig-negative** | **wrong-instance recall attractor** (ep12: one bad "toilet" recall re-chosen 945×; `no_candidate` trigger bypassed the cooldown) + snap-loop |
+| full4 | 14 | **NULL: S3−S1 = +0.0000** | none — mechanics clean |
+
+The full3→full4 fix is the on-thesis one: **memory consumption**. A memory-source waypoint
+reached without advancing the sub-goal is a dead lead, but nothing consumed it — the bridge
+re-proposes the same fine-LTM sighting every query, so it stayed top-ranked forever
+(`REMEMBR_CONSUME_REACHED_MEM`, per-sub-goal consumed list, cleared on advance), plus the
+follower-done drop cooldown (rerank 949/1049 → ≤1 per 3 ticks; wall-clock 15h → 6h17m) and
+snap-once (`snap_retried`, SNAP_N default 8→1).
+
+## full4 (the clean run, n=14/setting)
+
+| setting | Progress | PPL | steps | recall_assist |
+|---|---|---|---|---|
+| S1 (memory off) | 0.190 | 0.070 | 996.7 | — |
+| S2 (STM only) | 0.190 | 0.062 | 997.1 | — |
+| S3 (full LTM) | 0.190 | 0.075 | 1021.0 | 0.500 |
+
+Paired: Progress S3−S1 **+0.0000** [−0.095, +0.095]; PPL S3−S1 +0.005 (p=0.37); PPL S3−S2
++0.012 (p=0.19). Gap-by-index **identical in both arms at every index** (idx0 0.500, idx1
+0.071, idx2 0.000) — zero compounding. Mechanics verified clean in the same digests:
+max rerank 301/1049 (cold all-unreachable ep0; typical 40–130), max mem_chosen 73 (full3:
+945), wp_unreach ≤ 64 outside ep0, `consumed=` firing (up to 40/129), first multion STOP
+(ep13, 657 steps, adv=2, min_d2g 0.022 m).
+
+## Reading — why NULL here when the revisit eval is +0.24?
+
+1. **The compounding regime is barely entered.** idx0 found-rate 0.5, idx1 0.07, idx2 0.0
+   (both arms): the stand-in backbone's exploration+perception rarely survives to the
+   recall moment, so there is almost no c_{i+1}-glimpsed-during-c_i value to harvest.
+   Memory can't compound across sub-goals the agent doesn't reach.
+2. **Cold incidental priors ≠ warm relevant priors.** The revisit eval *guarantees* a
+   relevant prior sighting (controlled warm starts) — there the LTM is worth +0.21…+0.24
+   soft-SPL, reproduced 8×. MultiON's cold chains offer only incidental sightings, and
+   SBERT caption matching cannot tell instances apart (full3 ep12: a "bathroom with a
+   visible sink" recall for *toilet*, 16 m from any real one). Consumption bounds the
+   wrong-instance damage at ~zero; it cannot make incidental priors valuable.
+3. **full2's +0.167 was fragility, not signal.** Escape-config changes moved BOTH arms by
+   ~±0.1 Progress at n=8–14 (S1 alone: 0.167 → 0.286 → 0.190 across identical datasets);
+   any single-config "significant" delta at this n is within harness sensitivity.
+
+## Verdict
+
+**MultiON arc CLOSED — a clean, honest null.** On cold K=3 chains under the stand-in
+backbone, the hierarchical LTM is **net-neutral**: not inert (mem_chosen 194, consumption
+live, recall_assist 0.5), not harmful (the full3 negative was the now-fixed attractor), but
+without measurable Progress/PPL value because the eval's compounding premise is starved by
+the backbone's exploration ceiling. The thesis evidence stands where it always was: **the
+LTM helps when past observations are relevant** (warm revisit: +0.24, Gate A GREEN, 8
+reproductions) **and is neutral when they are incidental** (cold MultiON) — together a
+sharper claim than either alone. Two durable engineering artifacts: the
+**memory-consumption semantics** (recall-without-consumption was a real LTM-use defect no
+other eval exposed) and the absorbing-mode counter suite (`wp_unreach`, `escape=`,
+`consumed=`, propose-trigger attribution) that made each diagnosis a one-digest read.
+
+## File index (Run 15)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/scripts/make_multion_smoke.py` | K-chain episode builder (nearest-first starts, short-hop ordering, dedup) |
+| `embodied_memory/episode_runner.py` | sub-goal cursor, `consolidate_subgoal_boundary` call, near/blacklist/consumed filters, snap + no-progress escapes, drop-cooldown, Progress/PPL |
+| `embodied_memory/scripts/analyze_ablation.py --multion` | per-setting summary, paired bootstrap, gap-by-index, advance step-cost |
+| `embodied_memory/scripts/test_{advance_subgoal,filter_near_candidates,stuck_escape,memory_consume}.py` | TDD suites for every multion-gated mechanism (K=1 byte-identity throughout) |
+| `scripts/race-multion.sh` | one-shot driver (build → 3 settings → digests → analysis) |
+| `runs/multion-full{1..4}-s{1,2,3}` | the four RACE matrices (full4 = clean-mechanics null) |

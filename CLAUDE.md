@@ -88,6 +88,26 @@ the memory stack itself was unchanged from Run 8.
 
 ## Next milestone
 
+**MultiON arc CLOSED — clean null on cold K=3 chains (2026-06-07, Run 15; see
+`PHASE2_ABLATION_REPORT.md` Run 15).** The on-thesis answer to Run 7's "single-goal
+doesn't reward recall": chain K=3 categories per episode so within-episode recall can
+compound (Progress/PPL metrics, gap-by-sub-goal-index analyzer, `scripts/race-multion.sh`).
+Four RACE matrices (full1→full4) each diagnosed and killed an absorbing mode — the
+decisive on-thesis fix being **memory consumption** (a memory waypoint reached without
+advancing the sub-goal is consumed per-sub-goal; full3's wrong-instance recall attractor
+re-chose one bad recall 945× and reversed the result), plus a follower-drop re-propose
+cooldown and snap-once escape. **full4 (n=14/setting, clean mechanics): Progress
+S1 = S2 = S3 = 0.190 exactly, paired S3−S1 = +0.0000, gap-by-index identical at every
+index — zero compounding.** Why null when revisit is +0.24: the backbone's exploration
+ceiling starves the premise (idx0 found-rate 0.5, idx1 0.07 — the agent rarely survives
+to the recall moment), and cold *incidental* sightings are not warm *relevant* priors
+(SBERT captions can't tell instances apart). Net thesis statement: **the LTM helps when
+past observations are relevant (warm revisit +0.24, 8 reproductions) and is cleanly
+neutral when they are incidental (cold MultiON)** — a sharper claim than either result
+alone. full2's +0.167 (n=8) was config-sensitivity, not signal. Durable artifacts:
+consumption semantics (`REMEMBR_CONSUME_REACHED_MEM`), the escape/counter suite,
+`test_{stuck_escape,memory_consume}.py`.
+
 **Scorer-head training CLOSED — heuristic R is at/near the ceiling (2026-06-03, Run 13;
 see `PHASE2_ABLATION_REPORT.md` Run 13).** On-thesis attempt to *train* the LTM's own
 importance head (R in `I = αR + βU + γN`, which gates the top-k fine-layer writes that
