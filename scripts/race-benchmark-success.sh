@@ -3,7 +3,8 @@
 # success rate (STOP within 1.0 m) from existing episode logs. No GPU, no
 # Habitat — pure log mining via diagnose_pipeline.py --benchmark.
 #
-# Context (Run 15): neither previously-reported number is the benchmark
+# Context (Run 16; Run 15 became the MultiON arc): neither previously-reported
+# number is the benchmark
 # metric — "8%" used the 0.1 m radius (10x too strict) and "67%"
 # (success_1m) is STOP-independent reach. Since STOP terminates the episode,
 # final distance_to_goal IS distance-at-STOP, so the true number is
