@@ -601,9 +601,25 @@ class EpisodeRunner:
         # the blacklist alone can't break the loop because the never-moving
         # agent re-clusters the same geometry at coordinates drifting outside
         # the blacklist radius. Multion-gated; 0 disables; no-sim fallback is
-        # the existing blacklist+drop.
+        # the existing blacklist+drop. Default 8 -> 1 after full3: ep5's
+        # interleaved progressing-forwards kept resetting the consecutive
+        # count (803 unreachables, 0 escapes), and waiting 8 ticks per snap
+        # just slowed the ep0 snap-loop — snap on the FIRST failure, and at
+        # most ONCE per waypoint (the snap_retried mark below): if the
+        # snapped point is also unreachable, blacklist + drop instead of
+        # re-snapping forever (full3 ep0: escape=125, wp_unreach=1023).
         self.unreachable_snap_n: int = int(
-            os.environ.get("REMEMBR_UNREACHABLE_SNAP_N", "8")
+            os.environ.get("REMEMBR_UNREACHABLE_SNAP_N", "1")
+        )
+        # Memory-consumption fix (full3 post-mortem, the S3-specific
+        # wrong-instance recall attractor): once a MEMORY-source waypoint is
+        # REACHED without the sub-goal advancing, the recall is a dead lead —
+        # consume it (filter its position from later pools for the rest of
+        # the CURRENT sub-goal; cleared on advance). full3 ep12 re-chose one
+        # bad toilet recall 945x; ep10/11/13 oscillated on one all episode.
+        # Multion-gated; 0 disables.
+        self.consume_reached_mem: bool = (
+            os.environ.get("REMEMBR_CONSUME_REACHED_MEM", "1") != "0"
         )
         # Windowed no-progress escape (full2 ep4, forward-into-wall): when
         # >= MIN of the last WINDOW ticks were no-progress forwards, blacklist
@@ -715,6 +731,9 @@ class EpisodeRunner:
                     ep_metrics.get("n_candidates_filtered_unreachable", 0)),
                 "n_unreachable_escape": int(ep_metrics.get("n_unreachable_escape", 0)),
                 "n_no_progress_escape": int(ep_metrics.get("n_no_progress_escape", 0)),
+                "n_memory_consumed": int(ep_metrics.get("n_memory_consumed", 0)),
+                "n_candidates_filtered_consumed": int(
+                    ep_metrics.get("n_candidates_filtered_consumed", 0)),
                 "remembr_stub_mode": ep_metrics.get("remembr_stub_mode"),
                 "remembr_sample_caption": ep_metrics.get("remembr_sample_caption"),
             })
@@ -816,6 +835,10 @@ class EpisodeRunner:
             # (ep4). Multion-gated actions; counters log unconditionally.
             "n_unreachable_escape": 0,
             "n_no_progress_escape": 0,
+            # Memory-consumption fix (multion-full3 post-mortem): recalls
+            # consumed on reached-without-advance + pool drops they caused.
+            "n_memory_consumed": 0,
+            "n_candidates_filtered_consumed": 0,
         }
         # Closest the agent ever gets to a goal viewpoint over the episode
         # (geodesic). success@0.1m is perception-bound with caption-only
@@ -889,6 +912,14 @@ class EpisodeRunner:
         # Snap-escape state (full2 ep5): consecutive follower-unreachable
         # ticks; reset on "reached" or a progressing forward.
         consecutive_unreachable = 0
+        # Consumed memory recalls (full3 ep12): positions of memory-source
+        # waypoints reached without an advance — dead leads for the CURRENT
+        # sub-goal, filtered from later pools; cleared on advance.
+        consumed_memory_xys: List[np.ndarray] = []
+        # Last follower-done drop (full3 ep12 no_candidate hole): gates the
+        # multion no_candidate re-propose path with the same cooldown the
+        # candidate_reached trigger already has.
+        last_follower_drop_step: int = -10**9
         # No-progress-escape state (full2 ep4): rolling window of per-tick
         # _forward_no_progress flags. Multion-only (None otherwise) — keeps
         # K=1 byte-identical AND avoids dereferencing the escape knobs on the
@@ -958,23 +989,47 @@ class EpisodeRunner:
                 # Cooldown backstop (multion-gated): a reached-triggered
                 # re-propose may fire at most once per cooldown window, so
                 # pathological all-near geometry can't re-propose every tick.
-                # Scheduled / no-candidate triggers are unaffected.
+                # Scheduled triggers are unaffected.
                 candidate_reached = False
+            need_candidate = current_candidate is None
+            if multion and need_candidate and not _cooldown_elapsed(
+                step.step_idx, last_follower_drop_step, self.propose_cooldown
+            ):
+                # The ep12 hole (full3): a follower-done drop left
+                # current_candidate=None, and the no_candidate trigger fired
+                # EVERY TICK, bypassing the reached-cooldown entirely
+                # (rerank=949/1049 with n_propose_reached=0). Gate it with
+                # the same cooldown; the sub-goal-advance recall moment
+                # resets last_follower_drop_step so it re-queries instantly.
+                need_candidate = False
             due_to_propose = (step.step_idx - last_propose_step) >= self.propose_period
             if not multion_force_stop and (
-                current_candidate is None or due_to_propose or candidate_reached
+                need_candidate or due_to_propose or candidate_reached
             ):
                 # Record WHY this propose fired (multion-full1 post-mortem: a
                 # per-tick re-propose mode existed that no counter attributed;
                 # diagnose_propose_triggers.py mines this field).
                 propose_trigger = (
-                    "no_candidate" if current_candidate is None
+                    "no_candidate" if need_candidate
                     else "reached" if candidate_reached
                     else "scheduled"
                 )
                 if candidate_reached:
                     ep_metrics_counters["n_propose_reached"] += 1
                     last_reached_propose_step = int(step.step_idx)
+                    if (
+                        multion
+                        and self.consume_reached_mem
+                        and current_candidate is not None
+                        and current_candidate.source == "memory"
+                    ):
+                        # Consume the recall (full3 ep10/11/13 chronic
+                        # variant): the agent walked within the re-propose
+                        # radius of a memory waypoint and the sub-goal did
+                        # NOT advance — a dead lead for this sub-goal.
+                        consumed_memory_xys.append(np.asarray(
+                            current_candidate.world_xy, dtype=np.float32))
+                        ep_metrics_counters["n_memory_consumed"] += 1
                 last_propose_step = int(step.step_idx)
                 cands = self._propose_candidates(
                     step, ep, goal_override=active_category if multion else None
@@ -1045,6 +1100,18 @@ class EpisodeRunner:
                                 prefer_farthest=True,
                             )
                             ep_metrics_counters["n_candidates_filtered_unreachable"] += _n_bl
+                        # Consumed-recall filter (full3 ep12): never re-offer
+                        # a memory waypoint already reached without an
+                        # advance this sub-goal — the bridge re-proposes the
+                        # same fine-LTM sighting every query, so filtering
+                        # the pool is the only place to break the attractor.
+                        if consumed_memory_xys and self.unreachable_blacklist_m > 0:
+                            all_cands, _n_cons = _filter_candidates_near_points(
+                                all_cands, consumed_memory_xys,
+                                self.unreachable_blacklist_m,
+                                prefer_farthest=True,
+                            )
+                            ep_metrics_counters["n_candidates_filtered_consumed"] += _n_cons
 
                     rerank_result, retrieval = self.bridge.rerank(
                         candidates=all_cands,
@@ -1229,6 +1296,20 @@ class EpisodeRunner:
                     ep_metrics_counters[f"n_waypoint_{_outcome}"] += 1
                     if _outcome == "reached":
                         consecutive_unreachable = 0
+                        if (
+                            multion
+                            and self.consume_reached_mem
+                            and current_candidate is not None
+                            and current_candidate.source == "memory"
+                        ):
+                            # Consume the recall (full3 ep12 catastrophic
+                            # variant): the follower arrived at a memory
+                            # waypoint and the sub-goal did NOT advance —
+                            # dead lead; never re-offer it this sub-goal.
+                            consumed_memory_xys.append(np.asarray(
+                                current_candidate.world_xy,
+                                dtype=np.float32))
+                            ep_metrics_counters["n_memory_consumed"] += 1
                     if (
                         multion
                         and _outcome == "unreachable"
@@ -1252,7 +1333,15 @@ class EpisodeRunner:
                         consecutive_unreachable += 1
                         if _should_snap_unreachable(
                             consecutive_unreachable, self.unreachable_snap_n
+                        ) and not current_candidate.metadata.get(
+                            "snap_retried", False
                         ):
+                            # snap-once (full3 ep0/ep6): a waypoint is
+                            # snapped at most ONCE — if the snapped point is
+                            # also unreachable, fall through to blacklist +
+                            # drop instead of re-snapping forever (ep0:
+                            # escape=125, wp_unreach=1023 — each snap just
+                            # bought 8 more turn-in-place ticks).
                             _sim = self.source.get_sim()
                             _snapped = None
                             if _sim is not None:
@@ -1274,6 +1363,7 @@ class EpisodeRunner:
                                 current_candidate.world_xy = np.array(
                                     [_snapped[0], _snapped[2]],
                                     dtype=np.float32)
+                                current_candidate.metadata["snap_retried"] = True
                                 # Keep the snapped waypoint committed: clear
                                 # the follower-done flag so the drop branch
                                 # below doesn't immediately re-propose.
@@ -1312,6 +1402,11 @@ class EpisodeRunner:
                 elif self._waypoint_force_repropose:
                     # Follower reports reached/unreachable → drop & re-propose.
                     current_candidate = None
+                    if multion:
+                        # Start the no_candidate re-propose cooldown (the
+                        # full3 ep12 hole: this drop used to re-propose
+                        # ungated EVERY tick).
+                        last_follower_drop_step = int(step.step_idx)
 
             # Oracle-STOP diagnostic: force STOP once the agent is within the GT
             # success ring (isolates the termination layer — measures how much
@@ -1417,6 +1512,12 @@ class EpisodeRunner:
                             current_candidate = None
                             self._approach_waypoint = None
                             last_propose_step = -10**9
+                            # Consumed recalls are PER SUB-GOAL: the new
+                            # category may legitimately want a previously
+                            # visited area. Also reset the follower-drop
+                            # cooldown so the re-query fires next tick.
+                            consumed_memory_xys.clear()
+                            last_follower_drop_step = -10**9
 
             # Re-bearing-rel is needed for the controller next iteration; we
             # recompute the candidate's bearing relative to the current yaw.
@@ -1554,6 +1655,9 @@ class EpisodeRunner:
             ep_metrics_counters["n_candidates_filtered_unreachable"])
         ep_log["n_unreachable_escape"] = int(ep_metrics_counters["n_unreachable_escape"])
         ep_log["n_no_progress_escape"] = int(ep_metrics_counters["n_no_progress_escape"])
+        ep_log["n_memory_consumed"] = int(ep_metrics_counters["n_memory_consumed"])
+        ep_log["n_candidates_filtered_consumed"] = int(
+            ep_metrics_counters["n_candidates_filtered_consumed"])
         ep_log["n_detector_called"] = int(ep_metrics_counters["n_detector_called"])
         ep_log["n_detector_localized"] = int(ep_metrics_counters["n_detector_localized"])
         ep_log["n_detector_locate_failed"] = int(ep_metrics_counters["n_detector_locate_failed"])
@@ -1631,6 +1735,9 @@ class EpisodeRunner:
                 ep_metrics_counters["n_candidates_filtered_unreachable"]),
             "n_unreachable_escape": int(ep_metrics_counters["n_unreachable_escape"]),
             "n_no_progress_escape": int(ep_metrics_counters["n_no_progress_escape"]),
+            "n_memory_consumed": int(ep_metrics_counters["n_memory_consumed"]),
+            "n_candidates_filtered_consumed": int(
+                ep_metrics_counters["n_candidates_filtered_consumed"]),
             # Bookkeeping fix (multion-full1 post-mortem): these three were
             # written to the episode JSON but never returned in ep_metrics, so
             # the summary.json per-episode rows read 0 via .get() defaults —

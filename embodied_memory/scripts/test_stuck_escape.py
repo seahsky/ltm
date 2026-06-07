@@ -432,7 +432,10 @@ def case_multion_snap_escape_breaks_unreachable_loop():
 
 def case_multion_snap_disabled_keeps_blacklist_drop():
     # REMEMBR_UNREACHABLE_SNAP_N=0 disables the snap: the unreachable loop is
-    # back to blacklist+drop (the pre-fix behavior) — counter stays 0.
+    # back to blacklist+drop — counter stays 0. Since the full3 fix the
+    # follower-done drop also sets the re-propose cooldown (the ep12
+    # no_candidate hole), so the per-tick loop is bounded to ~n/cooldown
+    # attempts instead of ~n (full3 ep0 burned 903 reranks this way).
     def run():
         runner = _mk_runner(_SnapSimSource(seq=["chair", "bed", "toilet"]),
                             _OnlyUnreachablePlanner(),
@@ -441,7 +444,8 @@ def case_multion_snap_disabled_keeps_blacklist_drop():
 
     ep_log, metrics = _with_env({"REMEMBR_UNREACHABLE_SNAP_N": 0}, run)
     assert ep_log["n_unreachable_escape"] == 0, ep_log["n_unreachable_escape"]
-    assert ep_log["n_waypoint_unreachable"] >= 15, ep_log["n_waypoint_unreachable"]
+    # 19 ticks / cooldown 3 -> ~7 unreachable attempts (legacy: ~19).
+    assert 3 <= ep_log["n_waypoint_unreachable"] <= 10, ep_log["n_waypoint_unreachable"]
     print("  case_multion_snap_disabled_keeps_blacklist_drop: OK")
 
 
