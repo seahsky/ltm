@@ -263,6 +263,14 @@ def main(argv: Optional[list] = None) -> int:
                              "score on the SBERT caption embedding instead of "
                              "the length/keyword heuristic — gating which "
                              "keyframes enter the fine LTM. Setting 3 only.")
+    parser.add_argument("--predictor-ckpt", type=str, default=None,
+                        help="Path to a trained PredictionMLP checkpoint "
+                             "(dialogue_memory.train_predictor). When set, the "
+                             "consolidator's uniqueness term U is the forward "
+                             "model's bounded surprise on the SBERT caption "
+                             "stream instead of the R-deviation heuristic — "
+                             "gating which keyframes enter the fine LTM. "
+                             "Setting 3 only.")
 
     args = parser.parse_args(argv)
 
@@ -354,11 +362,17 @@ def main(argv: Optional[list] = None) -> int:
             clip_encoder=clip_encoder,
             affordance_table=affordance_table,
             scorer_ckpt=args.scorer_ckpt,
+            predictor_ckpt=args.predictor_ckpt,
         )
         if args.scorer_ckpt:
             print(
                 f"[run_hm3d_pol] trained importance (R) head loaded from "
                 f"{args.scorer_ckpt}"
+            )
+        if args.predictor_ckpt:
+            print(
+                f"[run_hm3d_pol] trained surprise (U) head loaded from "
+                f"{args.predictor_ckpt}"
             )
     print(
         f"[run_hm3d_pol] ablation: backbone={args.backbone} "
@@ -443,6 +457,7 @@ def main(argv: Optional[list] = None) -> int:
             "oracle_stop": args.oracle_stop,
             "oracle_location": args.oracle_location,
             "scorer_ckpt": args.scorer_ckpt,
+            "predictor_ckpt": args.predictor_ckpt,
             "target_sequence": target_sequence,
             "found_radius": args.found_radius,
         },

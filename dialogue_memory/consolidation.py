@@ -43,7 +43,10 @@ class DialogueConsolidation:
                  gamma: float = 0.3,  # 新颖度权重
                  top_k: int = 5,      # 每个 session 保留的关键片段数
                  relevance_scorer=None,      # trained R head (emb -> [0,1]); None = heuristic
-                 scorer_embed_dim: int = None):
+                 scorer_embed_dim: int = None,
+                 utility_predictor=None,     # trained U head ((hist_emb, emb) -> [0,1]); None = heuristic
+                 predictor_embed_dim: int = None,
+                 predictor_history_len: int = 5):
         self.ltm = ltm
         self.alpha = alpha
         self.beta = beta
@@ -56,6 +59,20 @@ class DialogueConsolidation:
         # (scorer_embed_dim). Default None keeps the dialogue path unchanged.
         self.relevance_scorer = relevance_scorer
         self.scorer_embed_dim = scorer_embed_dim
+
+        # Optional trained surprise (U) head — the proposal's prediction-error
+        # term. When set, _compute_uniqueness scores the trained forward
+        # model's surprise (predict the current embedding from the join of the
+        # last ``predictor_history_len`` PRIOR utterances — exactly how
+        # training pairs are built in EmbodiedPredictionDataset) instead of
+        # the R-deviation heuristic. Same dim guard semantics as the R head;
+        # default None keeps the dialogue path unchanged.
+        self.utility_predictor = utility_predictor
+        self.predictor_embed_dim = predictor_embed_dim
+        self.predictor_history_len = int(predictor_history_len)
+        # Prior utterances this session (trained-U history). Training pairs
+        # never cross episodes, so consolidate_session RESETS this.
+        self._utterance_history: List[str] = []
 
         # 历史记录（用于计算 surprise）
         self.info_richness_history = []
@@ -72,7 +89,7 @@ class DialogueConsolidation:
             (总分, 各项分数明细)
         """
         R = self._compute_relevance(segment)
-        U = self._compute_uniqueness(segment)
+        U = self._compute_uniqueness(segment, encoder_func)
         N = self._compute_novelty(segment, encoder_func)
 
         total = self.alpha * R + self.beta * U + self.gamma * N
@@ -83,6 +100,11 @@ class DialogueConsolidation:
             "novelty": N,
             "total": total
         }
+
+        # Trained-U history bookkeeping: the CURRENT utterance becomes part
+        # of the history only for LATER segments (training pairs are strictly
+        # (prior captions -> next caption)). Appended after U is computed.
+        self._utterance_history.append(segment.utterance or "")
 
         return total, breakdown
 
@@ -155,12 +177,40 @@ class DialogueConsolidation:
 
         return score
 
-    def _compute_uniqueness(self, segment: DialogueSegment) -> float:
+    def _compute_uniqueness(self, segment: DialogueSegment,
+                            encoder_func=None) -> float:
         """
         计算独特性 (Uniqueness/Surprise)
 
-        基于当前信息丰富度与历史平均的偏差
+        Trained path (``utility_predictor`` set): the forward model's bounded
+        prediction error — encode the join of the last
+        ``predictor_history_len`` PRIOR utterances this session (exactly how
+        EmbodiedPredictionDataset builds training pairs) and score
+        ``utility_predictor(history_emb, segment.embedding)``. Falls back to
+        the heuristic when there is no prior utterance yet (first segment of
+        a session), no embedding, no encoder, or the embedding dim doesn't
+        match ``predictor_embed_dim`` (same graceful guard as the R head).
+
+        Heuristic (default): 基于当前信息丰富度与历史平均的偏差.
         """
+        if (
+            self.utility_predictor is not None
+            and segment.embedding is not None
+            and encoder_func is not None
+            and self._utterance_history
+        ):
+            emb = segment.embedding
+            dim_ok = (
+                self.predictor_embed_dim is None
+                or int(emb.shape[-1]) == int(self.predictor_embed_dim)
+            )
+            if dim_ok:
+                history_str = " ".join(
+                    self._utterance_history[-self.predictor_history_len:]
+                )
+                history_emb = encoder_func(history_str)
+                return float(self.utility_predictor(history_emb, emb))
+
         if len(self.info_richness_history) <= 1:
             return 0.5  # 数据不足时返回中等分数
 
@@ -220,6 +270,10 @@ class DialogueConsolidation:
         Returns:
             写入各层的记忆 ID 列表
         """
+        # Trained-U history is PER SESSION/EPISODE (training pairs never
+        # cross episodes) — reset before scoring this session's segments.
+        self._utterance_history = []
+
         # 计算所有片段的重要性评分
         scored_segments = []
         for seg in segments:

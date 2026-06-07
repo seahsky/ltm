@@ -232,6 +232,26 @@ class PredictionTrainer:
 
         return mse_per_sample.cpu().numpy()
 
+    def compute_surprise_norm(self,
+                              history_emb: np.ndarray,
+                              actual_emb: np.ndarray) -> float:
+        """Bounded inference-time surprise in [0, 1] (the U-head hook).
+
+        Predicts the next embedding from ``history_emb`` and scores
+        ``(1 - cos(predicted, actual)) / 2`` via ``_cosine_surprise``. Raw
+        MSE (``compute_surprise``) on normalized SBERT embeddings is
+        ~1e-3-scale and would vanish inside I = αR + βU + γN next to the
+        [0,1]-bounded R and N terms; cosine surprise is scale-free and
+        bounded like the heuristic U it replaces.
+        """
+        self.model.eval()
+        with torch.no_grad():
+            t = torch.FloatTensor(
+                np.asarray(history_emb, dtype=np.float32)
+            ).unsqueeze(0).to(self.device)
+            predicted = self.model(t).squeeze(0).cpu().numpy()
+        return _cosine_surprise(predicted, actual_emb)
+
     def save(self, path: str):
         """保存模型"""
         torch.save({
@@ -244,6 +264,69 @@ class PredictionTrainer:
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+
+def _cosine_surprise(predicted, actual) -> float:
+    """(1 − cos(predicted, actual)) / 2 ∈ [0, 1] — bounded prediction error.
+
+    0 = the forward model anticipated the observation exactly (no surprise),
+    1 = maximally wrong. Scale-invariant (a scaled prediction of the right
+    direction is not a surprise). Zero-norm inputs return the neutral 0.5,
+    matching the heuristic U's data-starved default. Pure numpy — works
+    without torch, so it is unit-testable in the stub harness.
+    """
+    p = np.asarray(predicted, dtype=np.float32).reshape(-1)
+    a = np.asarray(actual, dtype=np.float32).reshape(-1)
+    norm_p = float(np.linalg.norm(p))
+    norm_a = float(np.linalg.norm(a))
+    if norm_p <= 1e-12 or norm_a <= 1e-12:
+        return 0.5
+    cos = float(np.dot(p, a) / (norm_p * norm_a))
+    cos = max(-1.0, min(1.0, cos))
+    return (1.0 - cos) / 2.0
+
+
+def _infer_predictor_dims(state_dict) -> Tuple[int, int]:
+    """Recover ``(embed_dim, hidden_dim)`` from a PredictionMLP state_dict.
+
+    Checkpoints store only the weights, not the constructor args, so to
+    rebuild the module before ``load_state_dict`` we read the first Linear's
+    weight shape. ``PredictionMLP.net[0]`` is ``Linear(embed_dim, hidden_dim)``
+    whose weight is stored ``[hidden_dim, embed_dim]``.
+
+    Pure: reads ``.shape`` only — works on torch tensors or numpy arrays, so
+    it is unit-testable without torch. (Mirror of train_scorer's
+    ``_infer_scorer_dims``.)
+    """
+    w = state_dict.get("net.0.weight")
+    if w is None:
+        raise KeyError(
+            "state_dict missing 'net.0.weight'; not a PredictionMLP checkpoint"
+        )
+    shape = tuple(w.shape)
+    if len(shape) != 2:
+        raise ValueError(f"net.0.weight must be 2-D, got shape {shape}")
+    hidden_dim, embed_dim = int(shape[0]), int(shape[1])
+    return embed_dim, hidden_dim
+
+
+def load_predictor(path: str, device: str = None) -> "PredictionTrainer":
+    """Load a trained PredictionMLP checkpoint into a ready PredictionTrainer.
+
+    Infers ``embed_dim`` / ``hidden_dim`` from the checkpoint (see
+    ``_infer_predictor_dims``) so the caller need not know how the head was
+    sized. ``PredictionTrainer.compute_surprise_norm(history_emb, emb) ->
+    float in [0,1]`` is the inference hook. (Mirror of train_scorer's
+    ``load_scorer``.)
+    """
+    checkpoint = torch.load(path, map_location=device or "cpu")
+    embed_dim, hidden_dim = _infer_predictor_dims(checkpoint["model_state_dict"])
+    trainer = PredictionTrainer(embed_dim=embed_dim, hidden_dim=hidden_dim,
+                                device=device)
+    trainer.model.load_state_dict(checkpoint["model_state_dict"])
+    trainer.model.eval()
+    trainer.embed_dim = embed_dim  # expose for the consumer's dim guard
+    return trainer
 
 
 def train_predictor(data_path: str,

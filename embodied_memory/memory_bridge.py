@@ -215,6 +215,7 @@ class EmbodiedMemoryBridge:
         clip_encoder: Optional[Any] = None,
         affordance_table: Optional[Dict[str, Dict[str, float]]] = None,
         scorer_ckpt: Optional[str] = None,
+        predictor_ckpt: Optional[str] = None,
     ):
         if text_encode_fn is None:
             raise ValueError("text_encode_fn (str -> np.ndarray) is required")
@@ -281,6 +282,28 @@ class EmbodiedMemoryBridge:
                     f"fall back to the heuristic. Re-train with the SAME text "
                     f"encoder (e.g. --encoder sbert) the bridge indexes with."
                 )
+        # Optionally load a trained surprise (U) head: when predictor_ckpt is
+        # given, the uniqueness term U is the forward model's bounded
+        # prediction error on the SBERT caption stream instead of the
+        # R-deviation heuristic (see consolidation._compute_uniqueness).
+        utility_predictor = None
+        predictor_embed_dim = None
+        self.predictor_ckpt = predictor_ckpt
+        if predictor_ckpt:
+            from dialogue_memory.train_predictor import load_predictor
+            self._predictor = load_predictor(predictor_ckpt)
+            utility_predictor = self._predictor.compute_surprise_norm
+            predictor_embed_dim = getattr(self._predictor, "embed_dim", None)
+            # Same loud guard as the R head: a dim mismatch would silently
+            # fall back to the heuristic and the run would read as "predictor
+            # had no effect" for the WRONG reason.
+            if predictor_embed_dim is not None and int(predictor_embed_dim) != int(self._ltm_embed_dim):
+                raise ValueError(
+                    f"predictor_ckpt embed_dim {predictor_embed_dim} != LTM/SBERT dim "
+                    f"{self._ltm_embed_dim}: the trained U head would silently "
+                    f"fall back to the heuristic. Re-train with the SAME text "
+                    f"encoder (e.g. --encoder sbert) the bridge indexes with."
+                )
         self.consolidator = DialogueConsolidation(
             ltm=self.ltm,
             alpha=0.4,
@@ -289,6 +312,8 @@ class EmbodiedMemoryBridge:
             top_k=consolidation_top_k,
             relevance_scorer=relevance_scorer,
             scorer_embed_dim=scorer_embed_dim,
+            utility_predictor=utility_predictor,
+            predictor_embed_dim=predictor_embed_dim,
         )
 
         # 3. Pattern clusterer + mid layer. Dim matches the LTM (CLIP space
