@@ -149,7 +149,10 @@ object), not the goal point** — stopping there is outside the 0.1m ring by con
 **So binary SPL@0.1m is genuinely localization-bound** (confirmed twice: caption-grounding
 can't localize to 0.1m, memory recall is a viewing pose). The LTM thesis reproduced a
 **6th time** (warm soft-SPL S3−S1 +0.21–0.24, p≈0.001). Headline config: **detector OFF,
-arrival-STOP off-by-default**; `success@1m ≈ 0.67` warm is the comparable-metric headline.
+arrival-STOP off-by-default**; the comparable-metric headline is the **true benchmark SR
+(STOP within 1.0 m), verified by log recompute (Run 16, 2026-06-07): warm S3 0.667 vs S1
+0.333 on the Phase-C harness (exact — stop_rate 1.0 there, so reach = at-STOP) and 0.500
+vs 0.308 on the wide 6-category matrix** (the older "~58%" was STOP-independent reach).
 Remaining binary-SPL levers (real <0.1m detector; relaxed success ring) are out of thesis
 scope. On-thesis ways to push the *positive* result: widen the revisit matrix or train the
 LTM heads (below).

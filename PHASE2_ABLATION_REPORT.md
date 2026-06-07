@@ -2202,3 +2202,47 @@ other eval exposed) and the absorbing-mode counter suite (`wp_unreach`, `escape=
 | `embodied_memory/scripts/test_{advance_subgoal,filter_near_candidates,stuck_escape,memory_consume}.py` | TDD suites for every multion-gated mechanism (K=1 byte-identity throughout) |
 | `scripts/race-multion.sh` | one-shot driver (build → 3 settings → digests → analysis) |
 | `runs/multion-full{1..4}-s{1,2,3}` | the four RACE matrices (full4 = clean-mechanics null) |
+
+# Run 16 — True benchmark success rate recomputed from logs: the 33%→67% headline VERIFIES at-STOP; wide matrix is 31%→50% (RACE, 2026-06-07)
+
+The metric caveat (found 2026-06-04): neither previously-reported success number was the
+standard HM3D ObjectNav metric. The "8%" binary used a **0.1 m** radius (10× stricter than
+the benchmark's 1.0 m), and the "67%" (`success_1m`) was **STOP-independent reach** (closest
+approach over the path, even if the agent never stopped). The true benchmark number —
+**agent issued STOP and final distance-to-goal < 1.0 m** — was recoverable from logs already
+on RACE because STOP terminates the episode, so final `distance_to_goal` IS
+distance-at-STOP (spot-checked: `scorer-d3-s1/episode_000` stops at step 21 with d2g
+0.031 m). `diagnose_pipeline.py --benchmark` + `scripts/race-benchmark-success.sh` mined all
+24 run dirs, no GPU.
+
+## Headline numbers (warm revisits, S3 = full LTM)
+
+| matrix | split | S1 (mem off) | S3 | benchmark reading |
+|---|---|---|---|---|
+| **Phase-C revisit harness** (`revisit-c1` / `revisit-harness`, n=16) | warm | 0.333 | **0.667** | **the 33%→67% headline holds EXACTLY at-STOP** — stop_rate is 1.000 in these runs (keyword STOP fired every episode), so reach@1m and stopped-within-1m coincide |
+| **Wide 6-category matrix** (`scorer-d3`, n=36) | warm | 0.308 | **0.500** (heur) / 0.500 (trained) | the previously-quoted ~58% was reach; the strict at-STOP number is **50%** |
+| wide matrix | all | 0.333 | 0.444 (heur) / 0.417 (trained) | stop_rate is the limiter here (0.61–0.77 — timeouts never stop) |
+
+Convergent with Run 14's precision verdict: at 0.5 m the heuristic head leads the trained
+one warm (0.346 vs 0.308), and the trained head stops more often (stop_rate 0.769 vs
+0.692) for the same @1.0 m rate — efficiency vs precision again. The b1–b5 revisit dirs in
+the sweep are development history with known builder bugs (b1 = all-zero broken builder;
+b2–b5 cold rows are the cold-start-on-goal artifact, trivially 1.000) and are excluded
+from any headline.
+
+## Verdict
+
+**The honest comparable claim, now verified under the strict definition: memory roughly
+doubles the standard-radius benchmark success rate on warm revisits — 33%→67% on the
+Phase-C harness (exact), 31%→50% on the wider 6-category matrix.** The "8%" number retires
+(wrong radius); the "67%" number survives but for the right reason (every Phase-C episode
+stopped, so reach = at-STOP). Stakeholder report corrected in the three spots that quoted
+58% / "well over half" (reach) where the strict number is 50%.
+
+## File index (Run 16)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/scripts/diagnose_pipeline.py --benchmark` | at-STOP success recompute over episode JSONs (radius sweep, cold/warm split, stop-precedence rules) |
+| `embodied_memory/scripts/test_diagnose_benchmark.py` | 8-case sanity suite (stop precedence, radius boundary, reach≠success) |
+| `scripts/race-benchmark-success.sh` | one-shot driver (pull → sanity → recompute → at-STOP spot-check); python3 fallback, no conda needed |
