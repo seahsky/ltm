@@ -1106,7 +1106,17 @@ class EmbodiedMemoryBridge:
 
         scored: List[Any] = []
         for world_xy, grounded in targets:
-            if any(np.linalg.norm(world_xy - sx) < dedup_radius_m for sx in seen_xys):
+            # A FRONTIER-grounded target sits EXACTLY on a planner frontier (its xy IS
+            # fc.world_xy) and the caller passes planner_world_xys = ALL candidate xys
+            # (incl. those frontiers), so deduping it removed it at distance 0 — 100%
+            # of the time (clip1 RACE run: n_room_match>0 but n_coarse_candidates=0).
+            # That is the OPPOSITE of the intent: a frontier-grounded coarse candidate
+            # is MEANT to ride/boost that frontier, so it must NOT be deduped against
+            # the planner pool. STM-grounded targets (a visited room position) keep the
+            # dedup — re-proposing a spot the planner already covers IS redundant.
+            if grounded != "frontier" and any(
+                np.linalg.norm(world_xy - sx) < dedup_radius_m for sx in seen_xys
+            ):
                 continue
             dx = float(world_xy[0]) - ax
             dz = float(world_xy[1]) - az
