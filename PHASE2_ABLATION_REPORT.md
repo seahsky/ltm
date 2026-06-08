@@ -2347,3 +2347,89 @@ only untouched LTM head is the **coarse-layer affordance** head.
 | `embodied_memory/scripts/test_predictor_wiring.py` | 13-case TDD suite for the wiring |
 | `models/embodied/predictor-predictor-e1.pt` | the trained U head checkpoint |
 | `runs/predictor-e1-s{1,s3-heur,s3-trained-u}` | the three eval cells (36 eps each, commit 9704e0b) |
+
+# Run 19 — Importance-head training lever EXHAUSTED: a research-agent diagnosis, a normalization+calibration fix, and a goal-proximity U all REGRESS (RACE, 2026-06-08)
+
+Run 18 left the U head a regression. Rather than re-measure, we (a) spawned three
+research agents to find *why* and *how to fix it*, then (b) implemented and tested two
+fixes end-to-end. The lever is now exhausted: **five different trainable importance
+heads — R: scorer-d1/d3 (Runs 13/14); U: surprise, calibrated-surprise, goal-proximity
+(this run) — all sit at or below the hand-tuned heuristic ceiling, via the same
+mechanism.**
+
+## What the research agents found (all grounded in the code)
+
+- **A confirmed train/serve normalization SKEW (a bug).** `EmbodiedPredictionDataset`
+  fed UN-normalized SBERT targets (norm ~5–9) at train time, but inference runs on
+  L2-normalized inputs (`run_hm3d_pol` wraps the encoder in `l2_normalize_encoder`). The
+  MLP's ReLU thresholds, tuned to norm-7 activations, saw norm-1 inputs → corrupt
+  predicted direction → garbage cosine readout. Invisible because the readout normalizes
+  at the end.
+- **No discriminative SPREAD.** An empirical probe showed even a correctly-trained
+  forward model gives U ≈ 0.30 ± 0.05 — a near-constant offset that flattens the top-k
+  write selection (R and N decide; the surprise ordering is lost).
+- **The deepest issue — U is novelty-like, redundant with N.** A forward model on a
+  room-jumping caption stream collapses to "distance from the recent centroid" — a local
+  novelty signal that double-counts the γN term and is orthogonal to goal-relevance. The
+  heuristic U wins because it is *R-derived* (relevance-deviation), not novelty-derived.
+  Retrieval was verified to be **pure caption-goal cosine + position→waypoint**.
+
+## Tier-1 fix (e2): normalization + calibration — NEGLIGIBLE
+
+Fixed the skew (L2-normalize training pairs + train with cosine loss matching the
+`(1−cos)/2` readout) and added per-episode U calibration (`_calibrate_uniqueness_pool`,
+zscore/rank, restoring spread). Controlled A/B reusing Run-18's eval set + S1/heuristic
+baselines (commit 05e0cef, 1h35m). **Result: warm soft-SPL S3−S1 +0.0613 → +0.0609 —
+moved by 0.0004.** The runs diverge from Run 18 per-episode (fixes are active, unit-
+tested) but the net is nil. This *rules out* the bug and miscalibration as the cause: the
+calibration (rank/zscore) discards absolute U and keeps only within-episode ordering, so
+whatever the normalization improved was normalized away, and the head's *ordering* still
+selects no better than the heuristic.
+
+## Tier-3 (p1): goal-PROXIMITY U — REGRESSES, hurts binary
+
+Since retrieval is caption-goal cosine + position→waypoint, the signal that *could* beat
+the heuristic is "is this a good waypoint = was the frame taken near the goal." Logged
+per-step geodesic `distance_to_goal` (`_serialize_step`), added a `goal_proximity` label
+(binary ≤1.0m), trained a scalar head on it, and injected it into the U slot
+(`--utility-scorer-ckpt`, additive to heuristic R, calibration off). Commit c491a36,
+2h52m.
+
+| warm (n=26) | soft-SPL S3−S1 | binary SPL S3−S1 | succ@1m | mem_chosen | steps |
+|---|---|---|---|---|---|
+| heuristic U (target) | **+0.112, p=0.011** | +0.066 | 0.577 | 856 | 118.2 |
+| forward-model U (e2) | +0.061, p=0.072 | +0.031 | 0.385 | 1163 | 109.2 |
+| goal-proximity U (p1) | +0.067, p=0.087 | **−0.016 (negative)** | **0.346** | 1131 | 99.3 |
+
+Goal-proximity not only missed the heuristic — its **binary SPL went negative** (the only
+head to hurt binary precision) and warm **succ@1m fell to 0.346, below memory-off S1
+(0.385)**. Cold transfer held (+0.141, p=0.001), as always.
+
+## Verdict — one mechanism, lever closed
+
+All three U formulations land at the **same place**: warm soft-SPL ≈ +0.06 (half the
+heuristic), memory **over-fires** (~1130 vs 856), arrival degrades. The unifying cause:
+**the SBERT caption embedding can't distinguish object instances, so any trained head
+that stores *more* goal-ish frames just surfaces more *wrong-instance* candidates at
+retrieval → over-fire on the wrong instance → worse arrival.** Goal-proximity is the
+clearest case (it specifically up-weights near-goal-looking frames → negative binary). The
+heuristic U wins because it is conservative *and* R-derived; in an instance-ambiguous
+space, conservatism is the correct bias, and training a head to fire more is exactly what
+hurts. **The bottleneck is the embedding's instance discrimination, not the importance
+signal.** The importance-head training lever is CLOSED (5 angles, all ≤ heuristic). The
+genuinely different remaining levers are a better embedding/detector (instance
+discrimination — a separate, bigger project) or the coarse-affordance head (the only
+untouched LTM head; a different mechanism). The heuristic importance stays the default.
+
+## File index (Run 19) — all durable, env-gated, dialogue-path byte-identical
+
+| Path | Purpose |
+|---|---|
+| `dialogue_memory/train_predictor.py` | `_l2norm` training pairs + `loss="cosine"` (Tier-1 ①, skew fix) |
+| `dialogue_memory/consolidation.py` | `_calibrate_uniqueness_pool` (none/zscore/rank) in `consolidate_session` (Tier-1 ②) |
+| `embodied_memory/embodied_dataset.py` | `EmbodiedSample.distance_to_goal` + `goal_proximity` label (≤`GOAL_PROX_RADIUS_M`, default 1.0m) |
+| `embodied_memory/episode_runner.py` | `_serialize_step` logs per-step geodesic `distance_to_goal` |
+| `embodied_memory/memory_bridge.py` | `--utility-scorer-ckpt` → scorer in the U slot; `REMEMBR_U_CALIB`; loud dim guards |
+| `embodied_memory/scripts/test_predictor_wiring.py` | 33-case TDD suite (Tier-1 + Tier-3 wiring) |
+| `scripts/race-train-{predictor,utility-scorer}.sh` | the two drivers (e2 reuse form; p1 proximity) |
+| `runs/predictor-e2-s3-trained-u`, `runs/utilscorer-p1-s3-utility-u` | the two experiment cells (36 eps each) |
