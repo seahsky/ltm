@@ -957,6 +957,7 @@ class EmbodiedMemoryBridge:
         agent_pos: np.ndarray,
         agent_yaw: float,
         target_category: Optional[str],
+        frontier_cands: Optional[List[FrontierCandidate]] = None,
         room_anchors: Optional[List[Tuple[Any, str]]] = None,
         planner_world_xys: Optional[List[np.ndarray]] = None,
         top_k: int = 1,
@@ -988,15 +989,46 @@ class EmbodiedMemoryBridge:
             return []
 
         # Default anchors = the current episode's STM buffer (each EmbodiedRecord
-        # carries a CURRENT-scene caption + agent_position). This is what grounds the
-        # transferable prior to scene B without any stored scene-A coordinate.
+        # carries a CURRENT-scene caption + agent_position). This grounds the
+        # transferable prior to the current scene with no stored scene-A coordinate.
         if room_anchors is None:
             room_anchors = [
                 (r.agent_position, r.caption)
                 for r in self._pending
                 if getattr(r, "agent_position", None) is not None and getattr(r, "caption", None)
             ]
-        if not room_anchors:
+
+        # Room-tag the current-scene STM anchors (drop captions that name no room).
+        tagged: List[Tuple[np.ndarray, str]] = []
+        for pos, caption in room_anchors:
+            if pos is None or len(pos) < 3:
+                continue
+            room = resolve_room(caption)
+            if room is not None:
+                tagged.append((np.asarray([pos[0], pos[2]], dtype=np.float32), room))
+        if not tagged:
+            return []
+
+        # Choose grounding targets matching the preferred room.
+        #   PRIMARY (frontier-grounding): room-tag each UNEXPLORED frontier candidate
+        #     by its NEAREST captioned keyframe and keep those leading toward the
+        #     affordant room — this steers exploration to where the goal usually is,
+        #     not just back to already-visited rooms (the coarse-1 failure mode).
+        #   FALLBACK (stm-grounding): the visited affordant-room anchor position.
+        targets: List[Tuple[np.ndarray, str]] = []   # (world_xy, grounded)
+        if frontier_cands:
+            for fc in frontier_cands:
+                fxy = np.asarray(fc.world_xy, dtype=np.float32)
+                nearest_room = min(
+                    tagged, key=lambda t: float(np.linalg.norm(fxy - t[0]))
+                )[1]
+                if nearest_room == pref:
+                    targets.append((fxy, "frontier"))
+        if not targets:
+            for xy, room in tagged:
+                if room == pref:
+                    targets.append((xy, "stm"))
+        if not targets:
             return []
 
         import math
@@ -1006,12 +1038,7 @@ class EmbodiedMemoryBridge:
         seen_xys: List[np.ndarray] = list(planner_world_xys or [])
 
         scored: List[Any] = []
-        for pos, caption in room_anchors:
-            if pos is None or len(pos) < 3:
-                continue
-            if resolve_room(caption) != pref:
-                continue
-            world_xy = np.asarray([pos[0], pos[2]], dtype=np.float32)
+        for world_xy, grounded in targets:
             if any(np.linalg.norm(world_xy - sx) < dedup_radius_m for sx in seen_xys):
                 continue
             dx = float(world_xy[0]) - ax
@@ -1019,14 +1046,14 @@ class EmbodiedMemoryBridge:
             dist_m = math.hypot(dx, dz)
             if dist_m > max_distance_m:
                 continue
-            scored.append((dist_m, world_xy, caption))
+            scored.append((dist_m, world_xy, grounded))
 
         if not scored:
             return []
         scored.sort(key=lambda t: t[0])  # nearest matching region first
 
         out: List[FrontierCandidate] = []
-        for dist_m, world_xy, caption in scored[:top_k]:
+        for dist_m, world_xy, grounded in scored[:top_k]:
             world_bearing = math.atan2(float(world_xy[0]) - ax, float(world_xy[1]) - az)
             rel = world_bearing - float(agent_yaw)
             while rel > math.pi:
@@ -1047,7 +1074,7 @@ class EmbodiedMemoryBridge:
                     metadata={
                         "preferred_room": pref,
                         "target_category": str(target_category),
-                        "anchor_caption": str(caption)[:120],
+                        "grounded": grounded,
                     },
                 )
             )

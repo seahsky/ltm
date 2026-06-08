@@ -1085,17 +1085,26 @@ class EpisodeRunner:
                     n_memory_candidates += len(mem_cands)
 
                     # Coarse-affordance (step 4): the POSITION-FREE cross-env path.
-                    # Env-gated (LTM_COARSE_AFFORDANCE) and fired ONLY when the fine
-                    # layer surfaced no same-scene hit (mem_cands empty == genuinely
-                    # cold/new scene) — conservatism that avoids the importance-head
-                    # over-fire trap. Grounds the goal category's preferred room-type
-                    # to the current scene's STM observations and injects one waypoint.
-                    if not mem_cands and os.environ.get("LTM_COARSE_AFFORDANCE"):
+                    # Env-gated (LTM_COARSE_AFFORDANCE). Conservatism lives in the
+                    # PROPOSER, which self-gates — it emits a candidate only when a
+                    # current-scene observation actually resolves to the goal
+                    # category's affordant room-type, and at most one. (coarse-1
+                    # showed the old `not mem_cands` precondition blocked it in 3/4
+                    # away episodes, incl. one with a matching living-room caption, so
+                    # coarse never fired — drop it and let the room-match + rerank
+                    # decide.) Grounds the goal's preferred room to the current scene.
+                    if os.environ.get("LTM_COARSE_AFFORDANCE"):
                         coarse_cands = self.bridge.propose_coarse_candidates(
                             agent_pos=step.agent_state.position,
                             agent_yaw=step.agent_state.rotation_yaw,
                             target_category=(active_category if multion
                                              else ep.target_category),
+                            # room-tag the UNEXPLORED frontier cells (room borrowed
+                            # from the nearest captioned keyframe) so the prior steers
+                            # exploration toward the affordant region, not just visited
+                            # rooms; STM-grounding is the fallback inside the proposer.
+                            frontier_cands=[c for c in all_cands
+                                            if getattr(c, "source", "") == "frontier"],
                             planner_world_xys=[c.world_xy for c in all_cands],
                             top_k=1,
                         )
