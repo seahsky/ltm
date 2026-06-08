@@ -132,7 +132,16 @@ is structurally impossible for a waypoint; positive transfer needs step 4 (coars
 or a better instance-discriminating embedding** — confirming audit overstatement #1 with a
 controlled experiment. (`crossenv-1` first measured this WRONG — n_warm=3 made the analyzer
 read within-away revisit, and the recall counter read 0 only because Habitat renumbers
-episode_id; both fixed in the redesign.)
+episode_id; both fixed in the redesign.) **`crossenv-3` (`--isolate`, 2026-06-08) makes the
+conclusion OVER-DETERMINED:** freezing away-scene LTM writes (`LTM_FREEZE_SCENE`, so each away
+episode queries only the home sightings) collapsed away S3−S1 **+0.1695 → +0.0218** (p=0.066,
+CI [0,+0.054]) with **mem_chosen=0 on every away episode** (no injectable memory), while the
+recall counter rose to **4055**. Per-episode: 3 of 4 away episodes were byte-identical between
+runs; **only bed changed (0.639 mem=3 → 0.048 mem=0)** — proving the entire +0.1695 was that one
+episode's cross-episode same-scene recall, not transfer. Three independent lines now agree
+(12-agent code audit: no injection path; mem_chosen=0 under isolation; delta collapse): **the
+LTM recalls the cross-scene sighting but it yields zero navigation benefit → cross-env transfer
+is structurally absent → step 4 (coarse-affordance) is the required mechanism.**
 
 **Instance bottleneck — now MEASURED ($0), was asserted.**
 `diagnose_sbert_cosines.py` (instance section; `runs/diagnose-instance-sep.txt`):

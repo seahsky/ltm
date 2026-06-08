@@ -80,10 +80,18 @@ The lone cross-scene READ (rerank S_sim via the un-scene-filtered `retrieve()` �
 home sightings are not literally zero-influence but cannot manufacture transfer. **Net:
 cross-env transfer via the fine layer is structurally impossible for a waypoint; positive
 transfer needs step 4 (coarse-affordance) or a better instance-discriminating embedding** —
-confirming this overstatement with a controlled experiment. (An optional cleaner re-run —
-isolate each home→away pair so the away delta has no within-away-block accumulation — would
-drop the delta toward 0 and STRENGTHEN this; deferred as a nice-to-have, the qualitative
-conclusion is already robust.)
+confirming this overstatement with a controlled experiment. **The cleaner re-run RAN and
+makes it OVER-DETERMINED (`crossenv-3`, `--isolate`, 2026-06-08):** freezing the away-scene
+LTM writes (`LTM_FREEZE_SCENE`, `memory_bridge.consolidate` skips the fine write in the away
+scene → each away episode queries only the home sightings) collapsed away S3−S1 **+0.1695 →
++0.0218** (p=0.066) with **mem_chosen=0 on every away episode** (no injectable memory), while
+the recall counter rose to **4055**. Per-episode, 3 of 4 away episodes were byte-identical
+across the two runs; **only bed changed (0.639 mem=3 → 0.048 mem=0)** — the entire +0.1695 was
+that one episode's cross-episode same-scene recall, not transfer. Three independent lines now
+agree: the 12-agent code audit (no home→away injection path), `mem_chosen=0` under isolation,
+and the delta collapse. **Cross-env transfer is structurally absent — the LTM recalls the
+cross-scene sighting but yields zero navigation benefit; step 4 (coarse-affordance) is the
+required mechanism.**
 
 **Instance-bottleneck claim — now MEASURED (was asserted).** The "SBERT can't
 distinguish instances" premise that gates the most expensive recommendation
