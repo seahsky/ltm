@@ -143,6 +143,21 @@ for S in 1 3; do
       --backbone remembr --setting "$S" --episodes-path "$DS" \
       --scene all --target "$TARGET" --n-episodes "$N_EPISODES" \
       --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
+  rc=${PIPESTATUS[0]}
+  # Fail-fast on a GENUINE crash, but NOT on rc!=0 alone: run_hm3d_pol returns
+  # nonzero when full-system pass_conditions fail (run_hm3d_pol.py:499-502), which
+  # is EXPECTED for memory-off S1 (it deliberately can't satisfy fine_layer_nonempty
+  # / all_four_modules_invoked). So judge a real failure by episodes WRITTEN, not rc:
+  # 0 completed = a true crash (GPU OOM / missing ReMEmbR weights under REMEMBR_STRICT
+  # / sim init) -> abort before spending on the next setting and the analysis.
+  completed="$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['n_episodes_completed'])" "${out_dir}/summary.json" 2>/dev/null || echo 0)"
+  # `completed` is always numeric (the `|| echo 0` fallback guarantees "0" on any
+  # parse failure), so a plain -lt 1 test is safe and avoids `!`-negation pitfalls.
+  if [ "${completed:-0}" -lt 1 ] 2>/dev/null; then
+    echo "FATAL: setting=$S completed 0/${N_EPISODES} episodes (rc=$rc) — genuine run failure (OOM / missing weights / sim init); aborting before analysis."
+    exit 1
+  fi
+  [ "$completed" = "$N_EPISODES" ] || echo "WARN: setting=$S completed ${completed}/${N_EPISODES} (rc=$rc) — partial run; warm pairs may be lower than expected."
   OUT_DIRS="$OUT_DIRS $out_dir"
 done
 
@@ -155,6 +170,14 @@ done
 banner "[6/6] paired warm soft-SPL: analyze_ablation.py --revisit$OUT_DIRS"
 # shellcheck disable=SC2086
 python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS
+echo
+echo "NOTE on the Gate-A verdict above: for THIS cross-env run the seam counts a"
+echo "cross-scene recall but never INJECTS a waypoint (geometry is invalid across"
+echo "scenes), so mem_fire_rate is 0 and the analyzer may print '(c) memory RARELY"
+echo "FIRES / empty warm memory'. That verdict is EXPECTED-FALSE here — the recall"
+echo "counter below is the corrective evidence. Read the warm S3-S1 soft-SPL as a"
+echo "LOW-POWER STRUCTURAL NULL by design (the away scene's first warm visit per"
+echo "category is demoted to 'cold' by visit-order, so n is small)."
 
 # Cross-scene recall PROOF: the away warm episodes must show n_cross_scene_recall
 # > 0 in S3 (memory recalled the home sighting) even though soft-SPL didn't move.
@@ -162,19 +185,25 @@ banner "cross-scene recall counter (S3 away warm episodes' bridge_stats_after)"
 python - "runs/${TAG}-s3" <<'PY'
 import glob, json, os, sys
 run = sys.argv[1]
-total = 0
+# _n_cross_scene_recall is a PROCESS-CUMULATIVE, monotonic counter (memory_bridge
+# never resets it per episode), so bridge_stats_after.n_cross_scene_recall is a
+# running snapshot. Report the FINAL (max) cumulative value as the total recall
+# EVENTS — do NOT sum the per-episode snapshots (that triple-counts). The number
+# is an event count (one per matched hit per replan), so its magnitude is only a
+# lower-bound proxy; its SIGN (>0) is the load-bearing fact.
+final = 0
 rows = []
 for f in sorted(glob.glob(os.path.join(run, "episode_*.json"))):
     d = json.load(open(f))
     eid = str(d.get("episode_id", ""))
     if "warm-away" not in eid:
         continue
-    n = (d.get("bridge_stats_after") or {}).get("n_cross_scene_recall", 0)
-    total += n
+    n = int((d.get("bridge_stats_after") or {}).get("n_cross_scene_recall", 0) or 0)
+    final = max(final, n)
     rows.append((eid, n, d.get("soft_spl")))
 for eid, n, sspl in rows:
-    print(f"  {eid:<22} n_cross_scene_recall={n:<4} soft_spl={sspl}")
-print(f"  --> total cross-scene recalls on away warm episodes = {total}")
+    print(f"  {eid:<22} cum_recall={n:<5} soft_spl={sspl}")
+print(f"  --> final cumulative cross-scene recall EVENTS across away warm episodes = {final}")
 print("  (>0 confirms the memory RECALLED the home sighting; if soft-SPL S3-S1~=0,")
 print("   the null is 'no cross-scene geometry mechanism', not 'empty memory' -> step 4.)")
 PY
