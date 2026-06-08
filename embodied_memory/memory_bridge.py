@@ -244,6 +244,15 @@ class EmbodiedMemoryBridge:
         self.disable_ltm = bool(disable_ltm)
         self.disable_rerank = bool(disable_rerank)
 
+        # Coarse-affordance head (step 4) instrumentation: the last
+        # propose_coarse_candidates call stashes its room-tagging diagnostics here
+        # (CLIP vs caption vs abstain counts, room histogram, top cosine, match/
+        # grounding) so the runner can surface them WITHOUT changing the proposer's
+        # return signature — the prior runs could not tell 'never proposed' from
+        # 'proposed-but-not-chosen' nor why the head abstained. See
+        # propose_coarse_candidates / episode_runner coarse counters.
+        self._last_coarse_diag: Dict[str, Any] = {}
+
         # Path-1 fix: the LTM is now indexed in CLIP joint vision-language
         # space, not SBERT text space. Caption-based indexing was inert because
         # the HM3D-Semantics sensor wasn't loading, so every caption defaulted
@@ -958,8 +967,10 @@ class EmbodiedMemoryBridge:
         agent_yaw: float,
         target_category: Optional[str],
         frontier_cands: Optional[List[FrontierCandidate]] = None,
-        room_anchors: Optional[List[Tuple[Any, str]]] = None,
+        room_anchors: Optional[List[Tuple[Any, ...]]] = None,
         planner_world_xys: Optional[List[np.ndarray]] = None,
+        room_classifier: Optional[Callable[[Any], Optional[str]]] = None,
+        room_cos_fn: Optional[Callable[[Any], float]] = None,
         top_k: int = 1,
         dedup_radius_m: float = 1.5,
         max_distance_m: float = 30.0,
@@ -970,44 +981,98 @@ class EmbodiedMemoryBridge:
         The transferable key is the goal category's preferred room-type (static
         prior ``room_resolver.preferred_room``; no coordinates), so this fires in a
         brand-new scene where the fine layer (scene-filtered) has nothing.
-        ``room_anchors`` are ``(position_xyz, caption)`` pairs observed in the
-        CURRENT scene (STM keyframes and/or frontier-adjacent captions). Each
-        anchor whose caption ``resolve_room``s to the preferred room is a candidate
-        region; up to ``top_k`` (nearest-first) are emitted as
+        ``room_anchors`` are ``(position_xyz, caption[, visual_embedding])`` tuples
+        observed in the CURRENT scene (STM keyframes and/or frontier-adjacent
+        captions). Each anchor is room-tagged and the ones matching the preferred
+        room become candidate regions; up to ``top_k`` (nearest-first) are emitted as
         ``FrontierCandidate(source="coarse")`` at the anchor position. Returns ``[]``
         whenever LTM is off, the category has no room affordance, or no anchor
         matches — so callers can concatenate the result unguarded.
+
+        Room-tagging is CLIP-FIRST, caption-fallback: if ``room_classifier`` is given
+        (a CLIP zero-shot classifier mapping an anchor's visual embedding -> a
+        room-type or ``None``) and the anchor carries a visual embedding, its label
+        wins; otherwise (no classifier / no embedding / CLIP abstains) the anchor
+        falls back to ``resolve_room(caption)``. The CLIP signal is DENSE where the
+        Qwen-VL caption is silent (most ObjectNav frames name no room), which is the
+        binding constraint coarse-1/coarse-2 hit; the classifier's own abstain margin
+        keeps the conservatism that beat every trained importance head.
 
         Conservatism (avoid the importance-head over-fire trap): the caller should
         only use these when ``propose_memory_candidates`` returned no same-scene fine
         hit (a genuinely new/cold scene) — see ``episode_runner._propose_candidates``.
         """
+        # Room-tagging diagnostics (stashed on self._last_coarse_diag before EVERY
+        # return so zero-fire/abstain stats are always recoverable — SA-1..5).
+        from collections import Counter as _Counter
+        diag: Dict[str, Any] = {
+            "pref": None, "n_anchors": 0, "n_tagged_clip": 0, "n_tagged_caption": 0,
+            "n_abstained": 0, "room_hist": {}, "top_cos_max": float("nan"),
+            "n_room_match": 0, "grounding": None,
+        }
+
+        def _ret(value):
+            self._last_coarse_diag = diag
+            return value
+
         if self.disable_ltm or not target_category:
-            return []
+            return _ret([])
         pref = _preferred_room_for(target_category)
+        diag["pref"] = pref
         if pref is None:
-            return []
+            return _ret([])
 
         # Default anchors = the current episode's STM buffer (each EmbodiedRecord
-        # carries a CURRENT-scene caption + agent_position). This grounds the
-        # transferable prior to the current scene with no stored scene-A coordinate.
+        # carries a CURRENT-scene caption + agent_position + CLIP visual_embedding).
+        # This grounds the transferable prior to the current scene with no stored
+        # scene-A coordinate. Anchors are (pos, caption, visual_embedding) so the
+        # CLIP room classifier can tag a frame whose caption names no room.
         if room_anchors is None:
-            room_anchors = [
-                (r.agent_position, r.caption)
+            anchors = [
+                (r.agent_position, r.caption, getattr(r, "visual_embedding", None))
                 for r in self._pending
                 if getattr(r, "agent_position", None) is not None and getattr(r, "caption", None)
             ]
+        else:
+            # External anchors may be (pos, caption) or (pos, caption, embedding).
+            anchors = [
+                (a[0], a[1], (a[2] if len(a) > 2 else None))
+                for a in room_anchors
+            ]
+        diag["n_anchors"] = len(anchors)
 
-        # Room-tag the current-scene STM anchors (drop captions that name no room).
+        # Room-tag each current-scene anchor (CLIP-first, caption-fallback). Drop
+        # anchors that resolve to no room — a wrong tag is worse than none.
+        room_hist: "_Counter[str]" = _Counter()
+        top_cos_max = float("nan")
         tagged: List[Tuple[np.ndarray, str]] = []
-        for pos, caption in room_anchors:
+        for pos, caption, vemb in anchors:
             if pos is None or len(pos) < 3:
                 continue
-            room = resolve_room(caption)
+            room = None
+            via_clip = False
+            if room_classifier is not None and vemb is not None:
+                if room_cos_fn is not None:            # SA-3: raw top cosine (no gate)
+                    tc = room_cos_fn(vemb)
+                    if tc is not None and tc == tc:    # not NaN
+                        top_cos_max = tc if top_cos_max != top_cos_max else max(top_cos_max, tc)
+                room = room_classifier(vemb)           # dense CLIP zero-shot signal
+                via_clip = room is not None
+            if room is None:                           # no classifier / no emb / CLIP abstained
+                room = resolve_room(caption)           # caption keyword fallback
             if room is not None:
+                if via_clip:
+                    diag["n_tagged_clip"] += 1
+                else:
+                    diag["n_tagged_caption"] += 1
+                room_hist[room] += 1
                 tagged.append((np.asarray([pos[0], pos[2]], dtype=np.float32), room))
+            else:
+                diag["n_abstained"] += 1
+        diag["room_hist"] = dict(room_hist)
+        diag["top_cos_max"] = top_cos_max
         if not tagged:
-            return []
+            return _ret([])
 
         # Choose grounding targets matching the preferred room.
         #   PRIMARY (frontier-grounding): room-tag each UNEXPLORED frontier candidate
@@ -1028,8 +1093,10 @@ class EmbodiedMemoryBridge:
             for xy, room in tagged:
                 if room == pref:
                     targets.append((xy, "stm"))
+        diag["n_room_match"] = len(targets)
+        diag["grounding"] = targets[0][1] if targets else None
         if not targets:
-            return []
+            return _ret([])
 
         import math
         weight = float(self._COARSE_PRIOR_WEIGHT if prior_weight is None else prior_weight)
@@ -1049,7 +1116,7 @@ class EmbodiedMemoryBridge:
             scored.append((dist_m, world_xy, grounded))
 
         if not scored:
-            return []
+            return _ret([])
         scored.sort(key=lambda t: t[0])  # nearest matching region first
 
         out: List[FrontierCandidate] = []
@@ -1080,7 +1147,7 @@ class EmbodiedMemoryBridge:
             )
         if out:
             self.modules_invoked["ltm_coarse"] = True
-        return out
+        return _ret(out)
 
     def retrieve(self, query_embedding: np.ndarray, top_k_per_layer: int = 3) -> Dict[str, List[Tuple[MemoryEntry, float]]]:
         results = self.ltm.multi_scale_search(query_embedding, top_k_per_layer=top_k_per_layer)

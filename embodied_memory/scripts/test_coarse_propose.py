@@ -108,6 +108,163 @@ def case_dedup_against_planner_xys():
 
 
 # ----------------------------------------------------------------------
+# CLIP room_classifier plumbing (Stage 5): CLIP-first, caption-fallback. The
+# binding constraint is room PERCEPTION — captions name the affordant room too
+# rarely. A CLIP zero-shot room classifier (on each anchor's visual embedding)
+# gives a DENSE room signal; resolve_room(caption) is the fallback when CLIP
+# abstains or no embedding is present.
+# ----------------------------------------------------------------------
+
+
+def _emb(marker: float) -> np.ndarray:
+    v = np.zeros(8, dtype=np.float32)
+    v[0] = float(marker)
+    return v
+
+
+def _clf(mapping: dict):
+    """Synthetic CLIP room classifier: emb[0] (rounded int) -> room or None."""
+    def clf(emb):
+        if emb is None:
+            return None
+        return mapping.get(int(round(float(emb[0]))))
+    return clf
+
+
+def case_clip_overrides_sparse_caption():
+    # caption names NO room (resolve_room abstains) but CLIP says living_room ->
+    # the anchor IS tagged living_room and the chair-goal coarse head fires. THE
+    # WHOLE POINT: dense room signal where the caption keyword is silent.
+    anchors = [([1.0, 0.0, 2.0], "a wooden chair tucked under a table", _emb(1))]
+    out = _propose(_mk_bridge(), "chair", anchors, room_classifier=_clf({1: "living_room"}))
+    assert len(out) == 1, out
+    assert out[0].metadata["preferred_room"] == "living_room", out[0].metadata
+    assert list(out[0].world_xy) == [1.0, 2.0], out[0].world_xy
+    print("  case clip_overrides_sparse_caption: OK")
+
+
+def case_clip_abstain_falls_back_to_caption():
+    # CLIP abstains (emb marker not in map -> None) but the caption DOES name the
+    # room -> caption fallback still tags it. CLIP augments, never removes coverage.
+    anchors = [([1.0, 0.0, 2.0], "a cozy living room with a sofa", _emb(9))]
+    out = _propose(_mk_bridge(), "chair", anchors, room_classifier=_clf({}))  # 9 -> None
+    assert len(out) == 1 and out[0].metadata["preferred_room"] == "living_room", out
+    print("  case clip_abstain_falls_back_to_caption: OK")
+
+
+def case_clip_confident_label_overrides_caption_keyword():
+    # caption keyword says living_room but CLIP is CONFIDENT it's a bedroom ->
+    # CLIP-first trusts the perceptual label -> chair(wants living) finds no match.
+    anchors = [([1.0, 0.0, 2.0], "a cozy living room", _emb(2))]
+    out = _propose(_mk_bridge(), "chair", anchors, room_classifier=_clf({2: "bedroom"}))
+    assert out == [], out
+    print("  case clip_confident_label_overrides_caption_keyword: OK")
+
+
+def case_no_classifier_is_caption_only_backcompat():
+    # without a classifier the proposer is caption-only (unchanged contract): a
+    # no-room caption abstains -> empty. 3-tuple anchors with a None embedding too.
+    anchors = [([1.0, 0.0, 2.0], "a wooden chair under a table", _emb(1))]
+    assert _propose(_mk_bridge(), "chair", anchors) == []                   # no classifier
+    anchors_none = [([1.0, 0.0, 2.0], "a cozy living room", None)]          # 3-tuple, None emb
+    out = _propose(_mk_bridge(), "chair", anchors_none, room_classifier=_clf({1: "bedroom"}))
+    assert len(out) == 1 and out[0].metadata["preferred_room"] == "living_room", out  # caption used
+    print("  case no_classifier_is_caption_only_backcompat: OK")
+
+
+def case_diag_clip_tag_recorded():
+    # SA-1/2/4: a CLIP-tagged match populates _last_coarse_diag with the clip count,
+    # the room histogram, the match count, and the grounding kind.
+    b = _mk_bridge()
+    b.begin_episode("ep-coarse", scene_id="SCENE_B")
+    anchors = [([1.0, 0.0, 2.0], "a wooden chair under a table", _emb(1))]  # caption abstains
+    out = b.propose_coarse_candidates(
+        agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32), agent_yaw=0.0,
+        target_category="chair", room_anchors=anchors, room_classifier=_clf({1: "living_room"}))
+    d = b._last_coarse_diag
+    assert len(out) == 1
+    assert d["pref"] == "living_room", d
+    assert d["n_tagged_clip"] == 1 and d["n_tagged_caption"] == 0, d
+    assert d["n_abstained"] == 0, d
+    assert d["room_hist"].get("living_room") == 1, d
+    assert d["n_room_match"] == 1, d
+    assert d["grounding"] == "stm", d   # no frontier_cands -> stm grounding
+    print("  case diag_clip_tag_recorded: OK")
+
+
+def case_diag_caption_and_abstain_recorded():
+    # SA-2: caption-fallback tag + an abstaining anchor are counted distinctly.
+    b = _mk_bridge()
+    b.begin_episode("ep-coarse", scene_id="SCENE_B")
+    anchors = [
+        ([1.0, 0.0, 2.0], "a cozy living room with a sofa", _emb(9)),  # CLIP abstains(9->None)->caption
+        ([5.0, 0.0, 5.0], "a wooden chair under a table", _emb(9)),    # CLIP abstains + caption abstains
+    ]
+    out = b.propose_coarse_candidates(
+        agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32), agent_yaw=0.0,
+        target_category="chair", room_anchors=anchors, room_classifier=_clf({}))
+    d = b._last_coarse_diag
+    assert len(out) == 1, out
+    assert d["n_tagged_clip"] == 0, d
+    assert d["n_tagged_caption"] == 1, d
+    assert d["n_abstained"] == 1, d
+    assert d["n_anchors"] == 2, d
+    print("  case diag_caption_and_abstain_recorded: OK")
+
+
+def case_diag_stashed_on_abort():
+    # SA-1: a propose that returns [] (no room matches the goal) STILL stashes the
+    # diag so abstain/zero-fire stats are recoverable (the prior runs could not tell
+    # 'never proposed' from 'proposed-but-not-chosen').
+    b = _mk_bridge()
+    b.begin_episode("ep-coarse", scene_id="SCENE_B")
+    anchors = [([5.0, 0.0, 5.0], "a spacious bedroom with a bed", _emb(9))]  # chair wants living
+    out = b.propose_coarse_candidates(
+        agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32), agent_yaw=0.0,
+        target_category="chair", room_anchors=anchors, room_classifier=_clf({}))
+    d = b._last_coarse_diag
+    assert out == [], out
+    assert d["n_anchors"] == 1, d
+    assert d["n_tagged_caption"] == 1, d          # bedroom tagged (just not a match)
+    assert d["n_room_match"] == 0, d              # but no anchor matched living_room
+    assert d["room_hist"].get("bedroom") == 1, d
+    print("  case diag_stashed_on_abort: OK")
+
+
+def case_diag_top_cos_from_cos_fn():
+    # SA-3: when a room_cos_fn is supplied the diag records the running max top cosine.
+    b = _mk_bridge()
+    b.begin_episode("ep-coarse", scene_id="SCENE_B")
+    anchors = [([1.0, 0.0, 2.0], "a wooden chair under a table", _emb(1))]
+    b.propose_coarse_candidates(
+        agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32), agent_yaw=0.0,
+        target_category="chair", room_anchors=anchors, room_classifier=_clf({1: "living_room"}),
+        room_cos_fn=lambda emb: 0.37)
+    d = b._last_coarse_diag
+    assert abs(d["top_cos_max"] - 0.37) < 1e-6, d
+    print("  case diag_top_cos_from_cos_fn: OK")
+
+
+def case_stm_default_uses_visual_embedding_for_clip():
+    # default anchors from _pending must carry each record's visual_embedding so
+    # the CLIP classifier can tag a no-room-caption keyframe.
+    from types import SimpleNamespace
+    b = _mk_bridge()
+    b.begin_episode("ep-coarse", scene_id="SCENE_B")
+    kf = SimpleNamespace(
+        step_idx=0, caption="a wooden chair under a table",   # caption abstains
+        text_embedding=np.zeros(8, dtype=np.float32),
+        visual_embedding=_emb(1), agent_position=np.array([3.0, 0.0, 0.0], dtype=np.float32),
+        agent_yaw=0.0)
+    b.observe_keyframe(kf, action=1, reward=0.0)
+    out = b.propose_coarse_candidates(
+        agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32), agent_yaw=0.0,
+        target_category="chair", room_classifier=_clf({1: "living_room"}))
+    assert len(out) == 1 and list(out[0].world_xy) == [3.0, 0.0], out
+    print("  case stm_default_uses_visual_embedding_for_clip: OK")
+
+
+# ----------------------------------------------------------------------
 # FrontierPhysicsScorer source=="coarse" branch
 # ----------------------------------------------------------------------
 
@@ -221,6 +378,15 @@ def main() -> int:
     case_defaults_to_stm_pending()
     case_frontier_grounding_steers_to_affordant_region()
     case_frontier_falls_back_to_stm_when_none_match()
+    case_clip_overrides_sparse_caption()
+    case_clip_abstain_falls_back_to_caption()
+    case_clip_confident_label_overrides_caption_keyword()
+    case_no_classifier_is_caption_only_backcompat()
+    case_diag_clip_tag_recorded()
+    case_diag_caption_and_abstain_recorded()
+    case_diag_stashed_on_abort()
+    case_diag_top_cos_from_cos_fn()
+    case_stm_default_uses_visual_embedding_for_clip()
     case_scorer_coarse_branch_drops_bearing()
     print("All cases passed.")
     return 0

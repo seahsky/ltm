@@ -37,6 +37,7 @@ from .frontier_planner import (
 )
 from .memory_bridge import EmbodiedMemoryBridge
 from .perception import CLIPKeyframeEncoder, Keyframe, SemanticCaptioner
+from .room_resolver import build_room_text_embeddings, classify_room_clip, room_clip_top_cos
 from .remembr_backbone import (
     ReMEmbRBuilder,
     ReMEmbRPlanner,
@@ -62,6 +63,12 @@ class RunSummary:
     n_frontier_chosen: int = 0        # decisions where reranker picked a frontier-injected candidate
     n_coarse_candidates: int = 0      # total coarse-affordance candidates surfaced (step 4)
     n_coarse_chosen: int = 0          # decisions where reranker picked a coarse-affordance candidate
+    # Coarse room-tagging diagnostics (Stage-5 SA-1..5): aggregate over episodes.
+    n_coarse_room_clip_tagged: int = 0     # anchors room-tagged by the CLIP classifier
+    n_coarse_room_caption_tagged: int = 0  # anchors room-tagged by caption fallback
+    n_coarse_room_abstained: int = 0       # anchors that resolved to NO room
+    n_coarse_room_matched: int = 0         # tagged anchors whose room == goal's preferred room
+    coarse_top_cos_max: float = float("nan")  # max top CLIP room cosine seen (calibration)
     n_remembr_chosen: int = 0         # decisions where reranker picked a grounded remembr (LLM) candidate
     n_stop_signals: int = 0           # decisions where backbone emitted a grounded STOP
     n_detector_called: int = 0
@@ -91,6 +98,11 @@ class RunSummary:
             "n_frontier_chosen": self.n_frontier_chosen,
             "n_coarse_candidates": self.n_coarse_candidates,
             "n_coarse_chosen": self.n_coarse_chosen,
+            "n_coarse_room_clip_tagged": self.n_coarse_room_clip_tagged,
+            "n_coarse_room_caption_tagged": self.n_coarse_room_caption_tagged,
+            "n_coarse_room_abstained": self.n_coarse_room_abstained,
+            "n_coarse_room_matched": self.n_coarse_room_matched,
+            "coarse_top_cos_max": float(self.coarse_top_cos_max),
             "n_remembr_chosen": self.n_remembr_chosen,
             "n_stop_signals": self.n_stop_signals,
             "n_detector_called": self.n_detector_called,
@@ -466,6 +478,12 @@ class EpisodeRunner:
         self.bridge = bridge
         self.clip_encoder = clip_encoder
         self.captioner = captioner
+        # CLIP zero-shot room classifier for the coarse-affordance head (Stage 5):
+        # built lazily once (the room prompts are fixed) and reused. Caches the
+        # 6 room-prompt CLIP-text embeddings; the per-call closure scores an
+        # anchor's visual embedding against them. None until first use / when off.
+        self._room_text_embeddings: Optional[Dict[str, Any]] = None
+        self._room_classifier_fn: Optional[Any] = None
         self.out_dir = out_dir
         self.target_category = target_category
         # MultiON (sequential semantic ObjectNav): ordered K-chain of goal
@@ -679,6 +697,20 @@ class EpisodeRunner:
             summary.n_frontier_chosen += int(ep_metrics.get("n_frontier_chosen", 0))
             summary.n_coarse_candidates += int(ep_metrics.get("n_coarse_candidates", 0))
             summary.n_coarse_chosen += int(ep_metrics.get("n_coarse_chosen", 0))
+            summary.n_coarse_room_clip_tagged += int(ep_metrics.get("n_coarse_room_clip_tagged", 0))
+            summary.n_coarse_room_caption_tagged += int(ep_metrics.get("n_coarse_room_caption_tagged", 0))
+            summary.n_coarse_room_abstained += int(ep_metrics.get("n_coarse_room_abstained", 0))
+            summary.n_coarse_room_matched += int(ep_metrics.get("n_coarse_room_matched", 0))
+            _ep_tc = ep_metrics.get("coarse_top_cos_max")
+            if _ep_tc is not None and _ep_tc == _ep_tc:  # not NaN
+                summary.coarse_top_cos_max = (
+                    _ep_tc if summary.coarse_top_cos_max != summary.coarse_top_cos_max
+                    else max(summary.coarse_top_cos_max, _ep_tc))
+            # Room-distribution histogram (catches CLIP collapse-to-one-room) lives
+            # in summary.ablation, not a flat scalar.
+            _hist = summary.ablation.setdefault("coarse_room_hist", {})
+            for _rm, _cnt in (ep_metrics.get("coarse_room_hist") or {}).items():
+                _hist[_rm] = _hist.get(_rm, 0) + int(_cnt)
             summary.n_remembr_chosen += int(ep_metrics.get("n_remembr_chosen", 0))
             summary.n_stop_signals += int(ep_metrics.get("n_stop_signals", 0))
             summary.n_detector_called += int(ep_metrics.get("n_detector_called", 0))
@@ -705,6 +737,11 @@ class EpisodeRunner:
                 "n_frontier_chosen": int(ep_metrics.get("n_frontier_chosen", 0)),
                 "n_coarse_candidates": int(ep_metrics.get("n_coarse_candidates", 0)),
                 "n_coarse_chosen": int(ep_metrics.get("n_coarse_chosen", 0)),
+                "n_coarse_room_clip_tagged": int(ep_metrics.get("n_coarse_room_clip_tagged", 0)),
+                "n_coarse_room_caption_tagged": int(ep_metrics.get("n_coarse_room_caption_tagged", 0)),
+                "n_coarse_room_abstained": int(ep_metrics.get("n_coarse_room_abstained", 0)),
+                "n_coarse_room_matched": int(ep_metrics.get("n_coarse_room_matched", 0)),
+                "coarse_top_cos_max": float(ep_metrics.get("coarse_top_cos_max", float("nan"))),
                 "n_remembr_chosen": int(ep_metrics.get("n_remembr_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
                 "n_detector_called": int(ep_metrics.get("n_detector_called", 0)),
@@ -819,6 +856,17 @@ class EpisodeRunner:
         n_frontier_chosen = 0
         n_coarse_candidates = 0
         n_coarse_chosen = 0
+        # Coarse room-tagging diagnostics (Stage-5 SA-1..5): how the coarse head
+        # grounded (or failed to) — CLIP-tagged vs caption-fallback vs abstained
+        # anchors, how many matched the goal's preferred room, the running max top
+        # CLIP room cosine (calibration / norm-skew guard: >1.0 == bug), and the
+        # distribution of classified rooms (catches CLIP collapse-to-one-room).
+        n_coarse_room_clip_tagged = 0
+        n_coarse_room_caption_tagged = 0
+        n_coarse_room_abstained = 0
+        n_coarse_room_matched = 0
+        coarse_top_cos_max = float("nan")
+        coarse_room_hist: Dict[str, int] = {}
         n_remembr_chosen = 0
         n_stop_signals = 0
         ep_metrics_counters: Dict[str, Any] = {
@@ -1106,12 +1154,34 @@ class EpisodeRunner:
                             frontier_cands=[c for c in all_cands
                                             if getattr(c, "source", "") == "frontier"],
                             planner_world_xys=[c.world_xy for c in all_cands],
+                            # DENSE room signal: CLIP zero-shot classifier over each
+                            # anchor's visual embedding (caption-fallback inside the
+                            # proposer). This is the coarse-2 fix — captions named the
+                            # affordant room too rarely to ever ground the prior.
+                            room_classifier=self._get_room_classifier(),
+                            room_cos_fn=self._get_room_cos_fn(),
                             top_k=1,
                         )
                         for i, cc in enumerate(coarse_cands):
                             cc.candidate_id = len(all_cands) + i + 2000
                         all_cands = all_cands + coarse_cands
                         n_coarse_candidates += len(coarse_cands)
+                        # Coarse room-tagging diagnostics (SA-1..5): always read,
+                        # even on zero-fire, so a quiet run tells us WHY the head
+                        # did/didn't ground (CLIP vs caption vs abstain, room dist,
+                        # match rate, top cosine) — the prior runs could not.
+                        _cdiag = getattr(self.bridge, "_last_coarse_diag", None) or {}
+                        n_coarse_room_clip_tagged += int(_cdiag.get("n_tagged_clip", 0))
+                        n_coarse_room_caption_tagged += int(_cdiag.get("n_tagged_caption", 0))
+                        n_coarse_room_abstained += int(_cdiag.get("n_abstained", 0))
+                        n_coarse_room_matched += int(_cdiag.get("n_room_match", 0))
+                        _tc = _cdiag.get("top_cos_max")
+                        if _tc is not None and _tc == _tc:  # not NaN
+                            coarse_top_cos_max = (
+                                _tc if coarse_top_cos_max != coarse_top_cos_max
+                                else max(coarse_top_cos_max, _tc))
+                        for _rm, _cnt in (_cdiag.get("room_hist") or {}).items():
+                            coarse_room_hist[_rm] = coarse_room_hist.get(_rm, 0) + int(_cnt)
                     if multion:
                         # Reached-thrash escape: drop already-reached
                         # waypoints from the pool — applied once after the
@@ -1687,6 +1757,12 @@ class EpisodeRunner:
         ep_log["n_frontier_chosen"] = n_frontier_chosen
         ep_log["n_coarse_candidates"] = n_coarse_candidates
         ep_log["n_coarse_chosen"] = n_coarse_chosen
+        ep_log["n_coarse_room_clip_tagged"] = n_coarse_room_clip_tagged
+        ep_log["n_coarse_room_caption_tagged"] = n_coarse_room_caption_tagged
+        ep_log["n_coarse_room_abstained"] = n_coarse_room_abstained
+        ep_log["n_coarse_room_matched"] = n_coarse_room_matched
+        ep_log["coarse_top_cos_max"] = float(coarse_top_cos_max)
+        ep_log["coarse_room_hist"] = dict(coarse_room_hist)
         ep_log["n_remembr_chosen"] = n_remembr_chosen
         ep_log["n_stop_signals"] = n_stop_signals
         ep_log["n_waypoint_reached"] = int(ep_metrics_counters["n_waypoint_reached"])
@@ -1765,6 +1841,12 @@ class EpisodeRunner:
             "n_frontier_chosen": n_frontier_chosen,
             "n_coarse_candidates": n_coarse_candidates,
             "n_coarse_chosen": n_coarse_chosen,
+            "n_coarse_room_clip_tagged": n_coarse_room_clip_tagged,
+            "n_coarse_room_caption_tagged": n_coarse_room_caption_tagged,
+            "n_coarse_room_abstained": n_coarse_room_abstained,
+            "n_coarse_room_matched": n_coarse_room_matched,
+            "coarse_top_cos_max": float(coarse_top_cos_max),
+            "coarse_room_hist": dict(coarse_room_hist),
             "n_remembr_chosen": n_remembr_chosen,
             "n_stop_signals": n_stop_signals,
             "n_detector_called": int(ep_metrics_counters["n_detector_called"]),
@@ -2056,6 +2138,61 @@ class EpisodeRunner:
         fx = 0.5 * W / np.tan(0.5 * hfov_rad)
         fy = fx   # square pixels in Habitat default
         return {"fx": fx, "fy": fy, "cx": W / 2.0, "cy": H / 2.0, "image_hw": (H, W)}
+
+    def _get_room_classifier(self):
+        """The coarse head's DENSE room signal: a CLIP zero-shot room classifier
+        closure (anchor visual embedding -> room-type or None), or ``None`` to fall
+        back to caption-only room tagging.
+
+        On by default whenever the coarse head is on (``LTM_COARSE_AFFORDANCE``);
+        disable with ``LTM_COARSE_ROOM_CLIP=0`` (caption-only A/B baseline). The
+        6 room-prompt CLIP-text embeddings are built once via the already-loaded
+        ``clip_encoder.encode_text`` and cached. Confidence thresholds are env-tunable
+        (``LTM_ROOM_CLIP_MIN_COS`` / ``LTM_ROOM_CLIP_MARGIN``) — the abstain margin
+        keeps the conservatism that beat every trained importance head.
+        """
+        if os.environ.get("LTM_COARSE_ROOM_CLIP", "1") in ("0", "false", "False", ""):
+            return None
+        if self.clip_encoder is None:
+            return None
+        if self._room_classifier_fn is not None:
+            return self._room_classifier_fn
+        try:
+            self._room_text_embeddings = build_room_text_embeddings(
+                self.clip_encoder.encode_text
+            )
+        except Exception as e:  # CLIP text tower unavailable -> caption-only
+            print(f"[coarse] room-CLIP disabled (encode_text failed: {e})")
+            self._room_text_embeddings = None
+            return None
+        # Defaults calibrated for the REAL CLIP ViT-B/32 image-text scale (~0.18-0.30),
+        # not the synthetic 0..1 world — a lower floor makes the abstain gate a no-op
+        # (the head would fire on nearly every frame, the opposite of the conservatism
+        # that beat every trained head). Measure per-scene with diagnose_room_clip_cosines.py.
+        min_cos = float(os.environ.get("LTM_ROOM_CLIP_MIN_COS", "0.25"))
+        margin = float(os.environ.get("LTM_ROOM_CLIP_MARGIN", "0.02"))
+        rte = self._room_text_embeddings
+
+        def _classify(visual_embedding):
+            return classify_room_clip(visual_embedding, rte, min_cos=min_cos, margin=margin)
+
+        self._room_classifier_fn = _classify
+        return _classify
+
+    def _get_room_cos_fn(self):
+        """Companion to ``_get_room_classifier``: the RAW top room cosine (no abstain
+        gate) for calibration / norm-skew monitoring (SA-3). ``None`` when the room-CLIP
+        path is off. Reuses the same cached room-prompt embeddings."""
+        if self._get_room_classifier() is None:
+            return None
+        rte = self._room_text_embeddings
+        if not rte:
+            return None
+
+        def _cos(visual_embedding):
+            return room_clip_top_cos(visual_embedding, rte)[0]
+
+        return _cos
 
     def _build_keyframe(self, step: Step, caption_override: Optional[str] = None) -> Keyframe:
         # Cached mode may have already produced a caption + embeddings.
