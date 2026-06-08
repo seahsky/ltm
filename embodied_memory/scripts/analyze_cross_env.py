@@ -100,9 +100,57 @@ def away_recall_total(run_dir: str, away_scene: str) -> int:
     return best
 
 
-def cross_env_verdict(recall_total: int, away_mean: float, away_p: float) -> str:
-    """Recall counter is PRIMARY (the seam is counted-not-injected, so the
-    soft-SPL delta is NOT cross-env transfer)."""
+def away_coarse_chosen(run_dir: str, away_scene: str) -> int:
+    """Total ``n_coarse_chosen`` across the AWAY-scene episode logs — how often the
+    reranker selected a coarse-affordance (room-prior) waypoint in the new scene.
+    This is the causal attribution for a coarse-driven cross-env gain."""
+    aw = _bare(away_scene)
+    total = 0
+    for f in sorted(glob.glob(os.path.join(run_dir, "episode_*.json"))):
+        if f.endswith("_error.json"):
+            continue
+        try:
+            d = json.load(open(f))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _bare(d.get("scene_id")) != aw:
+            continue
+        try:
+            total += int(d.get("n_coarse_chosen", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def cross_env_verdict(recall_total: int, away_mean: float, away_p: float,
+                      coarse_chosen: int = 0) -> str:
+    """Coarse-affordance (step 4) is the PRIMARY check when it fired
+    (``coarse_chosen > 0``): unlike the counted-not-injected seam, a coarse
+    candidate IS a navigable waypoint, so a positive away delta attributable to
+    coarse_chosen > 0 is genuine cross-env transfer. When coarse did not fire we
+    fall back to the seam verdict (recall counter)."""
+    if coarse_chosen > 0:
+        if away_mean > 0 and away_p < 0.1:
+            return (
+                f"COARSE-AFFORDANCE TRANSFERS (coarse_chosen={coarse_chosen} in the away scene, "
+                f"away S3-S1 soft-SPL {away_mean:+.4f}, p={away_p:.3f}): the position-free "
+                "category->room-type prior grounded a CURRENT-scene waypoint in the new scene and "
+                "improved arrival — genuine cross-environment transfer. The step-4 coarse-affordance "
+                "mechanism works (the fine layer could not, being scene-position-bound)."
+            )
+        if away_mean > 0.01:
+            return (
+                f"COARSE FIRES (coarse_chosen={coarse_chosen}) with a DIRECTIONAL away S3-S1 "
+                f"{away_mean:+.4f} (p={away_p:.3f}, not significant — underpowered at this n). "
+                "Promising: the room prior grounded waypoints in the new scene; widen the matrix "
+                "(more shared categories / HM3D val scenes) for a powered estimate."
+            )
+        return (
+            f"COARSE FIRES (coarse_chosen={coarse_chosen}) but NO measurable benefit (away S3-S1 "
+            f"{away_mean:+.4f}, p={away_p:.3f}): the room prior grounded a waypoint but it did not "
+            "shorten arrival — check room-extraction quality (caption->room), the exploration "
+            "ceiling, or the affordance prior."
+        )
     if recall_total <= 0:
         return (
             "INCONCLUSIVE: the cross-scene recall counter did not fire (counter=0). "
@@ -129,6 +177,7 @@ def print_cross_env_report(
     s3: List["ar.RevisitEpisode"],
     away_scene: str,
     recall_total: int,
+    coarse_chosen: int = 0,
     n_bootstrap: int = 5000,
 ) -> Dict[str, Any]:
     label_by_scene_role(s1, away_scene)
@@ -142,11 +191,13 @@ def print_cross_env_report(
           f"one-sided p(<=0)={away['p_le_zero']:.3f}")
     print(f"  HOME  S3-S1 soft-SPL (source/control, expect ~0): n={home['n']}  "
           f"mean={home['mean']:+.4f}  90% CI=[{home['lo']:+.4f}, {home['hi']:+.4f}]")
-    print(f"\n=== cross-scene recall (PRIMARY evidence) ===")
-    print(f"  away-scene cumulative cross-scene recall events = {recall_total}")
+    print(f"\n=== mechanism evidence ===")
+    print(f"  away coarse-affordance chosen (step 4 waypoints) = {coarse_chosen}")
+    print(f"  away cross-scene recall events (fine seam, counted-not-injected) = {recall_total}")
     print(f"\n=== verdict ===")
-    print(f"  {cross_env_verdict(recall_total, away['mean'], away['p_le_zero'])}")
-    return {"away": away, "home": home, "recall_total": recall_total}
+    print(f"  {cross_env_verdict(recall_total, away['mean'], away['p_le_zero'], coarse_chosen)}")
+    return {"away": away, "home": home, "recall_total": recall_total,
+            "coarse_chosen": coarse_chosen}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -175,7 +226,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     for r in (s1, s3):
         print(f"  {r.name}: setting={r.setting} n_episodes={len(r.episodes)}")
     recall_total = away_recall_total(s3.path, away)
-    print_cross_env_report(s1.episodes, s3.episodes, away, recall_total, args.bootstrap)
+    coarse_chosen = away_coarse_chosen(s3.path, away)
+    print_cross_env_report(s1.episodes, s3.episodes, away, recall_total,
+                           coarse_chosen=coarse_chosen, n_bootstrap=args.bootstrap)
     return 0
 
 

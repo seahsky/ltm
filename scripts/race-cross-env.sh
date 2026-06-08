@@ -65,6 +65,7 @@ TAG="crossenv-2"
 N_EPISODES=""
 TARGET="any"
 ISOLATE=0   # --isolate: freeze away-scene LTM writes (rigor pass, see below)
+COARSE=0    # --coarse: enable the step-4 coarse-affordance head (LTM_COARSE_AFFORDANCE)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -75,6 +76,7 @@ while [ $# -gt 0 ]; do
     --n-episodes)        N_EPISODES="$2"; shift 2 ;;
     --target)            TARGET="$2"; shift 2 ;;
     --isolate)           ISOLATE=1; shift ;;
+    --coarse)            COARSE=1; shift ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -126,6 +128,10 @@ python embodied_memory/scripts/test_analyze_cross_env.py \
   || { echo "FATAL: analyze_cross_env sanity suite failed."; exit 1; }
 python embodied_memory/scripts/test_memory_bridge_consolidate.py \
   || { echo "FATAL: memory_bridge_consolidate (incl --isolate freeze) sanity suite failed."; exit 1; }
+python embodied_memory/scripts/test_room_resolver.py \
+  || { echo "FATAL: room_resolver sanity suite failed."; exit 1; }
+python embodied_memory/scripts/test_coarse_propose.py \
+  || { echo "FATAL: coarse-affordance proposer sanity suite failed."; exit 1; }
 
 # --- 4. build the cross-env dataset (home cold + away warm) into one shared dir ---
 banner "[4/6] build cross-env dataset: HOME(cold)=$HOME_SCENE  AWAY(warm)=$AWAY_SCENE  cats=[$CATS] n-warm=$NWARM"
@@ -164,10 +170,18 @@ if [ "$ISOLATE" = "1" ]; then
   export LTM_FREEZE_SCENE="$AWAY_SCENE"
   echo "  --isolate ON: exported LTM_FREEZE_SCENE=$AWAY_SCENE (freezing away-scene LTM writes)"
 fi
+# --coarse: enable the step-4 coarse-affordance head. It fires only in the AWAY
+# scene (where the fine layer has no same-scene hit -> mem_cands empty), grounding
+# the goal category's static room prior to the away scene's own observations.
+# analyze_cross_env reports away coarse_chosen and AND-gates the verdict GREEN.
+if [ "$COARSE" = "1" ]; then
+  export LTM_COARSE_AFFORDANCE=1
+  echo "  --coarse ON: exported LTM_COARSE_AFFORDANCE=1 (step-4 coarse-affordance head)"
+fi
 OUT_DIRS=""
 for S in 1 3; do
   out_dir="runs/${TAG}-s$S"
-  banner "[5/6] run: setting=$S backbone=remembr scenes=all LTM_CROSS_SCENE=1${LTM_FREEZE_SCENE:+ LTM_FREEZE_SCENE=$LTM_FREEZE_SCENE} -> $out_dir"
+  banner "[5/6] run: setting=$S backbone=remembr scenes=all LTM_CROSS_SCENE=1${LTM_FREEZE_SCENE:+ LTM_FREEZE_SCENE=$LTM_FREEZE_SCENE}${LTM_COARSE_AFFORDANCE:+ LTM_COARSE_AFFORDANCE=1} -> $out_dir"
   # LTM_CROSS_SCENE is a no-op for S1 (memory off) and enables the cross-scene
   # recall counter for S3; safe for both. LTM_FREEZE_SCENE (if --isolate) is
   # already exported above, so the child inherits it — no command-line prefix.

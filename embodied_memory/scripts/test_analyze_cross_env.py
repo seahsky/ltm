@@ -124,6 +124,38 @@ def case_verdict_recall_zero_inconclusive():
     print("  case verdict_recall_zero_inconclusive: OK")
 
 
+def case_away_coarse_chosen_filters_scene_and_sums():
+    with tempfile.TemporaryDirectory() as d:
+        rows = [("HOME", 5), ("AWAY", 2), ("AWAY", 3), ("AWAY", 0)]
+        for i, (scene, n) in enumerate(rows):
+            json.dump({"scene_id": scene, "episode_id": str(i), "n_coarse_chosen": n},
+                      open(os.path.join(d, f"episode_{i:03d}.json"), "w"))
+        assert ce.away_coarse_chosen(d, away_scene="AWAY") == 5, "2+3+0 over AWAY only"
+    print("  case away_coarse_chosen_filters_scene_and_sums: OK")
+
+
+def case_verdict_coarse_transfers_when_fires_and_positive():
+    # coarse fired AND away delta positive+significant -> GREEN coarse transfer
+    v = ce.cross_env_verdict(recall_total=4055, away_mean=0.18, away_p=0.03, coarse_chosen=6)
+    assert v.startswith("COARSE-AFFORDANCE TRANSFERS"), v
+    assert "coarse" in v.lower() and "room" in v.lower(), v
+    print("  case verdict_coarse_transfers_when_fires_and_positive: OK")
+
+
+def case_verdict_coarse_fires_no_benefit():
+    v = ce.cross_env_verdict(recall_total=4055, away_mean=0.0, away_p=0.6, coarse_chosen=6)
+    assert v.startswith("COARSE FIRES"), v
+    assert "no" in v.lower() and "benefit" in v.lower(), v
+    print("  case verdict_coarse_fires_no_benefit: OK")
+
+
+def case_verdict_coarse_did_not_fire_falls_back_to_seam():
+    # coarse_chosen=0 -> the existing seam verdict (recall counted-not-injected)
+    v = ce.cross_env_verdict(recall_total=12, away_mean=0.03, away_p=0.4, coarse_chosen=0)
+    assert v.startswith("RECALL FIRES"), v
+    print("  case verdict_coarse_did_not_fire_falls_back_to_seam: OK")
+
+
 def case_verdict_recall_fires_states_no_fine_transfer():
     # recall fired -> the load-bearing fact; the delta CANNOT be cross-env
     # transfer (the seam injects no cross-scene WAYPOINT), so the verdict must say
@@ -170,6 +202,10 @@ def main() -> int:
     case_infer_away_none_when_not_two_scenes()
     case_away_recall_filters_scene_and_takes_max()
     case_away_recall_zero_when_no_away_or_no_counter()
+    case_away_coarse_chosen_filters_scene_and_sums()
+    case_verdict_coarse_transfers_when_fires_and_positive()
+    case_verdict_coarse_fires_no_benefit()
+    case_verdict_coarse_did_not_fire_falls_back_to_seam()
     case_verdict_recall_zero_inconclusive()
     case_verdict_recall_fires_states_no_fine_transfer()
     case_paired_away_delta_reuses_revisit_bootstrap()
