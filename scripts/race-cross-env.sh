@@ -156,20 +156,22 @@ fi
 # the away S3-S1 isolates the (zero) home->away contribution. Expected: recall
 # counter still >0, away S3-S1 drops toward ~0 -> STRENGTHENS the no-transfer
 # headline. Safe for S1 (memory off -> nothing to freeze).
-FREEZE_ENV=""
+# --isolate: EXPORT the freeze var so the python child inherits it. (A bash
+# `$VAR_ASSIGN cmd` env-prefix only works for LITERAL `K=V` tokens — an EXPANDED
+# `$FREEZE_ENV` is parsed as the command word, not an assignment, which is the
+# rc=127 'LTM_FREEZE_SCENE=...: command not found' bug. Exporting is robust.)
 if [ "$ISOLATE" = "1" ]; then
-  FREEZE_ENV="LTM_FREEZE_SCENE=$AWAY_SCENE"
-  echo "  --isolate ON: freezing away-scene ($AWAY_SCENE) LTM writes"
+  export LTM_FREEZE_SCENE="$AWAY_SCENE"
+  echo "  --isolate ON: exported LTM_FREEZE_SCENE=$AWAY_SCENE (freezing away-scene LTM writes)"
 fi
 OUT_DIRS=""
 for S in 1 3; do
   out_dir="runs/${TAG}-s$S"
-  banner "[5/6] run: setting=$S backbone=remembr scenes=all LTM_CROSS_SCENE=1 ${FREEZE_ENV:+$FREEZE_ENV }-> $out_dir"
+  banner "[5/6] run: setting=$S backbone=remembr scenes=all LTM_CROSS_SCENE=1${LTM_FREEZE_SCENE:+ LTM_FREEZE_SCENE=$LTM_FREEZE_SCENE} -> $out_dir"
   # LTM_CROSS_SCENE is a no-op for S1 (memory off) and enables the cross-scene
-  # recall counter for S3; safe to export for both. FREEZE_ENV is empty unless
-  # --isolate was passed.
-  # shellcheck disable=SC2086
-  REMEMBR_STRICT=1 LTM_CROSS_SCENE=1 $FREEZE_ENV python -m embodied_memory.run_hm3d_pol --mode live \
+  # recall counter for S3; safe for both. LTM_FREEZE_SCENE (if --isolate) is
+  # already exported above, so the child inherits it — no command-line prefix.
+  REMEMBR_STRICT=1 LTM_CROSS_SCENE=1 python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --episodes-path "$DS" \
       --scene all --target "$TARGET" --n-episodes "$N_EPISODES" \
       --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
