@@ -491,6 +491,23 @@ class EmbodiedMemoryBridge:
                 self._successful_episodes_seen += 1
             return {"fine": [], "mid": [], "coarse": []}
 
+        # Cross-env isolation (rigor pass): when LTM_FREEZE_SCENE matches the
+        # current scene, SKIP the fine-layer write — drain pending and keep the
+        # episode bookkeeping, but deposit nothing. Set to the AWAY (query) scene
+        # so each away episode queries ONLY the earlier home sightings, with no
+        # within-away cross-episode accumulation contaminating the cross-env delta.
+        # Off by default (legacy behaviour unchanged).
+        _freeze = os.environ.get("LTM_FREEZE_SCENE")
+        if _freeze and (
+            os.path.basename(str(self._current_scene_id or "")).split(".")[0]
+            == os.path.basename(str(_freeze)).split(".")[0]
+        ):
+            self._pending = []
+            self._episodes_seen += 1
+            if episode_success:
+                self._successful_episodes_seen += 1
+            return {"fine": [], "mid": [], "coarse": []}
+
         self.modules_invoked["consolidation"] = True
         inserted = self._consolidate_pending(
             episode_success=episode_success, episode_idx=episode_idx

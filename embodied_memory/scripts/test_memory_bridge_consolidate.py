@@ -160,6 +160,51 @@ def case_s3_empty_pending_boundary_sets_no_flags():
     print("  case_s3_empty_pending_boundary_sets_no_flags: OK")
 
 
+def case_freeze_scene_skips_fine_write():
+    """LTM_FREEZE_SCENE=<scene> makes consolidate() SKIP the fine-layer write while
+    in that scene (cross-env isolation: each away/query episode then sees only the
+    earlier home sightings, no within-away cross-episode accumulation). Episode
+    bookkeeping still bumps; pending still drains; other scenes are unaffected."""
+    import os as _os
+    bridge = _mk_bridge()  # S3
+    # home scene: consolidate writes to fine
+    bridge.begin_episode("ep-home", scene_id="HOME")
+    for i in range(3):
+        bridge.observe_keyframe(
+            _kf(i, f"a long detailed caption {i} with a chair and a table near the window"),
+            action=1, reward=0.0)
+    bridge.consolidate(episode_success=False, episode_idx=0)
+    n_home = len(bridge.ltm.fine)
+    assert n_home > 0, "home write should populate fine"
+    seen_before = bridge._episodes_seen
+
+    # away scene with LTM_FREEZE_SCENE set: the fine write is skipped
+    _os.environ["LTM_FREEZE_SCENE"] = "AWAY"
+    try:
+        bridge.begin_episode("ep-away", scene_id="AWAY")
+        for i in range(3):
+            bridge.observe_keyframe(
+                _kf(i, f"a long detailed caption {i} with a bed and a lamp near the door"),
+                action=1, reward=0.0)
+        out = bridge.consolidate(episode_success=False, episode_idx=1)
+        assert len(bridge.ltm.fine) == n_home, "frozen away scene must NOT add fine entries"
+        assert out["fine"] == [], out
+        assert bridge._pending == [], "pending must still drain"
+        assert bridge._episodes_seen == seen_before + 1, "episode still counted when frozen"
+    finally:
+        _os.environ.pop("LTM_FREEZE_SCENE", None)
+
+    # a different (non-frozen) scene writes again
+    bridge.begin_episode("ep-other", scene_id="OTHER")
+    for i in range(3):
+        bridge.observe_keyframe(
+            _kf(i, f"a long detailed caption {i} with a sofa and a rug near a bookshelf"),
+            action=1, reward=0.0)
+    bridge.consolidate(episode_success=False, episode_idx=2)
+    assert len(bridge.ltm.fine) > n_home, "non-frozen scene must write again"
+    print("  case_freeze_scene_skips_fine_write: OK")
+
+
 def main() -> int:
     print("memory_bridge consolidate_subgoal_boundary sanity tests")
     case_s1_boundary_is_noop()
@@ -167,6 +212,7 @@ def main() -> int:
     case_s3_boundary_writes_fine_without_episode_bookkeeping()
     case_s3_boundary_then_end_consolidate_counts_one_episode()
     case_s3_empty_pending_boundary_sets_no_flags()
+    case_freeze_scene_skips_fine_write()
     print("All cases passed.")
     return 0
 
