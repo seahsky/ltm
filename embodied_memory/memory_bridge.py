@@ -91,6 +91,7 @@ class EmbodiedMemorySimilarityScorer(Scorer):
 
 from .frontier_planner import FrontierCandidate
 from .perception import Keyframe
+from .room_resolver import preferred_room as _preferred_room_for, resolve_room
 from .text_encode_util import cosine_sim
 
 
@@ -179,13 +180,22 @@ class FrontierPhysicsScorer(Scorer):
         else:
             dist_score = max(0.0, 1.0 - abs(dist - 2.0) / 4.0)
 
-        if getattr(cand, "source", "planner") == "memory":
+        source = getattr(cand, "source", "planner")
+        if source == "memory":
             cos = float(cand.raw_score)
             span = self._MEM_COS_FULL - self._MEM_COS_NULL
             cos_norm = (cos - self._MEM_COS_NULL) / span if span > 0 else 0.0
             cos_norm = float(np.clip(cos_norm, 0.0, 1.0))
             # 1 - _MEM_DIST_WEIGHT goes to the cosine, the rest to distance.
             score = (1.0 - self._MEM_DIST_WEIGHT) * cos_norm + self._MEM_DIST_WEIGHT * dist_score
+        elif source == "coarse":
+            # Coarse-affordance candidate: raw_score is a room-match * prior_weight
+            # already in [0,1]. Bearing is dropped (heading toward the affordant
+            # room is worth a turn, like a memory waypoint); blend with a mild
+            # distance preference. Same shape as the memory branch so a confident
+            # coarse prior competes with a strong frontier without out-firing it.
+            score = (1.0 - self._MEM_DIST_WEIGHT) * float(cand.raw_score) + \
+                self._MEM_DIST_WEIGHT * dist_score
         else:
             bearing_score = max(0.0, 1.0 - abs(float(cand.bearing_rad)) / np.pi)
             score = 0.5 * float(cand.raw_score) + 0.3 * bearing_score + 0.2 * dist_score
@@ -935,6 +945,114 @@ class EmbodiedMemoryBridge:
             # Counts as fine-layer activation for the criterion-4 module check.
             self.modules_invoked["ltm_fine"] = True
 
+        return out
+
+    # Raw_score for a confident coarse room match. Sits in the frontier raw-score
+    # band (~0.7) so a coarse candidate competes with a planner frontier without
+    # dominating it (conservatism — the caller also gates on no same-scene fine hit).
+    _COARSE_PRIOR_WEIGHT = 0.7
+
+    def propose_coarse_candidates(
+        self,
+        agent_pos: np.ndarray,
+        agent_yaw: float,
+        target_category: Optional[str],
+        room_anchors: Optional[List[Tuple[Any, str]]] = None,
+        planner_world_xys: Optional[List[np.ndarray]] = None,
+        top_k: int = 1,
+        dedup_radius_m: float = 1.5,
+        max_distance_m: float = 30.0,
+        prior_weight: Optional[float] = None,
+    ) -> List[FrontierCandidate]:
+        """Coarse-affordance proposer (step 4): the POSITION-FREE cross-env path.
+
+        The transferable key is the goal category's preferred room-type (static
+        prior ``room_resolver.preferred_room``; no coordinates), so this fires in a
+        brand-new scene where the fine layer (scene-filtered) has nothing.
+        ``room_anchors`` are ``(position_xyz, caption)`` pairs observed in the
+        CURRENT scene (STM keyframes and/or frontier-adjacent captions). Each
+        anchor whose caption ``resolve_room``s to the preferred room is a candidate
+        region; up to ``top_k`` (nearest-first) are emitted as
+        ``FrontierCandidate(source="coarse")`` at the anchor position. Returns ``[]``
+        whenever LTM is off, the category has no room affordance, or no anchor
+        matches — so callers can concatenate the result unguarded.
+
+        Conservatism (avoid the importance-head over-fire trap): the caller should
+        only use these when ``propose_memory_candidates`` returned no same-scene fine
+        hit (a genuinely new/cold scene) — see ``episode_runner._propose_candidates``.
+        """
+        if self.disable_ltm or not target_category:
+            return []
+        pref = _preferred_room_for(target_category)
+        if pref is None:
+            return []
+
+        # Default anchors = the current episode's STM buffer (each EmbodiedRecord
+        # carries a CURRENT-scene caption + agent_position). This is what grounds the
+        # transferable prior to scene B without any stored scene-A coordinate.
+        if room_anchors is None:
+            room_anchors = [
+                (r.agent_position, r.caption)
+                for r in self._pending
+                if getattr(r, "agent_position", None) is not None and getattr(r, "caption", None)
+            ]
+        if not room_anchors:
+            return []
+
+        import math
+        weight = float(self._COARSE_PRIOR_WEIGHT if prior_weight is None else prior_weight)
+        ax = float(agent_pos[0])
+        az = float(agent_pos[2])
+        seen_xys: List[np.ndarray] = list(planner_world_xys or [])
+
+        scored: List[Any] = []
+        for pos, caption in room_anchors:
+            if pos is None or len(pos) < 3:
+                continue
+            if resolve_room(caption) != pref:
+                continue
+            world_xy = np.asarray([pos[0], pos[2]], dtype=np.float32)
+            if any(np.linalg.norm(world_xy - sx) < dedup_radius_m for sx in seen_xys):
+                continue
+            dx = float(world_xy[0]) - ax
+            dz = float(world_xy[1]) - az
+            dist_m = math.hypot(dx, dz)
+            if dist_m > max_distance_m:
+                continue
+            scored.append((dist_m, world_xy, caption))
+
+        if not scored:
+            return []
+        scored.sort(key=lambda t: t[0])  # nearest matching region first
+
+        out: List[FrontierCandidate] = []
+        for dist_m, world_xy, caption in scored[:top_k]:
+            world_bearing = math.atan2(float(world_xy[0]) - ax, float(world_xy[1]) - az)
+            rel = world_bearing - float(agent_yaw)
+            while rel > math.pi:
+                rel -= 2.0 * math.pi
+            while rel < -math.pi:
+                rel += 2.0 * math.pi
+            seen_xys.append(world_xy)
+            out.append(
+                FrontierCandidate(
+                    candidate_id=-1,  # caller assigns
+                    world_xy=world_xy,
+                    grid_rc=(-1, -1),
+                    distance_m=dist_m,
+                    bearing_rad=rel,
+                    cluster_size=0,
+                    raw_score=weight,
+                    source="coarse",
+                    metadata={
+                        "preferred_room": pref,
+                        "target_category": str(target_category),
+                        "anchor_caption": str(caption)[:120],
+                    },
+                )
+            )
+        if out:
+            self.modules_invoked["ltm_coarse"] = True
         return out
 
     def retrieve(self, query_embedding: np.ndarray, top_k_per_layer: int = 3) -> Dict[str, List[Tuple[MemoryEntry, float]]]:

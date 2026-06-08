@@ -60,6 +60,8 @@ class RunSummary:
     n_memory_candidates: int = 0      # total LTM-injected candidates surfaced
     n_memory_chosen: int = 0          # decisions where reranker picked a memory candidate
     n_frontier_chosen: int = 0        # decisions where reranker picked a frontier-injected candidate
+    n_coarse_candidates: int = 0      # total coarse-affordance candidates surfaced (step 4)
+    n_coarse_chosen: int = 0          # decisions where reranker picked a coarse-affordance candidate
     n_remembr_chosen: int = 0         # decisions where reranker picked a grounded remembr (LLM) candidate
     n_stop_signals: int = 0           # decisions where backbone emitted a grounded STOP
     n_detector_called: int = 0
@@ -87,6 +89,8 @@ class RunSummary:
             "n_memory_candidates": self.n_memory_candidates,
             "n_memory_chosen": self.n_memory_chosen,
             "n_frontier_chosen": self.n_frontier_chosen,
+            "n_coarse_candidates": self.n_coarse_candidates,
+            "n_coarse_chosen": self.n_coarse_chosen,
             "n_remembr_chosen": self.n_remembr_chosen,
             "n_stop_signals": self.n_stop_signals,
             "n_detector_called": self.n_detector_called,
@@ -673,6 +677,8 @@ class EpisodeRunner:
             summary.n_memory_candidates += int(ep_metrics.get("n_memory_candidates", 0))
             summary.n_memory_chosen += int(ep_metrics.get("n_memory_chosen", 0))
             summary.n_frontier_chosen += int(ep_metrics.get("n_frontier_chosen", 0))
+            summary.n_coarse_candidates += int(ep_metrics.get("n_coarse_candidates", 0))
+            summary.n_coarse_chosen += int(ep_metrics.get("n_coarse_chosen", 0))
             summary.n_remembr_chosen += int(ep_metrics.get("n_remembr_chosen", 0))
             summary.n_stop_signals += int(ep_metrics.get("n_stop_signals", 0))
             summary.n_detector_called += int(ep_metrics.get("n_detector_called", 0))
@@ -697,6 +703,8 @@ class EpisodeRunner:
                 "n_memory_candidates": int(ep_metrics.get("n_memory_candidates", 0)),
                 "n_memory_chosen": int(ep_metrics.get("n_memory_chosen", 0)),
                 "n_frontier_chosen": int(ep_metrics.get("n_frontier_chosen", 0)),
+                "n_coarse_candidates": int(ep_metrics.get("n_coarse_candidates", 0)),
+                "n_coarse_chosen": int(ep_metrics.get("n_coarse_chosen", 0)),
                 "n_remembr_chosen": int(ep_metrics.get("n_remembr_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
                 "n_detector_called": int(ep_metrics.get("n_detector_called", 0)),
@@ -809,6 +817,8 @@ class EpisodeRunner:
         n_memory_candidates = 0
         n_memory_chosen = 0
         n_frontier_chosen = 0
+        n_coarse_candidates = 0
+        n_coarse_chosen = 0
         n_remembr_chosen = 0
         n_stop_signals = 0
         ep_metrics_counters: Dict[str, Any] = {
@@ -1073,6 +1083,26 @@ class EpisodeRunner:
                         mc.candidate_id = len(cands) + i + 1000  # offset so logs are unambiguous
                     all_cands = cands + mem_cands
                     n_memory_candidates += len(mem_cands)
+
+                    # Coarse-affordance (step 4): the POSITION-FREE cross-env path.
+                    # Env-gated (LTM_COARSE_AFFORDANCE) and fired ONLY when the fine
+                    # layer surfaced no same-scene hit (mem_cands empty == genuinely
+                    # cold/new scene) — conservatism that avoids the importance-head
+                    # over-fire trap. Grounds the goal category's preferred room-type
+                    # to the current scene's STM observations and injects one waypoint.
+                    if not mem_cands and os.environ.get("LTM_COARSE_AFFORDANCE"):
+                        coarse_cands = self.bridge.propose_coarse_candidates(
+                            agent_pos=step.agent_state.position,
+                            agent_yaw=step.agent_state.rotation_yaw,
+                            target_category=(active_category if multion
+                                             else ep.target_category),
+                            planner_world_xys=[c.world_xy for c in all_cands],
+                            top_k=1,
+                        )
+                        for i, cc in enumerate(coarse_cands):
+                            cc.candidate_id = len(all_cands) + i + 2000
+                        all_cands = all_cands + coarse_cands
+                        n_coarse_candidates += len(coarse_cands)
                     if multion:
                         # Reached-thrash escape: drop already-reached
                         # waypoints from the pool — applied once after the
@@ -1147,6 +1177,8 @@ class EpisodeRunner:
                         n_memory_chosen += 1
                     if chosen.source == "frontier":
                         n_frontier_chosen += 1
+                    if chosen.source == "coarse":
+                        n_coarse_chosen += 1
                     if chosen.source == "remembr":
                         n_remembr_chosen += 1
                     current_candidate = chosen
@@ -1644,6 +1676,8 @@ class EpisodeRunner:
         ep_log["n_memory_candidates"] = n_memory_candidates
         ep_log["n_memory_chosen"] = n_memory_chosen
         ep_log["n_frontier_chosen"] = n_frontier_chosen
+        ep_log["n_coarse_candidates"] = n_coarse_candidates
+        ep_log["n_coarse_chosen"] = n_coarse_chosen
         ep_log["n_remembr_chosen"] = n_remembr_chosen
         ep_log["n_stop_signals"] = n_stop_signals
         ep_log["n_waypoint_reached"] = int(ep_metrics_counters["n_waypoint_reached"])
@@ -1720,6 +1754,8 @@ class EpisodeRunner:
             "n_memory_candidates": n_memory_candidates,
             "n_memory_chosen": n_memory_chosen,
             "n_frontier_chosen": n_frontier_chosen,
+            "n_coarse_candidates": n_coarse_candidates,
+            "n_coarse_chosen": n_coarse_chosen,
             "n_remembr_chosen": n_remembr_chosen,
             "n_stop_signals": n_stop_signals,
             "n_detector_called": int(ep_metrics_counters["n_detector_called"]),
