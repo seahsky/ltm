@@ -21,9 +21,14 @@ or simply, using the default minival discovery:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections import Counter
 from typing import Any, Optional
+
+# Run as a script (`python embodied_memory/scripts/diagnose_hm3d_regions.py`) ->
+# put the repo root on sys.path so `import embodied_memory.*` resolves.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
 def _safe(fn, default=None):
