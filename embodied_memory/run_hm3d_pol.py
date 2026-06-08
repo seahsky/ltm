@@ -271,6 +271,14 @@ def main(argv: Optional[list] = None) -> int:
                              "stream instead of the R-deviation heuristic — "
                              "gating which keyframes enter the fine LTM. "
                              "Setting 3 only.")
+    parser.add_argument("--utility-scorer-ckpt", type=str, default=None,
+                        help="Path to a trained ImportanceScorer checkpoint "
+                             "(dialogue_memory.train_scorer --label-mode "
+                             "goal_proximity). When set, the consolidator's "
+                             "uniqueness term U is the head's goal-proximity "
+                             "score on the caption embedding (waypoint quality) "
+                             "instead of the forward-model surprise. Mutually "
+                             "exclusive with --predictor-ckpt. Setting 3 only.")
 
     args = parser.parse_args(argv)
 
@@ -363,6 +371,7 @@ def main(argv: Optional[list] = None) -> int:
             affordance_table=affordance_table,
             scorer_ckpt=args.scorer_ckpt,
             predictor_ckpt=args.predictor_ckpt,
+            utility_scorer_ckpt=args.utility_scorer_ckpt,
         )
         if args.scorer_ckpt:
             print(
@@ -373,6 +382,11 @@ def main(argv: Optional[list] = None) -> int:
             print(
                 f"[run_hm3d_pol] trained surprise (U) head loaded from "
                 f"{args.predictor_ckpt}"
+            )
+        if args.utility_scorer_ckpt:
+            print(
+                f"[run_hm3d_pol] goal-proximity (U) head loaded from "
+                f"{args.utility_scorer_ckpt}"
             )
     print(
         f"[run_hm3d_pol] ablation: backbone={args.backbone} "
@@ -458,6 +472,7 @@ def main(argv: Optional[list] = None) -> int:
             "oracle_location": args.oracle_location,
             "scorer_ckpt": args.scorer_ckpt,
             "predictor_ckpt": args.predictor_ckpt,
+            "utility_scorer_ckpt": args.utility_scorer_ckpt,
             "target_sequence": target_sequence,
             "found_radius": args.found_radius,
         },

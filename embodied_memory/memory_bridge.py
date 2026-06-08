@@ -217,6 +217,7 @@ class EmbodiedMemoryBridge:
         affordance_table: Optional[Dict[str, Dict[str, float]]] = None,
         scorer_ckpt: Optional[str] = None,
         predictor_ckpt: Optional[str] = None,
+        utility_scorer_ckpt: Optional[str] = None,
     ):
         if text_encode_fn is None:
             raise ValueError("text_encode_fn (str -> np.ndarray) is required")
@@ -305,12 +306,43 @@ class EmbodiedMemoryBridge:
                     f"fall back to the heuristic. Re-train with the SAME text "
                     f"encoder (e.g. --encoder sbert) the bridge indexes with."
                 )
-        # Per-episode U calibration (trained-U only). The forward model's raw
-        # surprise has little spread (~0.30 ± 0.05) — a near-constant offset
+        # Alternative U head: a goal-PROXIMITY scorer (emb -> [0,1], trained on
+        # per-keyframe distance-to-goal) injected into the U slot instead of the
+        # forward-model surprise. Retrieval is caption-goal cosine +
+        # position->waypoint, so "good waypoint = near the goal" is the
+        # importance signal that can beat the heuristic (orthogonal to N/R/the
+        # forward-model U). Mutually exclusive with predictor_ckpt — both target
+        # the same β term.
+        self.utility_scorer_ckpt = utility_scorer_ckpt
+        if utility_scorer_ckpt:
+            if predictor_ckpt:
+                raise ValueError(
+                    "predictor_ckpt and utility_scorer_ckpt both target the U "
+                    "slot (β term) and are mutually exclusive — pass only one."
+                )
+            from dialogue_memory.train_scorer import load_scorer
+            self._utility_scorer = load_scorer(utility_scorer_ckpt)
+            _us = self._utility_scorer
+            utility_predictor = lambda h, e: _us.compute_importance(e)  # noqa: E731
+            predictor_embed_dim = getattr(self._utility_scorer, "embed_dim", None)
+            # Same loud guard as the other heads: a dim mismatch would silently
+            # fall back to the heuristic and read as "no effect" for the wrong
+            # reason.
+            if predictor_embed_dim is not None and int(predictor_embed_dim) != int(self._ltm_embed_dim):
+                raise ValueError(
+                    f"utility_scorer_ckpt embed_dim {predictor_embed_dim} != LTM/SBERT "
+                    f"dim {self._ltm_embed_dim}: the goal-proximity U head would "
+                    f"silently fall back to the heuristic. Re-train with the SAME "
+                    f"text encoder (e.g. --encoder sbert) the bridge indexes with."
+                )
+
+        # Per-episode U calibration (forward-model-U only). The forward model's
+        # raw surprise has little spread (~0.30 ± 0.05) — a near-constant offset
         # that flattens the top-k write selection; rank/z-score normalization
         # across the episode restores discriminative spread. Default 'zscore'
         # when a predictor is loaded (inert otherwise — the consolidator gates
         # on utility_predictor); REMEMBR_U_CALIB overrides (none|rank|zscore).
+        # The goal-proximity U is already a meaningful [0,1] signal -> no calib.
         uniqueness_calibration = (
             os.environ.get("REMEMBR_U_CALIB", "zscore") if predictor_ckpt else "none"
         )
