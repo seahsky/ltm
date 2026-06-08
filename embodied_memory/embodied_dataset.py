@@ -113,6 +113,11 @@ class EmbodiedSample:
     agent_yaw: float
     action: Optional[int] = None
     reward: float = 0.0
+    # Per-step geodesic distance to the nearest goal instance (from the sim's
+    # info["distance_to_goal"]). None for older logs that didn't record it.
+    # Feeds the goal_proximity label (a frame is a good waypoint to store iff
+    # it was taken close to the goal).
+    distance_to_goal: Optional[float] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -163,6 +168,10 @@ def load_episode_samples(run_dirs: Sequence[str]) -> List[EmbodiedSample]:
                 agent_yaw=float(stp.get("agent_yaw", 0.0)),
                 action=stp.get("action"),
                 reward=float(stp.get("reward", 0.0)),
+                distance_to_goal=(
+                    float(stp["distance_to_goal"])
+                    if stp.get("distance_to_goal") is not None else None
+                ),
                 extra={"soft_spl": float(ep.get("soft_spl", spl))},
             ))
     return out
@@ -247,7 +256,7 @@ class EmbodiedImportanceDataset(Dataset):
     "will-be-mentioned" supervision of the MSC scorer (a binary classification).
     """
 
-    SUPPORTED_LABELS = ("success", "soft_spl", "spl", "goal_object")
+    SUPPORTED_LABELS = ("success", "soft_spl", "spl", "goal_object", "goal_proximity")
 
     def __init__(
         self,
@@ -269,6 +278,9 @@ class EmbodiedImportanceDataset(Dataset):
 
         self.encoder = encoder
         self.label_mode = label_mode
+        # goal_proximity radius (m): a keyframe is a "good waypoint" (label 1)
+        # iff it was taken within this geodesic distance of the goal. Env-tunable.
+        self._goal_prox_radius = float(os.environ.get("GOAL_PROX_RADIUS_M", "1.0"))
 
         if keep_per_episode_top_k is not None:
             samples = self._downsample_per_episode(samples, keep_per_episode_top_k)
@@ -304,6 +316,13 @@ class EmbodiedImportanceDataset(Dataset):
             # Independent of episode outcome — a sighting is memory-worthy
             # whether or not THIS episode succeeded.
             return 1.0 if caption_has_goal_object(s.caption) else 0.0
+        if self.label_mode == "goal_proximity":
+            # Per-keyframe waypoint quality: was this frame taken close to the
+            # goal? Retrieval is caption-goal cosine + position->waypoint, so the
+            # best frames to STORE are the ones physically nearest the goal. A
+            # missing distance counts as not-a-waypoint (0).
+            d = s.distance_to_goal
+            return 1.0 if (d is not None and d <= self._goal_prox_radius) else 0.0
         return float(s.extra.get("soft_spl", s.spl))
 
     def __len__(self) -> int:

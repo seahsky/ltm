@@ -2068,6 +2068,10 @@ class EpisodeRunner:
 
     @staticmethod
     def _serialize_step(step: Step, keyframe: Keyframe) -> Dict[str, Any]:
+        # Per-step geodesic distance to goal (from the sim info) — the label
+        # source for the goal_proximity importance head. Absent on non-sim /
+        # oracle paths, so guard to None.
+        _d2g = step.info.get("distance_to_goal") if step.info else None
         return {
             "step_idx": int(step.step_idx),
             "action": step.action,
@@ -2076,6 +2080,7 @@ class EpisodeRunner:
             "agent_pos": step.agent_state.position.tolist(),
             "agent_yaw": float(step.agent_state.rotation_yaw),
             "caption": keyframe.caption,
+            "distance_to_goal": (float(_d2g) if _d2g is not None else None),
         }
 
     @staticmethod

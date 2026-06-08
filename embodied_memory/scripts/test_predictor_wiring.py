@@ -133,7 +133,12 @@ from dialogue_memory.consolidation import (  # noqa: E402
     DialogueSegment,
     _calibrate_uniqueness_pool,
 )
-from embodied_memory.embodied_dataset import _l2norm  # noqa: E402
+from embodied_memory.embodied_dataset import (  # noqa: E402
+    _l2norm,
+    EmbodiedSample,
+    EmbodiedImportanceDataset,
+    load_episode_samples,
+)
 
 
 def _approx(a, b, tol=1e-6):
@@ -502,6 +507,112 @@ def case_bridge_threads_uniqueness_calibration():
     assert "REMEMBR_U_CALIB" in src, "calibration env knob missing"
 
 
+# ----------------------------------------------------------------------
+# Tier-3  goal-PROXIMITY U head — a scalar head trained on per-keyframe
+#   distance-to-goal, injected into the U slot. Retrieval is pure caption-goal
+#   cosine + position->waypoint (verified in propose_memory_candidates), so the
+#   importance signal that can beat the heuristic is "is this frame a good
+#   waypoint" = was it taken close to the goal. Orthogonal to novelty (N),
+#   goal-mention (R/scorer-d3), and surprise (the forward-model U).
+# ----------------------------------------------------------------------
+def _mk_sample(distance, caption="a chair in a room"):
+    return EmbodiedSample(
+        episode_idx=0, episode_id="e0", scene_id="s0", target_category="chair",
+        success=False, spl=0.0, step_idx=0, caption=caption,
+        agent_pos=np.zeros(3, dtype=np.float32), agent_yaw=0.0,
+        distance_to_goal=distance,
+    )
+
+
+class _EncObj:
+    def encode(self, text):
+        return np.ones(384, dtype=np.float32)
+
+
+def case_sample_has_distance_to_goal_field():
+    s = _mk_sample(None)
+    assert hasattr(s, "distance_to_goal") and s.distance_to_goal is None
+
+
+def case_goal_proximity_in_supported_labels():
+    assert "goal_proximity" in EmbodiedImportanceDataset.SUPPORTED_LABELS
+
+
+def case_goal_proximity_label_binary_radius():
+    ds = EmbodiedImportanceDataset(
+        [_mk_sample(0.5), _mk_sample(1.5)], _EncObj(),
+        label_mode="goal_proximity")
+    assert ds._label(_mk_sample(0.5)) == 1.0     # within 1.0m -> good waypoint
+    assert ds._label(_mk_sample(1.0)) == 1.0     # boundary inclusive
+    assert ds._label(_mk_sample(1.5)) == 0.0     # too far
+    assert ds._label(_mk_sample(None)) == 0.0    # no distance -> not a waypoint
+
+
+def case_goal_proximity_respects_env_radius():
+    import os as _os
+    _os.environ["GOAL_PROX_RADIUS_M"] = "2.0"
+    try:
+        ds = EmbodiedImportanceDataset(
+            [_mk_sample(1.5)], _EncObj(), label_mode="goal_proximity")
+        assert ds._label(_mk_sample(1.5)) == 1.0   # now within the 2.0m radius
+        assert ds._label(_mk_sample(2.5)) == 0.0
+    finally:
+        del _os.environ["GOAL_PROX_RADIUS_M"]
+
+
+def case_load_episode_samples_reads_distance(tmp_dir=None):
+    import json as _json
+    import tempfile as _tf
+    ep = {
+        "episode_idx": 0, "episode_id": "7", "scene_id": "s0",
+        "target_category": "chair", "success": True, "spl": 0.5,
+        "soft_spl": 0.5,
+        "steps": [
+            {"step_idx": 0, "caption": "a hallway", "agent_pos": [0, 0, 0],
+             "agent_yaw": 0.0, "action": 1, "reward": 0.0,
+             "distance_to_goal": 4.2},
+            {"step_idx": 1, "caption": "a chair up close", "agent_pos": [1, 0, 1],
+             "agent_yaw": 0.0, "action": 1, "reward": 1.0,
+             "distance_to_goal": 0.4},
+        ],
+    }
+    with _tf.TemporaryDirectory() as d:
+        with open(Path(d) / "episode_000.json", "w") as f:
+            _json.dump(ep, f)
+        samples = load_episode_samples([d])
+    dists = sorted(s.distance_to_goal for s in samples)
+    assert dists == [0.4, 4.2], dists
+
+
+def case_serialize_step_logs_distance_to_goal():
+    src = (REPO / "embodied_memory" / "episode_runner.py").read_text()
+    assert '"distance_to_goal"' in src, "per-step distance not logged"
+    # must read it from the sim info (the runner already has it)
+    assert 'info.get("distance_to_goal")' in src or 'info["distance_to_goal"]' in src
+
+
+def case_bridge_threads_utility_scorer_ckpt():
+    src = (REPO / "embodied_memory" / "memory_bridge.py").read_text()
+    assert "utility_scorer_ckpt" in src, "U-slot scorer param missing"
+    assert "from dialogue_memory.train_scorer import load_scorer" in src
+    assert "utility_scorer_ckpt embed_dim" in src, "missing loud dim-mismatch guard"
+    # predictor_ckpt and utility_scorer_ckpt both target the U slot -> exclusive
+    assert ("both target the U slot" in src or "mutually exclusive" in src), \
+        "missing predictor/utility-scorer mutual-exclusion guard"
+
+
+def case_cli_exposes_utility_scorer_ckpt():
+    src = (REPO / "embodied_memory" / "run_hm3d_pol.py").read_text()
+    assert '"--utility-scorer-ckpt"' in src, "CLI flag missing"
+    assert "utility_scorer_ckpt=args.utility_scorer_ckpt" in src
+    assert '"utility_scorer_ckpt": args.utility_scorer_ckpt' in src
+
+
+def case_train_scorer_cli_supports_goal_proximity():
+    src = (REPO / "dialogue_memory" / "train_scorer.py").read_text()
+    assert "goal_proximity" in src, "scorer CLI must allow --label-mode goal_proximity"
+
+
 def main():
     cases = [
         case_predictor_infer_dims_from_first_linear,
@@ -530,6 +641,16 @@ def main():
         case_calibration_applied_when_predictor_set,
         case_calibration_inert_without_predictor,
         case_bridge_threads_uniqueness_calibration,
+        # Tier-3 goal-proximity U head
+        case_sample_has_distance_to_goal_field,
+        case_goal_proximity_in_supported_labels,
+        case_goal_proximity_label_binary_radius,
+        case_goal_proximity_respects_env_radius,
+        case_load_episode_samples_reads_distance,
+        case_serialize_step_logs_distance_to_goal,
+        case_bridge_threads_utility_scorer_ckpt,
+        case_cli_exposes_utility_scorer_ckpt,
+        case_train_scorer_cli_supports_goal_proximity,
     ]
     failed = 0
     for c in cases:
