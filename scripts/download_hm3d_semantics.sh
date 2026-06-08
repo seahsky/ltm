@@ -30,10 +30,12 @@ set -a
 set +a
 
 DEST_DIR="${1:-data/hm3d}"
-# Standard HM3D-Semantics v0.2 uids in habitat-sim's downloader catalog. If these
-# are wrong for this habitat-sim version, the --list output below shows the real
-# names — re-run with HM3D_SEMANTIC_UIDS set to the correct ones.
-SEMANTIC_UIDS="${HM3D_SEMANTIC_UIDS:-hm3d_semantic_annots_v0.2 hm3d_semantic_configs_v0.2}"
+# HM3D-Semantics v0.2 uids are SPLIT-SPECIFIC (confirmed via --list). Our scenes
+# live under minival/ (the val->minival symlink; TEEsavR23oF/wcojb4TFT35 are
+# minival scenes), so default to the MINIVAL semantic split. For the full 20-scene
+# val matrix later, override:
+#   HM3D_SEMANTIC_UIDS="hm3d_val_semantic_annots_v0.2 hm3d_val_semantic_configs_v0.2"
+SEMANTIC_UIDS="${HM3D_SEMANTIC_UIDS:-hm3d_minival_semantic_annots_v0.2 hm3d_minival_semantic_configs_v0.2}"
 
 if [[ -z "${MATTERPORT_TOKEN_ID:-}" || -z "${MATTERPORT_TOKEN_SECRET:-}" ]]; then
   echo "ERROR: MATTERPORT_TOKEN_ID / MATTERPORT_TOKEN_SECRET not set (need them in .env)." >&2
