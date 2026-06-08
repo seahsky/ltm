@@ -66,6 +66,7 @@ N_EPISODES=""
 TARGET="any"
 ISOLATE=0   # --isolate: freeze away-scene LTM writes (rigor pass, see below)
 COARSE=0    # --coarse: enable the step-4 coarse-affordance head (LTM_COARSE_AFFORDANCE)
+NO_ROOM_CLIP=0  # --no-room-clip: caption-only coarse grounding (LTM_COARSE_ROOM_CLIP=0) — the A/B baseline
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,6 +78,7 @@ while [ $# -gt 0 ]; do
     --target)            TARGET="$2"; shift 2 ;;
     --isolate)           ISOLATE=1; shift ;;
     --coarse)            COARSE=1; shift ;;
+    --no-room-clip)      NO_ROOM_CLIP=1; shift ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -130,6 +132,10 @@ python embodied_memory/scripts/test_memory_bridge_consolidate.py \
   || { echo "FATAL: memory_bridge_consolidate (incl --isolate freeze) sanity suite failed."; exit 1; }
 python embodied_memory/scripts/test_room_resolver.py \
   || { echo "FATAL: room_resolver sanity suite failed."; exit 1; }
+python embodied_memory/scripts/test_room_classifier.py \
+  || { echo "FATAL: room_classifier (CLIP zero-shot) sanity suite failed."; exit 1; }
+python embodied_memory/scripts/test_room_clip_wiring.py \
+  || { echo "FATAL: room-CLIP wiring sanity suite failed."; exit 1; }
 python embodied_memory/scripts/test_coarse_propose.py \
   || { echo "FATAL: coarse-affordance proposer sanity suite failed."; exit 1; }
 
@@ -177,6 +183,18 @@ fi
 if [ "$COARSE" = "1" ]; then
   export LTM_COARSE_AFFORDANCE=1
   echo "  --coarse ON: exported LTM_COARSE_AFFORDANCE=1 (step-4 coarse-affordance head)"
+  # CLIP zero-shot room classifier (Stage 5) is the DEFAULT dense room signal for
+  # the coarse head. --no-room-clip is the A/B baseline (caption-keyword grounding
+  # only) — the coarse head then fires only when a Qwen-VL caption names the goal's
+  # affordant room (the coarse-1/2 sparse signal that ~never fired). Thresholds are
+  # taken from the env (LTM_ROOM_CLIP_MIN_COS/_MARGIN) if exported by a calibration
+  # step, else the conservative in-code defaults (0.25 / 0.02).
+  if [ "$NO_ROOM_CLIP" = "1" ]; then
+    export LTM_COARSE_ROOM_CLIP=0
+    echo "  --no-room-clip ON: exported LTM_COARSE_ROOM_CLIP=0 (caption-only A/B baseline)"
+  else
+    echo "  room-CLIP ON (default): min_cos=${LTM_ROOM_CLIP_MIN_COS:-0.25} margin=${LTM_ROOM_CLIP_MARGIN:-0.02}"
+  fi
 fi
 OUT_DIRS=""
 for S in 1 3; do
