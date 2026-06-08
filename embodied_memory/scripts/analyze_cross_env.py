@@ -114,11 +114,13 @@ def cross_env_verdict(recall_total: int, away_mean: float, away_p: float) -> str
         f"RECALL FIRES (cross-scene recall counter = {recall_total} > 0): the LTM DOES "
         "recall the home-scene sighting while the agent is in the away scene. But the "
         "LTM_CROSS_SCENE seam is counted-not-injected (the home position is invalid in "
-        f"the away coordinate frame), so this recall yields no waypoint — the away "
-        f"S3-S1 soft-SPL ({away_mean:+.4f}, p={away_p:.3f}) is within-episode same-scene "
-        "memory, NOT cross-env transfer. Cross-environment transfer via the fine layer is "
-        "structurally impossible; it requires a position-free mechanism (step 4 "
-        "coarse-affordance)."
+        f"the away frame), so this recall yields no waypoint — the away S3-S1 soft-SPL "
+        f"({away_mean:+.4f}, p={away_p:.3f}) is same-(away-)scene memory (within- OR "
+        "cross-episode accumulation across the away episodes), NOT cross-env transfer. The "
+        "fine layer cannot inject a cross-scene WAYPOINT (positions are scene-filtered); the "
+        "only cross-scene READ is a goal-irrelevant rerank score perturbation that cannot "
+        "steer toward the goal. Positive cross-env transfer needs a position-free mechanism "
+        "(step 4 coarse-affordance)."
     )
 
 

@@ -126,10 +126,14 @@ def case_verdict_recall_zero_inconclusive():
 
 def case_verdict_recall_fires_states_no_fine_transfer():
     # recall fired -> the load-bearing fact; the delta CANNOT be cross-env
-    # transfer (counted-not-injected), so the verdict must say so and point to step 4.
+    # transfer (the seam injects no cross-scene WAYPOINT), so the verdict must say
+    # so, attribute the delta to same-(away-)scene memory, and point to step 4.
     v = ce.cross_env_verdict(recall_total=12, away_mean=0.03, away_p=0.4)
     assert v.startswith("RECALL FIRES"), v
     assert "counted-not-injected" in v.lower() or "not inject" in v.lower(), v
+    assert "waypoint" in v.lower(), v                       # waypoint-vs-read distinction
+    assert "same-scene" in v.lower() or "same-(away-)scene" in v.lower(), v  # corrected class
+    assert "within-episode" not in v.lower(), v             # corrected: not the within-episode overclaim
     assert "step 4" in v.lower() or "coarse-affordance" in v.lower(), v
     print("  case verdict_recall_fires_states_no_fine_transfer: OK")
 

@@ -112,11 +112,27 @@ five claims overstated/mislabeled — state them precisely:
 5. **Success ring.** Binary SPL is at **0.1 m** (localization-bound); the benchmark
    uses **1.0 m**, where warm SR = S3 0.667 vs S1 0.333 (Phase-C). Quote both.
 
-**Scope:** the positive result is within-scene, same-category recall, NOT the
-proposal's cross-environment reuse — the injector hard-filters to the current scene
-(`memory_bridge.py:829`). A cross-env seam now exists (`LTM_CROSS_SCENE` +
-`build_cross_env_dataset` + `scripts/race-cross-env.sh`); expected to confirm a
-structural null (positive transfer needs the coarse-affordance mechanism).
+**Scope — cross-env transfer is structurally ABSENT (crossenv-2, 2026-06-08, VERIFIED).**
+The positive result is within-scene, same-category recall, NOT the proposal's
+cross-environment reuse — the injector hard-filters to the current scene
+(`memory_bridge.py:829`). The redesigned cross-env eval (`crossenv-2`: home cold
+sighting in scene A, one query/category in scene B, `analyze_cross_env.py` role-based,
+recall counted by scene_id) ran on the real backbone: **cross-scene recall counter =
+1208 (the home sighting IS recalled in scene B) but counted-not-injected → no
+waypoint.** A 12-agent adversarial code audit found **no home→away injection path**
+across every memory→waypoint emitter (fine seam scene-gated; ReMEmbR flat memory reset
+per-episode; coarse layer has no position). The **away S3−S1 = +0.1695 (p=0.004, n=4)
+is same-(away-)scene CROSS-EPISODE memory** (the 4 away episodes share one LTM;
+within-episode consolidation is MultiON-gated off for single-goal — `episode_runner.py:872`),
+**NOT cross-env transfer** — and it is FRAGILE (rides on one episode, an upper bound).
+The lone cross-scene READ (rerank S_sim via un-scene-filtered `retrieve()`, weight 0.30)
+is a goal-irrelevant non-navigable score perturbation, so home sightings aren't literally
+zero-influence but cannot manufacture transfer. **Net: cross-env reuse via the fine layer
+is structurally impossible for a waypoint; positive transfer needs step 4 (coarse-affordance)
+or a better instance-discriminating embedding** — confirming audit overstatement #1 with a
+controlled experiment. (`crossenv-1` first measured this WRONG — n_warm=3 made the analyzer
+read within-away revisit, and the recall counter read 0 only because Habitat renumbers
+episode_id; both fixed in the redesign.)
 
 **Instance bottleneck — now MEASURED ($0), was asserted.**
 `diagnose_sbert_cosines.py` (instance section; `runs/diagnose-instance-sep.txt`):

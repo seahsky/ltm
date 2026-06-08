@@ -60,10 +60,30 @@ proposal's cross-environment (跨环境) reuse.** The action-path memory injecto
 hard-filters to the current scene (`memory_bridge.py:829`), so cross-environment
 reuse is structurally impossible in the fine layer; "+0.24 across 2 scenes" is the
 same within-scene effect replicated per scene, not transfer. The genuine cross-task
-cold test (MultiON K=3) is a clean null. A real cross-env eval now exists as a seam
-(`LTM_CROSS_SCENE` + `build_cross_env_dataset` + `scripts/race-cross-env.sh`); it is
-expected to confirm a structural null (positive transfer needs the coarse-affordance
-mechanism, not a fine-layer relaxation).
+cold test (MultiON K=3) is a clean null. **The cross-env eval has now RUN and CONFIRMED
+this empirically (`crossenv-2`, 2026-06-08, real backbone).** Redesigned after a
+confounded first attempt (`crossenv-1`: n_warm=3 made `analyze_revisit`'s visit-order
+labeling measure *within-away-scene* revisit, +0.1695, not transfer; and the recall
+counter read 0 only because Habitat renumbers `episode_id` so the `"warm-away"` filter
+matched nothing). The redesign (one query/category in the away scene; `analyze_cross_env.py`
+labels by scene ROLE; recall counted by `scene_id`) gives: **cross-scene recall counter =
+1208** (the home sighting IS recalled in scene B) but **counted-not-injected → no waypoint**.
+A 12-agent adversarial code audit found **no home→away injection path** (fine seam
+scene-gated at `memory_bridge.py:841-853`; ReMEmbR flat memory reset per-episode at
+`remembr_backbone.py:177-180` / `episode_runner.py:947`, `n_remembr_chosen=0`; coarse layer
+stores no position). The away **S3−S1 = +0.1695 (p=0.004, n=4) is same-(away-)scene
+CROSS-EPISODE memory** (the 4 away episodes share one persistent LTM; within-episode
+consolidation is MultiON-gated off for single-goal, `episode_runner.py:872`), **NOT cross-env
+transfer**, and is FRAGILE (rides on one episode — bed idx6, mem_chosen=3 — an upper bound).
+The lone cross-scene READ (rerank S_sim via the un-scene-filtered `retrieve()` →
+`multi_scale_search`, weight 0.30) is a goal-irrelevant non-navigable score perturbation, so
+home sightings are not literally zero-influence but cannot manufacture transfer. **Net:
+cross-env transfer via the fine layer is structurally impossible for a waypoint; positive
+transfer needs step 4 (coarse-affordance) or a better instance-discriminating embedding** —
+confirming this overstatement with a controlled experiment. (An optional cleaner re-run —
+isolate each home→away pair so the away delta has no within-away-block accumulation — would
+drop the delta toward 0 and STRENGTHEN this; deferred as a nice-to-have, the qualitative
+conclusion is already robust.)
 
 **Instance-bottleneck claim — now MEASURED (was asserted).** The "SBERT can't
 distinguish instances" premise that gates the most expensive recommendation
