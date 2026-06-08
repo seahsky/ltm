@@ -5,32 +5,39 @@
 # The same-scene revisit eval (race-revisit.sh) tests recall of a past sighting
 # WITHIN one scene (+0.24 warm soft-SPL, reproduced 8x). The proposal's actual
 # thesis is broader: reuse across environments (跨环境). This driver builds a
-# dataset where the cold sighting accumulates in a HOME scene and the warm visit
-# is queried in a DIFFERENT AWAY scene, then measures whether the LTM transfers
-# across scenes (paired warm soft-SPL S3-S1) with the cross-scene seam enabled.
+# dataset where the cold sighting accumulates in a HOME scene and the SAME
+# category is then queried ONCE in a DIFFERENT AWAY scene, and measures cross-env
+# transfer with a role-based analyzer (analyze_cross_env.py).
 #
-# IMPORTANT — read before interpreting the result. The cross-scene seam
-# (LTM_CROSS_SCENE) is geometrically honest: a scene-A sighting is RECALLED in
-# scene B (counter n_cross_scene_recall > 0) but its stored agent_position is in
-# scene A's coordinate frame, so it is NOT injected as a waypoint in scene B.
-# So S3 behaves like S1 in the away scene and the expected result is a STRUCTURAL
-# NULL (S3-S1 ~= 0): the architecture has no cross-scene geometry to act on the
-# recall. That null is the informative answer to step 2's decision rule —
-# positive cross-env transfer requires the coarse-affordance mechanism (step 4),
-# NOT a raw fine-layer filter relaxation. The n_cross_scene_recall counter proves
-# the memory DOES recall the cross-scene sighting (so the null is "no mechanism",
-# not "empty memory").
+# REDESIGN (2026-06-08, after crossenv-1): the first version used n-warm=3 +
+# analyze_ablation --revisit. That CONFOUNDED the result — multiple away visits
+# create WITHIN-away-scene revisit, which the visit-order analyzer measured as
+# the "warm" effect (+0.1675), NOT cross-env transfer; and the recall counter
+# read 0 only because Habitat renumbers episode_id so the "warm-away" filter
+# matched nothing. Fixes: (1) n-warm=1 -> exactly ONE away visit/category, no
+# within-away revisit; (2) analyze_cross_env.py labels by scene ROLE (away=query,
+# home=source) and reads the recall counter by scene_id; (3) more categories for
+# power instead of more visits.
+#
+# IMPORTANT — interpreting the result. The cross-scene seam (LTM_CROSS_SCENE) is
+# geometrically honest: a scene-A sighting is RECALLED in scene B (counter
+# n_cross_scene_recall > 0) but its stored position is in scene A's frame, so it
+# is NOT injected as a waypoint. So the PRIMARY evidence is the recall counter:
+# counter>0 proves the LTM recalls the cross-scene sighting, while the away
+# soft-SPL S3-S1 cannot be cross-env transfer (counted-not-injected) — it is
+# within-episode same-scene memory at most. Positive cross-env transfer requires
+# the coarse-affordance mechanism (step 4), not a fine-layer relaxation.
 #
 # Mirrors race-revisit.sh (pull -> setup -> pre-verify -> build -> run -> analyze).
 # EXECUTE it (do NOT source) — it activates conda in its own process:
 #
-#   bash scripts/race-cross-env.sh --tag crossenv-1
+#   bash scripts/race-cross-env.sh --tag crossenv-2
 #
-# A bare invocation uses the two val_mini scenes x {chair, bed}, n-warm 3. The
-# HOME (cold sighting) scene is the alphabetically-FIRST of the two — the runner
-# processes scenes in sorted() order with group_by_scene=True, so the home cold
-# episodes must precede the away warm episodes for the LTM to be warm when the
-# away visits run.
+# A bare invocation uses the two val_mini scenes x the 4 SHARED categories
+# {chair, bed, sofa, toilet}, n-warm 1 (one away visit/category -> n=4 away
+# pairs). The HOME (cold sighting) scene is the codepoint-FIRST of the two — the
+# runner processes scenes in sorted() order with group_by_scene=True, so the home
+# cold episodes precede the away query for the LTM to be warm when it runs.
 #
 # Invariants carried over from race-revisit.sh (each cost a re-run before):
 #   * --backbone remembr     — omitting it silently uses the 'frontier' stub.
@@ -46,9 +53,9 @@ cd "$REPO_ROOT" || { echo "FATAL: cannot cd to repo root"; exit 1; }
 
 # --- defaults ---
 SCENES="wcojb4TFT35 TEEsavR23oF"
-CATS="chair bed"
-NWARM="3"
-TAG="crossenv-1"
+CATS="chair bed sofa toilet"   # the 4 categories shared by both val_mini scenes
+NWARM="1"                      # ONE away visit/category -> no within-away revisit
+TAG="crossenv-2"
 N_EPISODES=""
 TARGET="any"
 
@@ -107,8 +114,8 @@ python embodied_memory/scripts/test_cross_scene_propose.py \
   || { echo "FATAL: cross_scene_propose sanity suite failed."; exit 1; }
 python embodied_memory/scripts/test_diagnose_sbert_cosines.py \
   || { echo "FATAL: diagnose_sbert_cosines sanity suite failed."; exit 1; }
-python embodied_memory/scripts/test_analyze_ablation.py \
-  || { echo "FATAL: analyze_ablation --revisit dispatch sanity suite failed."; exit 1; }
+python embodied_memory/scripts/test_analyze_cross_env.py \
+  || { echo "FATAL: analyze_cross_env sanity suite failed."; exit 1; }
 
 # --- 4. build the cross-env dataset (home cold + away warm) into one shared dir ---
 banner "[4/6] build cross-env dataset: HOME(cold)=$HOME_SCENE  AWAY(warm)=$AWAY_SCENE  cats=[$CATS] n-warm=$NWARM"
@@ -161,51 +168,14 @@ for S in 1 3; do
   OUT_DIRS="$OUT_DIRS $out_dir"
 done
 
-# --- 6. analysis: paired warm soft-SPL + cross-scene recall proof ---
-# analyze_ablation --revisit pairs warm episodes across S1/S3 by (scene, episode)
-# key. Caveat: it labels each scene's first visit "cold" by within-scene visit
-# order, so the away scene's FIRST warm episode is dropped as "cold" (conservative
-# — it never inflates the delta). The headline is still the warm S3-S1 delta on
-# the remaining away visits, expected ~0 (the structural null).
-banner "[6/6] paired warm soft-SPL: analyze_ablation.py --revisit$OUT_DIRS"
+# --- 6. cross-environment transfer analysis (role-based, recall by scene_id) ---
+# analyze_cross_env.py labels by scene ROLE (away=query, home=source) instead of
+# visit-order, pairs the away episodes S3-vs-S1, and reads the cross-scene recall
+# counter by scene_id (robust to Habitat renumbering episode_id). PRIMARY evidence
+# is the recall counter (>0 = the home sighting is recalled in the away scene);
+# the away soft-SPL delta cannot be cross-env transfer (counted-not-injected).
+banner "[6/6] cross-env transfer: analyze_cross_env.py$OUT_DIRS --away-scene $AWAY_SCENE"
 # shellcheck disable=SC2086
-python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS
-echo
-echo "NOTE on the Gate-A verdict above: for THIS cross-env run the seam counts a"
-echo "cross-scene recall but never INJECTS a waypoint (geometry is invalid across"
-echo "scenes), so mem_fire_rate is 0 and the analyzer may print '(c) memory RARELY"
-echo "FIRES / empty warm memory'. That verdict is EXPECTED-FALSE here — the recall"
-echo "counter below is the corrective evidence. Read the warm S3-S1 soft-SPL as a"
-echo "LOW-POWER STRUCTURAL NULL by design (the away scene's first warm visit per"
-echo "category is demoted to 'cold' by visit-order, so n is small)."
+python embodied_memory/scripts/analyze_cross_env.py $OUT_DIRS --away-scene "$AWAY_SCENE"
 
-# Cross-scene recall PROOF: the away warm episodes must show n_cross_scene_recall
-# > 0 in S3 (memory recalled the home sighting) even though soft-SPL didn't move.
-banner "cross-scene recall counter (S3 away warm episodes' bridge_stats_after)"
-python - "runs/${TAG}-s3" <<'PY'
-import glob, json, os, sys
-run = sys.argv[1]
-# _n_cross_scene_recall is a PROCESS-CUMULATIVE, monotonic counter (memory_bridge
-# never resets it per episode), so bridge_stats_after.n_cross_scene_recall is a
-# running snapshot. Report the FINAL (max) cumulative value as the total recall
-# EVENTS — do NOT sum the per-episode snapshots (that triple-counts). The number
-# is an event count (one per matched hit per replan), so its magnitude is only a
-# lower-bound proxy; its SIGN (>0) is the load-bearing fact.
-final = 0
-rows = []
-for f in sorted(glob.glob(os.path.join(run, "episode_*.json"))):
-    d = json.load(open(f))
-    eid = str(d.get("episode_id", ""))
-    if "warm-away" not in eid:
-        continue
-    n = int((d.get("bridge_stats_after") or {}).get("n_cross_scene_recall", 0) or 0)
-    final = max(final, n)
-    rows.append((eid, n, d.get("soft_spl")))
-for eid, n, sspl in rows:
-    print(f"  {eid:<22} cum_recall={n:<5} soft_spl={sspl}")
-print(f"  --> final cumulative cross-scene recall EVENTS across away warm episodes = {final}")
-print("  (>0 confirms the memory RECALLED the home sighting; if soft-SPL S3-S1~=0,")
-print("   the null is 'no cross-scene geometry mechanism', not 'empty memory' -> step 4.)")
-PY
-
-banner "DONE — paste the Gate block + the cross-scene recall counter"
+banner "DONE — paste the cross-env transfer block (away S3-S1 + recall counter + verdict)"
