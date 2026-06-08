@@ -409,6 +409,14 @@ class EmbodiedMemoryBridge:
         # when disable_stm=True so the ablation can confirm the toggle worked.
         self._n_keyframes_observed = 0
 
+        # Cumulative count of cross-scene fine-layer recalls: a stored sighting
+        # of the goal category from ANOTHER scene that cleared the cosine bar
+        # during propose_memory_candidates. Only ever non-zero when the
+        # LTM_CROSS_SCENE seam is enabled (see propose_memory_candidates); it
+        # measures cross-environment recall without injecting an invalid
+        # cross-scene waypoint.
+        self._n_cross_scene_recall = 0
+
         # Tracking which modules have been invoked (for criterion 4 logging).
         self.modules_invoked: Dict[str, bool] = {
             "stm": False,
@@ -792,6 +800,10 @@ class EmbodiedMemoryBridge:
 
         import math
 
+        # Cross-env seam: when set, scene-mismatched fine hits are recalled and
+        # counted (but not injected). Off by default → unchanged behaviour.
+        _cross_scene = bool(os.environ.get("LTM_CROSS_SCENE"))
+
         # Query the text-indexed fine layer with the goal phrase in SBERT space
         # (same encoder the layer was indexed with) → discriminative goal-vs-
         # caption cosine, not the flat CLIP image-text cosine.
@@ -828,6 +840,16 @@ class EmbodiedMemoryBridge:
                 continue
             if entry.metadata.get("scene_id") != self._current_scene_id:
                 _dbg["scene_mism"] += 1
+                # Cross-env seam (step 2): with LTM_CROSS_SCENE set, count this
+                # as a cross-scene recall — the agent genuinely retrieved a
+                # past sighting of the goal category from a DIFFERENT scene —
+                # but still skip injection. The stored agent_position is in the
+                # other scene's coordinate frame, so a waypoint there is
+                # geometrically meaningless here; positive cross-env transfer
+                # needs a region/affordance mechanism (step 4), not raw fine
+                # geometry. The counter makes the cross-env recall measurable.
+                if _cross_scene:
+                    self._n_cross_scene_recall += 1
                 continue
             ap = entry.metadata.get("agent_position")
             if ap is None or len(ap) < 3:
@@ -881,7 +903,6 @@ class EmbodiedMemoryBridge:
                 break
 
         _dbg["emitted"] = len(out)
-        import os
         if os.environ.get("LTM_PROPOSE_DEBUG"):
             import sys
             print(
@@ -1110,6 +1131,7 @@ class EmbodiedMemoryBridge:
             "episodes_seen": self._episodes_seen,
             "successful_episodes_seen": self._successful_episodes_seen,
             "n_keyframes_observed": self._n_keyframes_observed,
+            "n_cross_scene_recall": self._n_cross_scene_recall,
             "modules_invoked": dict(self.modules_invoked),
             "ablation": {
                 "disable_stm": self.disable_stm,

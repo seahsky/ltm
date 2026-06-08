@@ -244,6 +244,79 @@ def case_two_builds_into_one_dir_are_additive():
     print("  case two_builds_into_one_dir_are_additive: OK")
 
 
+# ----------------------------------------------------------------------
+# build_cross_env_dataset — cold sighting in scene A, warm visit in scene B
+# ----------------------------------------------------------------------
+
+
+def _scene_src(glb: str, cat: str = "chair"):
+    """One-category source content for scene <glb>: a goal viewpoint + 2 starts."""
+    scene_id = f"hm3d/val/0000-{glb}/{glb}.basis.glb"
+
+    def tmpl(eid, start):
+        return {
+            "episode_id": eid, "scene_id": scene_id, "object_category": cat,
+            "start_position": list(start), "start_rotation": [0, 0, 0, 1],
+            "goals": [{"position": [1.0, 0.0, 1.0]}],
+            "info": {"geodesic_distance": 5.0}, "shortest_paths": [],
+        }
+
+    return {
+        "category_to_task_category_id": {cat: 0},
+        "category_to_scene_annotation_category_id": {cat: 3},
+        "goals_by_category": {f"{glb}_{cat}": [_goal([0, 0, 0], [_vp([1, 0, 1], iou=1.5)])]},
+        "episodes": [tmpl("h1", [8, 0, 8]), tmpl("h2", [15, 0, 0])],
+    }
+
+
+def case_cross_env_cold_home_warm_away():
+    home = _scene_src("AAA")
+    away = _scene_src("BBB")
+    out = mk.build_cross_env_dataset(("AAA", home), ("BBB", away), ["chair"], n_warm=2)
+    assert set(out.keys()) == {"AAA", "BBB"}, out.keys()
+
+    home_eps = out["AAA"]["episodes"]
+    away_eps = out["BBB"]["episodes"]
+    # exactly one COLD sighting in the home scene, starting at its goal viewpoint
+    assert len(home_eps) == 1, home_eps
+    assert home_eps[0]["start_position"] == [1, 0, 1], home_eps[0]["start_position"]
+    assert home_eps[0]["scene_id"].endswith("AAA.basis.glb"), home_eps[0]["scene_id"]
+    assert "cold" in home_eps[0]["episode_id"], home_eps[0]["episode_id"]
+    # two WARM revisits in the away scene, from the away scene's own starts
+    assert len(away_eps) == 2, away_eps
+    assert away_eps[0]["scene_id"].endswith("BBB.basis.glb"), away_eps[0]["scene_id"]
+    assert all("warm" in e["episode_id"] for e in away_eps), away_eps
+    # episode ids unique across the whole dataset
+    ids = [e["episode_id"] for e in home_eps + away_eps]
+    assert len(set(ids)) == len(ids), ids
+    # each scene keeps its OWN goals_by_category (so success computes per scene)
+    assert out["AAA"]["goals_by_category"] == home["goals_by_category"]
+    assert out["BBB"]["goals_by_category"] == away["goals_by_category"]
+    print("  case cross_env_cold_home_warm_away: OK")
+
+
+def case_cross_env_warm_starts_from_away_scene():
+    home = _scene_src("AAA")
+    away = _scene_src("BBB")
+    out = mk.build_cross_env_dataset(("AAA", home), ("BBB", away), ["chair"], n_warm=2)
+    warm_starts = [e["start_position"] for e in out["BBB"]["episodes"]]
+    # both away starts are far from the away goal viewpoint [1,0,1]; farthest first
+    # ([15,0,0] is 14.0 m away, [8,0,8] is 9.9 m → [15,0,0] leads)
+    assert warm_starts == [[15, 0, 0], [8, 0, 8]], warm_starts
+    print("  case cross_env_warm_starts_from_away_scene: OK")
+
+
+def case_cross_env_skips_category_absent_in_either_scene():
+    # category must exist in BOTH scenes; chair only in home, bed only in away
+    home = _scene_src("AAA", cat="chair")
+    away = _scene_src("BBB", cat="bed")
+    out = mk.build_cross_env_dataset(("AAA", home), ("BBB", away), ["chair", "bed"], n_warm=1)
+    # chair: no away match; bed: no home match -> nothing buildable
+    total = sum(len(c["episodes"]) for c in out.values())
+    assert total == 0, out
+    print("  case cross_env_skips_category_absent_in_either_scene: OK")
+
+
 def main() -> int:
     print("Phase-B1 controlled-start dataset builder sanity tests")
     case_cold_pose_picks_max_iou_viewpoint()
@@ -256,6 +329,9 @@ def main() -> int:
     case_build_dataset_skips_missing_category()
     case_write_dataset_roundtrip()
     case_two_builds_into_one_dir_are_additive()
+    case_cross_env_cold_home_warm_away()
+    case_cross_env_warm_starts_from_away_scene()
+    case_cross_env_skips_category_absent_in_either_scene()
     print("All cases passed.")
     return 0
 
