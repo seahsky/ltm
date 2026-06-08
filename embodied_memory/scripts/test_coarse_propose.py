@@ -322,6 +322,33 @@ def case_frontier_grounding_steers_to_affordant_region():
     print("  case frontier_grounding_steers_to_affordant_region: OK")
 
 
+def case_frontier_grounding_survives_planner_dedup():
+    # REGRESSION (clip1 RACE run, 2026-06-09): the real call site passes
+    # planner_world_xys = ALL candidate xys INCLUDING the frontier candidates
+    # (episode_runner.py: planner_world_xys=[c.world_xy for c in all_cands]). A
+    # frontier-grounded coarse target sits EXACTLY on a frontier's xy, so deduping
+    # it against the planner pool removed it at distance 0 -> 100% of the time ->
+    # the head emitted 0 candidates DESPITE a room match (n_coarse_room_matched>0,
+    # n_coarse_candidates=0 in the run). A frontier-grounded coarse candidate is
+    # MEANT to ride/boost an existing frontier, so it must SURVIVE the planner dedup.
+    b = _mk_bridge()
+    b.begin_episode("ep-coarse", scene_id="SCENE_B")
+    stm = [([3.0, 0.0, 0.0], "a cozy living room with a sofa")]
+    frontier = [FrontierCandidate(candidate_id=1, world_xy=np.array([4.0, 0.0], dtype=np.float32),
+                                  grid_rc=(-1, -1), distance_m=4.0, bearing_rad=0.0, cluster_size=3,
+                                  raw_score=0.8, source="frontier", metadata={})]
+    out = b.propose_coarse_candidates(
+        agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32), agent_yaw=0.0,
+        target_category="chair", frontier_cands=frontier, room_anchors=stm,
+        planner_world_xys=[np.array([4.0, 0.0], dtype=np.float32)])  # the frontier IS in the pool
+    assert len(out) == 1, ("frontier-grounded coarse must survive planner dedup", out)
+    assert list(out[0].world_xy) == [4.0, 0.0], out[0].world_xy
+    assert out[0].metadata.get("grounded") == "frontier", out[0].metadata
+    # diag must still record the match
+    assert b._last_coarse_diag["n_room_match"] >= 1, b._last_coarse_diag
+    print("  case frontier_grounding_survives_planner_dedup: OK")
+
+
 def case_frontier_falls_back_to_stm_when_none_match():
     # no frontier's nearest room matches -> fall back to the visited affordant-room
     # anchor position (STM grounding), so the head still fires.
@@ -377,6 +404,7 @@ def main() -> int:
     case_dedup_against_planner_xys()
     case_defaults_to_stm_pending()
     case_frontier_grounding_steers_to_affordant_region()
+    case_frontier_grounding_survives_planner_dedup()
     case_frontier_falls_back_to_stm_when_none_match()
     case_clip_overrides_sparse_caption()
     case_clip_abstain_falls_back_to_caption()
