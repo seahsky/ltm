@@ -18,26 +18,37 @@
 #   PHASE A (fast, sim+CLIP only, no 7B): diagnose_room_clip_cosines.py dumps the
 #     top_cos / margin distributions + room histogram and prints a data-driven
 #     RECOMMEND min_cos=.. margin=.. line. We export those as the gate thresholds.
-#   PHASE B (the A/B, real backbone): the cross-env coarse run TWICE —
-#     CLIP-on (tuned thresholds) vs caption-only (--no-room-clip baseline) — so we
-#     can see whether the dense signal makes the head FIRE (coarse_chosen>0) AND
-#     whether arrival (succ@1m / min_d2g) is helped, not just fire-rate.
+#   PHASE B (real backbone): the CROSS-ENV coarse A/B — CLIP-on (tuned) vs
+#     caption-only (--no-room-clip). Tests "does the dense signal make the head
+#     FIRE (coarse_chosen>0) and HELP in a NEW scene (succ@1m/min_d2g)?".
+#   PHASE C (real backbone): the WARM-REVISIT over-fire A/B — the documented
+#     Phase-C +0.24 harness, coarse-OFF baseline (full S1/S2/S3) vs coarse-CLIP-ON
+#     (S3 only, rerun on the SAME dataset). Tests "does the relaxed coarse gate
+#     OVER-FIRE on warm same-scene episodes and dent the established +0.24?".
 #
-# ACCEPTANCE (MF-2): coarse_chosen>0 AND warm succ@1m/min_d2g NOT regressed vs the
-# caption-only baseline AND vs coarse-OFF. coarse_chosen>0 alone is NOT a pass.
-# Also confirm the room histogram is NOT collapsed to one room and n_memory_chosen
-# does not inflate (the instance-level over-fire trap).
+# This is a multi-hour run (PHASE C is the documented 48-episode revisit matrix +
+# one extra S3 arm). PHASE A ~minutes; PHASE B ~1-3h; PHASE C ~several hours.
+#
+# ACCEPTANCE: the CLIP path passes iff
+#   PHASE B: away coarse_chosen>0 AND away succ@1m/min_d2g NOT regressed vs
+#            caption-only (coarse FIRES + HELPS in a new scene), AND
+#   PHASE C: coarse-ON warm S3-S1 ~= coarse-OFF warm S3-S1 (~+0.24) — NO regression
+#            (the relaxed gate does not over-fire on warm same-scene), AND
+#   both:    coarse_room_hist NOT collapsed to one room; n_memory_chosen NOT
+#            inflated (no instance over-fire); coarse_top_cos_max <= 1.0.
 #
 # EXECUTE it (do NOT source). Because this file may be brand-new on RACE, the
 # self-pull at step 1 runs the OLD copy via bash's open fd — so on the FIRST run
 # `git pull` MANUALLY first:
 #
 #   git pull --ff-only && nrun bash scripts/race-room-clip.sh --tag clip1
-#   nrun bash scripts/race-room-clip.sh --tag clip1 --calib-only   # PHASE A only (gate check)
+#   nrun bash scripts/race-room-clip.sh --tag clip1 --calib-only      # PHASE A only (gate check)
+#   nrun bash scripts/race-room-clip.sh --tag clip1 --skip-revisit    # A+B only (faster)
+#   nrun bash scripts/race-room-clip.sh --tag clip1 --skip-crossenv   # A+C only
 #
-# Flags: --tag <t> (run tag); --calib-only (stop after the cosine measurement);
-#        --steps <n> (calibration walk length/scene, default 140); plus any
-#        race-cross-env.sh flags are NOT forwarded — edit CATS/SCENES there.
+# Flags: --tag <t>; --calib-only; --steps <n> (calib walk len, default 140);
+#        --skip-crossenv / --skip-revisit; --rev-scenes/--rev-cats/--rev-nwarm
+#        (PHASE C matrix; default = the documented chair+bed x 2 scenes x n-warm 3).
 
 set -uo pipefail
 
@@ -48,13 +59,23 @@ TAG="clip1"
 CALIB_ONLY=0
 STEPS=140
 EPISODES_PATH="data/hm3d/datasets/objectnav/hm3d/v1/val_mini/val_mini.json.gz"
+SKIP_CROSSENV=0   # --skip-crossenv: omit PHASE B (the cross-env "does coarse FIRE+help" A/B)
+SKIP_REVISIT=0    # --skip-revisit:  omit PHASE C (the warm-revisit "does coarse OVER-FIRE" A/B)
+REV_SCENES="wcojb4TFT35 TEEsavR23oF"   # PHASE C: the documented Phase-C +0.24 harness
+REV_CATS="chair bed"
+REV_NWARM="3"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag)         TAG="$2"; shift 2 ;;
-    --calib-only)  CALIB_ONLY=1; shift ;;
-    --steps)       STEPS="$2"; shift 2 ;;
+    --tag)           TAG="$2"; shift 2 ;;
+    --calib-only)    CALIB_ONLY=1; shift ;;
+    --steps)         STEPS="$2"; shift 2 ;;
     --episodes-path) EPISODES_PATH="$2"; shift 2 ;;
+    --skip-crossenv) SKIP_CROSSENV=1; shift ;;
+    --skip-revisit)  SKIP_REVISIT=1; shift ;;
+    --rev-scenes)    REV_SCENES="$2"; shift 2 ;;
+    --rev-cats)      REV_CATS="$2"; shift 2 ;;
+    --rev-nwarm)     REV_NWARM="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -111,34 +132,73 @@ if [ "$CALIB_ONLY" = "1" ]; then
   exit 0
 fi
 
-# Export the measured thresholds so the child cross-env runs inherit them.
+# Export the measured thresholds so the child cross-env / revisit runs inherit them.
 export LTM_ROOM_CLIP_MIN_COS="$REC_MIN"
 export LTM_ROOM_CLIP_MARGIN="$REC_MARGIN"
 
-# --- 5. PHASE B: the coarse A/B on the cross-env harness (real backbone) ---
-# Reuse race-cross-env.sh (it self-pulls + sets up, idempotent). The exported
-# thresholds propagate to the child. CLIP-on arm first, caption-only baseline next.
-banner "[5/5] PHASE B: cross-env coarse A/B — CLIP-on (tuned) vs caption-only"
-echo ">> ARM 1: CLIP-on  (min_cos=$LTM_ROOM_CLIP_MIN_COS margin=$LTM_ROOM_CLIP_MARGIN)"
-bash scripts/race-cross-env.sh --coarse --tag "${TAG}-clipon" \
-  || { echo "FATAL: CLIP-on cross-env arm failed."; exit 1; }
+# --- 5. PHASE B: cross-env coarse A/B (real backbone) — does coarse FIRE+HELP? ---
+# Reuse race-cross-env.sh (self-pulls + sets up, idempotent). Exported thresholds
+# propagate to the child. NOTE: --coarse only sets LTM_COARSE_AFFORDANCE inside the
+# CHILD, so it never leaks into PHASE C's coarse-OFF baseline.
+if [ "$SKIP_CROSSENV" = "0" ]; then
+  banner "[5/6] PHASE B: cross-env coarse A/B — CLIP-on (tuned) vs caption-only"
+  echo ">> ARM 1: CLIP-on  (min_cos=$LTM_ROOM_CLIP_MIN_COS margin=$LTM_ROOM_CLIP_MARGIN)"
+  bash scripts/race-cross-env.sh --coarse --tag "${TAG}-clipon" \
+    || { echo "FATAL: CLIP-on cross-env arm failed."; exit 1; }
+  echo ">> ARM 2: caption-only baseline (LTM_COARSE_ROOM_CLIP=0)"
+  bash scripts/race-cross-env.sh --coarse --no-room-clip --tag "${TAG}-caponly" \
+    || { echo "FATAL: caption-only cross-env arm failed."; exit 1; }
+else
+  banner "[5/6] PHASE B: cross-env A/B SKIPPED (--skip-crossenv)"
+fi
 
-echo ">> ARM 2: caption-only baseline (LTM_COARSE_ROOM_CLIP=0)"
-bash scripts/race-cross-env.sh --coarse --no-room-clip --tag "${TAG}-caponly" \
-  || { echo "FATAL: caption-only cross-env arm failed."; exit 1; }
+# --- 6. PHASE C: warm-revisit over-fire A/B (real backbone) — does coarse HURT? ---
+# Baseline = the documented +0.24 harness with coarse OFF (full S1/S2/S3). The
+# coarse-ON arm reruns ONLY S3 on the SAME dataset (--reuse-dataset) so it pairs
+# against the baseline's exact S1 episodes. Compare coarse-ON warm S3-S1 vs the
+# coarse-OFF baseline warm S3-S1 (~+0.24): a drop = the relaxed gate over-fires on
+# warm same-scene; parity = safe.
+REV_DS_DIR="data/hm3d/datasets/objectnav/hm3d/v1/revisit_${TAG}-revoff"
+if [ "$SKIP_REVISIT" = "0" ]; then
+  banner "[6/6] PHASE C: warm-revisit over-fire A/B — coarse-OFF baseline vs coarse-CLIP-ON"
+  echo ">> ARM 1 (baseline, coarse OFF, full S1/S2/S3): the established +0.24 harness"
+  bash scripts/race-revisit.sh --tag "${TAG}-revoff" \
+      --scenes "$REV_SCENES" --cats "$REV_CATS" --n-warm "$REV_NWARM" \
+    || { echo "FATAL: revisit baseline (coarse-OFF) arm failed."; exit 1; }
+  echo ">> ARM 2 (coarse-CLIP-ON, S3 only, SAME dataset): does it dent the +0.24?"
+  bash scripts/race-revisit.sh --tag "${TAG}-revon" --coarse --settings 3 \
+      --reuse-dataset "$REV_DS_DIR" \
+    || { echo "FATAL: revisit coarse-ON arm failed."; exit 1; }
 
-banner "DONE — compare the two arms"
+  banner "PHASE C cross-arm pairing: coarse-ON S3 vs baseline S1/S2"
+  # Pair the coarse-ON S3 against the baseline S1/S2 (SAME episodes) so this delta is
+  # directly comparable to the baseline Gate-A block printed by ARM 1 above.
+  if [ -d "runs/${TAG}-revoff-s1" ] && [ -d "runs/${TAG}-revon-s3" ]; then
+    python embodied_memory/scripts/analyze_ablation.py --revisit \
+        "runs/${TAG}-revoff-s1" "runs/${TAG}-revoff-s2" "runs/${TAG}-revon-s3" \
+      || echo "WARN: coarse-ON pairing analysis failed (inspect the run dirs)."
+  else
+    echo "WARN: expected run dirs missing — skipping coarse-ON pairing."
+  fi
+else
+  banner "[6/6] PHASE C: revisit over-fire A/B SKIPPED (--skip-revisit)"
+fi
+
+banner "DONE — read the ACCEPTANCE checklist"
 cat <<EOF
-Read across the two analyze_cross_env blocks above:
-  ARM 1 (CLIP-on)      runs/${TAG}-clipon-s{1,3}
-  ARM 2 (caption-only) runs/${TAG}-caponly-s{1,3}
+Calibration band + RECOMMEND: $CALIB_LOG  (thresholds used: min_cos=$REC_MIN margin=$REC_MARGIN)
 
-ACCEPTANCE (MF-2): the CLIP arm passes iff
-  (a) away n_coarse_chosen > 0          (the dense signal made the head FIRE), AND
-  (b) warm/away succ@1m & min_d2g NOT regressed vs caption-only AND vs coarse-OFF, AND
-  (c) coarse_room_hist is NOT collapsed to one room, AND
-  (d) n_memory_chosen does NOT inflate vs caption-only (no instance over-fire).
-coarse_chosen>0 ALONE is not a pass. Also eyeball each s3 summary.json for
-n_coarse_room_clip_tagged vs n_coarse_room_caption_tagged vs n_coarse_room_abstained
-and coarse_top_cos_max (must be <= 1.0; >1.0 = a normalization bug).
+PHASE B (cross-env, does coarse FIRE+HELP in a NEW scene):
+  ARM 1 CLIP-on      runs/${TAG}-clipon-s{1,3}
+  ARM 2 caption-only runs/${TAG}-caponly-s{1,3}
+  PASS iff away n_coarse_chosen>0 AND away succ@1m/min_d2g NOT regressed vs caption-only.
+
+PHASE C (warm revisit, does coarse OVER-FIRE on same-scene):
+  baseline (coarse OFF) runs/${TAG}-revoff-s{1,2,3}  -> warm S3-S1 should reproduce ~+0.24
+  coarse-ON (S3)        runs/${TAG}-revon-s3          -> paired vs revoff-s1 above
+  PASS iff coarse-ON warm S3-S1 ~= baseline warm S3-S1 (no regression).
+
+BOTH: coarse_room_hist NOT collapsed to one room; n_memory_chosen NOT inflated vs
+baseline (no instance over-fire); coarse_top_cos_max <= 1.0 (>1.0 = normalization bug).
+Inspect each s3 summary.json: n_coarse_room_clip_tagged / _caption_tagged / _abstained.
 EOF
