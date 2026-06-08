@@ -216,6 +216,95 @@ def build_dataset(
     }
 
 
+def _content_with_episodes(src: Dict[str, Any], episodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "category_to_task_category_id": src.get("category_to_task_category_id", {}),
+        "category_to_scene_annotation_category_id":
+            src.get("category_to_scene_annotation_category_id", {}),
+        "goals_by_category": src.get("goals_by_category") or {},
+        "episodes": episodes,
+    }
+
+
+def build_cross_env_dataset(
+    home: "tuple[str, Dict[str, Any]]",
+    away: "tuple[str, Dict[str, Any]]",
+    categories: List[str],
+    n_warm: int,
+    min_dist: float = 2.0,
+) -> Dict[str, Dict[str, Any]]:
+    """Build a CROSS-ENVIRONMENT revisit dataset: the cold sighting accumulates
+    in the ``home`` scene and the warm visit is queried in a DIFFERENT ``away``
+    scene. This is the eval vehicle for the proposal's actual thesis
+    (cross-environment reuse), which the same-scene revisit eval cannot test.
+
+    ``home`` / ``away`` are ``(scene_name, src_content)`` tuples. For each
+    category present in BOTH scenes:
+
+      * one **cold** episode in ``home`` starting at the home goal's view_point
+        (so the agent captions that category and the LTM holds a home sighting);
+      * ``n_warm`` **warm** episodes in ``away`` starting far from the away goal
+        (drawn from the away scene's OWN category starts so the start→goal
+        geodesic is finite), where reaching the goal could benefit from the
+        cross-env recall — IF the system transfers across scenes.
+
+    Returns ``{scene_name: content}`` for each scene that has ≥1 episode; each
+    content keeps its own ``goals_by_category`` so success computes per scene.
+    Run home-before-away in ONE process (memory persisting) and gate the warm
+    away visits on ``LTM_CROSS_SCENE`` to measure cross-env transfer.
+    """
+    home_scene, home_src = home
+    away_scene, away_src = away
+    home_goals = home_src.get("goals_by_category") or {}
+    away_goals = away_src.get("goals_by_category") or {}
+    home_eps = home_src.get("episodes") or []
+    away_eps = away_src.get("episodes") or []
+
+    def _clone(template: Dict[str, Any], pose: Dict[str, Any], category: str,
+               eid: str) -> Dict[str, Any]:
+        ep = copy.deepcopy(template)
+        ep["episode_id"] = eid
+        ep["object_category"] = category
+        ep["start_position"] = list(pose["position"])
+        ep["start_rotation"] = list(pose["rotation"])
+        return ep
+
+    home_out: List[Dict[str, Any]] = []
+    away_out: List[Dict[str, Any]] = []
+    for cat in categories:
+        hkey = _goals_key(home_goals, cat)
+        akey = _goals_key(away_goals, cat)
+        if hkey is None or akey is None:
+            continue  # cross-env needs the category in BOTH scenes
+        home_tmpl = next((ep for ep in home_eps if ep.get("object_category") == cat), None)
+        away_tmpl = next((ep for ep in away_eps if ep.get("object_category") == cat), None)
+        if home_tmpl is None or away_tmpl is None:
+            continue
+
+        # cold sighting in the home scene: start at the home goal view_point
+        cold_pose = pick_cold_pose(home_goals[hkey])
+        home_out.append(_clone(home_tmpl, cold_pose, cat, f"{cat}-cold-home-0"))
+
+        # warm visits in the away scene, from the away scene's own reachable starts
+        away_candidates = [
+            {"position": list(ep["start_position"]), "rotation": list(ep["start_rotation"])}
+            for ep in away_eps
+            if ep.get("object_category") == cat
+            and ep.get("start_position") and ep.get("start_rotation")
+        ]
+        away_vps = _goal_view_point_positions(away_goals[akey])
+        warm_poses = pick_warm_poses(away_candidates, away_vps, n=n_warm, min_dist=min_dist)
+        for i, pose in enumerate(warm_poses):
+            away_out.append(_clone(away_tmpl, pose, cat, f"{cat}-warm-away-{i + 1}"))
+
+    out: Dict[str, Dict[str, Any]] = {}
+    if home_out:
+        out[home_scene] = _content_with_episodes(home_src, home_out)
+    if away_out:
+        out[away_scene] = _content_with_episodes(away_src, away_out)
+    return out
+
+
 # ----------------------------------------------------------------------
 # IO
 # ----------------------------------------------------------------------
@@ -265,18 +354,71 @@ def _load_gz(path: str) -> Dict[str, Any]:
 # ----------------------------------------------------------------------
 
 
+def _main_cross_env(args, parser) -> int:
+    """Cross-environment mode: cold sighting in --home-scene, warm visit in
+    --away-scene. Writes both scenes' content into one shared --out-dir (the
+    runner loads them with --scene all), like the Phase-C multi-scene build."""
+    missing = [f"--{a.replace('_', '-')}" for a in
+               ("home_src", "home_scene", "away_src", "away_scene")
+               if not getattr(args, a)]
+    if missing:
+        parser.error(f"--cross-env requires {', '.join(missing)}")
+
+    home = (args.home_scene, _load_gz(args.home_src))
+    away = (args.away_scene, _load_gz(args.away_src))
+    scenes = build_cross_env_dataset(home, away, args.categories, args.n_warm, args.min_dist)
+    if not scenes:
+        print(f"ERROR: no cross-env episodes built for categories={args.categories} "
+              f"(need each category in BOTH {args.home_scene} and {args.away_scene}).",
+              file=sys.stderr)
+        return 1
+
+    top = None
+    for scene_name, content in scenes.items():
+        top = write_dataset(args.out_dir, scene_name, content, content)
+        by_cat: Dict[str, int] = {}
+        for ep in content["episodes"]:
+            by_cat[ep["object_category"]] = by_cat.get(ep["object_category"], 0) + 1
+        role = "cold" if scene_name == args.home_scene else "warm"
+        print(f"  content/{scene_name}.json.gz ({role}): {len(content['episodes'])} episodes "
+              f"({', '.join(f'{c}:{n}' for c, n in by_cat.items())})")
+    print(f"wrote {top}")
+
+    # re-load verify
+    re = _load_gz(top)
+    assert re["episodes"] == [], "top-level must have empty episodes"
+    for scene_name in scenes:
+        cj = _load_gz(os.path.join(args.out_dir, "content", f"{scene_name}.json.gz"))
+        assert cj["episodes"] and "goals_by_category" in cj, f"content malformed: {scene_name}"
+    print("  verify: re-loaded OK (top empty; home cold + away warm content present)")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Phase-B1 controlled-start revisit dataset")
-    parser.add_argument("--src", required=True,
-                        help="Source content json.gz "
-                             "(…/val_mini/content/<scene>.json.gz).")
-    parser.add_argument("--scene", required=True, help="Bare scene name, e.g. wcojb4TFT35.")
+    parser.add_argument("--src", help="Source content json.gz "
+                                      "(…/val_mini/content/<scene>.json.gz). Single-scene mode.")
+    parser.add_argument("--scene", help="Bare scene name, e.g. wcojb4TFT35. Single-scene mode.")
     parser.add_argument("--categories", nargs="+", default=["chair", "bed"])
     parser.add_argument("--n-warm", type=int, default=3)
     parser.add_argument("--min-dist", type=float, default=2.0,
                         help="Min metres a warm start must be from any goal view_point.")
     parser.add_argument("--out-dir", required=True)
+    # cross-environment mode (step 2): a sighting in --home-scene, queried in --away-scene.
+    parser.add_argument("--cross-env", action="store_true",
+                        help="Cross-environment mode: cold sighting in --home-scene, "
+                             "warm visit in --away-scene. Requires the --home-*/--away-* args.")
+    parser.add_argument("--home-src", help="Cross-env: home scene content json.gz (cold sighting).")
+    parser.add_argument("--home-scene", help="Cross-env: home scene name.")
+    parser.add_argument("--away-src", help="Cross-env: away scene content json.gz (warm visit).")
+    parser.add_argument("--away-scene", help="Cross-env: away scene name.")
     args = parser.parse_args(argv)
+
+    if args.cross_env:
+        return _main_cross_env(args, parser)
+
+    if not args.src or not args.scene:
+        parser.error("--src and --scene are required (single-scene mode), or use --cross-env")
 
     src = _load_gz(args.src)
     content = build_dataset(src, args.categories, args.n_warm, args.min_dist)

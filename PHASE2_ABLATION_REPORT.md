@@ -6,6 +6,79 @@
 **Run dirs:** `runs/abl-s{1,2,3}-remembr`
 **Source log:** `/tmp/phase2.log` on pod (downloaded copy at `~/Downloads/phase2.log`)
 
+---
+
+## AUDIT CAVEATS (2026-06-08) — read before the run log
+
+A read-only fact-check audit (the "diagnose-first" program) cross-checked the
+headline claims below against the code and the **locally-present** run data. The
+positive thesis stands, but five things in the write-up overstate or mislabel —
+state them precisely:
+
+1. **Provenance — local `runs/abl-s{1,2,3}-qwen` hold Run-2 data, not the Run-7
+   numbers cited against them.** Verified locally: `abl-s1-qwen` mean soft_spl =
+   **0.0279**, mean steps **9.6**, spl 0.0; `abl-s3-qwen` `n_memory_chosen` =
+   **21**; captions are the degenerate `"room interior"` (semantic-sensor-zero
+   era). The Run-7 figures (e.g. soft-SPL S1 ≈ 0.089) attributed to these dirs are
+   NOT reproducible from the local copies — the dirs were overwritten/reused. The
+   real headline data (`revisit-*`, the wide matrix, `scorer-*`, `predictor-*`)
+   lives **only on RACE** and is unverifiable locally. `runs/abl-s{1,2,3}-tier1`
+   is a 3-episode pre-Run-1 smoke (null setting/metrics), not Run 19.
+
+2. **Headline magnitude — report BOTH the n=12 and the better-powered n=26
+   estimate.** The advertised **+0.240** (90% CI [+0.073, +0.417], p=0.008) is the
+   Phase-C **n=12** subset (chair+bed × 2 scenes). The wide 6-category matrix gives
+   **n=26**: warm soft-SPL S3−S1 = **+0.115** (p=0.005, Runs 14/17) — roughly HALF
+   the n=12 figure. Honest headline: "**+0.115 at n=26** (or +0.24 on the easier
+   n=12 chair+bed subset)", not +0.24 alone. (Independent datasets are ~2–3, not
+   "8–10 reproductions": Run 10 = byte-identical reruns; Runs 11/12/13 = re-analyses
+   of the same detector-OFF arm; Run 17 = same dataset as Run 14.)
+
+3. **"Hierarchical 3-layer LTM" overstates what's exercised — the measured effect
+   is fine-layer + rerank.** In every local S3 run `modules_invoked.ltm_mid =
+   false` (the mid layer is empty; its write-gate needs successful episodes that
+   ~never occur); `ltm_coarse` is seeded (10 static category-name priors) but
+   `propose_memory_candidates` queries the **fine layer only**, so coarse is not in
+   the action path. The action-path effect is the **fine layer + memory-injected
+   rerank** (proposal modules 3–4, partially), not a working 3-layer hierarchy.
+
+4. **Cold-control "contradiction" is two different experiments — make it
+   explicit.** Phase-C cold S3−S1 = **+0.020, p=0.315 (inert)** is the
+   SAME-category cold control (no prior sighting → memory correctly does nothing).
+   Run-17 cold S3−S1 = **+0.157, p<0.001** is CROSS-category lifelong transfer (the
+   scene was incidentally mapped while hunting other categories). Both are correct;
+   they are not the same control and must not be read as conflicting.
+
+5. **Success-ring comparability.** Binary SPL is reported at the **0.1 m** ring
+   (localization-bound: caption-grounding / a memory waypoint is a viewing pose,
+   not a 0.1 m fix). The standard ObjectNav benchmark uses a **1.0 m** ring; at
+   1.0 m the warm SR is **S3 0.667 vs S1 0.333** (Phase-C) / 0.500 vs 0.308 (wide
+   matrix). Quote binary SPL@0.1 m and SR@1.0 m side by side, never the 0.1 m alone.
+
+**Scope check — the positive result is within-scene, same-category recall, NOT the
+proposal's cross-environment (跨环境) reuse.** The action-path memory injector
+hard-filters to the current scene (`memory_bridge.py:829`), so cross-environment
+reuse is structurally impossible in the fine layer; "+0.24 across 2 scenes" is the
+same within-scene effect replicated per scene, not transfer. The genuine cross-task
+cold test (MultiON K=3) is a clean null. A real cross-env eval now exists as a seam
+(`LTM_CROSS_SCENE` + `build_cross_env_dataset` + `scripts/race-cross-env.sh`); it is
+expected to confirm a structural null (positive transfer needs the coarse-affordance
+mechanism, not a fine-layer relaxation).
+
+**Instance-bottleneck claim — now MEASURED (was asserted).** The "SBERT can't
+distinguish instances" premise that gates the most expensive recommendation
+(detector/embedding training) was quantified at $0
+(`diagnose_sbert_cosines.py` instance section; `runs/diagnose-instance-sep.txt`):
+within-instance caption cosine **0.628** vs between-instance-same-category
+**0.535** → separation **+0.093** (instance signal EXISTS), but the live category
+query `"there is a {cat}"` collapses instances to a **0.047** rank gap. **Verdict:
+MIXED — the embedding carries instance signal; the bare category query throws it
+away. The first lever is query / retrieval construction, NOT a detector.** So
+"instance discrimination is THE bottleneck → train a detector" is not yet justified;
+a cheaper query-side fix should be exhausted first.
+
+---
+
 ## TL;DR
 
 The full Phase-2 ablation ran cleanly end-to-end with the production

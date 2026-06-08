@@ -86,6 +86,46 @@ decomposition cleanly attributes the gain to the LTM**: S2−S1 = exactly 0.000
 multi-scene cold-first ordering) and the S2 delta reporting in `analyze_revisit.py`;
 the memory stack itself was unchanged from Run 8.
 
+## Audit caveats (2026-06-08)
+
+A read-only fact-check (the "diagnose-first" program; full version in
+`PHASE2_ABLATION_REPORT.md` → "AUDIT CAVEATS") found the positive thesis solid but
+five claims overstated/mislabeled — state them precisely:
+
+1. **Provenance.** Local `runs/abl-s{1,2,3}-qwen` hold **Run-2** data (verified:
+   `abl-s1-qwen` soft_spl **0.0279**, steps **9.6**; `abl-s3-qwen` mem **21**;
+   degenerate `"room interior"` captions), **not** the Run-7 numbers (S1 ≈ 0.089)
+   cited against them. The real headline data (`revisit-*`, wide matrix, `scorer-*`,
+   `predictor-*`) lives only on RACE. `runs/abl-s*-tier1` is a 3-ep pre-Run-1 smoke,
+   not Run 19.
+2. **Headline magnitude.** The advertised **+0.24** is the **n=12** chair+bed
+   subset; the better-powered **n=26** wide-matrix estimate is **+0.115** (p=0.005,
+   ~half). Quote both. Distinct datasets ≈ 2–3 (Phase-C n=12, wide n=26), not "8–10
+   reproductions" (most are reruns/re-analyses of the same arm).
+3. **"Hierarchical 3-layer LTM" → fine + rerank.** Every local S3 run has
+   `ltm_mid=false` (mid empty); coarse is seeded but `propose_memory_candidates`
+   queries the **fine layer only**. The measured action-path effect is **fine layer +
+   memory-injected rerank**, not a working 3-layer hierarchy.
+4. **Cold control = two experiments.** Phase-C cold S3−S1 **+0.020, p=0.315**
+   (same-category, inert) vs Run-17 cold **+0.157, p<0.001** (cross-category lifelong
+   transfer) are NOT contradictory — different controls.
+5. **Success ring.** Binary SPL is at **0.1 m** (localization-bound); the benchmark
+   uses **1.0 m**, where warm SR = S3 0.667 vs S1 0.333 (Phase-C). Quote both.
+
+**Scope:** the positive result is within-scene, same-category recall, NOT the
+proposal's cross-environment reuse — the injector hard-filters to the current scene
+(`memory_bridge.py:829`). A cross-env seam now exists (`LTM_CROSS_SCENE` +
+`build_cross_env_dataset` + `scripts/race-cross-env.sh`); expected to confirm a
+structural null (positive transfer needs the coarse-affordance mechanism).
+
+**Instance bottleneck — now MEASURED ($0), was asserted.**
+`diagnose_sbert_cosines.py` (instance section; `runs/diagnose-instance-sep.txt`):
+within-instance caption cosine **0.628** vs between-instance-same-category **0.535**
+→ sep **+0.093** (signal EXISTS), but the live query `"there is a {cat}"` collapses
+instances to a **0.047** rank gap. **Verdict MIXED: the embedding carries instance
+signal; the category query throws it away → the first lever is query/retrieval
+construction, NOT a detector.** "Train a detector" is not yet justified.
+
 ## Next milestone
 
 **MultiON arc CLOSED — clean null on cold K=3 chains (2026-06-07, Run 15; see
