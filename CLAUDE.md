@@ -144,12 +144,29 @@ trained-u). **Trained U REGRESSES the thesis-relevant warm condition: warm soft-
 over-fire signature as scorer-d1*: warm `mem_chosen` 856→1165 (+36%, the forward model assigns
 high surprise to most captions, inflating `I` broadly → over-retrieval → thrash), warm `succ@1m`
 collapses 0.577→0.385 (exactly back to S1), min_d2g worse; ~8% fewer steps (same efficiency-for-
-precision trade as the scorer). Cold cross-category transfer survives (both p=0.001). Verdict:
-**both trainable importance heads (R, U) are at/near or below the hand-tuned heuristic ceiling —
-training doesn't beat the heuristics here**; the consolidation-importance path is load-bearing (a
-mis-weighted head breaks the LTM via over-fire). Driver `scripts/race-train-predictor.sh`. The
-only untouched LTM head is now the **coarse-layer affordance** head. Remaining on-thesis pushes
-(orthogonal): the coarse-affordance head, or a blended precision-aware importance weight.
+precision trade as the scorer). Cold cross-category transfer survives (both p=0.001).
+**Importance-head training lever EXHAUSTED — three U fixes all REGRESS via one mechanism (2026-06-08,
+Run 19; `PHASE2_ABLATION_REPORT.md` Run 19).** After Run 18, three research agents diagnosed the U
+head (grounded in code): (1) a confirmed train/serve normalization SKEW (dataset fed UN-normalized
+SBERT targets but inference is L2-normalized → corrupt cosine readout); (2) no discriminative spread
+(U≈0.30±0.05, a flat offset); (3) the deepest — forward-model surprise is novelty-like, redundant
+with γN, orthogonal to goal-relevance (retrieval is **pure caption-goal cosine + position→waypoint**).
+**Tier-1 fix (e2, commit 05e0cef): L2-normalize training pairs + cosine loss + per-episode U
+calibration (`_calibrate_uniqueness_pool`) → NEGLIGIBLE (warm S3−S1 +0.0613→+0.0609).** **Tier-3
+(p1, commit c491a36): a goal-PROXIMITY U** (log per-step geodesic `distance_to_goal`; binary ≤1.0m
+label; scorer in the U slot via `--utility-scorer-ckpt`) **also REGRESSES — warm soft-SPL +0.067,
+binary SPL −0.016 (NEGATIVE, only head to hurt binary), succ@1m 0.346 < memory-off S1 0.385.** All
+three U formulations land at warm soft-SPL ≈ +0.06 (half the heuristic +0.112) with the same
+**over-fire** (mem_chosen ~1130 vs heuristic 856). Unifying cause: **the SBERT caption embedding
+can't distinguish object instances, so any head storing *more* goal-ish frames surfaces more
+*wrong-instance* candidates at retrieval → over-fire → worse arrival.** The heuristic U wins because
+it is conservative *and* R-derived; conservatism is the right bias in an instance-ambiguous space.
+Verdict: **the importance-head training lever is CLOSED (5 angles: R scorer-d1/d3; U surprise /
+calibrated / proximity — all ≤ heuristic). The bottleneck is the embedding's instance discrimination,
+not the importance signal.** Heuristic importance stays default. Drivers
+`scripts/race-train-{predictor,utility-scorer}.sh`. The only untouched LTM head is the **coarse-layer
+affordance** head; the genuinely different remaining lever for further gains is a better
+embedding/detector (instance discrimination — a separate, bigger project).
 **Run 17 (2026-06-07) completed the wide matrix's module attribution** (`race-wide-s2.sh`,
 S2 on the exact scorer-d3 dataset): warm S2−S1 = +0.012 n.s. / binary exactly 0.000, warm
 S3−S2 = **+0.103, p=0.017** (binary +0.074, p=0.039) — **~90% of the soft-SPL effect and
