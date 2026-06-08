@@ -32,6 +32,12 @@
 # EXECUTE it (do NOT source) — it activates conda in its own process:
 #
 #   bash scripts/race-cross-env.sh --tag crossenv-2
+#   bash scripts/race-cross-env.sh --tag crossenv-3 --isolate   # rigor pass (see below)
+#
+# --isolate freezes the AWAY-scene LTM writes (LTM_FREEZE_SCENE) so each away
+# episode queries ONLY the earlier home sightings — stripping the within-away
+# cross-episode accumulation that inflated crossenv-2's +0.1695. Expected:
+# recall counter still >0, away S3-S1 -> ~0 (STRENGTHENS the no-transfer headline).
 #
 # A bare invocation uses the two val_mini scenes x the 4 SHARED categories
 # {chair, bed, sofa, toilet}, n-warm 1 (one away visit/category -> n=4 away
@@ -58,6 +64,7 @@ NWARM="1"                      # ONE away visit/category -> no within-away revis
 TAG="crossenv-2"
 N_EPISODES=""
 TARGET="any"
+ISOLATE=0   # --isolate: freeze away-scene LTM writes (rigor pass, see below)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -67,6 +74,7 @@ while [ $# -gt 0 ]; do
     --tag)               TAG="$2"; shift 2 ;;
     --n-episodes)        N_EPISODES="$2"; shift 2 ;;
     --target)            TARGET="$2"; shift 2 ;;
+    --isolate)           ISOLATE=1; shift ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -116,6 +124,8 @@ python embodied_memory/scripts/test_diagnose_sbert_cosines.py \
   || { echo "FATAL: diagnose_sbert_cosines sanity suite failed."; exit 1; }
 python embodied_memory/scripts/test_analyze_cross_env.py \
   || { echo "FATAL: analyze_cross_env sanity suite failed."; exit 1; }
+python embodied_memory/scripts/test_memory_bridge_consolidate.py \
+  || { echo "FATAL: memory_bridge_consolidate (incl --isolate freeze) sanity suite failed."; exit 1; }
 
 # --- 4. build the cross-env dataset (home cold + away warm) into one shared dir ---
 banner "[4/6] build cross-env dataset: HOME(cold)=$HOME_SCENE  AWAY(warm)=$AWAY_SCENE  cats=[$CATS] n-warm=$NWARM"
@@ -140,13 +150,26 @@ fi
 [ "$N_EPISODES" -gt 0 ] 2>/dev/null || { echo "FATAL: episode count '$N_EPISODES' invalid."; exit 1; }
 
 # --- 5. run S1 (memory off) and S3 (full + cross-scene seam) ---
+# --isolate (rigor pass): freeze the AWAY-scene LTM writes so each away/query
+# episode sees ONLY the earlier home sightings — no within-away cross-episode
+# accumulation. This strips the confound that inflated crossenv-2's +0.1695, so
+# the away S3-S1 isolates the (zero) home->away contribution. Expected: recall
+# counter still >0, away S3-S1 drops toward ~0 -> STRENGTHENS the no-transfer
+# headline. Safe for S1 (memory off -> nothing to freeze).
+FREEZE_ENV=""
+if [ "$ISOLATE" = "1" ]; then
+  FREEZE_ENV="LTM_FREEZE_SCENE=$AWAY_SCENE"
+  echo "  --isolate ON: freezing away-scene ($AWAY_SCENE) LTM writes"
+fi
 OUT_DIRS=""
 for S in 1 3; do
   out_dir="runs/${TAG}-s$S"
-  banner "[5/6] run: setting=$S backbone=remembr scenes=all LTM_CROSS_SCENE=1 -> $out_dir"
+  banner "[5/6] run: setting=$S backbone=remembr scenes=all LTM_CROSS_SCENE=1 ${FREEZE_ENV:+$FREEZE_ENV }-> $out_dir"
   # LTM_CROSS_SCENE is a no-op for S1 (memory off) and enables the cross-scene
-  # recall counter for S3; safe to export for both.
-  REMEMBR_STRICT=1 LTM_CROSS_SCENE=1 python -m embodied_memory.run_hm3d_pol --mode live \
+  # recall counter for S3; safe to export for both. FREEZE_ENV is empty unless
+  # --isolate was passed.
+  # shellcheck disable=SC2086
+  REMEMBR_STRICT=1 LTM_CROSS_SCENE=1 $FREEZE_ENV python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --episodes-path "$DS" \
       --scene all --target "$TARGET" --n-episodes "$N_EPISODES" \
       --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
