@@ -45,6 +45,10 @@ TAG="revisit-c1"
 # which re-runs cold (start-on-goal) episodes and deflates the warm fire-rate.
 N_EPISODES=""
 TARGET="any"
+COARSE=0          # --coarse: enable the step-4 coarse-affordance head (LTM_COARSE_AFFORDANCE)
+SETTINGS="1 2 3"  # --settings: which settings to run (e.g. "3" for a coarse-ON S3-only arm)
+REUSE_DS=""       # --reuse-dataset <DIR>: skip the build, run on an existing dataset dir
+                  # (so a second arm pairs against the SAME episodes — e.g. an over-fire A/B)
 
 # --- arg parse ---
 while [ $# -gt 0 ]; do
@@ -55,16 +59,30 @@ while [ $# -gt 0 ]; do
     --tag)               TAG="$2"; shift 2 ;;
     --n-episodes)        N_EPISODES="$2"; shift 2 ;;
     --target)            TARGET="$2"; shift 2 ;;
+    --coarse)            COARSE=1; shift ;;
+    --settings)          SETTINGS="$2"; shift 2 ;;
+    --reuse-dataset)     REUSE_DS="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
 CATS="${CATS//,/ }"        # accept comma- or space-separated lists
 SCENES="${SCENES//,/ }"
+SETTINGS="${SETTINGS//,/ }"
+for S in $SETTINGS; do
+  case "$S" in 1|2|3) ;; *) echo "FATAL: --settings must be from {1,2,3} (got '$S')"; exit 1 ;; esac
+done
 [[ "$TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --tag must be alphanumeric/dash/underscore (got '$TAG')"; exit 1; }
 
 VALMINI="data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content"
-DS_DIR="data/hm3d/datasets/objectnav/hm3d/v1/revisit_${TAG}"
-NAME="revisit_${TAG}"
+if [ -n "$REUSE_DS" ]; then
+  # Reuse an existing dataset dir (e.g. a baseline arm's) so this arm runs the SAME
+  # episodes and pairs correctly. The top-level file mirrors the dir basename.
+  DS_DIR="$REUSE_DS"
+  NAME="$(basename "$DS_DIR")"
+else
+  DS_DIR="data/hm3d/datasets/objectnav/hm3d/v1/revisit_${TAG}"
+  NAME="revisit_${TAG}"
+fi
 DS="${DS_DIR}/${NAME}.json.gz"
 
 banner() { printf '\n========== %s ==========\n' "$1"; }
@@ -100,18 +118,33 @@ python embodied_memory/scripts/test_analyze_ablation.py \
 # make_revisit_smoke writes content/<scene>.json.gz per-scene (additive across
 # calls) and rewrites the top-level <name>.json.gz (harmless: both val_mini
 # scenes share the ObjectNav category map; the scene-annotation map is unused).
-banner "[4/6] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR"
-rm -rf "$DS_DIR"   # fresh build so a stale content/ from an earlier tag can't inflate n-episodes
-for SCENE in $SCENES; do
-  SRC="${VALMINI}/${SCENE}.json.gz"
-  [ -f "$SRC" ] || { echo "FATAL: source episodes missing: $SRC"; exit 1; }
-  # shellcheck disable=SC2086
-  python embodied_memory/scripts/make_revisit_smoke.py \
-      --src "$SRC" --scene "$SCENE" --categories $CATS --n-warm "$NWARM" \
-      --out-dir "$DS_DIR" \
-    || { echo "FATAL: dataset build failed for scene $SCENE."; exit 1; }
-done
-[ -f "$DS" ] || { echo "FATAL: expected top-level dataset not written: $DS"; exit 1; }
+if [ -n "$REUSE_DS" ]; then
+  banner "[4/6] REUSE existing dataset (no rebuild): $DS_DIR"
+  [ -f "$DS" ] || { echo "FATAL: --reuse-dataset given but top-level dataset missing: $DS"; exit 1; }
+else
+  banner "[4/6] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR"
+  rm -rf "$DS_DIR"   # fresh build so a stale content/ from an earlier tag can't inflate n-episodes
+  for SCENE in $SCENES; do
+    SRC="${VALMINI}/${SCENE}.json.gz"
+    [ -f "$SRC" ] || { echo "FATAL: source episodes missing: $SRC"; exit 1; }
+    # shellcheck disable=SC2086
+    python embodied_memory/scripts/make_revisit_smoke.py \
+        --src "$SRC" --scene "$SCENE" --categories $CATS --n-warm "$NWARM" \
+        --out-dir "$DS_DIR" \
+      || { echo "FATAL: dataset build failed for scene $SCENE."; exit 1; }
+  done
+  [ -f "$DS" ] || { echo "FATAL: expected top-level dataset not written: $DS"; exit 1; }
+fi
+
+# --coarse: enable the step-4 coarse-affordance head (with its default-on CLIP room
+# classifier; thresholds from LTM_ROOM_CLIP_MIN_COS/_MARGIN if exported). Used for the
+# over-fire A/B: does adding coarse to the WARM revisit harness dent the +0.24? The
+# head is env-gated, so exporting here is all that's needed (S1/S2 ignore it — coarse
+# needs LTM, so it only affects S3).
+if [ "$COARSE" = "1" ]; then
+  export LTM_COARSE_AFFORDANCE=1
+  echo "  --coarse ON: exported LTM_COARSE_AFFORDANCE=1 (room-CLIP min_cos=${LTM_ROOM_CLIP_MIN_COS:-0.25} margin=${LTM_ROOM_CLIP_MARGIN:-0.02}${LTM_COARSE_ROOM_CLIP:+ ROOM_CLIP=$LTM_COARSE_ROOM_CLIP})"
+fi
 
 # Default n-episodes = SUM of episodes across ALL content/*.json.gz (--scene all
 # loads every scene; counting one file would truncate the others).
@@ -122,9 +155,9 @@ if [ -z "$N_EPISODES" ]; then
 fi
 [ "$N_EPISODES" -gt 0 ] 2>/dev/null || { echo "FATAL: episode count is '$N_EPISODES' (<=0 or non-numeric) — content files missing or unreadable?"; exit 1; }
 
-# --- 5. run S1/S2/S3 in SEPARATE processes (--scene all over the built scenes) ---
+# --- 5. run the requested settings in SEPARATE processes (--scene all) ---
 OUT_DIRS=""
-for S in 1 2 3; do
+for S in $SETTINGS; do
   out_dir="runs/${TAG}-s$S"
   banner "[5/6] run: setting=$S backbone=remembr scenes=all -> $out_dir"
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
@@ -148,8 +181,15 @@ done
 # Revisit analysis is now a first-class mode of the standard analyzer
 # (analyze_ablation --revisit, which lazily delegates to analyze_revisit).
 # Output is identical to the old analyze_revisit.py entry point.
-banner "[6/6] Gate-A analysis: analyze_ablation.py --revisit$OUT_DIRS"
-# shellcheck disable=SC2086
-python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS
-
-banner "DONE — paste everything above (esp. the Gate-A block + S2 decomposition)"
+# The analyzer needs at least S1 + S3 to pair a delta. A partial-settings arm (e.g.
+# the coarse-ON S3-only over-fire arm) skips it — the caller pairs the S3 against a
+# baseline S1 itself.
+if echo " $SETTINGS " | grep -q " 1 " && echo " $SETTINGS " | grep -q " 3 "; then
+  banner "[6/6] Gate-A analysis: analyze_ablation.py --revisit$OUT_DIRS"
+  # shellcheck disable=SC2086
+  python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS
+  banner "DONE — paste everything above (esp. the Gate-A block + S2 decomposition)"
+else
+  banner "[6/6] partial settings ($SETTINGS) — skipping built-in Gate-A pairing"
+  echo "  out-dirs:$OUT_DIRS  (caller pairs these against a baseline)"
+fi
