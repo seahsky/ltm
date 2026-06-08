@@ -137,6 +137,55 @@ def case_defaults_to_stm_pending():
     print("  case defaults_to_stm_pending: OK")
 
 
+def case_frontier_grounding_steers_to_affordant_region():
+    # FRONTIER-grounding (the real exploration value): each unexplored frontier is
+    # room-tagged by its NEAREST captioned STM keyframe. For chair (-> living_room),
+    # the frontier near the living-room keyframe is emitted; the one near the bedroom
+    # keyframe is not. The emitted waypoint is the FRONTIER xy (unexplored), not the
+    # visited keyframe.
+    b = _mk_bridge()
+    b.begin_episode("ep-coarse", scene_id="SCENE_B")
+    stm = [([3.0, 0.0, 0.0], "a cozy living room with a sofa"),     # tags nearby frontier living
+           ([19.0, 0.0, 0.0], "a spacious bedroom with a bed")]      # tags nearby frontier bedroom
+    frontier = [
+        FrontierCandidate(candidate_id=1, world_xy=np.array([4.0, 0.0], dtype=np.float32),
+                          grid_rc=(-1, -1), distance_m=4.0, bearing_rad=0.0, cluster_size=3,
+                          raw_score=0.8, source="frontier", metadata={}),   # near living kf
+        FrontierCandidate(candidate_id=2, world_xy=np.array([20.0, 0.0], dtype=np.float32),
+                          grid_rc=(-1, -1), distance_m=20.0, bearing_rad=0.0, cluster_size=3,
+                          raw_score=0.8, source="frontier", metadata={}),   # near bedroom kf
+    ]
+    out = b.propose_coarse_candidates(
+        agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32), agent_yaw=0.0,
+        target_category="chair", frontier_cands=frontier, room_anchors=stm)
+    assert len(out) == 1, out
+    assert out[0].source == "coarse", out[0].source
+    assert list(out[0].world_xy) == [4.0, 0.0], out[0].world_xy   # the living-tagged FRONTIER
+    assert out[0].metadata.get("grounded") == "frontier", out[0].metadata
+    print("  case frontier_grounding_steers_to_affordant_region: OK")
+
+
+def case_frontier_falls_back_to_stm_when_none_match():
+    # no frontier's nearest room matches -> fall back to the visited affordant-room
+    # anchor position (STM grounding), so the head still fires.
+    b = _mk_bridge()
+    b.begin_episode("ep-coarse", scene_id="SCENE_B")
+    stm = [([3.0, 0.0, 0.0], "a cozy living room with a sofa")]
+    frontier = [FrontierCandidate(candidate_id=1, world_xy=np.array([50.0, 0.0], dtype=np.float32),
+                                  grid_rc=(-1, -1), distance_m=50.0, bearing_rad=0.0, cluster_size=3,
+                                  raw_score=0.8, source="frontier", metadata={})]  # nearest=living, but...
+    # the lone frontier IS nearest to the living anchor, so it DOES match -> frontier path.
+    # Force a no-frontier-match by giving a frontier whose nearest tagged anchor is bedroom:
+    stm2 = [([3.0, 0.0, 0.0], "a cozy living room"), ([49.0, 0.0, 0.0], "a spacious bedroom")]
+    out = b.propose_coarse_candidates(
+        agent_pos=np.array([0.0, 0.0, 0.0], dtype=np.float32), agent_yaw=0.0,
+        target_category="chair", frontier_cands=frontier, room_anchors=stm2)
+    # frontier [50,0] nearest anchor is bedroom[49] -> no frontier match -> STM fallback to living[3,0]
+    assert len(out) == 1 and list(out[0].world_xy) == [3.0, 0.0], out
+    assert out[0].metadata.get("grounded") == "stm", out[0].metadata
+    print("  case frontier_falls_back_to_stm_when_none_match: OK")
+
+
 def case_scorer_coarse_branch_drops_bearing():
     # raw_score dominant, bearing IGNORED (heading to the affordant room is worth a
     # turn) — so a coarse candidate facing backwards still scores well.
@@ -170,6 +219,8 @@ def main() -> int:
     case_nearest_matching_anchor_wins()
     case_dedup_against_planner_xys()
     case_defaults_to_stm_pending()
+    case_frontier_grounding_steers_to_affordant_region()
+    case_frontier_falls_back_to_stm_when_none_match()
     case_scorer_coarse_branch_drops_bearing()
     print("All cases passed.")
     return 0
