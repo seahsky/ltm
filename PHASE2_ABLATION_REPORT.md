@@ -2534,3 +2534,88 @@ untouched LTM head; a different mechanism). The heuristic importance stays the d
 | `embodied_memory/scripts/test_predictor_wiring.py` | 33-case TDD suite (Tier-1 + Tier-3 wiring) |
 | `scripts/race-train-{predictor,utility-scorer}.sh` | the two drivers (e2 reuse form; p1 proximity) |
 | `runs/predictor-e2-s3-trained-u`, `runs/utilscorer-p1-s3-utility-u` | the two experiment cells (36 eps each) |
+
+# Run 20 — Coarse-affordance head: built, CLIP-grounded, and proven CONSERVATIVE, but DOMINATED by concrete evidence in the rerank (the only untouched LTM head; arc CLOSED) (RACE, 2026-06-09)
+
+Run 19 left the coarse-affordance head as the one remaining untouched LTM lever and the
+proposal's nominal cross-environment mechanism (the fine layer is scene-position-bound, so
+it cannot inject a cross-scene waypoint — `memory_bridge.py:829`; crossenv-1/2/3 verified
+that null). Step 4 reinterprets affordance for ObjectNav as a **position-free
+`category → preferred_room` prior** (chair→living_room, bed→bedroom, toilet→bathroom)
+grounded to the CURRENT scene's observations, so it can fire in a brand-new scene. Room-type
+(~6 classes) is what SBERT/CLIP *can* support where instance discrimination failed (Run 19).
+
+## What was built (TDD throughout; env-gated `LTM_COARSE_AFFORDANCE`, dialogue path untouched)
+
+- `room_resolver.py`: caption→room (6-class, earliest-mention) + static `CATEGORY_ROOM_PRIOR`;
+  **CLIP zero-shot room classifier** (`classify_room_clip`: cosine of the keyframe CLIP image
+  embedding vs CLIP-text "a photo of a {room}", argmax with `min_cos`/`margin` abstain;
+  `room_clip_top_cos` calibration probe) — the DENSE room signal where captions are silent.
+- `memory_bridge.propose_coarse_candidates`: frontier-grounding (room-tag each unexplored
+  frontier by its nearest captioned/CLIP-tagged keyframe, steer to the affordant region) +
+  STM fallback; CLIP-first/caption-fallback tagging; a `_last_coarse_diag` (clip/caption/abstain
+  counts, room histogram, top-cosine, match/grounding) surfaced through all per-episode counters.
+- `episode_runner` `_get_room_classifier`/`_get_room_cos_fn` (lazy-cached, graceful); scorer
+  `source=="coarse"` branch; `diagnose_room_clip_cosines.py` (data-driven `min_cos`/`margin`).
+- Drivers: `scripts/race-room-clip.sh` (calibrate → cross-env A/B → revisit over-fire A/B in
+  one run); `race-cross-env.sh --no-room-clip`, `race-revisit.sh --coarse/--settings/--reuse-dataset`.
+
+## Two bugs the instrumentation caught (both fixed)
+
+1. **Thresholds calibrated for a synthetic cosine world (pre-run, 13-agent adversarial review).**
+   Defaults `min_cos=0.20/margin=0.005` are a no-op at the real ViT-B/32 image-text scale
+   (~0.18–0.30) → fire-on-every-frame. Fixed: defaults → `0.25/0.02`, calibrated per-run by the
+   diagnostic (clip2 picked **0.292/0.020**; live `coarse_top_cos_max ≈ 0.29–0.32`, ≤1.0 — no skew).
+2. **Frontier-grounded self-dedup (clip1, caught by `n_coarse_room_matched`).** A frontier-grounded
+   coarse target's xy IS a frontier's xy, but the call site passes `planner_world_xys` *including*
+   the frontiers → the dedup removed every target at distance 0. Symptom: `n_coarse_room_matched`
+   up to 12 but `n_coarse_candidates=0` (the head matched rooms yet emitted nothing). Fix: skip the
+   planner dedup for `grounded=="frontier"` (it is *meant* to ride/boost that frontier); STM-grounded
+   keeps dedup. After the fix the head proposes (`n_coarse_candidates` 1–4/episode).
+
+## Final result (clip2, real backbone, 3h51m): functional + conservative, but never chosen
+
+| arm | warm soft-SPL S3−S1 | coarse: clip-tagged / matched / **chosen** | over-fire? |
+|---|---|---|---|
+| cross-env CLIP-on (n=4 away) | clipon-s3 0.1155 vs caponly-s3 0.1105 (n.s.) | tags fire, proposes, **chosen = 0** | — |
+| revisit coarse-OFF (n=12 warm) | **+0.2127, p=0.002** (CI [0.077,0.358]) | coarse off | baseline |
+| revisit coarse-ON (n=12 warm) | **+0.2127** (byte-identical to OFF) | proposes, **chosen = 0** | **none** |
+
+The CLIP room signal is real (calibrated cosines ~0.30, `clip_tagged`>0, room matches up to 15)
+and the head proposes after the dedup fix — but at the rerank weight (`_COARSE_PRIOR_WEIGHT=0.7`,
+score ≈0.76) it **always loses** to concrete frontier (≈0.8–1.0) and memory (high-cosine) candidates:
+`n_coarse_chosen = 0` in every episode of every arm. So `revon-s3` is byte-identical to `revoff-s3`
+(both soft-SPL 0.3039, mem_chosen 227) — **zero over-fire, the warm +0.21 thesis reproduced cleanly
+again** (S2−S1 = 0.000, cold S3−S1 −0.015 n.s.). The head is correct and **provably conservative**,
+but **inert**: the reranker correctly prefers concrete sightings over a position-free room prior.
+
+## Verdict — arc CLOSED (user decision: accept + document)
+
+The coarse-affordance head — the proposal's cross-environment mechanism and the last untouched LTM
+head — is **built, CLIP-grounded, instrumented, and harmless**, but does **not** demonstrate cross-env
+transfer in this eval because it never wins a decision. This is an honest, well-instrumented negative,
+not a bug: every mechanical failure (room perception, self-dedup, threshold calibration) was found and
+fixed, and the remaining gap is that a coarse room prior is *dominated by concrete frontier/memory
+evidence* — which is arguably the correct behavior. Demonstrating coarse value would require making it
+competitive in the rerank (`_COARSE_PRIOR_WEIGHT`, env-tunable) AND a properly-powered brand-new-scene
+first-visit eval (the current cross-env arm is n=4 and same-scene-confounded) — left as future work.
+
+**Net thesis (unchanged, strengthened):** the LTM helps when past observations are *relevant* (warm
+revisit **+0.21–0.24**, reproduced ~11×, this run p=0.002) and is cleanly neutral when they are
+incidental (cold MultiON) or position-free (coarse-affordance, dominated). Cross-environment *waypoint*
+reuse remains structurally out of reach for the fine layer (scene-filtered) and unrealized for the
+coarse layer (built + conservative, but not selected). The genuinely different remaining lever for a
+*positive* cross-env result is a better instance-discriminating embedding/detector — a separate, larger
+project — not another LTM head.
+
+## File index (Run 20) — all durable, env-gated, dialogue-path byte-identical
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/room_resolver.py` | `classify_room_clip` / `room_clip_top_cos` / `build_room_text_embeddings` + `CATEGORY_ROOM_PRIOR` |
+| `embodied_memory/memory_bridge.py` | `propose_coarse_candidates` (CLIP-first tagging, frontier-grounding, **frontier-dedup fix**), `_last_coarse_diag` |
+| `embodied_memory/episode_runner.py` | `_get_room_classifier`/`_get_room_cos_fn`; coarse diag counters through all 5 sites |
+| `embodied_memory/scripts/diagnose_room_clip_cosines.py` | per-scene CLIP room-cosine calibration → `RECOMMEND min_cos/margin` |
+| `embodied_memory/scripts/test_{room_classifier,room_clip_wiring,coarse_propose}.py` | TDD suites (incl. the self-dedup regression) |
+| `scripts/race-room-clip.sh` | one-run calibrate → cross-env A/B → revisit over-fire A/B |
+| `runs/clip2-{clipon,caponly,revoff,revon}-s*` | the clip2 cells (cross-env n=4 away + revisit n=12 warm) |
