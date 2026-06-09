@@ -143,6 +143,31 @@ episode's cross-episode same-scene recall, not transfer. Three independent lines
 LTM recalls the cross-scene sighting but it yields zero navigation benefit → cross-env transfer
 is structurally absent → step 4 (coarse-affordance) is the required mechanism.**
 
+**Step 4 coarse-affordance — BUILT + CONSERVATIVE but DOMINATED → arc CLOSED (2026-06-09,
+Run 20; see `PHASE2_ABLATION_REPORT.md` Run 20).** The coarse-affordance head (the only
+untouched LTM head) was built end-to-end: a position-free `category→preferred_room` prior
+grounded to the current scene via a **CLIP zero-shot room classifier** (keyframe image vs
+CLIP-text "a photo of a {room}"; calibrated `min_cos=0.292` on real ViT-B/32 cosines ~0.30) +
+frontier-grounding, fully instrumented (`_last_coarse_diag`). Two bugs were found AND fixed
+by the new instrumentation: (1) thresholds calibrated for a synthetic cosine world (13-agent
+adversarial review; defaults 0.20/0.005→0.25/0.02 + a per-run calibration diagnostic), and
+(2) a **frontier-grounded self-dedup** (a coarse target's xy IS a frontier's xy, but
+`planner_world_xys` included the frontiers → every target deduped at distance 0; symptom
+`n_coarse_room_matched`≈12 yet `n_coarse_candidates=0`; fixed by skipping the planner dedup for
+frontier-grounded targets). **Final (clip2, real backbone): the head CLIP-tags real cosines and
+PROPOSES (1–4/episode) but is NEVER CHOSEN (`n_coarse_chosen=0`) at the rerank weight 0.7 —
+it always loses to concrete frontier (≈0.8–1.0) and memory candidates. So `revon-s3` is
+byte-identical to `revoff-s3` → ZERO over-fire, warm S3−S1 reproduced at +0.2127 (p=0.002,
+~11th repro).** Verdict: the coarse head is correct, CLIP-grounded, and provably conservative
+(harmless in warm) but **inert** — the reranker correctly prefers concrete sightings over a
+position-free room prior, so cross-env transfer is NOT demonstrated (an honest, well-
+instrumented negative, not a bug). Demonstrating coarse value needs a competitive rerank
+weight (env-tunable `_COARSE_PRIOR_WEIGHT`) AND a properly-powered brand-new-scene first-visit
+eval (the cross-env arm is n=4, same-scene-confounded) — deferred. **All LTM heads are now
+exhausted; the genuinely different remaining lever is a better instance-discriminating
+embedding/detector (a separate, larger project), not another LTM head.** Drivers
+`scripts/race-room-clip.sh` (calibrate→cross-env A/B→revisit over-fire A/B).
+
 **Instance bottleneck — now MEASURED ($0), was asserted.**
 `diagnose_sbert_cosines.py` (instance section; `runs/diagnose-instance-sep.txt`):
 within-instance caption cosine **0.628** vs between-instance-same-category **0.535**
