@@ -78,6 +78,33 @@ def case_cold_pose_carries_rotation():
 
 
 # ----------------------------------------------------------------------
+# pick_cold_instance — the goal INSTANCE owning the highest-iou view_point
+# (instance-keyed mode needs the instance, not just the pose)
+# ----------------------------------------------------------------------
+
+
+def case_pick_cold_instance_returns_max_iou_instance():
+    goals = [
+        _goal([0, 0, 0], [_vp([1, 0, 1], iou=0.3), _vp([2, 0, 2], iou=0.9)]),
+        _goal([5, 0, 5], [_vp([4, 0, 4], iou=1.7)]),  # owns the global-best vp
+    ]
+    inst = mk.pick_cold_instance(goals)
+    assert inst["position"] == [5, 0, 5], inst
+    # consistency: the cold pose is the chosen instance's best view_point
+    assert mk.pick_cold_pose([inst])["position"] == [4, 0, 4]
+    print("  case pick_cold_instance_returns_max_iou_instance: OK")
+
+
+def case_pick_cold_instance_raises_when_no_viewpoints():
+    try:
+        mk.pick_cold_instance([_goal([0, 0, 0], [])])
+    except ValueError:
+        print("  case pick_cold_instance_raises_when_no_viewpoints: OK")
+        return
+    raise AssertionError("expected ValueError on empty view_points")
+
+
+# ----------------------------------------------------------------------
 # pick_warm_poses — farthest navigable candidates from the goals
 # ----------------------------------------------------------------------
 
@@ -194,6 +221,91 @@ def case_build_dataset_skips_missing_category():
     cats = {e["object_category"] for e in content["episodes"]}
     assert cats == {"chair"}, cats  # sofa absent → silently skipped
     print("  case build_dataset_skips_missing_category: OK")
+
+
+# ----------------------------------------------------------------------
+# build_dataset(instance_keyed=True) — restrict the goal set to the single
+# cold-sighted (highest-iou) instance so reaching a DIFFERENT same-category
+# instance no longer counts; this gives instance-discrimination a metric target.
+# ----------------------------------------------------------------------
+
+
+def _multi_instance_src(glb="wcojb4TFT35.basis.glb"):
+    """One category ("chair") with TWO instances: a high-iou TARGET near the
+    origin and a low-iou DISTRACTOR near [20,0,20]. The category's source
+    episode starts sit one near each instance, so the two build modes pick
+    different warm starts (category-level drops the start near the distractor;
+    instance-keyed keeps it because it is far from the TARGET)."""
+    return {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {
+            f"{glb}_chair": [
+                _goal([0, 0, 0], [_vp([1, 0, 1], iou=1.8)]),      # TARGET (best vp)
+                _goal([20, 0, 20], [_vp([19, 0, 19], iou=0.5)]),  # DISTRACTOR
+            ],
+        },
+        "episodes": [
+            {**_template("chair", "1"), "start_position": [19, 0, 19]},  # far from target
+            {**_template("chair", "2"), "start_position": [1, 0, 1]},    # on the target vp
+        ],
+    }
+
+
+def case_build_dataset_default_preserves_all_instances():
+    # Regression guard: default (instance_keyed=False) leaves goals untouched.
+    src = _multi_instance_src()
+    glb = "wcojb4TFT35.basis.glb"
+    content = mk.build_dataset(src, categories=["chair"], n_warm=1)
+    assert content["goals_by_category"] == src["goals_by_category"]
+    assert len(content["goals_by_category"][f"{glb}_chair"]) == 2
+    print("  case build_dataset_default_preserves_all_instances: OK")
+
+
+def case_build_dataset_instance_keyed_restricts_goals():
+    src = _multi_instance_src()
+    glb = "wcojb4TFT35.basis.glb"
+    gkey = f"{glb}_chair"
+    content = mk.build_dataset(src, categories=["chair"], n_warm=1, instance_keyed=True)
+    goals = content["goals_by_category"][gkey]
+    # goal set restricted to exactly the TARGET (max-iou) instance
+    assert len(goals) == 1, goals
+    assert goals[0]["position"] == [0, 0, 0], goals
+    # object_category unchanged ("chair") so the "there is a chair" query is intact
+    assert all(e["object_category"] == "chair" for e in content["episodes"])
+    # cold episode still starts at the target instance's best view_point
+    assert content["episodes"][0]["start_position"] == [1, 0, 1]
+    # the builder must not mutate the source goals_by_category
+    assert len(src["goals_by_category"][gkey]) == 2
+    print("  case build_dataset_instance_keyed_restricts_goals: OK")
+
+
+def case_build_dataset_instance_keyed_warm_far_from_target_instance():
+    # Warm starts are filtered by distance to the TARGET instance's view_points
+    # only — a start sitting on the DISTRACTOR (far from the target) is a valid
+    # warm start, whereas the category-level build would drop it as "too close
+    # to a goal" because it is on the distractor's view_point.
+    src = _multi_instance_src()
+    inst = mk.build_dataset(src, categories=["chair"], n_warm=2, instance_keyed=True)
+    warm = [e["start_position"] for e in inst["episodes"][1:]]
+    assert warm == [[19, 0, 19]], warm  # far from target, kept; [1,0,1] dropped (on target)
+
+    # contrast: category-level drops [19,0,19] (on the distractor's view_point)
+    cat = mk.build_dataset(src, categories=["chair"], n_warm=2, instance_keyed=False)
+    cat_warm = [e["start_position"] for e in cat["episodes"][1:]]
+    assert [19, 0, 19] not in cat_warm, cat_warm
+    print("  case build_dataset_instance_keyed_warm_far_from_target_instance: OK")
+
+
+def case_build_dataset_instance_keyed_roundtrip_survives_gzip():
+    src = _multi_instance_src()
+    glb = "wcojb4TFT35.basis.glb"
+    content = mk.build_dataset(src, categories=["chair"], n_warm=1, instance_keyed=True)
+    with tempfile.TemporaryDirectory() as d:
+        mk.write_dataset(out_dir=d, scene="wcojb4TFT35", content=content, category_maps=src)
+        cj = json.load(gzip.open(os.path.join(d, "content", "wcojb4TFT35.json.gz")))
+        assert len(cj["goals_by_category"][f"{glb}_chair"]) == 1  # restriction persisted
+    print("  case build_dataset_instance_keyed_roundtrip_survives_gzip: OK")
 
 
 # ----------------------------------------------------------------------
@@ -321,12 +433,18 @@ def main() -> int:
     print("Phase-B1 controlled-start dataset builder sanity tests")
     case_cold_pose_picks_max_iou_viewpoint()
     case_cold_pose_carries_rotation()
+    case_pick_cold_instance_returns_max_iou_instance()
+    case_pick_cold_instance_raises_when_no_viewpoints()
     case_warm_poses_ranked_far_from_goals()
     case_warm_poses_drops_too_close()
     case_build_category_episodes_cold_first()
     case_build_dataset_two_categories()
     case_build_dataset_warm_starts_same_category()
     case_build_dataset_skips_missing_category()
+    case_build_dataset_default_preserves_all_instances()
+    case_build_dataset_instance_keyed_restricts_goals()
+    case_build_dataset_instance_keyed_warm_far_from_target_instance()
+    case_build_dataset_instance_keyed_roundtrip_survives_gzip()
     case_write_dataset_roundtrip()
     case_two_builds_into_one_dir_are_additive()
     case_cross_env_cold_home_warm_away()
