@@ -191,6 +191,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--out-dir", type=str, default="runs/pol-001")
     parser.add_argument("--max-steps", type=int, default=250)
     parser.add_argument("--image-hw", type=int, default=256)
+    parser.add_argument("--save-video", action="store_true",
+        help="Record a first-person camera video per episode to "
+             "<out-dir>/video/episode_NNN.mp4 (animated GIF fallback when the "
+             "ffmpeg backend is unavailable).")
+    parser.add_argument("--video-fps", type=int, default=8,
+        help="Frames per second for --save-video (default 8).")
     parser.add_argument("--keyframe-every", type=int, default=5)
     parser.add_argument("--decision-period", type=int, default=10)
     parser.add_argument("--n-candidates", type=int, default=4)
@@ -475,6 +481,7 @@ def main(argv: Optional[list] = None) -> int:
             "utility_scorer_ckpt": args.utility_scorer_ckpt,
             "target_sequence": target_sequence,
             "found_radius": args.found_radius,
+            "save_video": args.save_video,
         },
         backbone=args.backbone,
         remembr_builder=remembr_builder,
@@ -485,6 +492,8 @@ def main(argv: Optional[list] = None) -> int:
         oracle_stop_radius=args.oracle_stop_radius,
         target_categories=target_sequence,
         found_radius=args.found_radius,
+        save_video=args.save_video,
+        video_fps=args.video_fps,
     )
 
     summary = runner.run(args.n_episodes)
