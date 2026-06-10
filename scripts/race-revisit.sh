@@ -49,6 +49,8 @@ COARSE=0          # --coarse: enable the step-4 coarse-affordance head (LTM_COAR
 SETTINGS="1 2 3"  # --settings: which settings to run (e.g. "3" for a coarse-ON S3-only arm)
 REUSE_DS=""       # --reuse-dataset <DIR>: skip the build, run on an existing dataset dir
                   # (so a second arm pairs against the SAME episodes — e.g. an over-fire A/B)
+SAVE_VIDEO=0      # --save-video: record per-episode first-person clips to <out-dir>/video/
+VIDEO_FPS=""      # --video-fps <N>: fps for --save-video (run_hm3d_pol default 8)
 
 # --- arg parse ---
 while [ $# -gt 0 ]; do
@@ -62,6 +64,8 @@ while [ $# -gt 0 ]; do
     --coarse)            COARSE=1; shift ;;
     --settings)          SETTINGS="$2"; shift 2 ;;
     --reuse-dataset)     REUSE_DS="$2"; shift 2 ;;
+    --save-video)        SAVE_VIDEO=1; shift ;;
+    --video-fps)         VIDEO_FPS="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -155,15 +159,25 @@ if [ -z "$N_EPISODES" ]; then
 fi
 [ "$N_EPISODES" -gt 0 ] 2>/dev/null || { echo "FATAL: episode count is '$N_EPISODES' (<=0 or non-numeric) — content files missing or unreadable?"; exit 1; }
 
+# --save-video: forward the per-episode clip recording to run_hm3d_pol (clips land
+# in <out-dir>/video/episode_NNN.mp4; GIF fallback without ffmpeg). Demo-clip use.
+VIDEO_ARGS=""
+if [ "$SAVE_VIDEO" = "1" ]; then
+  VIDEO_ARGS="--save-video"
+  [ -n "$VIDEO_FPS" ] && VIDEO_ARGS="$VIDEO_ARGS --video-fps $VIDEO_FPS"
+  echo "  --save-video ON: forwarding '$VIDEO_ARGS' to run_hm3d_pol"
+fi
+
 # --- 5. run the requested settings in SEPARATE processes (--scene all) ---
 OUT_DIRS=""
 for S in $SETTINGS; do
   out_dir="runs/${TAG}-s$S"
   banner "[5/6] run: setting=$S backbone=remembr scenes=all -> $out_dir"
+  # shellcheck disable=SC2086
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --episodes-path "$DS" \
       --scene all --target "$TARGET" --n-episodes "$N_EPISODES" \
-      --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
+      --out-dir "$out_dir" $VIDEO_ARGS 2>&1 | tee "${out_dir}.log"
   rc=${PIPESTATUS[0]}
   # run_hm3d_pol exits nonzero when its full-system pass_conditions fail, which is
   # EXPECTED for memory-off (S1) / STM-only (S2) — those settings deliberately can't

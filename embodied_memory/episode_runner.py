@@ -472,6 +472,8 @@ class EpisodeRunner:
         oracle_stop_radius: float = 0.1,
         target_categories: Optional[List[str]] = None,
         found_radius: float = 1.0,
+        save_video: bool = False,
+        video_fps: int = 8,
     ):
         self.source = source
         self.planner = planner
@@ -495,6 +497,13 @@ class EpisodeRunner:
         # Sub-goal "found" radius (m). MultiON-standard forgiving radius; the
         # advance also requires a caption confirm (see _advance_subgoal).
         self.found_radius = float(found_radius)
+        # First-person video recording (--save-video). When on, each step's RGB
+        # is buffered and written to one clip per episode at episode end (mp4
+        # where ffmpeg is available, GIF fallback otherwise). Off => no frames
+        # buffered, zero overhead.
+        self.save_video = bool(save_video)
+        self.video_fps = int(video_fps)
+        self._video_frames: List[np.ndarray] = []
         self.keyframe_every_m = keyframe_every_m
         self.max_steps_per_episode = max_steps_per_episode
         self.run_config = dict(run_config or {})
@@ -685,6 +694,18 @@ class EpisodeRunner:
                 )
                 continue
 
+            if self.save_video and self._video_frames:
+                from . import video_recorder
+                _vid_req = os.path.join(
+                    self.out_dir, "video", f"episode_{ep_idx:03d}.mp4"
+                )
+                _written = video_recorder.write_video(
+                    self._video_frames, _vid_req, fps=self.video_fps
+                )
+                if _written:
+                    ep_log["video_path"] = os.path.relpath(_written, self.out_dir)
+                self._video_frames = []
+
             self._dump_json(os.path.join(self.out_dir, f"episode_{ep_idx:03d}.json"), ep_log)
             summary.n_episodes_completed += 1
             if ep_metrics.get("success"):
@@ -806,6 +827,8 @@ class EpisodeRunner:
     def _run_episode(self, ep_idx: int):
         is_oracle = self.backbone == "oracle"
         step, ep = self.source.reset(ep_idx)
+        # Fresh per-episode video buffer (no-op storage when --save-video is off).
+        self._video_frames = []
         self.planner.reset(agent_pos=step.agent_state.position)
         # Reset per-episode detector approach state so a stale waypoint from
         # episode N (e.g. step-budget exhausted mid-approach) never leaks into
@@ -1014,6 +1037,7 @@ class EpisodeRunner:
             self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
             stm_captions.append(keyframe.caption)
             ep_log["steps"].append(self._serialize_step(step, keyframe))
+            self._record_frame(step)
 
         # Loop.
         for t in range(1, self.max_steps_per_episode):
@@ -1665,6 +1689,7 @@ class EpisodeRunner:
                 )
                 stm_captions.append(keyframe.caption)
                 ep_log["steps"].append(self._serialize_step(step, keyframe))
+                self._record_frame(step)
                 # Periodic within-episode consolidation (extension seam, OFF
                 # by default — event-boundary consolidation at sub-goal
                 # advance is the multion default).
@@ -2247,6 +2272,11 @@ class EpisodeRunner:
             if chosen_text.startswith(prefix):
                 return i
         return 0
+
+    def _record_frame(self, step: Step) -> None:
+        """Buffer this step's first-person RGB for --save-video (no-op when off)."""
+        if self.save_video and getattr(step, "rgb", None) is not None:
+            self._video_frames.append(np.ascontiguousarray(step.rgb))
 
     @staticmethod
     def _serialize_step(step: Step, keyframe: Keyframe) -> Dict[str, Any]:
