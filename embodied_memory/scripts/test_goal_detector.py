@@ -381,6 +381,195 @@ def case_locate_picks_lowest_depth_bbox_among_multiple():
     print("  case_locate_picks_lowest_depth_bbox_among_multiple: OK")
 
 
+# ----------------------------------------------------------------------
+# OWLv2 backend (DETECTOR_BACKEND=owlv2) — mocks only; no GPU, no HF download
+# ----------------------------------------------------------------------
+
+
+import contextlib  # noqa: E402
+
+
+@contextlib.contextmanager
+def _env(**kv):
+    """Temporarily set/unset env vars (value None => unset); always restores."""
+    old = {k: os.environ.get(k) for k in kv}
+    try:
+        for k, v in kv.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+class _MockOwlModel:
+    """Mock OWLv2 model — forward pass returns an opaque outputs object that
+    only the paired _MockOwlProcessor knows how to post-process."""
+    def __call__(self, **kwargs):
+        return "owl-outputs"
+
+
+class _MockOwlProcessor:
+    """Mock OWLv2 processor: __call__ returns a dict (BatchEncoding stand-in);
+    post-processing returns the configured pixel-space xyxy boxes + scores."""
+    def __init__(self, boxes, scores):
+        self.boxes = boxes
+        self.scores = scores
+    def __call__(self, text=None, images=None, return_tensors=None):
+        return {"pixel_values": "px"}
+    def post_process_grounded_object_detection(
+        self, outputs, threshold=0.0, target_sizes=None, **kw
+    ):
+        return [{
+            "boxes": list(self.boxes),
+            "scores": list(self.scores),
+            "labels": [0] * len(self.scores),
+        }]
+
+
+class _PoisonOwl:
+    """Trips if the OWLv2 path is touched when the backend should be qwen."""
+    def __call__(self, *args, **kwargs):
+        raise AssertionError("OWLv2 path must not run on the qwen backend")
+    def post_process_grounded_object_detection(self, *args, **kwargs):
+        raise AssertionError("OWLv2 path must not run on the qwen backend")
+
+
+def _owl_detector(boxes, scores, snap, max_snap_dist=0.5):
+    """GoalDetector with injected mock OWLv2 model/processor (bypasses the
+    lazy HF load) and an inert qwen mock that trips if dispatch is wrong."""
+    det = gd.GoalDetector(
+        _MockModel(), _MockProcessor("qwen path must not run on owlv2 backend"),
+        _MockPathfinder(snap_target=snap), max_snap_dist=max_snap_dist,
+    )
+    det._owl_model = _MockOwlModel()
+    det._owl_processor = _MockOwlProcessor(boxes, scores)
+    return det
+
+
+def case_owlv2_locate_returns_point_on_confident_box():
+    # Same geometry as the qwen happy-path case: box center (140,140) at depth
+    # 2.0, identity pose -> ~(0.094, -0.094, 2.0); snap target nearby.
+    snap = np.array([0.1, 0.0, 2.0], dtype=np.float32)
+    det = _owl_detector([[120, 120, 160, 160]], [0.42], snap)
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_SCORE_THRESH=None):
+        out = det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                         depth=np.full((256, 256), 2.0, dtype=np.float32),
+                         goal_category="chair",
+                         agent_pose=np.eye(4, dtype=np.float32),
+                         intrinsics=_intrinsics())
+    assert out is not None
+    assert np.allclose(out, snap, atol=1e-5), out
+    print("  case_owlv2_locate_returns_point_on_confident_box: OK")
+
+
+def case_owlv2_below_default_threshold_returns_none():
+    snap = np.array([0.1, 0.0, 2.0], dtype=np.float32)
+    det = _owl_detector([[120, 120, 160, 160]], [0.05], snap)  # < default 0.1
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_SCORE_THRESH=None):
+        out = det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                         depth=np.full((256, 256), 2.0, dtype=np.float32),
+                         goal_category="chair",
+                         agent_pose=np.eye(4, dtype=np.float32),
+                         intrinsics=_intrinsics())
+    assert out is None
+    print("  case_owlv2_below_default_threshold_returns_none: OK")
+
+
+def case_owlv2_threshold_env_respected():
+    snap = np.array([0.1, 0.0, 2.0], dtype=np.float32)
+    rgb = np.zeros((256, 256, 3), dtype=np.uint8)
+    depth = np.full((256, 256), 2.0, dtype=np.float32)
+    pose = np.eye(4, dtype=np.float32)
+    # score 0.2: rejected at thresh 0.5, accepted at thresh 0.15
+    det = _owl_detector([[120, 120, 160, 160]], [0.2], snap)
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_SCORE_THRESH="0.5"):
+        assert det.locate(rgb=rgb, depth=depth, goal_category="chair",
+                          agent_pose=pose, intrinsics=_intrinsics()) is None
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_SCORE_THRESH="0.15"):
+        out = det.locate(rgb=rgb, depth=depth, goal_category="chair",
+                         agent_pose=pose, intrinsics=_intrinsics())
+        assert out is not None and np.allclose(out, snap, atol=1e-5)
+    print("  case_owlv2_threshold_env_respected: OK")
+
+
+def case_owlv2_no_detection_returns_none():
+    snap = np.array([0.1, 0.0, 2.0], dtype=np.float32)
+    det = _owl_detector([], [], snap)
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_SCORE_THRESH=None):
+        out = det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                         depth=np.full((256, 256), 2.0, dtype=np.float32),
+                         goal_category="chair",
+                         agent_pose=np.eye(4, dtype=np.float32),
+                         intrinsics=_intrinsics())
+    assert out is None
+    print("  case_owlv2_no_detection_returns_none: OK")
+
+
+def case_owlv2_clips_out_of_bounds_box():
+    # Real OWLv2 can emit slightly out-of-image coords after rescaling; the
+    # backend must clip to the image instead of dropping the detection.
+    # Clipped box = full image -> center (128,128) at depth 2.0 -> (0,0,2).
+    snap = np.array([0.0, 0.0, 2.0], dtype=np.float32)
+    det = _owl_detector([[-10.0, -10.0, 5000.0, 5000.0]], [0.9], snap)
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_SCORE_THRESH=None):
+        out = det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                         depth=np.full((256, 256), 2.0, dtype=np.float32),
+                         goal_category="chair",
+                         agent_pose=np.eye(4, dtype=np.float32),
+                         intrinsics=_intrinsics())
+    assert out is not None
+    assert np.allclose(out, snap, atol=1e-5), out
+    print("  case_owlv2_clips_out_of_bounds_box: OK")
+
+
+def case_owlv2_picks_lowest_depth_box_among_confident():
+    # Two confident boxes; the FAR one (center (60,60), depth 4.0) back-projects
+    # >0.5m from the snap target, the NEAR one (center (140,140), depth 2.0)
+    # lands within the snap guard. Non-None proves the near box was chosen.
+    snap = np.array([0.1, 0.0, 2.0], dtype=np.float32)
+    det = _owl_detector([[40, 40, 80, 80], [120, 120, 160, 160]], [0.9, 0.4], snap)
+    depth = np.full((256, 256), 4.0, dtype=np.float32)
+    depth[120:161, 120:161] = 2.0
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_SCORE_THRESH=None):
+        out = det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                         depth=depth, goal_category="chair",
+                         agent_pose=np.eye(4, dtype=np.float32),
+                         intrinsics=_intrinsics())
+    assert out is not None
+    assert np.allclose(out, snap, atol=1e-5), out
+    print("  case_owlv2_picks_lowest_depth_box_among_confident: OK")
+
+
+def case_default_backend_is_qwen_and_untouched():
+    # DETECTOR_BACKEND unset => the qwen path runs byte-identically and the
+    # OWLv2 attributes are never touched (poison object trips otherwise).
+    proc = _MockProcessor("the chair is at <|box_start|>120,120,160,160<|box_end|>")
+    snap = np.array([0.1, 0.0, 2.0], dtype=np.float32)
+    det = gd.GoalDetector(_MockModel(), proc, _MockPathfinder(snap_target=snap),
+                          max_snap_dist=0.5)
+    det._owl_model = _PoisonOwl()
+    det._owl_processor = _PoisonOwl()
+    rgb = np.zeros((256, 256, 3), dtype=np.uint8)
+    depth = np.full((256, 256), 2.0, dtype=np.float32)
+    pose = np.eye(4, dtype=np.float32)
+    with _env(DETECTOR_BACKEND=None):
+        out = det.locate(rgb=rgb, depth=depth, goal_category="chair",
+                         agent_pose=pose, intrinsics=_intrinsics())
+    assert out is not None and np.allclose(out, snap, atol=1e-5)
+    with _env(DETECTOR_BACKEND="qwen"):   # explicit qwen behaves the same
+        out = det.locate(rgb=rgb, depth=depth, goal_category="chair",
+                         agent_pose=pose, intrinsics=_intrinsics())
+    assert out is not None and np.allclose(out, snap, atol=1e-5)
+    print("  case_default_backend_is_qwen_and_untouched: OK")
+
+
 def main() -> int:
     print("goal_detector Layer-1 sanity tests (parser + geometry)")
     case_parse_qwen_bbox_well_formed()
@@ -404,6 +593,13 @@ def main() -> int:
     case_debug_log_records_empty_parse_with_decoded_text()
     case_debug_log_disabled_when_path_none()
     case_extract_assistant_output_handles_chat_template()
+    case_owlv2_locate_returns_point_on_confident_box()
+    case_owlv2_below_default_threshold_returns_none()
+    case_owlv2_threshold_env_respected()
+    case_owlv2_no_detection_returns_none()
+    case_owlv2_clips_out_of_bounds_box()
+    case_owlv2_picks_lowest_depth_box_among_confident()
+    case_default_backend_is_qwen_and_untouched()
     print("All cases passed.")
     return 0
 

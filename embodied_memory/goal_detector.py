@@ -23,6 +23,7 @@ the EpisodeRunner integration via mocks.
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import List, Optional, Tuple, Dict
 
@@ -232,6 +233,20 @@ class GoalDetector:
         # to see what the model is actually emitting without re-running the
         # full ablation.
         self.debug_log_path = debug_log_path
+        # OWLv2 backend (DETECTOR_BACKEND=owlv2): lazily-loaded so the default
+        # qwen path never pays the transformers import / weight download.
+        # Tests inject mocks here directly.
+        self._owl_model = None
+        self._owl_processor = None
+
+    @staticmethod
+    def _backend() -> str:
+        """Detection backend: 'qwen' (default — Qwen-VL grounding tokens, the
+        Run-11 path, byte-identical when DETECTOR_BACKEND is unset) or 'owlv2'
+        (open-vocab detector; the Run-11 verdict was a *bbox-source* quality
+        ceiling, so only the bbox source changes — depth/back-project/snap are
+        shared). Read per-call so drivers can flip the env without rebuilding."""
+        return (os.environ.get("DETECTOR_BACKEND") or "qwen").strip().lower()
 
     def locate(
         self,
@@ -243,7 +258,8 @@ class GoalDetector:
     ) -> Optional[np.ndarray]:
         """Return a navmesh-snapped 3D goal point, or None.
 
-        Pipeline:
+        Pipeline (steps 1-2 dispatch on DETECTOR_BACKEND — default 'qwen',
+        'owlv2' swaps in the open-vocab detector; steps 3-5 are shared):
           1. Prompt Qwen2-VL: "Please locate the {goal_category} ..."
           2. Parse <|box_start|>...<|box_end|> tokens.
           3. For each bbox, compute robust depth at center; pick the bbox
@@ -252,17 +268,33 @@ class GoalDetector:
           5. pathfinder.snap_point(point). If the snap jumped further than
              ``max_snap_dist``, return None (off-navmesh).
         """
-        text = self._infer(rgb, goal_category)
         image_hw = (rgb.shape[0], rgb.shape[1])
-        bboxes = parse_qwen_bbox(text, image_hw=image_hw)
-        # We do NOT fall back to normalized=True: Qwen2-VL-2B-Instruct emits
-        # pixel-space coordinates by default. Re-interpreting slightly-out-of-
-        # bounds pixel coords as normalized [0,1000] would produce a spurious
-        # bbox at a different location. If the pre-flight smoke surfaces
-        # normalized output instead, flip this default.
-        if not bboxes:
-            self._debug_log("empty_parse", decoded=text, goal_category=goal_category)
-            return None
+        if self._backend() == "owlv2":
+            # Open-vocab detector path: scored pixel-space boxes, gated by
+            # DETECTOR_OWL_SCORE_THRESH. Below-threshold/no detection returns
+            # None -> the caller's existing plain-STOP fallback.
+            scored = self._infer_owlv2(rgb, goal_category)
+            thresh = float(os.environ.get("DETECTOR_OWL_SCORE_THRESH", "0.1"))
+            bboxes = [(x1, y1, x2, y2) for (x1, y1, x2, y2, s) in scored if s >= thresh]
+            text = ""   # no decoded text on this backend (failure logs stay valid)
+            if not bboxes:
+                self._debug_log(
+                    "owl_below_threshold" if scored else "owl_no_detection",
+                    goal_category=goal_category,
+                    scores=[float(s) for (*_, s) in scored], thresh=thresh,
+                )
+                return None
+        else:
+            text = self._infer(rgb, goal_category)
+            bboxes = parse_qwen_bbox(text, image_hw=image_hw)
+            # We do NOT fall back to normalized=True: Qwen2-VL-2B-Instruct emits
+            # pixel-space coordinates by default. Re-interpreting slightly-out-of-
+            # bounds pixel coords as normalized [0,1000] would produce a spurious
+            # bbox at a different location. If the pre-flight smoke surfaces
+            # normalized output instead, flip this default.
+            if not bboxes:
+                self._debug_log("empty_parse", decoded=text, goal_category=goal_category)
+                return None
 
         best = None
         best_depth = float("inf")
@@ -355,6 +387,72 @@ class GoalDetector:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             pass  # Never let logging crash the agent.
+
+    def _ensure_owlv2(self):
+        """Lazy-load the OWLv2 detector on first use (DETECTOR_OWL_MODEL,
+        default google/owlv2-base-patch16-ensemble). Tests pre-set the two
+        attributes with mocks so this never imports transformers locally."""
+        if self._owl_model is None or self._owl_processor is None:
+            model_id = os.environ.get(
+                "DETECTOR_OWL_MODEL", "google/owlv2-base-patch16-ensemble"
+            )
+            from transformers import Owlv2ForObjectDetection, Owlv2Processor
+            self._owl_processor = Owlv2Processor.from_pretrained(model_id)
+            model = Owlv2ForObjectDetection.from_pretrained(model_id)
+            if self.device is not None:
+                model = model.to(self.device)
+            self._owl_model = model.eval()
+        return self._owl_model, self._owl_processor
+
+    def _infer_owlv2(
+        self, rgb: np.ndarray, goal_category: str
+    ) -> List[Tuple[int, int, int, int, float]]:
+        """One OWLv2 open-vocab detection pass.
+
+        Returns ``(x1, y1, x2, y2, score)`` tuples in pixel space, clipped to
+        the image and positive-area only — NOT score-filtered (locate()
+        applies DETECTOR_OWL_SCORE_THRESH so the gate is visible in one place).
+        """
+        model, processor = self._ensure_owlv2()
+        from PIL import Image
+        img = Image.fromarray(rgb)
+        H, W = rgb.shape[0], rgb.shape[1]
+        inputs = processor(
+            text=[[f"a photo of a {goal_category}"]], images=img,
+            return_tensors="pt",
+        )
+        if self.device is not None:
+            inputs = inputs.to(self.device)
+        # BatchEncoding is a dict subclass; mocks return a plain dict.
+        kwargs = dict(inputs) if isinstance(inputs, dict) else {
+            "pixel_values": inputs.pixel_values
+        }
+        try:
+            import torch
+            ctx = torch.no_grad()
+        except ImportError:   # mock-only environments
+            import contextlib
+            ctx = contextlib.nullcontext()
+        with ctx:
+            outputs = model(**kwargs)
+        # transformers >=4.43 renamed the grounded post-processor; accept both.
+        post = getattr(processor, "post_process_grounded_object_detection", None) \
+            or processor.post_process_object_detection
+        results = post(outputs, threshold=0.0, target_sizes=[(H, W)])[0]
+        out: List[Tuple[int, int, int, int, float]] = []
+        for box, score in zip(results["boxes"], results["scores"]):
+            x1, y1, x2, y2 = (float(v) for v in box)
+            # Clip (OWLv2 rescaling can land slightly outside the image)
+            # rather than drop — mirrors parse_qwen_bbox's sanity but keeps
+            # near-edge detections.
+            x1 = max(0, min(int(round(x1)), W))
+            x2 = max(0, min(int(round(x2)), W))
+            y1 = max(0, min(int(round(y1)), H))
+            y2 = max(0, min(int(round(y2)), H))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            out.append((x1, y1, x2, y2, float(score)))
+        return out
 
     def _infer(self, rgb: np.ndarray, goal_category: str) -> str:
         """One forward pass through Qwen2-VL for grounding.
