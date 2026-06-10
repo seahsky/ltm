@@ -87,6 +87,29 @@ def pick_cold_pose(goal_instances: List[Dict[str, Any]]) -> Dict[str, Any]:
     return best
 
 
+def pick_cold_instance(goal_instances: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the goal INSTANCE (one ``ObjectGoal`` dict) that owns the
+    highest-iou view_point across all instances — i.e. the instance the cold
+    visit starts at and provably captions.
+
+    Used by the instance-keyed build: the warm goal set is restricted to *this*
+    instance so reaching a different same-category instance no longer counts,
+    giving instance discrimination a metric target. Raises ``ValueError`` if no
+    instance carries any view_point.
+    """
+    best: Optional[Dict[str, Any]] = None
+    best_iou = -math.inf
+    for inst in goal_instances:
+        for vp in inst.get("view_points") or []:
+            iou = float(vp.get("iou", 0.0))
+            if iou > best_iou:
+                best_iou = iou
+                best = inst
+    if best is None:
+        raise ValueError("no goal view_point available to key the cold instance")
+    return best
+
+
 def _goal_view_point_positions(goal_instances: List[Dict[str, Any]]) -> List[List[float]]:
     out: List[List[float]] = []
     for inst in goal_instances:
@@ -168,16 +191,28 @@ def build_dataset(
     categories: List[str],
     n_warm: int,
     min_dist: float = 2.0,
+    instance_keyed: bool = False,
 ) -> Dict[str, Any]:
-    """Assemble a content dict (goals_by_category preserved) with, per category,
-    one cold + ``n_warm`` warm episodes. Categories absent from the source are
-    skipped. Warm-start candidates are drawn from the SAME category's own source
-    episode starts (see below).
+    """Assemble a content dict with, per category, one cold + ``n_warm`` warm
+    episodes. Categories absent from the source are skipped. Warm-start
+    candidates are drawn from the SAME category's own source episode starts
+    (see below).
+
+    ``instance_keyed`` (default ``False`` → category-level, the historical
+    behaviour) restricts each built category's ``goals_by_category`` entry to
+    the SINGLE cold-sighted (highest-iou) instance. Habitat keys success/
+    distance on ``goals_by_category['{scene}_{cat}']`` (the full multi-instance
+    list), so shrinking it to one instance means reaching a *different*
+    same-category instance no longer counts — giving instance discrimination a
+    metric target. ``object_category`` stays "{cat}" so the "there is a {cat}"
+    retrieval query is unchanged; only the goal *set* shrinks. Warm starts are
+    then filtered for distance to *that instance's* view_points only.
     """
     goals_by_category = src_content.get("goals_by_category") or {}
     src_eps = src_content.get("episodes") or []
 
     out_eps: List[Dict[str, Any]] = []
+    out_goals: Dict[str, Any] = dict(goals_by_category)
     for cat in categories:
         gkey = _goals_key(goals_by_category, cat)
         if gkey is None:
@@ -202,8 +237,17 @@ def build_dataset(
         ]
 
         goal_instances = goals_by_category[gkey]
-        cold_pose = pick_cold_pose(goal_instances)
-        goal_vps = _goal_view_point_positions(goal_instances)
+        if instance_keyed:
+            # restrict the goal set (and the warm-distance reference) to the
+            # single cold-sighted instance — reaching any OTHER same-category
+            # instance no longer succeeds / reduces distance-to-goal.
+            target_inst = pick_cold_instance(goal_instances)
+            cold_pose = pick_cold_pose([target_inst])
+            goal_vps = _goal_view_point_positions([target_inst])
+            out_goals[gkey] = [target_inst]
+        else:
+            cold_pose = pick_cold_pose(goal_instances)
+            goal_vps = _goal_view_point_positions(goal_instances)
         warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps, n=n_warm, min_dist=min_dist)
         out_eps.extend(build_category_episodes(template, cold_pose, warm_poses, cat))
 
@@ -211,7 +255,7 @@ def build_dataset(
         "category_to_task_category_id": src_content.get("category_to_task_category_id", {}),
         "category_to_scene_annotation_category_id":
             src_content.get("category_to_scene_annotation_category_id", {}),
-        "goals_by_category": goals_by_category,
+        "goals_by_category": out_goals,
         "episodes": out_eps,
     }
 
@@ -403,6 +447,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--n-warm", type=int, default=3)
     parser.add_argument("--min-dist", type=float, default=2.0,
                         help="Min metres a warm start must be from any goal view_point.")
+    parser.add_argument("--instance-keyed", action="store_true",
+                        help="Restrict each category's goal set to the single "
+                             "cold-sighted (highest-iou) instance, so reaching a "
+                             "different same-category instance no longer counts "
+                             "(gives instance discrimination a metric target).")
     parser.add_argument("--out-dir", required=True)
     # cross-environment mode (step 2): a sighting in --home-scene, queried in --away-scene.
     parser.add_argument("--cross-env", action="store_true",
@@ -421,7 +470,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--src and --scene are required (single-scene mode), or use --cross-env")
 
     src = _load_gz(args.src)
-    content = build_dataset(src, args.categories, args.n_warm, args.min_dist)
+    content = build_dataset(src, args.categories, args.n_warm, args.min_dist,
+                            instance_keyed=args.instance_keyed)
     if not content["episodes"]:
         print(f"ERROR: no episodes built for categories={args.categories} "
               f"(none present in {args.src}).", file=sys.stderr)
@@ -434,10 +484,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     for ep in content["episodes"]:
         by_cat[ep["object_category"]] = by_cat.get(ep["object_category"], 0) + 1
     print(f"wrote {top}")
+    print(f"  mode: {'INSTANCE-KEYED' if args.instance_keyed else 'category-level'}")
     print(f"  content/{args.scene}.json.gz: {len(content['episodes'])} episodes")
     for cat, n in by_cat.items():
         print(f"    {cat}: 1 cold + {n - 1} warm")
-    print(f"  goals_by_category: {len(content['goals_by_category'])} categories preserved")
+    if args.instance_keyed:
+        src_goals = src.get("goals_by_category") or {}
+        for cat in args.categories:
+            gkey = _goals_key(src_goals, cat)
+            if gkey is None:
+                continue
+            n_src = len(src_goals.get(gkey) or [])
+            out_inst = content["goals_by_category"].get(gkey) or []
+            if out_inst:
+                tgt = out_inst[0]
+                n_vp = len(tgt.get("view_points") or [])
+                oid = tgt.get("object_id", "?")
+                print(f"    {cat}: goal set {n_src} -> {len(out_inst)} instance "
+                      f"(object_id={oid}, {n_vp} view_points)")
+    else:
+        print(f"  goals_by_category: {len(content['goals_by_category'])} categories preserved")
 
     # re-load verify (cheap structural check the GPU run will rely on)
     re = _load_gz(top)
