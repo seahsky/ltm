@@ -75,7 +75,10 @@ MINICONDA="${HOME}/miniconda3"
 # nounset OFF.
 set +u
 eval "$("$MINICONDA/bin/conda" shell.bash hook)"
-if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+# Existence check via the env dir, NOT `conda env list | grep -q`: under
+# pipefail, grep -q exiting early can SIGPIPE the conda writer and turn a
+# found-it result into a pipeline failure (same class as the GLIBC bug below).
+if [ ! -d "$MINICONDA/envs/$ENV_NAME" ]; then
   conda create -y -n "$ENV_NAME" "python=$PY_VER" "cmake=$CMAKE_VER" \
     || { echo "FATAL: conda create failed"; exit 1; }
 fi
@@ -106,7 +109,14 @@ fi
 
 # --- 3. system preflight (fail in seconds, not 40 min into the build) ---
 banner "[3/8] system preflight: GLIBC >= 2.29 + GL/EGL dev libs"
-GLIBC_VER="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' || echo 0.0)"
+# Pipe-safe extraction (cost the 2nd spike run, 2026-06-11): `ldd | head -1 |
+# grep` lets head/grep exit early -> SIGPIPEs ldd -> under pipefail the
+# pipeline "fails" despite a good match, so an `|| echo 0.0` fallback APPENDS
+# a bogus 0.0 line and sort -V flunks a healthy GLIBC 2.35. getconf + awk
+# consume their whole input, so nothing SIGPIPEs.
+GLIBC_VER="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+[ -n "$GLIBC_VER" ] || GLIBC_VER="$(ldd --version 2>/dev/null | awk 'NR==1{print $NF}')"
+[ -n "$GLIBC_VER" ] || GLIBC_VER="0.0"
 if [ "$(printf '2.29\n%s\n' "$GLIBC_VER" | sort -V | head -1)" != "2.29" ]; then
   echo "FATAL: GLIBC $GLIBC_VER < 2.29 — the prebuilt libRLRAudioPropagation.so"
   echo "  will not link (undefined reference to pow@GLIBC_2.29, habitat-sim #1810)."
