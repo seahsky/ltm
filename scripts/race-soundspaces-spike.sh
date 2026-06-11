@@ -150,7 +150,9 @@ echo "  GL/EGL dev libs OK"
 
 # --- 4. habitat-sim from the audio branch (skip if already audio-capable) ---
 banner "[4/8] habitat-sim @ $SIM_BRANCH with --audio"
-if audio_probe; then
+# Quiet probe here — a not-yet-built env prints a noisy ImportError traceback
+# that reads like a failure; step 5's verbose probe is the real verify.
+if audio_probe >/dev/null 2>&1; then
   echo "  audio-capable habitat_sim already importable — skipping build"
 else
   mkdir -p "$BUILD_ROOT"
@@ -176,6 +178,13 @@ else
   pip install -r requirements.txt -c "$BUILD_ROOT/np-constraint.txt" \
     || { echo "FATAL: habitat-sim requirements failed"; exit 1; }
   export CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
+  # The conda cross-toolchain's triplet (x86_64-conda-linux-gnu) stops cmake
+  # searching Ubuntu's multiarch dir, so magnum's find_package(OpenGL) missed
+  # the GLVND libs (libOpenGL.so/libGLX.so) even though libglvnd-dev was
+  # installed (run-3 failure). Point find_library/find_path at the system GL
+  # stack explicitly — documented cmake env knobs, searched before system dirs.
+  export CMAKE_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/lib${CMAKE_LIBRARY_PATH:+:$CMAKE_LIBRARY_PATH}"
+  export CMAKE_INCLUDE_PATH="/usr/include${CMAKE_INCLUDE_PATH:+:$CMAKE_INCLUDE_PATH}"
   # --headless: RACE has no display. --audio: builds RLRAudioPropagation.
   # --with-cuda deliberately omitted (audio engine is CPU; EGL needs no CUDA).
   python setup.py install --headless --audio 2>&1 \
