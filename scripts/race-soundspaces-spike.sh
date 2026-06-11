@@ -177,6 +177,16 @@ else
   echo "numpy<1.24" > "$BUILD_ROOT/np-constraint.txt"
   pip install -r requirements.txt -c "$BUILD_ROOT/np-constraint.txt" \
     || { echo "FATAL: habitat-sim requirements failed"; exit 1; }
+  # A failed configure leaves CMakeCache.txt WITHOUT compile_commands.json;
+  # setup.py's arg-cache then SKIPS re-running cmake (env-only changes like
+  # CMAKE_LIBRARY_PATH are invisible to its comparison) and dies on the
+  # missing file (run-4: "No such file or directory: build/compile_commands
+  # .json"). A build dir without compile_commands.json is a poisoned
+  # half-configure — wipe it so cmake re-runs with the current env.
+  if [ -d "$SIM_DIR/build" ] && [ ! -f "$SIM_DIR/build/compile_commands.json" ]; then
+    echo "  stale half-configured build dir (no compile_commands.json) — wiping $SIM_DIR/build"
+    rm -rf "$SIM_DIR/build"
+  fi
   export CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
   # The conda cross-toolchain's triplet (x86_64-conda-linux-gnu) stops cmake
   # searching Ubuntu's multiarch dir, so magnum's find_package(OpenGL) missed
