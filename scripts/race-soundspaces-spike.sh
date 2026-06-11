@@ -67,13 +67,21 @@ mkdir -p "$OUT_DIR"
 banner "[2/8] conda env: $ENV_NAME (python=$PY_VER cmake=$CMAKE_VER, numpy<1.24, gcc-10 toolchain)"
 MINICONDA="${HOME}/miniconda3"
 [ -x "$MINICONDA/bin/conda" ] || { echo "FATAL: $MINICONDA/bin/conda missing"; exit 1; }
+# conda's compiler-package hooks dereference CONDA_BACKUP_* vars that are
+# unset on first install (observed on RACE 2026-06-11: `conda install
+# gcc_linux-64` triggers a reactivate that sources the brand-new
+# deactivate-gxx_linux-64.sh -> "CONDA_BACKUP_CXX: unbound variable", which
+# under `set -u` kills the whole script). Run every conda state change with
+# nounset OFF.
+set +u
 eval "$("$MINICONDA/bin/conda" shell.bash hook)"
 if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
   conda create -y -n "$ENV_NAME" "python=$PY_VER" "cmake=$CMAKE_VER" \
     || { echo "FATAL: conda create failed"; exit 1; }
 fi
 conda activate "$ENV_NAME" || { echo "FATAL: conda activate $ENV_NAME failed"; exit 1; }
-[ "$CONDA_DEFAULT_ENV" = "$ENV_NAME" ] || { echo "FATAL: wrong env active: $CONDA_DEFAULT_ENV"; exit 1; }
+[ "${CONDA_DEFAULT_ENV:-}" = "$ENV_NAME" ] || { echo "FATAL: wrong env active: ${CONDA_DEFAULT_ENV:-<none>}"; exit 1; }
+set -u
 # numpy 2.x breaks the 2022-era tree (and np.float removal breaks habitat-lab
 # v0.2.2) — pin BEFORE anything else can resolve numpy. quaternion is the
 # import-order workaround dep; it must exist even on build-skip re-runs.
@@ -83,8 +91,10 @@ pip install "numpy>=1.16.1,<1.24" numpy-quaternion \
 # with 7.4.0; modern gcc 12/13 predates-era magnum/corrade headers). Prefer a
 # conda gcc-10; fall back to system gcc with a loud version print.
 if [ ! -x "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-cc" ]; then
+  set +u   # the install reactivates the env -> sources compiler hooks (see above)
   conda install -y -c conda-forge 'gcc_linux-64=10.*' 'gxx_linux-64=10.*' sysroot_linux-64 \
     || echo "WARN: conda gcc-10 install failed — will build with system gcc $(gcc -dumpversion 2>/dev/null || echo '?') (era-tested is 7-10)"
+  set -u
 fi
 if [ -x "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-cc" ]; then
   export CC="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-cc"
@@ -110,9 +120,19 @@ ldconfig -p 2>/dev/null | grep -q 'libOpenGL\.so\.0' || missing="$missing libglv
 { [ -f /usr/include/jpeglib.h ] || [ -f /usr/include/x86_64-linux-gnu/jpeglib.h ]; } \
                                                      || missing="$missing libjpeg-dev"
 if [ -n "$missing" ]; then
-  echo "FATAL: missing system deps:$missing"
-  echo "  fix: $APT_LINE"
-  exit 1
+  echo "  missing system deps:$missing"
+  if sudo -n true 2>/dev/null; then
+    echo "  passwordless sudo available — installing them now"
+    sudo apt-get update -qq || true
+    sudo apt-get install -y --no-install-recommends \
+        libjpeg-dev libglm-dev libgl1-mesa-glx libegl1-mesa-dev mesa-utils \
+        xorg-dev freeglut3-dev libglvnd-dev \
+      || { echo "FATAL: apt install failed — run manually: $APT_LINE"; exit 1; }
+  else
+    echo "FATAL: missing system deps:$missing"
+    echo "  fix: $APT_LINE"
+    exit 1
+  fi
 fi
 ls /usr/lib/x86_64-linux-gnu/libGLX.so >/dev/null 2>&1 \
   || echo "WARN: no libGLX.so dev symlink — if the build dies with 'No rule to make target .../libGLX.so' (issue #215), run: $APT_LINE"
