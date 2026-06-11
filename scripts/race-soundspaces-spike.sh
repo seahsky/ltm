@@ -195,6 +195,19 @@ else
   # stack explicitly — documented cmake env knobs, searched before system dirs.
   export CMAKE_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/lib${CMAKE_LIBRARY_PATH:+:$CMAKE_LIBRARY_PATH}"
   export CMAKE_INCLUDE_PATH="/usr/include${CMAKE_INCLUDE_PATH:+:$CMAKE_INCLUDE_PATH}"
+  # COMPILE-time counterpart (run-5 died at 10%: "EGL/egl.h: No such file"):
+  # magnum's EGL object library includes <EGL/egl.h> via the compiler's
+  # DEFAULT include path, which for the conda gcc is its sysroot (glibc +
+  # kernel headers only — no GL). Expose ONLY the system GL header trees
+  # through a shim dir on CPATH (gcc reads CPATH like -I) — deliberately NOT
+  # all of /usr/include, which would shadow the sysroot's glibc headers with
+  # the host's newer ones.
+  SHIM="$BUILD_ROOT/include-shim"
+  mkdir -p "$SHIM"
+  for d in EGL KHR GL X11; do
+    [ -d "/usr/include/$d" ] && ln -sfn "/usr/include/$d" "$SHIM/$d"
+  done
+  export CPATH="$SHIM${CPATH:+:$CPATH}"
   # --headless: RACE has no display. --audio: builds RLRAudioPropagation.
   # --with-cuda deliberately omitted (audio engine is CPU; EGL needs no CUDA).
   python setup.py install --headless --audio 2>&1 \
