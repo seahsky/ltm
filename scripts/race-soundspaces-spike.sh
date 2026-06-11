@@ -182,7 +182,17 @@ else
     | tee "$REPO_ROOT/$OUT_DIR/sim-build.log" | tail -40
   rc=${PIPESTATUS[0]}
   cd "$REPO_ROOT" || exit 1
-  [ "$rc" = "0" ] || { echo "FATAL: habitat-sim audio build failed (exit $rc) — full log: $OUT_DIR/sim-build.log; that version delta is the spike deliverable"; exit 1; }
+  if [ "$rc" != "0" ]; then
+    echo "FATAL: habitat-sim audio build failed (exit $rc) — error excerpt:"
+    # Surface the real failure (the tail -40 window is usually eaten by the
+    # python traceback); the cmake/compiler error lines live mid-log.
+    grep -n -iE "cmake error|error:|Could NOT|No such file|undefined reference" \
+        -B3 -A20 "$OUT_DIR/sim-build.log" | head -120 || true
+    [ -f "$SIM_DIR/build/CMakeFiles/CMakeError.log" ] \
+      && { echo "--- CMakeError.log tail ---"; tail -40 "$SIM_DIR/build/CMakeFiles/CMakeError.log"; }
+    echo "  full log: $OUT_DIR/sim-build.log; this version delta is the spike deliverable"
+    exit 1
+  fi
 fi
 
 # --- 5. import + audio-API verify ---
