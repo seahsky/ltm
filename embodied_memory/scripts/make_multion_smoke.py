@@ -6,7 +6,8 @@ recall per episode at most). MultiON fixes that: an episode specifies an
 ordered chain of K goal categories ``[c1, …, cK]`` that co-occur in one scene;
 the agent must reach each in order, so a ``c_{i+1}`` glimpsed while hunting
 ``c_i`` is recallable from the LTM when the goal advances — the value
-compounds across sub-goals. See ``docs/MULTION_PORT_PLAN.md``.
+compounds across sub-goals. The MultiON arc is CLOSED (clean null on cold
+K=3 chains); see ``PHASE2_ABLATION_REPORT.md`` Run 15 for the outcome.
 
 Flavour B chains *existing HM3D categories* using the scene's own
 ``goals_by_category`` (no cylinder assets, no new detector): the episode

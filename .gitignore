@@ -130,3 +130,7 @@ scratch/
 tmp/
 *.log
 .gstack/
+
+# Tool caches (Serena MCP project cache, scheduler lock)
+.serena/
+.claude/scheduled_tasks.lock

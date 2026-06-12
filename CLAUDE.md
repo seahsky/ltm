@@ -92,10 +92,12 @@ A read-only fact-check (the "diagnose-first" program; full version in
 `PHASE2_ABLATION_REPORT.md` → "AUDIT CAVEATS") found the positive thesis solid but
 five claims overstated/mislabeled — state them precisely:
 
-1. **Provenance.** Local `runs/abl-s{1,2,3}-qwen` hold **Run-2** data (verified:
-   `abl-s1-qwen` soft_spl **0.0279**, steps **9.6**; `abl-s3-qwen` mem **21**;
-   degenerate `"room interior"` captions), **not** the Run-7 numbers (S1 ≈ 0.089)
-   cited against them. The real headline data (`revisit-*`, wide matrix, `scorer-*`,
+1. **Provenance.** The committed `runs/abl-s{1,2,3}-qwen` dirs held **Run-2** data
+   (verified before removal: `abl-s1-qwen` soft_spl **0.0279**, steps **9.6**;
+   `abl-s3-qwen` mem **21**; degenerate `"room interior"` captions), **not** the
+   Run-7 numbers (S1 ≈ 0.089) cited against them. Because that data was misleading
+   and provenance-mismatched, it was **git-removed on 2026-06-12** (recoverable via
+   git history). The real headline data (`revisit-*`, wide matrix, `scorer-*`,
    `predictor-*`) lives only on RACE. `runs/abl-s*-tier1` is a 3-ep pre-Run-1 smoke,
    not Run 19.
 2. **Headline magnitude.** The advertised **+0.24** is the **n=12** chair+bed
@@ -166,7 +168,7 @@ weight (env-tunable `_COARSE_PRIOR_WEIGHT`) AND a properly-powered brand-new-sce
 eval (the cross-env arm is n=4, same-scene-confounded) — deferred. **All LTM heads are now
 exhausted; the genuinely different remaining lever is a better instance-discriminating
 embedding/detector (a separate, larger project), not another LTM head.** Drivers
-`scripts/race-room-clip.sh` (calibrate→cross-env A/B→revisit over-fire A/B).
+`scripts/archive/race-room-clip.sh` (calibrate→cross-env A/B→revisit over-fire A/B).
 
 **Instance bottleneck — now MEASURED ($0), was asserted.**
 `diagnose_sbert_cosines.py` (instance section; `runs/diagnose-instance-sep.txt`):
@@ -181,7 +183,7 @@ construction, NOT a detector.** "Train a detector" is not yet justified.
 **MultiON arc CLOSED — clean null on cold K=3 chains (2026-06-07, Run 15; see
 `PHASE2_ABLATION_REPORT.md` Run 15).** The on-thesis answer to Run 7's "single-goal
 doesn't reward recall": chain K=3 categories per episode so within-episode recall can
-compound (Progress/PPL metrics, gap-by-sub-goal-index analyzer, `scripts/race-multion.sh`).
+compound (Progress/PPL metrics, gap-by-sub-goal-index analyzer, `scripts/archive/race-multion.sh`).
 Four RACE matrices (full1→full4) each diagnosed and killed an absorbing mode — the
 decisive on-thesis fix being **memory consumption** (a memory waypoint reached without
 advancing the sub-goal is consumed per-sub-goal; full3's wrong-instance recall attractor
@@ -213,7 +215,7 @@ per-keyframe `goal_object` label (caption names an HM3D goal object) IS learnabl
 (−0.152).** Verdict: the hand-tuned heuristic R is at/near the ceiling; training doesn't
 beat it here. The exercise proved the consolidation-importance path is load-bearing (a bad
 R breaks the LTM, a good R restores it) and reproduced the thesis an **8th time** (heuristic
-warm +0.2357, p=0.001). Driver `scripts/race-train-scorer.sh`.
+warm +0.2357, p=0.001). Driver `scripts/archive/race-train-scorer.sh`.
 
 **Run 14 (2026-06-04) confirms + refines this at scale.** Widened the revisit matrix to
 6 categories × 2 scenes (n=26 warm / 10 cold) and added a **direct paired
@@ -254,7 +256,7 @@ it is conservative *and* R-derived; conservatism is the right bias in an instanc
 Verdict: **the importance-head training lever is CLOSED (5 angles: R scorer-d1/d3; U surprise /
 calibrated / proximity — all ≤ heuristic). The bottleneck is the embedding's instance discrimination,
 not the importance signal.** Heuristic importance stays default. Drivers
-`scripts/race-train-{predictor,utility-scorer}.sh`. The only untouched LTM head is the **coarse-layer
+`scripts/archive/race-train-{predictor,utility-scorer}.sh`. The only untouched LTM head is the **coarse-layer
 affordance** head; the genuinely different remaining lever for further gains is a better
 embedding/detector (instance discrimination — a separate, bigger project).
 **Run 17 (2026-06-07) completed the wide matrix's module attribution** (`race-wide-s2.sh`,
@@ -267,7 +269,7 @@ transfer (scene mapped while hunting other categories), not a leak.
 **Embodied binary-SPL work CLOSED — localization-bound (2026-06-03, Run 12; see
 `PHASE2_ABLATION_REPORT.md` Run 12).** A component diagnosis (`diagnose_pipeline.py`)
 showed observe+retrieve work on warm visits; the **oracle ladder**
-(`scripts/race-oracle-ladder.sh`, `--oracle-stop`/`--oracle-location`) proved
+(`scripts/archive/race-oracle-ladder.sh`, `--oracle-stop`/`--oracle-location`) proved
 **termination is the entire recoverable gap** — a perfect STOP lifts warm succ@0.1m
 0.167 → **0.750**. But the realizable proxy (`_arrival_stop`: STOP at a confident memory
 waypoint + caption-confirm; `ARRIVAL_STOP_COS`/`ARRIVAL_STOP_RADIUS`) was **net-zero
