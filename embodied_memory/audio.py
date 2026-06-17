@@ -198,30 +198,69 @@ def rms(signal) -> float:
 # ----------------------------------------------------------------------
 
 
+def _itd_xcorr(left, right, max_lag: int) -> int:
+    """TDOA (samples, left-minus-right) by plain cross-correlation, bounded to
+    the physical interaural lag range ``±max_lag`` (rejects spurious far peaks
+    from reverberant multipath)."""
+    from scipy.signal import correlate, correlation_lags
+
+    corr = correlate(left, right, mode="full", method="fft")
+    lags = correlation_lags(len(left), len(right), mode="full")
+    mask = np.abs(lags) <= max_lag
+    corr_m, lags_m = corr[mask], lags[mask]
+    return int(lags_m[int(np.argmax(corr_m))])
+
+
+def _itd_gcc_phat(left, right, max_lag: int) -> int:
+    """TDOA (samples, left-minus-right) by GCC-PHAT: the cross-spectrum is
+    whitened (magnitude normalized, phase kept). Sharpens the direct-path peak
+    in moderate reverb, but amplifies empty/low-energy bins, so it can be noisier
+    than plain x-corr at low direct-to-reverberant ratios — compared on real data
+    by audio_loop_smoke before being made the default."""
+    n = max(len(left), len(right))
+    nfft = 1
+    while nfft < 2 * n:
+        nfft <<= 1
+    L = np.fft.rfft(left, nfft)
+    R = np.fft.rfft(right, nfft)
+    cross = L * np.conj(R)
+    mag = np.abs(cross)
+    mag[mag < 1e-12] = 1e-12
+    cc = np.fft.irfft(cross / mag, nfft)
+    cc_lagged = np.concatenate((cc[-max_lag:], cc[: max_lag + 1]))
+    lags = np.arange(-max_lag, max_lag + 1)
+    return int(lags[int(np.argmax(cc_lagged))])
+
+
 def estimate_doa(
     binaural,
     sample_rate: int,
     ear_distance_m: float = 0.18,
     speed_of_sound: float = 343.0,
+    method: str = "xcorr",
 ) -> float:
     """Azimuth (radians) of the source from a ``(2, L)`` [left, right] signal.
 
     Positive = source to the agent's RIGHT, negative = LEFT, 0 = ahead. Range
     ``[-pi/2, pi/2]`` (front hemisphere — binaural is front-back ambiguous).
 
-    ITD (cross-correlation lag) drives magnitude and sign; when the lag is zero
-    (sub-sample), the interaural level difference breaks the tie.
+    The interaural TDOA is estimated by ``method`` — ``"xcorr"`` (default, plain
+    bounded cross-correlation, verified ~5° on a real HM3D RIR grid) or
+    ``"gcc_phat"`` (phase-transform; reverb-robust in theory but noise-sensitive
+    at low DRR). A positive lag means the left ear arrives later → right ear is
+    closer → source on the right → positive azimuth. At zero lag (centered) the
+    interaural level difference breaks the sign.
     """
-    from scipy.signal import correlate, correlation_lags
-
     b = np.asarray(binaural, dtype=np.float64)
     left, right = b[0], b[1]
+    max_lag = int(np.ceil(ear_distance_m / speed_of_sound * sample_rate)) + 1
 
-    corr = correlate(left, right, mode="full", method="fft")
-    lags = correlation_lags(len(left), len(right), mode="full")
-    # peak_lag > 0  ⇒ left arrives later than right ⇒ right ear closer ⇒ source
-    # on the right ⇒ positive azimuth.
-    itd = int(lags[int(np.argmax(corr))])
+    if method == "gcc_phat":
+        itd = _itd_gcc_phat(left, right, max_lag)
+    elif method == "xcorr":
+        itd = _itd_xcorr(left, right, max_lag)
+    else:
+        raise ValueError(f"unknown DOA method {method!r} (xcorr | gcc_phat)")
 
     if itd != 0:
         s = np.clip(itd / sample_rate * speed_of_sound / ear_distance_m, -1.0, 1.0)

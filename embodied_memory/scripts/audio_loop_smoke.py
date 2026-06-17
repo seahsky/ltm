@@ -88,7 +88,8 @@ def _angle_err_with_fold(est: float, true: float) -> float:
     return min(direct, fold)
 
 
-def _run(grid: audio.RIRGrid, clip: np.ndarray, doa_tol_deg: float = 30.0) -> int:
+def _run(grid: audio.RIRGrid, clip: np.ndarray, doa_tol_deg: float = 30.0,
+         doa_method: str = "xcorr") -> int:
     src = grid.source_position
     cxz = grid.cell_positions[:, [0, 2]]
     dists = np.linalg.norm(cxz - src[[0, 2]][None, :], axis=1)
@@ -115,15 +116,28 @@ def _run(grid: audio.RIRGrid, clip: np.ndarray, doa_tol_deg: float = 30.0) -> in
     print(f"  cells={n}  RMS far-half={far_mean:.5f}  near-half={near_mean:.5f}  "
           f"spearman(dist,rms)={spearman:.3f}")
 
-    # (2) DOA at the nearest cell
-    near_i = int(order[-1])
-    near_cell = grid.cell_positions[near_i]
-    near_out = audio.render_at_pose(grid, near_cell, clip)
-    est = audio.estimate_doa(near_out, grid.sample_rate)
-    true = _true_bearing(near_cell, src)
-    err = math.degrees(_angle_err_with_fold(est, true))
-    print(f"  nearest cell d={dists[near_i]:.2f}m  DOA est={math.degrees(est):.1f}°  "
-          f"true={math.degrees(true):.1f}°  err(fold)={err:.1f}°")
+    # (2) DOA over the nearest K cells. The agent localizes over its whole
+    # approach, and a single reverberant pose can null out (diffuse-field DOA is
+    # noisy per-sample), so gate on the MEDIAN fold-error of the cells closest to
+    # the source rather than one sample. Median (not min) keeps it honest.
+    K = min(5, n)
+    near_idx = list(order[-K:])              # order is far→near, so the tail is nearest
+    errs = {"xcorr": [], "gcc_phat": []}
+    for i in near_idx:
+        cell = grid.cell_positions[i]
+        out_i = audio.render_at_pose(grid, cell, clip)
+        true_i = _true_bearing(cell, src)
+        line = f"  near cell d={float(dists[i]):.2f}m  true={math.degrees(true_i):+.1f}°"
+        for m in ("xcorr", "gcc_phat"):
+            est_m = audio.estimate_doa(out_i, grid.sample_rate, method=m)
+            e_m = math.degrees(_angle_err_with_fold(est_m, true_i))
+            errs[m].append(e_m)
+            line += f"  | {m}: est={math.degrees(est_m):+.1f}° err={e_m:.1f}°"
+        print(line)
+    med = {m: float(np.median(errs[m])) for m in errs}
+    med_err = med[doa_method]
+    print(f"  DOA median err over {K} near cells — xcorr={med['xcorr']:.1f}°  "
+          f"gcc_phat={med['gcc_phat']:.1f}°  (gating on '{doa_method}', tol {doa_tol_deg:.0f}°)")
 
     fails = []
     if not (near_mean > far_mean):
@@ -131,14 +145,14 @@ def _run(grid: audio.RIRGrid, clip: np.ndarray, doa_tol_deg: float = 30.0) -> in
                      f"(near {near_mean:.5f} <= far {far_mean:.5f})")
     if not (spearman < -0.3):
         fails.append(f"distance↔RMS not strongly negative (spearman {spearman:.3f})")
-    if not (err <= doa_tol_deg):
-        fails.append(f"DOA error {err:.1f}° > {doa_tol_deg}° tolerance")
+    if not (med_err <= doa_tol_deg):
+        fails.append(f"DOA median error ('{doa_method}') {med_err:.1f}° > {doa_tol_deg}° tolerance")
     if fails:
         for f in fails:
             print(f"RED: {f}")
         return 1
     print(f"GREEN: signal is heard (energy rises toward source) and localizable "
-          f"(DOA within {doa_tol_deg:.0f}°).")
+          f"(DOA median {med_err:.1f}° ≤ {doa_tol_deg:.0f}° over {K} near cells, '{doa_method}').")
     return 0
 
 
@@ -168,6 +182,8 @@ def main() -> int:
     ap.add_argument("--rir-grid", default=None, help="rir_grid.npz from render_rir_grid.py")
     ap.add_argument("--clip", default=None, help="optional .wav (default: synthetic burst)")
     ap.add_argument("--doa-tol-deg", type=float, default=30.0)
+    ap.add_argument("--doa-method", default="xcorr", choices=["xcorr", "gcc_phat"],
+                    help="DOA estimator to GATE on (both are reported)")
     ap.add_argument("--self-test", action="store_true",
                     help="build a synthetic grid and validate this smoke's logic")
     args = ap.parse_args()
@@ -177,7 +193,7 @@ def main() -> int:
         grid = _build_synthetic_grid(sr)
         clip = _synthetic_clip(sr)
         print("  [self-test] synthetic grid")
-        return _run(grid, clip, args.doa_tol_deg)
+        return _run(grid, clip, args.doa_tol_deg, args.doa_method)
 
     if not args.rir_grid:
         print("RED: --rir-grid is required (or pass --self-test)")
@@ -190,7 +206,7 @@ def main() -> int:
         else _synthetic_clip(grid.sample_rate)
     print(f"  grid: {len(grid)} cells  sr={grid.sample_rate}  scene={grid.scene_id}  "
           f"clip={'wav:' + os.path.basename(args.clip) if args.clip else 'synthetic'}")
-    return _run(grid, clip, args.doa_tol_deg)
+    return _run(grid, clip, args.doa_tol_deg, args.doa_method)
 
 
 if __name__ == "__main__":

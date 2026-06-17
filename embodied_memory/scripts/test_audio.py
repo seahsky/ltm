@@ -185,13 +185,15 @@ def case_render_rms_monotone_with_distance():
 
 
 def case_doa_recovers_right_and_left():
-    for deg in (10.0, 30.0, 45.0, -20.0, -40.0):
-        az = math.radians(deg)
-        b = _binaural_for_azimuth(az, amp=1.0)
-        est = audio.estimate_doa(b, _SR, ear_distance_m=_EARS_M, speed_of_sound=_C)
-        assert abs(math.degrees(est) - deg) <= 5.0, \
-            f"azimuth {deg}° recovered as {math.degrees(est):.1f}°"
-    print("  case doa_recovers_right_and_left: OK")
+    for method in ("xcorr", "gcc_phat"):
+        for deg in (10.0, 30.0, 45.0, -20.0, -40.0):
+            az = math.radians(deg)
+            b = _binaural_for_azimuth(az, amp=1.0)
+            est = audio.estimate_doa(b, _SR, ear_distance_m=_EARS_M,
+                                     speed_of_sound=_C, method=method)
+            assert abs(math.degrees(est) - deg) <= 5.0, \
+                f"[{method}] azimuth {deg}° recovered as {math.degrees(est):.1f}°"
+    print("  case doa_recovers_right_and_left (xcorr+gcc_phat): OK")
 
 
 def case_doa_front_centered_is_zero():
