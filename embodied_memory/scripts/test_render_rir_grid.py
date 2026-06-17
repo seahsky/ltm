@@ -96,6 +96,29 @@ def case_returns_empty_when_none_in_range():
     print("  case returns_empty_when_none_in_range: OK")
 
 
+def case_load_audio_without_faiss():
+    """render_rir_grid runs in the soundspaces-spike env, which has numpy but
+    NOT faiss. Obtaining save_rir_grid must NOT drag in the embodied_memory
+    package __init__ (memory_bridge -> dialogue_memory -> faiss) — audio.py
+    itself needs only numpy at import time."""
+    saved = sys.modules.get("faiss", "MISSING")
+    sys.modules["faiss"] = None  # make any `import faiss` raise ImportError
+    # drop a stale real-package import so it can't mask the standalone load
+    for m in [k for k in sys.modules
+              if k == "embodied_memory" or k.startswith("embodied_memory.audio")]:
+        del sys.modules[m]
+    try:
+        mod = rrg._load_audio()
+        assert hasattr(mod, "save_rir_grid"), "loaded audio module lacks save_rir_grid"
+        assert hasattr(mod, "RIRGrid"), "loaded audio module lacks RIRGrid"
+    finally:
+        if saved == "MISSING":
+            sys.modules.pop("faiss", None)
+        else:
+            sys.modules["faiss"] = saved
+    print("  case load_audio_without_faiss: OK")
+
+
 def main() -> int:
     cases = [
         case_filters_out_of_range_and_unreachable,
@@ -103,6 +126,7 @@ def main() -> int:
         case_keeps_spread_points,
         case_caps_at_max_cells,
         case_returns_empty_when_none_in_range,
+        case_load_audio_without_faiss,
     ]
     print(f"running {len(cases)} select_cells cases…")
     for c in cases:
