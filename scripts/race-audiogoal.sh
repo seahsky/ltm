@@ -70,7 +70,10 @@ else
   SRC="${VALMINI}/${SCENE}.json.gz"
   [ -f "$SRC" ] || { echo "FATAL: source episodes missing: $SRC"; exit 1; }
   rm -rf "$DS_DIR"
-  SRC_ARG=""; [ -n "$SOURCE_OVERRIDE" ] && SRC_ARG="--source-position $SOURCE_OVERRIDE"
+  # NOTE: '=' form (not a space) — HM3D source coords start with '-' and contain
+  # commas, so they don't match argparse's negative-number regex; passed with a
+  # space, argparse mistakes the value for an option flag ("expected one argument").
+  SRC_ARG=""; [ -n "$SOURCE_OVERRIDE" ] && SRC_ARG="--source-position=$SOURCE_OVERRIDE"
   # shellcheck disable=SC2086
   python embodied_memory/scripts/make_audiogoal_smoke.py \
       --src "$SRC" --scene "$SCENE" --categories "$CATEGORY" --n-warm "$NWARM" \
@@ -96,12 +99,27 @@ GLB="$(find data/hm3d -name "${SCENE}.basis.glb" 2>/dev/null | head -1)"
 [ -n "$GLB" ] || { echo "FATAL: no .glb for $SCENE"; exit 1; }
 mkdir -p "$(dirname "$GRID")"
 set +u; conda activate "$SS_ENV" || { echo "FATAL: activate $SS_ENV failed (build it: scripts/race-soundspaces-spike.sh)"; exit 1; }; set -u
+# '=' form: $SRC_XYZ starts with '-' (HM3D coords) and has commas, so a
+# space-separated value is misread by argparse as an option flag.
 python embodied_memory/scripts/render_rir_grid.py \
-    --scene "$GLB" --source "$SRC_XYZ" --out "$GRID" --n-cells 24 \
+    --scene "$GLB" --source="$SRC_XYZ" --out "$GRID" --n-cells 24 \
     2>&1 | tee "${DS_DIR}/render.log"
 rc=${PIPESTATUS[0]}
 set +u; conda activate "$LTM_ENV" || { echo "FATAL: re-activate $LTM_ENV failed"; exit 1; }; set -u
-[ "$rc" -eq 0 ] && [ -f "$GRID" ] || { echo "FATAL: RIR render failed (rc=$rc) — likely an off-navmesh MVP source; re-pick with --source x,y,z. NOT spending on the LLM run."; exit 1; }
+if [ "$rc" -ne 0 ] || [ ! -f "$GRID" ]; then
+  # Disambiguate the failure so the operator isn't sent down the wrong path:
+  #  - render_rir_grid prints a distinctive "RED: ... reachable cells / non-zero IRs"
+  #    line (and exits 1) ONLY for a genuine off-navmesh / too-few-cells source.
+  #  - an UNCAUGHT exception (habitat_sim/EGL/OOM crash) ALSO exits 1 but bypasses
+  #    sys.exit(main()) — no RED line; exit 2 is argparse/CLI/setup/scene-data.
+  # Only blame the source position when the off-navmesh signature is actually present.
+  if [ "$rc" -eq 1 ] && grep -qE "reachable cells|non-zero IRs" "${DS_DIR}/render.log" 2>/dev/null; then
+    echo "FATAL: RIR render found too few reachable cells (rc=1) — off-navmesh source; re-pick with --source x,y,z. See ${DS_DIR}/render.log. NOT spending on the LLM run."
+  else
+    echo "FATAL: RIR render failed (rc=$rc) — CLI/setup/import/runtime/scene-data error, NOT necessarily the source position; check ${DS_DIR}/render.log for the traceback. NOT spending on the LLM run."
+  fi
+  exit 1
+fi
 
 N_EPISODES="$(python -c "import gzip,json,glob,sys; print(sum(len(json.load(gzip.open(f))['episodes']) for f in sorted(glob.glob(sys.argv[1]))))" "${DS_DIR}/content/*.json.gz")" || N_EPISODES=0
 [ "$N_EPISODES" -gt 0 ] 2>/dev/null || { echo "FATAL: episode count '$N_EPISODES' <= 0"; exit 1; }
