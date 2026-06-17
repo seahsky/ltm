@@ -511,6 +511,11 @@ def case_oracle_short_circuit():
     # _run_episode dereferences these before the oracle short-circuit (the
     # detector wiring is per-episode; the __new__ bypass skips __init__).
     r.goal_detector = None
+    # AudioGoal wiring (M1): _run_episode reads self.task + resets audio state
+    # unconditionally (no-op for non-audio). The __new__ bypass skips __init__,
+    # so provide a stub audio state with a reset() (oracle never reads further).
+    r.task = "oracle"
+    r._audio_state = SimpleNamespace(reset=lambda: None)
 
     propose_calls: list = []
     r._propose_candidates = lambda *a, **kw: propose_calls.append(1) or []

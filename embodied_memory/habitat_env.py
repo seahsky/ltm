@@ -68,6 +68,11 @@ class HabitatObjectNavSource(EpisodeSource):
         max_steps: int = 250,
         target_category: Optional[str] = "chair",
         image_hw: Tuple[int, int] = (256, 256),
+        task: str = "objectnav",
+        rir_grid_path: Optional[str] = None,
+        t_anom: int = 0,
+        anomaly_clip_path: Optional[str] = None,
+        target_norm_rms_db: float = -20.0,
     ):
         # scene_id can be a single id (legacy) or a list — passed straight to
         # habitat's `dataset.content_scenes`, which cycles episodes across all
@@ -96,6 +101,18 @@ class HabitatObjectNavSource(EpisodeSource):
         self._cat_vps_cache: Dict[Tuple[str, str], List[List[float]]] = {}
         self._scene_content_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         self._current_scene_label: Optional[str] = None
+
+        # AudioGoal task (render side only — the cached .npz RIR grid is consumed
+        # here, the audio SIMULATOR is never imported). All None / inert unless
+        # task=="audiogoal", so the objectnav/revisit/multion paths are unchanged.
+        self.task = str(task)
+        self._rir_grid_path = rir_grid_path
+        self._audio_t_anom = int(t_anom)
+        self._anomaly_clip_path = anomaly_clip_path
+        self._target_norm_rms_db = float(target_norm_rms_db)
+        self._rir_grid = None              # lazy-loaded at reset (scene-matched)
+        self._anomaly_clip_norm = None     # normalized FSD50K clip, loaded once
+        self._audio_render_cfg = None      # AudioTaskConfig, built at reset
 
     @staticmethod
     def _default_scene_dataset_path() -> Optional[str]:
@@ -284,6 +301,28 @@ class HabitatObjectNavSource(EpisodeSource):
         metadata: Dict[str, Any] = {
             "source": "habitat_live", "max_steps": self.max_steps,
         }
+
+        # AudioGoal: lazy-load the scene-matched RIR grid + normalized clip ONCE.
+        # Gated on task=="audiogoal"; otherwise inert (objectnav unchanged).
+        if self.task == "audiogoal" and self._rir_grid_path:
+            from .audio import RIRGrid
+            from .audio_task import AudioTaskConfig
+            if self._rir_grid is None or self._rir_grid.scene_id != scene_label:
+                grid = RIRGrid.load(self._rir_grid_path)
+                if grid.scene_id != scene_label:
+                    raise ValueError(
+                        f"RIR grid scene_id {grid.scene_id!r} != current scene "
+                        f"{scene_label!r} — audio is rendered per (scene, source)."
+                    )
+                self._rir_grid = grid
+                self._anomaly_clip_norm = None   # re-normalize at the grid's sr
+            if self._anomaly_clip_norm is None:
+                self._anomaly_clip_norm = self._load_anomaly_clip()
+            self._audio_render_cfg = AudioTaskConfig(
+                enabled=True, t_anom=self._audio_t_anom,
+                sample_rate=int(self._rir_grid.sample_rate),
+            )
+
         # MultiON: surface the ordered category chain (written by
         # make_multion_smoke into the episode's info dict) so the runner's
         # sub-goal cursor can read it from Episode.metadata. Absent the key,
@@ -293,6 +332,27 @@ class HabitatObjectNavSource(EpisodeSource):
             metadata["object_categories"] = [
                 str(c) for c in ep_info["object_categories"]
             ]
+
+        # AudioGoal: surface the anomaly config (source position / class written
+        # by the M2 dataset builder into episode.info) for the runner + analysis.
+        if self.task == "audiogoal":
+            src_pos = None
+            anom_cls = None
+            if isinstance(ep_info, dict):
+                if ep_info.get("source_position") is not None:
+                    src_pos = [float(v) for v in ep_info["source_position"]]
+                if ep_info.get("anomaly_class"):
+                    anom_cls = str(ep_info["anomaly_class"])
+            metadata["audio_config"] = {
+                "task": self.task,
+                "scene_id": scene_label,
+                "t_anom": self._audio_t_anom,
+                "rir_grid_available": self._rir_grid is not None,
+                "sample_rate": int(self._rir_grid.sample_rate) if self._rir_grid is not None else None,
+                "source_position": src_pos,
+                "anomaly_class": anom_cls,
+            }
+
         episode = Episode(
             episode_id=str(getattr(env.current_episode, "episode_id", episode_idx)),
             scene_id=scene_label,
@@ -434,6 +494,19 @@ class HabitatObjectNavSource(EpisodeSource):
                 semantic = semantic[..., 0]
 
         agent_state = self._read_agent_state(self._env)
+
+        # AudioGoal RENDER ONLY: nearest-cell lookup + fftconvolve of the cached
+        # RIR with the clip (silence before t_anom). No decision logic here — the
+        # runner calls audio_task on Step.audio. Never imports the audio sim.
+        audio = None
+        if (self.task == "audiogoal" and self._rir_grid is not None
+                and self._anomaly_clip_norm is not None and self._audio_render_cfg is not None):
+            from .audio_task import render_step_audio
+            audio = render_step_audio(
+                self._rir_grid, agent_state.position, self._anomaly_clip_norm,
+                self._step_count, self._audio_render_cfg,
+            )
+
         return Step(
             step_idx=self._step_count,
             rgb=rgb,
@@ -444,7 +517,37 @@ class HabitatObjectNavSource(EpisodeSource):
             reward=reward,
             done=done,
             info=dict(info or {}),
+            audio=audio,
         )
+
+    def _load_anomaly_clip(self) -> np.ndarray:
+        """Load + RMS-normalize the anomaly clip at the grid's sample rate. A
+        real FSD50K .wav if ``anomaly_clip_path`` is set, else a synthetic
+        broadband burst (so M1 wiring does not block on FSD50K being staged)."""
+        from .audio_task import normalize_clip
+
+        grid_sr = int(self._rir_grid.sample_rate) if self._rir_grid is not None else 48000
+        if self._anomaly_clip_path and os.path.isfile(self._anomaly_clip_path):
+            from scipy.io import wavfile
+            sr, data = wavfile.read(self._anomaly_clip_path)
+            data = np.asarray(data, dtype=np.float32)
+            if np.issubdtype(np.asarray(data).dtype, np.integer):
+                data = data / 32768.0
+            if data.ndim == 2:
+                data = data.mean(axis=1)
+            data = data.reshape(-1).astype(np.float32)
+            if int(sr) != grid_sr:
+                from math import gcd
+                from scipy.signal import resample_poly
+                g = gcd(int(sr), grid_sr)
+                data = resample_poly(data, grid_sr // g, int(sr) // g).astype(np.float32)
+            return normalize_clip(data, self._target_norm_rms_db)
+
+        rng = np.random.default_rng(0)
+        n = int(grid_sr * 0.5)
+        envlp = np.minimum(1.0, np.linspace(0.0, 4.0, n))
+        burst = (rng.standard_normal(n).astype(np.float32) * envlp).astype(np.float32)
+        return normalize_clip(burst, self._target_norm_rms_db)
 
     @staticmethod
     def _read_agent_state(env) -> AgentState:

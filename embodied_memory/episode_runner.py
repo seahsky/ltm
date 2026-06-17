@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 
+from . import audio_task
 from .episode_source import Episode, EpisodeSource, Step
 from .frontier_planner import (
     ACTION_FORWARD,
@@ -474,6 +475,9 @@ class EpisodeRunner:
         found_radius: float = 1.0,
         save_video: bool = False,
         video_fps: int = 8,
+        task: str = "objectnav",
+        clap_encoder: Optional[Any] = None,
+        audio_cfg: Optional[Any] = None,
     ):
         self.source = source
         self.planner = planner
@@ -512,6 +516,15 @@ class EpisodeRunner:
                 f"backbone must be 'frontier', 'remembr', or 'oracle'; got {backbone!r}"
             )
         self.backbone = backbone
+        # AudioGoal task wiring (M1). Inert unless task=="audiogoal": clap_encoder
+        # + audio_cfg are None for objectnav, so the audio branches in
+        # _run_episode are skipped and every non-audio path is byte-identical
+        # (audio_target_for_retrieval returns the fallback when undetected).
+        from .audio_task import AudioEpisodeState, AudioTaskConfig
+        self.task = str(task)
+        self.clap_encoder = clap_encoder
+        self._audio_cfg = audio_cfg if audio_cfg is not None else AudioTaskConfig()
+        self._audio_state = AudioEpisodeState()
         # Oracle backbone (Run-5 diagnostic): a ShortestPathFollower steers
         # straight to the episode goal, bypassing the candidate/scorer/memory
         # machinery. Lazily constructed per-episode in _init_oracle_follower.
@@ -827,6 +840,15 @@ class EpisodeRunner:
     def _run_episode(self, ep_idx: int):
         is_oracle = self.backbone == "oracle"
         step, ep = self.source.reset(ep_idx)
+        # Fresh per-episode audio state — UNCONDITIONAL so the once-per-episode
+        # onset/classify can never leak across episodes (a no-op for non-audio
+        # runs since the default state is already cleared). Sample-rate threading
+        # stays audiogoal-gated (reads the source's grid metadata).
+        self._audio_state.reset()
+        if self.task == "audiogoal":
+            _ac = (ep.metadata or {}).get("audio_config") or {}
+            if _ac.get("sample_rate"):
+                self._audio_cfg.sample_rate = int(_ac["sample_rate"])
         # Fresh per-episode video buffer (no-op storage when --save-video is off).
         self._video_frames = []
         self.planner.reset(agent_pos=step.agent_state.position)
@@ -1041,6 +1063,20 @@ class EpisodeRunner:
 
         # Loop.
         for t in range(1, self.max_steps_per_episode):
+            # AudioGoal: process THIS step's audio (onset → classify-once → object
+            # override; energy/lateral diag into step.info) before any decision
+            # below consumes it. Gated → no-op for objectnav/revisit/multion.
+            if self.task == "audiogoal" and self._audio_cfg.enabled:
+                _adiag = audio_task.process_audio_step(
+                    getattr(step, "audio", None), step.step_idx,
+                    self._audio_cfg.sample_rate, self._audio_cfg,
+                    self._audio_state, self.clap_encoder)
+                step.info.update(_adiag)
+                if _adiag.get("onset_fired"):
+                    print(f"[audio] onset @step {step.step_idx} "
+                          f"class={_adiag.get('audio_class')} "
+                          f"target={_adiag.get('audio_target_override')} "
+                          f"energy={_adiag.get('audio_energy', 0.0):.3f}", flush=True)
             if is_oracle:
                 # Oracle short-circuit: steer straight to the goal, bypassing
                 # candidate proposal, memory injection, and rerank entirely.
@@ -1142,11 +1178,16 @@ class EpisodeRunner:
                     # waypoints (locations of past observations that look like
                     # the target category in CLIP joint space). Scene-filtered
                     # and de-duped vs planner candidates inside the bridge.
+                    # AudioGoal: after the anomaly is heard+classified, retrieve
+                    # the audio-inferred object (CLASS_TO_OBJECT); otherwise the
+                    # fallback category VERBATIM → objectnav retrieval unchanged.
+                    _retrieval_target = audio_task.audio_target_for_retrieval(
+                        self._audio_state,
+                        active_category if multion else ep.target_category)
                     mem_cands = self.bridge.propose_memory_candidates(
                         agent_pos=step.agent_state.position,
                         agent_yaw=step.agent_state.rotation_yaw,
-                        target_category=(active_category if multion
-                                         else ep.target_category),
+                        target_category=_retrieval_target,
                         planner_world_xys=[c.world_xy for c in cands],
                         top_k=3,
                     )
@@ -1155,6 +1196,24 @@ class EpisodeRunner:
                         mc.candidate_id = len(cands) + i + 1000  # offset so logs are unambiguous
                     all_cands = cands + mem_cands
                     n_memory_candidates += len(mem_cands)
+
+                    # AudioGoal energy STOP (disjunctive, conservative): if the
+                    # backbone did not already STOP and the anomaly is detected +
+                    # loud + near, STOP at the best memory/candidate waypoint. The
+                    # downstream action-derivation sees stop_signal → ACTION_STOP.
+                    # (In-scope: mem_cands/cands are defined just above, inside
+                    # this `if cands:` proposal block; the `task=="audiogoal"`
+                    # short-circuit also keeps objectnav out of this branch.)
+                    if (stop_cand is None and self.task == "audiogoal"
+                            and audio_task.should_audio_stop(
+                                self._audio_state,
+                                float(step.info.get("audio_energy", 0.0)),
+                                step.info.get("distance_to_goal"), self._audio_cfg)):
+                        _sc = mem_cands[0] if mem_cands else (cands[0] if cands else None)
+                        if _sc is not None:
+                            _sc.metadata["stop_signal"] = True
+                            _sc.metadata["stop_match"] = "audio_energy"
+                            stop_cand = _sc
 
                     # Coarse-affordance (step 4): the POSITION-FREE cross-env path.
                     # Env-gated (LTM_COARSE_AFFORDANCE). Conservatism lives in the
