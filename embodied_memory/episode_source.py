@@ -43,6 +43,11 @@ class Step:
     reward: float
     done: bool
     info: Dict[str, Any] = field(default_factory=dict)
+    # AudioGoal task: (2, L) float32 binaural observation rendered from the
+    # cached RIR grid at the agent's pose, or None when audio is disabled
+    # (objectnav/revisit/multion) or before t_anom (silence). Last field with a
+    # default → all existing positional/kw Step constructions stay valid.
+    audio: Optional[np.ndarray] = None
 
 
 @dataclass

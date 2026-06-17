@@ -131,6 +131,10 @@ def _build_source(args):
         max_steps=args.max_steps,
         target_category=target,
         image_hw=(args.image_hw, args.image_hw),
+        task=getattr(args, "task", "objectnav"),
+        rir_grid_path=getattr(args, "rir_grid", None),
+        t_anom=getattr(args, "t_anom", 0),
+        anomaly_clip_path=getattr(args, "anomaly_clip", None),
     )
 
 
@@ -286,10 +290,43 @@ def main(argv: Optional[list] = None) -> int:
                              "instead of the forward-model surprise. Mutually "
                              "exclusive with --predictor-ckpt. Setting 3 only.")
 
+    # AudioGoal task: render a cached SoundSpaces RIR + an FSD50K anomaly clip
+    # into the live loop; the agent localizes via energy/lateral-sign and recalls
+    # the affordant object from LTM. Inert unless --task audiogoal.
+    parser.add_argument("--task", type=str, default="objectnav",
+                        choices=["objectnav", "audiogoal"],
+                        help="objectnav (default) or audiogoal (anomaly-sound task).")
+    parser.add_argument("--rir-grid", type=str, default=None,
+                        help="audiogoal: precomputed RIR grid .npz (render_rir_grid.py). "
+                             "Required for --task audiogoal.")
+    parser.add_argument("--anomaly-class", type=str, default="baby_cry",
+                        choices=["baby_cry", "alarm", "glass_break"],
+                        help="audiogoal: anomaly class for the single-episode smoke "
+                             "(M2 writes per-episode classes into episode.info).")
+    parser.add_argument("--anomaly-clip", type=str, default=None,
+                        help="audiogoal: FSD50K .wav to render (default: synthetic burst).")
+    parser.add_argument("--t-anom", type=int, default=30,
+                        help="audiogoal: step index the anomaly begins (silence before).")
+    parser.add_argument("--audio-onset-rms", type=float, default=0.05,
+                        help="audiogoal: RMS threshold for anomaly onset detection.")
+    parser.add_argument("--audio-energy-stop-rms", type=float, default=0.20,
+                        help="audiogoal: RMS threshold for the audio-energy STOP gate.")
+    parser.add_argument("--audio-stop-distance", type=float, default=1.5,
+                        help="audiogoal: only allow the energy STOP within this d2g (m).")
+
     args = parser.parse_args(argv)
 
     if args.mode == "live" and not args.scene:
         parser.error("--scene is required in live mode")
+
+    if args.task == "audiogoal":
+        if args.mode != "live":
+            parser.error("--task audiogoal requires --mode live")
+        if not args.rir_grid:
+            parser.error("--task audiogoal requires --rir-grid")
+        if args.backbone != "remembr":
+            print(f"[run_hm3d_pol] WARNING: --task audiogoal is intended with "
+                  f"--backbone remembr; got --backbone {args.backbone}")
 
     # Resolve ablation toggles. --setting picks a preset; explicit per-toggle
     # flags can additionally disable a module on top of the preset (so e.g.
@@ -457,6 +494,22 @@ def main(argv: Optional[list] = None) -> int:
     if args.target_sequence:
         target_sequence = [s.strip() for s in args.target_sequence.split(",")
                            if s.strip()]
+
+    # AudioGoal: build the CLAP classifier ONCE + the audio task config; both
+    # None for objectnav so the runner's audio path stays disabled (byte-same).
+    clap_encoder = None
+    audio_cfg = None
+    if args.task == "audiogoal":
+        from .perception import CLAPAudioEncoder
+        from .audio_task import AudioTaskConfig
+        clap_encoder = CLAPAudioEncoder(device=args.clip_device)
+        audio_cfg = AudioTaskConfig(
+            enabled=True, t_anom=args.t_anom,
+            onset_rms=args.audio_onset_rms,
+            energy_stop_db_rms=args.audio_energy_stop_rms,
+            stop_distance_m=args.audio_stop_distance,
+        )
+
     runner = EpisodeRunner(
         source=source,
         planner=planner,
@@ -482,6 +535,10 @@ def main(argv: Optional[list] = None) -> int:
             "target_sequence": target_sequence,
             "found_radius": args.found_radius,
             "save_video": args.save_video,
+            "task": args.task,
+            "anomaly_class": args.anomaly_class,
+            "rir_grid": args.rir_grid,
+            "t_anom": args.t_anom,
         },
         backbone=args.backbone,
         remembr_builder=remembr_builder,
@@ -494,6 +551,9 @@ def main(argv: Optional[list] = None) -> int:
         found_radius=args.found_radius,
         save_video=args.save_video,
         video_fps=args.video_fps,
+        task=args.task,
+        clap_encoder=clap_encoder,
+        audio_cfg=audio_cfg,
     )
 
     summary = runner.run(args.n_episodes)
