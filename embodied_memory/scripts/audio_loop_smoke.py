@@ -89,7 +89,8 @@ def _angle_err_with_fold(est: float, true: float) -> float:
 
 
 def _run(grid: audio.RIRGrid, clip: np.ndarray, doa_tol_deg: float = 30.0,
-         doa_method: str = "xcorr") -> int:
+         doa_method: str = "xcorr", sign_frac: float = 0.80,
+         lateral_min_deg: float = 20.0) -> int:
     src = grid.source_position
     cxz = grid.cell_positions[:, [0, 2]]
     dists = np.linalg.norm(cxz - src[[0, 2]][None, :], axis=1)
@@ -120,39 +121,65 @@ def _run(grid: audio.RIRGrid, clip: np.ndarray, doa_tol_deg: float = 30.0,
     # approach, and a single reverberant pose can null out (diffuse-field DOA is
     # noisy per-sample), so gate on the MEDIAN fold-error of the cells closest to
     # the source rather than one sample. Median (not min) keeps it honest.
+    # (2) DOA — SoundSpaces 2.0 binaural is ENERGY/ILD-spatialized but ITD-weak
+    # (Ambisonic→time-aligned-HRTF strips the broadband interaural delay), so the
+    # honest localizability cue is the fold-invariant LATERAL SIGN (left/right),
+    # not the ITD azimuth MAGNITUDE (which the engine compresses ~7×). We gate on
+    # sign agreement over the cells where the source is meaningfully lateral, and
+    # demote the magnitude fold-error to an informational print.
     K = min(5, n)
     near_idx = list(order[-K:])              # order is far→near, so the tail is nearest
     errs = {"xcorr": [], "gcc_phat": []}
+    lateral = []                              # bools: lateral-sign agreed?
+    lat_thresh = math.sin(math.radians(lateral_min_deg))
     for i in near_idx:
         cell = grid.cell_positions[i]
         out_i = audio.render_at_pose(grid, cell, clip)
         true_i = _true_bearing(cell, src)
+        est_gate = audio.estimate_doa(out_i, grid.sample_rate, method=doa_method)
         line = f"  near cell d={float(dists[i]):.2f}m  true={math.degrees(true_i):+.1f}°"
         for m in ("xcorr", "gcc_phat"):
             est_m = audio.estimate_doa(out_i, grid.sample_rate, method=m)
             e_m = math.degrees(_angle_err_with_fold(est_m, true_i))
             errs[m].append(e_m)
             line += f"  | {m}: est={math.degrees(est_m):+.1f}° err={e_m:.1f}°"
+        s_true = math.sin(true_i)             # lateral component (fold-invariant)
+        if abs(s_true) >= lat_thresh:
+            es = 1 if est_gate > 0 else (-1 if est_gate < 0 else 0)
+            ts = 1 if s_true > 0 else -1
+            agree = (es == ts)
+            lateral.append(agree)
+            line += f"  [lateral sign {'OK' if agree else 'MISS'}]"
         print(line)
     med = {m: float(np.median(errs[m])) for m in errs}
-    med_err = med[doa_method]
-    print(f"  DOA median err over {K} near cells — xcorr={med['xcorr']:.1f}°  "
-          f"gcc_phat={med['gcc_phat']:.1f}°  (gating on '{doa_method}', tol {doa_tol_deg:.0f}°)")
+    print(f"  [informational] DOA median fold-err over {K} near cells — "
+          f"xcorr={med['xcorr']:.1f}° gcc_phat={med['gcc_phat']:.1f}° "
+          f"— engine ITD magnitude-compressed, NOT gated")
+
+    n_lat = len(lateral)
+    if n_lat >= 3:
+        sign_agree = sum(lateral) / n_lat
+        c_ok = sign_agree >= sign_frac
+        c_str = f"{sum(lateral)}/{n_lat}={sign_agree:.2f} (req >= {sign_frac:.2f})"
+    else:
+        sign_agree, c_ok = None, True        # N/A → informational, never fails
+        c_str = f"{n_lat} lateral cells (<3) → N/A"
+    print(f"  DOA lateral-sign agreement ('{doa_method}'): {c_str}")
 
     fails = []
     if not (near_mean > far_mean):
         fails.append(f"energy does not rise toward source "
                      f"(near {near_mean:.5f} <= far {far_mean:.5f})")
-    if not (spearman < -0.3):
-        fails.append(f"distance↔RMS not strongly negative (spearman {spearman:.3f})")
-    if not (med_err <= doa_tol_deg):
-        fails.append(f"DOA median error ('{doa_method}') {med_err:.1f}° > {doa_tol_deg}° tolerance")
+    if not (spearman <= -0.45):
+        fails.append(f"distance↔RMS gradient too weak (spearman {spearman:.3f} > -0.45)")
+    if not c_ok:
+        fails.append(f"DOA lateral-sign agreement {sign_agree:.2f} < {sign_frac:.2f}")
     if fails:
         for f in fails:
             print(f"RED: {f}")
         return 1
-    print(f"GREEN: signal is heard (energy rises toward source) and localizable "
-          f"(DOA median {med_err:.1f}° ≤ {doa_tol_deg:.0f}° over {K} near cells, '{doa_method}').")
+    print(f"GREEN: heard (energy rises toward source, spearman {spearman:.3f}) and "
+          f"localizable (lateral-sign {c_str}).")
     return 0
 
 
@@ -163,7 +190,7 @@ def _build_synthetic_grid(sr: int):
     cells, irs = [], []
     T = 256
     for k in range(1, 9):
-        cell = np.array([0.6, 1.5, float(k)], dtype=np.float32)  # offset in x → nonzero az
+        cell = np.array([2.0, 1.5, float(k)], dtype=np.float32)  # lateral x offset → side cells
         cells.append(cell)
         az = _true_bearing(cell, src)
         lag = int(round(math.sin(az) * 0.18 / 343.0 * sr))
@@ -181,9 +208,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--rir-grid", default=None, help="rir_grid.npz from render_rir_grid.py")
     ap.add_argument("--clip", default=None, help="optional .wav (default: synthetic burst)")
-    ap.add_argument("--doa-tol-deg", type=float, default=30.0)
+    ap.add_argument("--doa-tol-deg", type=float, default=30.0,
+                    help="informational fold-error tolerance (NOT gated)")
     ap.add_argument("--doa-method", default="xcorr", choices=["xcorr", "gcc_phat"],
-                    help="DOA estimator to GATE on (both are reported)")
+                    help="DOA estimator feeding the lateral-sign cue (both reported)")
+    ap.add_argument("--doa-sign-frac", type=float, default=0.80,
+                    help="required lateral-sign agreement fraction (secondary gate)")
+    ap.add_argument("--lateral-min-deg", type=float, default=20.0,
+                    help="a cell counts as 'lateral' when |sin(true_bearing)| >= sin(this)")
     ap.add_argument("--self-test", action="store_true",
                     help="build a synthetic grid and validate this smoke's logic")
     args = ap.parse_args()
@@ -193,7 +225,8 @@ def main() -> int:
         grid = _build_synthetic_grid(sr)
         clip = _synthetic_clip(sr)
         print("  [self-test] synthetic grid")
-        return _run(grid, clip, args.doa_tol_deg, args.doa_method)
+        return _run(grid, clip, args.doa_tol_deg, args.doa_method,
+                    args.doa_sign_frac, args.lateral_min_deg)
 
     if not args.rir_grid:
         print("RED: --rir-grid is required (or pass --self-test)")
@@ -206,7 +239,8 @@ def main() -> int:
         else _synthetic_clip(grid.sample_rate)
     print(f"  grid: {len(grid)} cells  sr={grid.sample_rate}  scene={grid.scene_id}  "
           f"clip={'wav:' + os.path.basename(args.clip) if args.clip else 'synthetic'}")
-    return _run(grid, clip, args.doa_tol_deg, args.doa_method)
+    return _run(grid, clip, args.doa_tol_deg, args.doa_method,
+                args.doa_sign_frac, args.lateral_min_deg)
 
 
 if __name__ == "__main__":

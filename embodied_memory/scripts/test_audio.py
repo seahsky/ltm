@@ -214,6 +214,36 @@ def case_doa_sign_from_ild_when_itd_zero():
     print("  case doa_sign_from_ild_when_itd_zero: OK")
 
 
+def case_doa_ild_overrides_subresolution_itd():
+    # SoundSpaces bakes a TINY (sub-resolution) interaural delay even for side
+    # sources, but a real ILD. When |ITD| is below the confidence floor, the
+    # ILD sign must drive the azimuth — not a sub-sample lag of the wrong sign.
+    rng = np.random.default_rng(3)
+    noise = rng.standard_normal(2000).astype(np.float32)
+    left = noise.copy()
+    right = np.empty_like(noise)
+    right[1:] = 2.0 * noise[:-1]      # right LOUDER (×2) and lagged by 1 sample
+    right[0] = 0.0
+    b = np.stack([left, right])
+    # |itd| here is 1 sample (< floor 3) and its sign says left-leads (would give
+    # a NEGATIVE az on the old code); ILD says right is louder → must be +az.
+    est = audio.estimate_doa(b, _SR, ear_distance_m=_EARS_M, speed_of_sound=_C)
+    assert est > math.radians(10.0), \
+        f"sub-resolution ITD + louder-right ILD must give a clear +az, got {math.degrees(est):.1f}°"
+    print("  case doa_ild_overrides_subresolution_itd: OK")
+
+
+def case_lateral_sign_helper():
+    n, base = 256, 64
+    louder_right = np.stack([_impulse(n, base, 0.3), _impulse(n, base, 1.0)])
+    louder_left = np.stack([_impulse(n, base, 1.0), _impulse(n, base, 0.3)])
+    equal = np.stack([_impulse(n, base, 0.7), _impulse(n, base, 0.7)])
+    assert audio.lateral_sign(louder_right) == 1
+    assert audio.lateral_sign(louder_left) == -1
+    assert audio.lateral_sign(equal) == 0
+    print("  case lateral_sign_helper: OK")
+
+
 # ----------------------------------------------------------------------
 # CLAP zero-shot 3-way classification (encoder injected / mocked)
 # ----------------------------------------------------------------------
@@ -276,6 +306,8 @@ def main() -> int:
         case_doa_recovers_right_and_left,
         case_doa_front_centered_is_zero,
         case_doa_sign_from_ild_when_itd_zero,
+        case_doa_ild_overrides_subresolution_itd,
+        case_lateral_sign_helper,
         case_classify_anomaly_argmax,
         case_class_maps_present_and_consistent,
     ]

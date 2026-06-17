@@ -245,12 +245,21 @@ def estimate_doa(
     ``[-pi/2, pi/2]`` (front hemisphere — binaural is front-back ambiguous).
 
     The interaural TDOA is estimated by ``method`` — ``"xcorr"`` (default, plain
-    bounded cross-correlation, verified ~5° on a real HM3D RIR grid) or
-    ``"gcc_phat"`` (phase-transform; reverb-robust in theory but noise-sensitive
-    at low DRR). A positive lag means the left ear arrives later → right ear is
-    closer → source on the right → positive azimuth. At zero lag (centered) the
-    interaural level difference breaks the sign.
+    bounded cross-correlation) or ``"gcc_phat"`` (phase-transform). A positive
+    lag means the left ear arrives later → right ear is closer → source on the
+    right → positive azimuth.
+
+    SoundSpaces 2.0 renders binaural via an Ambisonic→time-aligned-HRTF path
+    (Zaunschirm 2018) that strips the broadband ITD and leaves only a tiny
+    residual lag (~1-8 samples) even for side sources, while keeping a real ILD.
+    So when ``|ITD|`` is below a confidence floor (``AUDIO_ITD_MIN_SAMPLES``,
+    default 3) AND there is a clear interaural LEVEL difference, the ILD sign —
+    not a sub-resolution lag — drives the azimuth. Only when no ILD information
+    is present do we trust a tiny ITD (so clean free-field signals still resolve
+    small angles). The ITD path stays exact for any stronger-ITD config.
     """
+    import os
+
     b = np.asarray(binaural, dtype=np.float64)
     left, right = b[0], b[1]
     max_lag = int(np.ceil(ear_distance_m / speed_of_sound * sample_rate)) + 1
@@ -262,17 +271,41 @@ def estimate_doa(
     else:
         raise ValueError(f"unknown DOA method {method!r} (xcorr | gcc_phat)")
 
-    if itd != 0:
-        s = np.clip(itd / sample_rate * speed_of_sound / ear_distance_m, -1.0, 1.0)
-        return float(np.arcsin(s))
-
     rms_l = float(np.sqrt(np.mean(np.square(left))))
     rms_r = float(np.sqrt(np.mean(np.square(right))))
     denom = rms_l + rms_r
+    ild = (rms_r - rms_l) / denom if denom > 1e-12 else 0.0  # +ve = right louder
+
+    itd_floor = float(os.environ.get("AUDIO_ITD_MIN_SAMPLES", "3"))
+    ild_min = float(os.environ.get("AUDIO_ILD_MIN", "0.02"))
+
+    if abs(itd) >= itd_floor:
+        s = np.clip(itd / sample_rate * speed_of_sound / ear_distance_m, -1.0, 1.0)
+        return float(np.arcsin(s))
+    if abs(ild) >= ild_min:
+        # sub-resolution ITD but a real level difference → ILD is the lateral cue
+        return float(np.arcsin(np.clip(ild, -1.0, 1.0)))
+    # no ILD info: trust the (tiny) ITD so clean free-field signals still resolve
+    s = np.clip(itd / sample_rate * speed_of_sound / ear_distance_m, -1.0, 1.0)
+    return float(np.arcsin(s))
+
+
+def lateral_sign(binaural) -> int:
+    """Fold-invariant left/right cue from the interaural level difference:
+    ``+1`` source to the RIGHT, ``-1`` LEFT, ``0`` if ambiguous. This is the
+    cue SoundSpaces spatializes reliably (ILD/energy), unlike the engine-weak
+    ITD. Shared by the M0b gate and any audio-nav code so there is one
+    definition of the lateral sign."""
+    b = np.asarray(binaural, dtype=np.float64)
+    rms_l = float(np.sqrt(np.mean(np.square(b[0]))))
+    rms_r = float(np.sqrt(np.mean(np.square(b[1]))))
+    denom = rms_l + rms_r
     if denom <= 1e-12:
-        return 0.0
-    ild = (rms_r - rms_l) / denom  # in [-1, 1], +ve = right louder
-    return float(np.arcsin(np.clip(ild, -1.0, 1.0)))
+        return 0
+    ild = (rms_r - rms_l) / denom
+    if abs(ild) < 1e-6:
+        return 0
+    return 1 if ild > 0.0 else -1
 
 
 # ----------------------------------------------------------------------

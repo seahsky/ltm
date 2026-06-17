@@ -76,6 +76,11 @@ for S in $SCENES; do
   if [ ! -f "$GRID" ]; then
     echo "RED: missing grid $GRID (render step failed) — skipping loop smoke"; fail=1; continue
   fi
+  # Informational: confirm on the REAL IRs that the engine bakes weak ITD but a
+  # real ILD (H1) — this is what the lateral-sign gate rests on. Never gates.
+  banner "raw-ITD diagnostic: $S (informational)"
+  python embodied_memory/scripts/diagnose_raw_itd.py "$GRID" --near 8 \
+      2>&1 | tee "$OUT_DIR/${S}_rawitd.log" || true
   banner "audio_loop_smoke: $S"
   python embodied_memory/scripts/audio_loop_smoke.py --rir-grid "$GRID" \
       2>&1 | tee "$OUT_DIR/${S}_loop.log"
