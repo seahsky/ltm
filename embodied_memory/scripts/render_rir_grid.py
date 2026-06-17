@@ -90,6 +90,25 @@ def select_cells(
 # ----------------------------------------------------------------------
 
 
+def _load_audio():
+    """Load ``embodied_memory/audio.py`` WITHOUT importing the embodied_memory
+    package ``__init__`` (which pulls memory_bridge → dialogue_memory → faiss).
+
+    This renderer runs in the ``soundspaces-spike`` env, which has numpy + a
+    habitat_sim audio build but NOT faiss; ``audio.py`` itself imports only
+    numpy at module load (scipy/perception are lazy), so a direct file load is
+    self-sufficient there. Mirrors the standalone-load pattern the tests use.
+    """
+    import importlib.util
+
+    audio_path = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "audio.py"))
+    spec = importlib.util.spec_from_file_location("_audiogoal_audio", audio_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _geodesic(pathfinder, a, b, habitat_sim) -> float:
     sp = habitat_sim.ShortestPath()
     sp.requested_start = a
@@ -128,12 +147,6 @@ def main() -> int:
         print(f"RED: scene file not found: {args.scene}")
         return 2
 
-    # save_rir_grid lives in embodied_memory.audio; make the repo importable
-    # without requiring PYTHONPATH (the script may be run by absolute path).
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
-
     try:
         import quaternion  # noqa: F401  (must precede habitat_sim — issue #1813)
     except ImportError as e:
@@ -154,7 +167,7 @@ def main() -> int:
               f"{habitat_sim.__file__})")
         return 2
 
-    from embodied_memory.audio import save_rir_grid
+    save_rir_grid = _load_audio().save_rir_grid
 
     backend_cfg = habitat_sim.SimulatorConfiguration()
     backend_cfg.scene_id = args.scene
