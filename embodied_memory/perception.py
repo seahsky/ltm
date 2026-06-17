@@ -162,6 +162,122 @@ class CLIPKeyframeEncoder:
 
 
 # ----------------------------------------------------------------------
+# CLAP audio encoder (anomaly classifier only)
+# ----------------------------------------------------------------------
+
+
+class CLAPAudioEncoder:
+    """``laion/clap-htsat-fused`` audio+text tower → 512-d joint embeddings.
+
+    Used ONLY as the 3-way anomaly CLASSIFIER (cry / alarm / glass) in
+    ``audio.classify_anomaly``; retrieval deliberately stays on the proven SBERT
+    caption path (the flat CLAP/CLIP cross-modal cosine is what closed the
+    embedding lever). Mirrors ``CLIPKeyframeEncoder``: lazy-loaded, device
+    auto-pick (cuda → mps → cpu), encode_* L2-normalize.
+
+    The model forward lives in ``_audio_features`` / ``_text_features`` (the
+    single heavy seam) so the resample + normalize logic is unit-testable
+    without loading the ~600 MB checkpoint.
+    """
+
+    TARGET_SR: int = 48000      # CLAP operates at 48 kHz
+    EMBED_DIM: int = 512
+
+    def __init__(self, model_name: str = "laion/clap-htsat-fused",
+                 device: Optional[str] = None):
+        self.model_name = model_name
+        self._requested_device = device
+        self._model = None
+        self._processor = None
+        self._device = None
+
+    @property
+    def embed_dim(self) -> int:
+        return self.EMBED_DIM
+
+    def _pick_device(self) -> str:
+        if self._requested_device is not None:
+            return self._requested_device
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda"
+            if torch.backends.mps.is_available():
+                return "mps"
+        except Exception:
+            pass
+        return "cpu"
+
+    def _lazy_load(self):
+        if self._model is not None:
+            return
+        try:
+            import torch  # noqa: F401
+            from transformers import ClapModel, ClapProcessor
+        except ImportError as e:
+            raise RuntimeError(
+                "transformers + torch are required for CLAPAudioEncoder "
+                "(pip install transformers torch)."
+            ) from e
+        device = self._pick_device()
+        model = ClapModel.from_pretrained(self.model_name).to(device).eval()
+        processor = ClapProcessor.from_pretrained(self.model_name)
+        self._model = model
+        self._processor = processor
+        self._device = device
+
+    @staticmethod
+    def _to_mono_48k(waveform: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Stereo→mono (channel mean) + resample to 48 kHz, float32 1-D."""
+        w = np.asarray(waveform, dtype=np.float32)
+        if w.ndim == 2:
+            # (C, L) if the channel axis is small, else (L, C).
+            w = w.mean(axis=0) if w.shape[0] <= w.shape[1] else w.mean(axis=1)
+        w = w.reshape(-1).astype(np.float32)
+        if int(sample_rate) != CLAPAudioEncoder.TARGET_SR:
+            from math import gcd
+            from scipy.signal import resample_poly
+            g = gcd(int(sample_rate), CLAPAudioEncoder.TARGET_SR)
+            up = CLAPAudioEncoder.TARGET_SR // g
+            down = int(sample_rate) // g
+            w = resample_poly(w, up, down).astype(np.float32)
+        return w
+
+    def _audio_features(self, mono_48k: np.ndarray) -> np.ndarray:
+        self._lazy_load()
+        import torch
+        inputs = self._processor(audios=[mono_48k], sampling_rate=self.TARGET_SR,
+                                 return_tensors="pt")
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        with torch.no_grad():
+            feats = self._model.get_audio_features(**inputs)
+        return feats.squeeze(0).detach().cpu().float().numpy()
+
+    def _text_features(self, text: str) -> np.ndarray:
+        self._lazy_load()
+        import torch
+        inputs = self._processor(text=[text], return_tensors="pt", padding=True)
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        with torch.no_grad():
+            feats = self._model.get_text_features(**inputs)
+        return feats.squeeze(0).detach().cpu().float().numpy()
+
+    @staticmethod
+    def _normalize(v: np.ndarray) -> np.ndarray:
+        v = np.asarray(v, dtype=np.float32).reshape(-1)
+        n = float(np.linalg.norm(v))
+        return v / n if n > 0.0 else v
+
+    def encode_audio(self, waveform: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Encode a waveform → L2-normalized 512-d float32 vector."""
+        return self._normalize(self._audio_features(self._to_mono_48k(waveform, sample_rate)))
+
+    def encode_text(self, text: str) -> np.ndarray:
+        """Encode a text prompt → L2-normalized 512-d float32 vector."""
+        return self._normalize(self._text_features(text))
+
+
+# ----------------------------------------------------------------------
 # Semantic captioner
 # ----------------------------------------------------------------------
 
