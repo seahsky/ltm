@@ -202,6 +202,49 @@ def case_target_override_when_detected():
     print("  case target_override_when_detected: OK")
 
 
+def case_target_prefers_anomaly_object_override():
+    # M2: a per-episode anomaly_object (the actual captioned object the source
+    # sits near, e.g. 'bed') wins over the static CLASS_TO_OBJECT mapping.
+    st = at.AudioEpisodeState(detected=True, target_override="crib",
+                              anomaly_object_override="bed")
+    assert at.audio_target_for_retrieval(st, "chair") == "bed"
+    print("  case target_prefers_anomaly_object_override: OK")
+
+
+def case_target_falls_back_to_class_to_object():
+    st = at.AudioEpisodeState(detected=True, target_override="crib",
+                              anomaly_object_override=None)
+    assert at.audio_target_for_retrieval(st, "chair") == "crib"
+    print("  case target_falls_back_to_class_to_object: OK")
+
+
+def case_target_objectnav_byte_identical_with_override_field():
+    # undetected + overrides present must STILL return the fallback verbatim
+    st = at.AudioEpisodeState(detected=False, anomaly_object_override="bed",
+                              target_override="crib")
+    assert at.audio_target_for_retrieval(st, "chair") == "chair"
+    print("  case target_objectnav_byte_identical_with_override_field: OK")
+
+
+def case_state_reset_clears_anomaly_object_override():
+    st = at.AudioEpisodeState(detected=True, anomaly_object_override="bed",
+                              target_override="crib")
+    st.reset()
+    assert st.anomaly_object_override is None and st.target_override is None
+    print("  case state_reset_clears_anomaly_object_override: OK")
+
+
+def case_resolve_t_anom():
+    # per-episode t_anom from episode.info overrides the run-level default;
+    # absent/None → default (objectnav/revisit byte-identical).
+    assert at.resolve_t_anom({"t_anom": 30}, 999) == 30
+    assert at.resolve_t_anom({"t_anom": 10000}, 30) == 10000
+    assert at.resolve_t_anom({}, 30) == 30
+    assert at.resolve_t_anom(None, 42) == 42
+    assert at.resolve_t_anom({"t_anom": None}, 7) == 7
+    print("  case resolve_t_anom: OK")
+
+
 def case_should_stop_true():
     cfg = at.AudioTaskConfig(enabled=True, energy_stop_db_rms=0.2, stop_distance_m=1.5)
     st = at.AudioEpisodeState(detected=True)
@@ -343,6 +386,11 @@ def main() -> int:
         case_process_lateral_and_energy_in_diag,
         case_target_fallback_when_undetected,
         case_target_override_when_detected,
+        case_target_prefers_anomaly_object_override,
+        case_target_falls_back_to_class_to_object,
+        case_target_objectnav_byte_identical_with_override_field,
+        case_state_reset_clears_anomaly_object_override,
+        case_resolve_t_anom,
         case_should_stop_true,
         case_should_stop_false_far,
         case_should_stop_false_quiet_and_undetected,

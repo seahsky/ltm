@@ -849,6 +849,12 @@ class EpisodeRunner:
             _ac = (ep.metadata or {}).get("audio_config") or {}
             if _ac.get("sample_rate"):
                 self._audio_cfg.sample_rate = int(_ac["sample_rate"])
+            # Per-episode t_anom (cold-silent vs warm-fires) + the captioned
+            # anomaly object the source sits near (M2). Both ride episode.info →
+            # metadata["audio_config"]; absent for the M1 single-episode smoke.
+            if _ac.get("t_anom") is not None:
+                self._audio_cfg.t_anom = int(_ac["t_anom"])
+            self._audio_state.anomaly_object_override = _ac.get("anomaly_object")
         # Fresh per-episode video buffer (no-op storage when --save-video is off).
         self._video_frames = []
         self.planner.reset(agent_pos=step.agent_state.position)

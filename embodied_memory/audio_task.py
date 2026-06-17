@@ -52,7 +52,12 @@ class AudioEpisodeState:
     once-per-episode onset/classification does not leak across episodes."""
     detected: bool = False
     anomaly_class: Optional[str] = None
-    target_override: Optional[str] = None   # CLASS_TO_OBJECT[class]; drives retrieval
+    target_override: Optional[str] = None   # CLASS_TO_OBJECT[class] (CLAP affordance)
+    # M2: the actual captioned object the anomaly source sits near, from the
+    # dataset (episode.info["anomaly_object"]). Preferred over target_override so
+    # warm recall queries the object the agent really mapped (e.g. 'bed') rather
+    # than the static affordance ('crib') — set per-episode by the runner.
+    anomaly_object_override: Optional[str] = None
     onset_step: Optional[int] = None
     last_energy: float = 0.0
     last_lateral: int = 0
@@ -61,9 +66,20 @@ class AudioEpisodeState:
         self.detected = False
         self.anomaly_class = None
         self.target_override = None
+        self.anomaly_object_override = None
         self.onset_step = None
         self.last_energy = 0.0
         self.last_lateral = 0
+
+
+def resolve_t_anom(ep_info, default: int) -> int:
+    """Per-episode anomaly onset step: ``episode.info["t_anom"]`` when present
+    (M2 writes a high value for cold-silent mapping passes and a low value for
+    warm-fires episodes), else the run-level ``default``. Absent/None → default,
+    so objectnav/revisit episodes are unchanged."""
+    if isinstance(ep_info, dict) and ep_info.get("t_anom") is not None:
+        return int(ep_info["t_anom"])
+    return int(default)
 
 
 def normalize_clip(clip, target_db: float = -20.0) -> np.ndarray:
@@ -149,11 +165,13 @@ def process_audio_step(
 
 
 def audio_target_for_retrieval(state: AudioEpisodeState, fallback_category: str) -> str:
-    """The retrieval target for ``propose_memory_candidates``: the audio-inferred
-    object once the anomaly is detected, else the fallback category VERBATIM (so
+    """The retrieval target for ``propose_memory_candidates``: once the anomaly is
+    detected, prefer the per-episode captioned object (``anomaly_object_override``,
+    the object the agent actually mapped) over the static CLASS_TO_OBJECT
+    affordance (``target_override``); else the fallback category VERBATIM (so
     objectnav/revisit/multion retrieval is byte-identical when audio is off)."""
-    if state.detected and state.target_override:
-        return state.target_override
+    if state.detected:
+        return state.anomaly_object_override or state.target_override or fallback_category
     return fallback_category
 
 

@@ -302,11 +302,17 @@ class HabitatObjectNavSource(EpisodeSource):
             "source": "habitat_live", "max_steps": self.max_steps,
         }
 
+        ep_info = getattr(env.current_episode, "info", None)
+
         # AudioGoal: lazy-load the scene-matched RIR grid + normalized clip ONCE.
-        # Gated on task=="audiogoal"; otherwise inert (objectnav unchanged).
+        # Per-episode t_anom (episode.info — M2 writes a high value for cold-
+        # silent mapping passes and a low value for warm-fires episodes) overrides
+        # the run-level default. Gated on task=="audiogoal"; otherwise inert.
+        ep_t_anom = self._audio_t_anom
         if self.task == "audiogoal" and self._rir_grid_path:
             from .audio import RIRGrid
-            from .audio_task import AudioTaskConfig
+            from .audio_task import AudioTaskConfig, resolve_t_anom
+            ep_t_anom = resolve_t_anom(ep_info, self._audio_t_anom)
             if self._rir_grid is None or self._rir_grid.scene_id != scene_label:
                 grid = RIRGrid.load(self._rir_grid_path)
                 if grid.scene_id != scene_label:
@@ -319,7 +325,7 @@ class HabitatObjectNavSource(EpisodeSource):
             if self._anomaly_clip_norm is None:
                 self._anomaly_clip_norm = self._load_anomaly_clip()
             self._audio_render_cfg = AudioTaskConfig(
-                enabled=True, t_anom=self._audio_t_anom,
+                enabled=True, t_anom=ep_t_anom,
                 sample_rate=int(self._rir_grid.sample_rate),
             )
 
@@ -327,30 +333,34 @@ class HabitatObjectNavSource(EpisodeSource):
         # make_multion_smoke into the episode's info dict) so the runner's
         # sub-goal cursor can read it from Episode.metadata. Absent the key,
         # single-goal episodes carry no chain — behaviour unchanged.
-        ep_info = getattr(env.current_episode, "info", None)
         if isinstance(ep_info, dict) and ep_info.get("object_categories"):
             metadata["object_categories"] = [
                 str(c) for c in ep_info["object_categories"]
             ]
 
-        # AudioGoal: surface the anomaly config (source position / class written
-        # by the M2 dataset builder into episode.info) for the runner + analysis.
+        # AudioGoal: surface the anomaly config (source_position / anomaly_class /
+        # anomaly_object / per-episode t_anom written by the M2 dataset builder
+        # into episode.info) for the runner + analysis.
         if self.task == "audiogoal":
             src_pos = None
             anom_cls = None
+            anom_obj = None
             if isinstance(ep_info, dict):
                 if ep_info.get("source_position") is not None:
                     src_pos = [float(v) for v in ep_info["source_position"]]
                 if ep_info.get("anomaly_class"):
                     anom_cls = str(ep_info["anomaly_class"])
+                if ep_info.get("anomaly_object"):
+                    anom_obj = str(ep_info["anomaly_object"])
             metadata["audio_config"] = {
                 "task": self.task,
                 "scene_id": scene_label,
-                "t_anom": self._audio_t_anom,
+                "t_anom": ep_t_anom,
                 "rir_grid_available": self._rir_grid is not None,
                 "sample_rate": int(self._rir_grid.sample_rate) if self._rir_grid is not None else None,
                 "source_position": src_pos,
                 "anomaly_class": anom_cls,
+                "anomaly_object": anom_obj,
             }
 
         episode = Episode(
