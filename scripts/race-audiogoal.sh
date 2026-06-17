@@ -51,7 +51,11 @@ banner() { printf '\n========== %s ==========\n' "$1"; }
 [ -x "$MINICONDA/bin/conda" ] || { echo "FATAL: $MINICONDA/bin/conda missing"; exit 1; }
 
 banner "[1/7] git pull --ff-only"
-git pull --ff-only || { echo "FATAL: git pull failed"; exit 1; }
+if [ -n "${RACE_SKIP_PULL:-}" ]; then
+  echo "  RACE_SKIP_PULL set — skipping (matrix driver already pulled once up front)"
+else
+  git pull --ff-only || { echo "FATAL: git pull failed"; exit 1; }
+fi
 
 banner "[2/7] conda setup (source scripts/race-setup.sh → $LTM_ENV)"
 set +u; source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; exit 1; }; set -u
@@ -135,6 +139,14 @@ for S in $SETTINGS; do
       --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
       --episodes-path "$DS" --scene "$SCENE" --target any \
       --n-episodes "$N_EPISODES" --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
+  # Abort LOUD on a hard crash (CUDA OOM / sim or model load / uncaught exception):
+  # pipefail makes PIPESTATUS[0] the python rc, and summary.json is written ONLY
+  # after the full episode loop completes — so a missing one == incomplete data.
+  # Without this the child would exit 0 and a matrix run would feed silently-
+  # under-powered data into the combined analyze.
+  rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] && [ -f "$out_dir/summary.json" ] \
+    || { echo "FATAL: setting=$S run failed (rc=$rc) or no summary.json at $out_dir — incomplete; see ${out_dir}.log."; exit 1; }
   OUT_DIRS="$OUT_DIRS $out_dir"
 done
 

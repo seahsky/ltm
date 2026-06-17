@@ -429,6 +429,34 @@ def _print_delta(label: str, res: Dict[str, Any]) -> None:
           f"one-sided p(<=0)={res['p_le_zero']:.3f}")
 
 
+def pool_runs_by_setting(runs: List[RevisitRun]) -> Dict[int, "RevisitRun"]:
+    """Bucket runs by setting (1/2/3), POOLING episodes when several run dirs
+    share a setting.
+
+    The standard ablation passes one dir per setting. The AudioGoal/revisit
+    MATRIX passes one dir per (scene, anomaly_class) CELL × setting (e.g. 6
+    cells × {S1,S2,S3} = 18 dirs), so each setting has multiple dirs that must
+    be MERGED — not overwritten (the old ``by_setting[s] = r`` silently kept
+    only the last cell). Pairing downstream groups by ``(scene_id,
+    target_category)``, so pooling cells is correct as long as cells use
+    DISTINCT categories (one category per class). One dir per setting is
+    unchanged (single name preserved, single episode list)."""
+    pooled_eps: Dict[int, List[RevisitEpisode]] = {}
+    pooled_names: Dict[int, List[str]] = {}
+    for r in runs:
+        if r.setting not in (1, 2, 3):
+            continue
+        s = int(r.setting)
+        pooled_eps.setdefault(s, []).extend(r.episodes)
+        pooled_names.setdefault(s, []).append(r.name)
+    out: Dict[int, RevisitRun] = {}
+    for s, eps in pooled_eps.items():
+        names = pooled_names[s]
+        name = names[0] if len(names) == 1 else f"{len(names)}cells-pooled"
+        out[s] = RevisitRun(name=name, path="", setting=s, episodes=eps)
+    return out
+
+
 def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
     """Print the full Phase-A report and return the Gate A classification."""
     for r in runs:
@@ -448,10 +476,9 @@ def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
         print(_fmt_block("warm", summ["warm"]))
     print()
 
-    by_setting: Dict[int, RevisitRun] = {}
-    for r in runs:
-        if r.setting in (1, 2, 3):
-            by_setting[int(r.setting)] = r
+    # Pool dirs per setting (matrix mode merges multiple (scene,class) cells per
+    # setting; standard ablation has one dir per setting → unchanged).
+    by_setting = pool_runs_by_setting(runs)
 
     if 1 not in by_setting or 3 not in by_setting:
         print("(skip warm delta + Gate A: need both setting 1 and setting 3 runs.)")
