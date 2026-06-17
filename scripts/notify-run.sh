@@ -1,32 +1,59 @@
 #!/bin/bash
-# scripts/notify-run.sh — run any command, then email the run report.
+# scripts/notify-run.sh — run any command, then email the run report; AND the
+# canonical home of the `nrun` self-detaching wrapper function.
 #
-# Generic wrapper for the race-*.sh drivers (zero edits to the drivers):
-# tees the wrapped command's output to runs/notify-<tag>-<ts>.log and, on
-# EXIT (normal finish, crash, Ctrl-C/SIGTERM), calls scripts/notify_email.py
-# which emails a markdown report + the gzipped log via Resend.
+# TWO usage modes:
 #
-# On RACE, launch under nohup (or inside tmux) so the run AND the
-# notification survive the SSH session disconnecting:
+#  1. SOURCE it to get `nrun` (SAFE in an interactive shell — it only defines the
+#     function and returns; it NEVER exits or changes your shell options):
 #
-#   nohup bash scripts/notify-run.sh bash scripts/race-revisit.sh --tag wide-1 &
-#   tail -f runs/notify-wide-1-*.log
+#       source scripts/notify-run.sh
+#       nrun bash scripts/race-revisit.sh --tag wide-1   # self-detaches (nohup+bg)
+#       tail -f runs/nrun-*.out
 #
-# Or via the alias from `source scripts/race-setup.sh` — nrun SELF-detaches
-# (it is a shell function, so do NOT prefix nohup; nohup can't run functions):
+#     (`source scripts/race-setup.sh` also defines nrun — it sources this file.)
 #
-#   nrun bash scripts/race-revisit.sh --tag wide-1
+#  2. EXECUTE it to wrap a command in the FOREGROUND, tee its output to
+#     runs/notify-<tag>-<ts>.log, and email a markdown report + gzipped log via
+#     scripts/notify_email.py on EXIT (normal finish, crash, Ctrl-C/SIGTERM):
+#
+#       bash scripts/notify-run.sh bash scripts/race-revisit.sh --tag wide-1
+#       nohup bash scripts/notify-run.sh bash scripts/race-revisit.sh --tag t &
 #
 # Config: RESEND_API_KEY / NOTIFY_EMAIL_TO in .env at the repo root (see
 # .env.example). Unconfigured -> the run still works, just no email.
 #
-# Exit code: ALWAYS the wrapped command's exit code — a notifier failure
-# never changes it.
+# Exit code (execute mode): ALWAYS the wrapped command's exit code — a notifier
+# failure never changes it.
 #
 # Env knobs:
 #   NOTIFY_RUN_LOG_DIR  where to write the tee'd log (default: REPO_ROOT/runs)
 #   NOTIFY_DISABLE=1    skip the email entirely
 
+# --- nrun: self-detaching, email-notified wrapper (SAFE to source) --------
+# Defined BEFORE any `set`/`exit` so that sourcing this file only ever defines
+# the function and returns — it can never kill the caller's interactive shell
+# (the old version hit `exit 2` on a no-arg source and closed the session).
+nrun() {
+  local repo_root log_dir out
+  repo_root="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  log_dir="${NOTIFY_RUN_LOG_DIR:-$repo_root/runs}"
+  mkdir -p "$log_dir"
+  out="$log_dir/nrun-$(date +%Y%m%d-%H%M%S).out"
+  # nohup + background so the run survives an SSH disconnect; do NOT prefix
+  # nohup yourself — nrun is a function and nohup cannot launch functions.
+  nohup bash "$repo_root/scripts/notify-run.sh" "$@" > "$out" 2>&1 &
+  disown 2>/dev/null || true
+  echo "[nrun] detached (pid $!) — follow with: tail -f $out"
+}
+
+# When SOURCED, stop here: nrun is defined, and we must NOT set shell options or
+# run/exit the wrapper in the caller's shell. ${BASH_SOURCE[0]} != $0 ⇔ sourced.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+  return 0
+fi
+
+# --- EXECUTED below: foreground wrapper -----------------------------------
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

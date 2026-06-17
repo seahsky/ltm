@@ -85,16 +85,24 @@ fi
 # RESEND_API_KEY / NOTIFY_EMAIL_TO in .env (see .env.example);
 # unconfigured -> runs fine, just no email.
 #   nrun bash scripts/race-revisit.sh --tag wide-1
-#   tail -f runs/notify-wide-1-*.log
+#   tail -f runs/nrun-*.out
 # For a foreground (blocking) run: bash scripts/notify-run.sh <command...>
-nrun() {
-  local log_dir="${NOTIFY_RUN_LOG_DIR:-$REPO_ROOT/runs}"
-  mkdir -p "$log_dir"
-  local out="$log_dir/nrun-$(date +%Y%m%d-%H%M%S).out"
-  nohup bash "$REPO_ROOT/scripts/notify-run.sh" "$@" > "$out" 2>&1 &
-  disown
-  echo "[nrun] detached (pid $!) — follow with: tail -f $out"
-}
+# Single source of truth: notify-run.sh defines nrun and is SAFE to source
+# (it returns without touching this shell's options/exit). Falls back to an
+# inline definition if the file is somehow absent.
+if [ -f "$REPO_ROOT/scripts/notify-run.sh" ]; then
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/scripts/notify-run.sh"
+else
+  nrun() {
+    local log_dir="${NOTIFY_RUN_LOG_DIR:-$REPO_ROOT/runs}"
+    mkdir -p "$log_dir"
+    local out="$log_dir/nrun-$(date +%Y%m%d-%H%M%S).out"
+    nohup bash "$REPO_ROOT/scripts/notify-run.sh" "$@" > "$out" 2>&1 &
+    disown 2>/dev/null || true
+    echo "[nrun] detached (pid $!) — follow with: tail -f $out"
+  }
+fi
 
 # --- 5. status block -----------------------------------------------------
 echo "[5/5] Status"
