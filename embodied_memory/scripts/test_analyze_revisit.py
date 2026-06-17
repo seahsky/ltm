@@ -375,8 +375,56 @@ def case_binary_spl_block_printed_when_runs_have_spl():
     print("  case_binary_spl_block_printed_when_runs_have_spl: OK")
 
 
+def case_pools_multiple_dirs_per_setting():
+    # Matrix mode: two cells at setting 1 (distinct categories), one at setting 3.
+    # pool_runs_by_setting must MERGE the two setting-1 dirs' episodes, not drop
+    # one (the old by_setting[s]=r overwrote → only the last survived).
+    s1a = _run(1, [_ep("A", 1, "bed", 0), _ep("A", 2, "bed", 1)])
+    s1b = _run(1, [_ep("B", 1, "sofa", 0), _ep("B", 2, "sofa", 1)])
+    s3 = _run(3, [_ep("A", 3, "bed", 0)])
+    pooled = ar.pool_runs_by_setting([s1a, s1b, s3])
+    assert set(pooled.keys()) == {1, 3}, pooled.keys()
+    assert len(pooled[1].episodes) == 4, len(pooled[1].episodes)  # both cells pooled
+    assert sorted({e.target_category for e in pooled[1].episodes}) == ["bed", "sofa"]
+    assert len(pooled[3].episodes) == 1
+    print("  case_pools_multiple_dirs_per_setting: OK")
+
+
+def case_pool_single_dir_per_setting_unchanged():
+    # Back-compat: the standard 3-run ablation (one dir per setting) is unchanged.
+    s1 = _run(1, [_ep("A", 1, "bed", 0)])
+    s3 = _run(3, [_ep("A", 2, "bed", 1)])
+    pooled = ar.pool_runs_by_setting([s1, s3])
+    assert set(pooled.keys()) == {1, 3}
+    assert len(pooled[1].episodes) == 1 and len(pooled[3].episodes) == 1
+    print("  case_pool_single_dir_per_setting_unchanged: OK")
+
+
+def case_matrix_report_pools_cells_for_warm_delta():
+    # End-to-end: two setting-1 cells + two setting-3 cells (distinct categories,
+    # distinct scenes) → print_report must pair warm across BOTH cells, not just
+    # the last-loaded one. Warm n should be >= 2 (one warm pair per cell).
+    s1_bed = _run(1, [_ep("A", 1, "bed", 0, soft=0.1), _ep("A", 2, "bed", 1, soft=0.1)])
+    s1_sofa = _run(1, [_ep("B", 1, "sofa", 0, soft=0.1), _ep("B", 2, "sofa", 1, soft=0.1)])
+    s3_bed = _run(3, [_ep("A", 1, "bed", 0, soft=0.1), _ep("A", 2, "bed", 1, soft=0.9, n_mem_chosen=1)])
+    s3_sofa = _run(3, [_ep("B", 1, "sofa", 0, soft=0.1), _ep("B", 2, "sofa", 1, soft=0.8, n_mem_chosen=1)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ar.print_report([s1_bed, s1_sofa, s3_bed, s3_sofa], n_bootstrap=500)
+    out = buf.getvalue()
+    # Both warm pairs (bed + sofa) must contribute → WARM delta n=2, not n=1.
+    assert "WARM S3 - S1" in out, out
+    import re
+    m = re.search(r"WARM S3 - S1[^\n]*?n=(\d+)", out)
+    assert m and int(m.group(1)) == 2, out
+    print("  case_matrix_report_pools_cells_for_warm_delta: OK")
+
+
 def main() -> int:
     print("Phase-A revisit analyzer sanity tests")
+    case_pools_multiple_dirs_per_setting()
+    case_pool_single_dir_per_setting_unchanged()
+    case_matrix_report_pools_cells_for_warm_delta()
     case_visit_order_by_idx()
     case_visit_order_cold_warm_flags()
     case_visit_order_separates_categories_and_scenes()

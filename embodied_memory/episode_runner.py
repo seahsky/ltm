@@ -1124,9 +1124,18 @@ class EpisodeRunner:
                     self._audio_state, self.clap_encoder)
                 step.info.update(_adiag)
                 if _adiag.get("onset_fired"):
+                    # Show BOTH the heard-class affordance (CLASS_TO_OBJECT, the
+                    # 'heard->' field) AND the RESOLVED retrieval target that
+                    # propose_memory_candidates actually queries. In onset-trigger
+                    # framing these differ: anomaly_object_override (the co-located
+                    # goal category) wins over the class affordance, so the old
+                    # single 'target=' field (the affordance) was misleading.
+                    _resolved_tgt = audio_task.audio_target_for_retrieval(
+                        self._audio_state, ep.target_category)
                     print(f"[audio] onset @step {step.step_idx} "
                           f"class={_adiag.get('audio_class')} "
-                          f"target={_adiag.get('audio_target_override')} "
+                          f"heard->{_adiag.get('audio_target_override')} "
+                          f"retrieval_target={_resolved_tgt} "
                           f"energy={_adiag.get('audio_energy', 0.0):.3f}", flush=True)
             if is_oracle:
                 # Oracle short-circuit: steer straight to the goal, bypassing
