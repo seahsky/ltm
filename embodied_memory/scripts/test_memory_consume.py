@@ -110,7 +110,8 @@ def _bootstrap():
 
     percep.Keyframe = _Keyframe
     remembr = _stub_submodule("embodied_memory.remembr_backbone",
-                              ["ReMEmbRBuilder", "ReMEmbRPlanner"])
+                              ["ReMEmbRBuilder", "ReMEmbRPlanner",
+                               "planner_decision_kind", "planner_retrieve_calls"])
     remembr._goal_terms = _goal_terms_stub
     remembr._caption_mentions = _caption_mentions_stub
     hab = types.ModuleType("embodied_memory.habitat_env")

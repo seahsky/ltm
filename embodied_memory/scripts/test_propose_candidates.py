@@ -81,7 +81,8 @@ def _bootstrap():
                     ["CLIPKeyframeEncoder", "Keyframe", "SemanticCaptioner"])
     _stub_submodule("embodied_memory.remembr_backbone",
                     ["ReMEmbRBuilder", "ReMEmbRPlanner",
-                     "_caption_mentions", "_goal_terms"])
+                     "_caption_mentions", "_goal_terms",
+                     "planner_decision_kind", "planner_retrieve_calls"])
     # habitat_env stub: only its _ACTION_NAMES list is needed (by the oracle
     # action map); the real module imports AgentState which the episode_source
     # stub doesn't provide, so we can't load it here.

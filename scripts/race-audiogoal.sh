@@ -58,7 +58,7 @@ set +u; source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; ex
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 banner "[3/7] pre-verify (free; abort before spend)"
-for t in test_make_audiogoal_smoke test_audio_task test_make_revisit_smoke test_analyze_revisit; do
+for t in test_make_audiogoal_smoke test_audio_task test_make_revisit_smoke test_analyze_revisit test_planner_decision_kind; do
   python embodied_memory/scripts/$t.py \
     || { echo "FATAL: $t failed — not spending on the live run."; exit 1; }
 done
@@ -141,6 +141,34 @@ done
 banner "[7/7] Gate-A verdict (warm paired soft-SPL S3-S1 + S2 decomposition)"
 # shellcheck disable=SC2086
 python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS 2>&1 | tee "runs/${TAG}-${CLASS}-analysis.log"
+echo
+
+# Planner-decision census (S3): WHY the LLM planner's own pick never wins the
+# rerank (n_remembr_chosen). goto = it grounded a remembered waypoint (then lost
+# the rerank to the injected memory candidate for the same spot); explore = it
+# said nothing relevant; retrieve_calls=0 == it never queried memory at all.
+banner "planner decision census (S3 — is the LLM 'too dumb to recall'?)"
+S3_SUM="runs/${TAG}-${CLASS}-s3/summary.json"
+if [ -f "$S3_SUM" ]; then
+  python - "$S3_SUM" <<'PYEOF'
+import json, sys
+s = json.load(open(sys.argv[1]))
+g = lambda k: s.get(k, 0)
+print("  proposals=%d  goto=%d  explore=%d  grounding_rejected=%d  budget_defer=%d  stop=%d  retrieve_calls=%d"
+      % (g("n_planner_proposals"), g("n_planner_goto"), g("n_planner_explore"),
+         g("n_planner_grounding_rejected"), g("n_planner_budget_defer"),
+         g("n_planner_stop"), g("n_planner_retrieve_calls")))
+print("  reranks won: remembr(LLM)=%d  memory(injected)=%d  frontier=%d"
+      % (g("n_remembr_chosen"), g("n_memory_chosen"), g("n_frontier_chosen")))
+verdict = ("NEVER TRIED to recall (lazy/too-dumb)" if g("n_planner_retrieve_calls") == 0
+           else "TRIED to recall (goto=%d) but its pick lost the rerank to injected memory" % g("n_planner_goto")
+                if g("n_planner_goto") > 0
+                else "queried memory but always answered explore (found nothing relevant)")
+print("  -> %s" % verdict)
+PYEOF
+else
+  echo "  (no S3 summary at $S3_SUM)"
+fi
 echo
 echo "DONE. AudioGoal warm S1-vs-S3 for ($SCENE,$CLASS). Cold-silent (t_anom high)"
 echo "seeds the LTM; warm episodes fire the anomaly. Onset lines: grep '\\[audio\\]' the run logs."

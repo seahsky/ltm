@@ -64,7 +64,8 @@ def _bootstrap():
                     ["CLIPKeyframeEncoder", "Keyframe", "SemanticCaptioner"])
     _stub_submodule("embodied_memory.remembr_backbone",
                     ["ReMEmbRBuilder", "ReMEmbRPlanner",
-                     "_caption_mentions", "_goal_terms"])
+                     "_caption_mentions", "_goal_terms",
+                     "planner_decision_kind", "planner_retrieve_calls"])
     hab = types.ModuleType("embodied_memory.habitat_env")
     hab._ACTION_NAMES = [
         "stop", "move_forward", "turn_left", "turn_right", "look_up", "look_down",
