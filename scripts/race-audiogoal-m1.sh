@@ -67,9 +67,13 @@ python -m embodied_memory.run_hm3d_pol \
 rc=${PIPESTATUS[0]}
 
 banner "wiring assertions"
+# Class-agnostic wiring check: the synthetic burst may classify as any anomaly
+# class; we assert the audio→class→object→retrieval mapping is consistent, not a
+# specific class (CLAP accuracy on real FSD50K clips is an M3 metric). Pass
+# --expect-class only with a known-class real --anomaly-clip.
 python embodied_memory/scripts/verify_audiogoal_wiring.py \
     --log "$OUT_DIR/frontier.log" --run "$OUT_DIR/frontier" \
-    --t-anom "$T_ANOM" --expect-object crib 2>&1 | tee "$OUT_DIR/verify.log"
+    --t-anom "$T_ANOM" 2>&1 | tee "$OUT_DIR/verify.log"
 [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "RED: wiring assertions failed"; fail=1; }
 
 # --- 4/4. objectnav regression (same scene, no audio) ---------------------
