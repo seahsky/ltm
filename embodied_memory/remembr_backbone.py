@@ -420,6 +420,59 @@ class PlannerTrace:
     stub_mode: bool = False
 
 
+# Tool-call markers that classify a planner decision (see planner_decision_kind).
+_PLANNER_REJECT_TOOLS = frozenset({
+    "goto_rejected_unknown_t",
+    "goto_rejected_zero_displacement",
+    "answer_xy_rejected_far_from_memory",
+})
+_PLANNER_RETRIEVE_TOOLS = frozenset({
+    "retrieve_from_text",
+    "retrieve_from_position",
+    "retrieve_from_time",
+})
+
+
+def planner_decision_kind(trace) -> str:
+    """Bucket one planner decision (a PlannerTrace) into a single outcome:
+    ``stub`` | ``stop`` | ``grounding_rejected`` | ``goto`` | ``explore`` |
+    ``budget_defer`` | ``none``.
+
+    This is the diagnostic that answers "is the LLM too dumb to know it needs
+    memory?". With ``n_remembr_chosen=0``, the bucket tells WHY the planner's
+    own pick never won: it never tried to recall (``explore`` / ``none``, and
+    ``planner_retrieve_calls==0``) vs it answered ``goto`` and grounded a real
+    waypoint that simply lost the rerank to the injected memory/frontier
+    candidates (``goto``) vs it answered but grounding rejected the timestep
+    (``grounding_rejected``). Pure; duck-typed on ``.tool_calls`` /
+    ``.stub_mode`` so it is testable without the model stack.
+    """
+    if getattr(trace, "stub_mode", False):
+        return "stub"
+    tools = {tc.get("tool") for tc in (getattr(trace, "tool_calls", None) or [])}
+    if "stop_check" in tools:
+        return "stop"
+    if tools & _PLANNER_REJECT_TOOLS:   # answered goto/xy but grounding refused it
+        return "grounding_rejected"
+    if "answer_goto" in tools or "answer_xy" in tools:
+        return "goto"                   # grounded a real remembered waypoint
+    if "answer_explore" in tools:
+        return "explore"                # LLM said nothing relevant remembered
+    if "budget_exhausted_defer" in tools:
+        return "budget_defer"           # ran out of tool budget without answering
+    return "none"
+
+
+def planner_retrieve_calls(trace) -> int:
+    """Count ``retrieve_from_*`` tool invocations in the trace. Zero means the
+    LLM never queried memory at all — the strongest "too dumb to recall"
+    signal (it answered without consulting the memory tools)."""
+    return sum(
+        1 for tc in (getattr(trace, "tool_calls", None) or [])
+        if tc.get("tool") in _PLANNER_RETRIEVE_TOOLS
+    )
+
+
 class ReMEmbRPlanner:
     """LLM agent + retrieval tools. Returns 1–3 ``FrontierCandidate``s."""
 

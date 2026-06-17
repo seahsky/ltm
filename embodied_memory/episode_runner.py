@@ -44,6 +44,8 @@ from .remembr_backbone import (
     ReMEmbRPlanner,
     _caption_mentions,
     _goal_terms,
+    planner_decision_kind,
+    planner_retrieve_calls,
 )
 
 if TYPE_CHECKING:
@@ -72,6 +74,18 @@ class RunSummary:
     coarse_top_cos_max: float = float("nan")  # max top CLIP room cosine seen (calibration)
     n_remembr_chosen: int = 0         # decisions where reranker picked a grounded remembr (LLM) candidate
     n_stop_signals: int = 0           # decisions where backbone emitted a grounded STOP
+    # Planner-decision diagnostics (remembr backbone): WHY the LLM planner's own
+    # pick never wins. goto = grounded a remembered waypoint (then lost the
+    # rerank to injected memory/frontier); explore = said nothing relevant;
+    # grounding_rejected = answered but grounding refused; retrieve_calls=0 ==
+    # never queried memory at all (the "too dumb to recall" signal).
+    n_planner_proposals: int = 0
+    n_planner_goto: int = 0
+    n_planner_explore: int = 0
+    n_planner_grounding_rejected: int = 0
+    n_planner_budget_defer: int = 0
+    n_planner_stop: int = 0
+    n_planner_retrieve_calls: int = 0
     n_detector_called: int = 0
     n_detector_localized: int = 0
     n_detector_locate_failed: int = 0
@@ -106,6 +120,13 @@ class RunSummary:
             "coarse_top_cos_max": float(self.coarse_top_cos_max),
             "n_remembr_chosen": self.n_remembr_chosen,
             "n_stop_signals": self.n_stop_signals,
+            "n_planner_proposals": self.n_planner_proposals,
+            "n_planner_goto": self.n_planner_goto,
+            "n_planner_explore": self.n_planner_explore,
+            "n_planner_grounding_rejected": self.n_planner_grounding_rejected,
+            "n_planner_budget_defer": self.n_planner_budget_defer,
+            "n_planner_stop": self.n_planner_stop,
+            "n_planner_retrieve_calls": self.n_planner_retrieve_calls,
             "n_detector_called": self.n_detector_called,
             "n_detector_localized": self.n_detector_localized,
             "n_detector_locate_failed": self.n_detector_locate_failed,
@@ -747,6 +768,10 @@ class EpisodeRunner:
                 _hist[_rm] = _hist.get(_rm, 0) + int(_cnt)
             summary.n_remembr_chosen += int(ep_metrics.get("n_remembr_chosen", 0))
             summary.n_stop_signals += int(ep_metrics.get("n_stop_signals", 0))
+            for _pk in ("n_planner_proposals", "n_planner_goto", "n_planner_explore",
+                        "n_planner_grounding_rejected", "n_planner_budget_defer",
+                        "n_planner_stop", "n_planner_retrieve_calls"):
+                setattr(summary, _pk, getattr(summary, _pk) + int(ep_metrics.get(_pk, 0)))
             summary.n_detector_called += int(ep_metrics.get("n_detector_called", 0))
             summary.n_detector_localized += int(ep_metrics.get("n_detector_localized", 0))
             summary.n_detector_locate_failed += int(ep_metrics.get("n_detector_locate_failed", 0))
@@ -778,6 +803,13 @@ class EpisodeRunner:
                 "coarse_top_cos_max": float(ep_metrics.get("coarse_top_cos_max", float("nan"))),
                 "n_remembr_chosen": int(ep_metrics.get("n_remembr_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
+                "n_planner_proposals": int(ep_metrics.get("n_planner_proposals", 0)),
+                "n_planner_goto": int(ep_metrics.get("n_planner_goto", 0)),
+                "n_planner_explore": int(ep_metrics.get("n_planner_explore", 0)),
+                "n_planner_grounding_rejected": int(ep_metrics.get("n_planner_grounding_rejected", 0)),
+                "n_planner_budget_defer": int(ep_metrics.get("n_planner_budget_defer", 0)),
+                "n_planner_stop": int(ep_metrics.get("n_planner_stop", 0)),
+                "n_planner_retrieve_calls": int(ep_metrics.get("n_planner_retrieve_calls", 0)),
                 "n_detector_called": int(ep_metrics.get("n_detector_called", 0)),
                 "n_detector_localized": int(ep_metrics.get("n_detector_localized", 0)),
                 "n_detector_locate_failed": int(ep_metrics.get("n_detector_locate_failed", 0)),
@@ -948,6 +980,19 @@ class EpisodeRunner:
             # consumed on reached-without-advance + pool drops they caused.
             "n_memory_consumed": 0,
             "n_candidates_filtered_consumed": 0,
+            # Planner-decision diagnostics (remembr backbone only): WHY the LLM
+            # planner's own pick never wins (n_remembr_chosen). One bucket per
+            # propose() call — goto = grounded a remembered waypoint (then lost
+            # the rerank), explore = said nothing relevant, grounding_rejected =
+            # answered but grounding refused, budget_defer = ran out of budget,
+            # stop = STOP short-circuit. retrieve_calls=0 == never queried memory.
+            "n_planner_proposals": 0,
+            "n_planner_goto": 0,
+            "n_planner_explore": 0,
+            "n_planner_grounding_rejected": 0,
+            "n_planner_budget_defer": 0,
+            "n_planner_stop": 0,
+            "n_planner_retrieve_calls": 0,
         }
         # Closest the agent ever gets to a goal viewpoint over the episode
         # (geodesic). success@0.1m is perception-bound with caption-only
@@ -1158,6 +1203,21 @@ class EpisodeRunner:
                 cands = self._propose_candidates(
                     step, ep, goal_override=active_category if multion else None
                 )
+                # Classify the LLM planner's decision (remembr backbone only) so
+                # we can see WHY its grounded pick never wins the rerank
+                # (n_remembr_chosen): tried-and-lost (goto) vs never-tried
+                # (explore/none, retrieve_calls=0) vs grounding_rejected.
+                if (getattr(self, "backbone", None) == "remembr"
+                        and getattr(self, "remembr_planner", None) is not None):
+                    _ptrace = getattr(self.remembr_planner, "last_trace", None)
+                    if _ptrace is not None:
+                        ep_metrics_counters["n_planner_proposals"] += 1
+                        _pkind = planner_decision_kind(_ptrace)
+                        _pkey = f"n_planner_{_pkind}"
+                        if _pkey in ep_metrics_counters:
+                            ep_metrics_counters[_pkey] += 1
+                        ep_metrics_counters["n_planner_retrieve_calls"] += \
+                            planner_retrieve_calls(_ptrace)
                 if multion and subgoal_idx < n_subgoals - 1 and cands:
                     # STOP-vs-advance: before the final sub-goal a backbone
                     # stop_signal must not terminate the episode — drop it and
@@ -1855,6 +1915,10 @@ class EpisodeRunner:
         ep_log["coarse_room_hist"] = dict(coarse_room_hist)
         ep_log["n_remembr_chosen"] = n_remembr_chosen
         ep_log["n_stop_signals"] = n_stop_signals
+        for _pk in ("n_planner_proposals", "n_planner_goto", "n_planner_explore",
+                    "n_planner_grounding_rejected", "n_planner_budget_defer",
+                    "n_planner_stop", "n_planner_retrieve_calls"):
+            ep_log[_pk] = int(ep_metrics_counters[_pk])
         ep_log["n_waypoint_reached"] = int(ep_metrics_counters["n_waypoint_reached"])
         ep_log["n_waypoint_unreachable"] = int(ep_metrics_counters["n_waypoint_unreachable"])
         ep_log["n_forward_no_progress"] = int(ep_metrics_counters["n_forward_no_progress"])
@@ -1939,6 +2003,13 @@ class EpisodeRunner:
             "coarse_room_hist": dict(coarse_room_hist),
             "n_remembr_chosen": n_remembr_chosen,
             "n_stop_signals": n_stop_signals,
+            "n_planner_proposals": int(ep_metrics_counters["n_planner_proposals"]),
+            "n_planner_goto": int(ep_metrics_counters["n_planner_goto"]),
+            "n_planner_explore": int(ep_metrics_counters["n_planner_explore"]),
+            "n_planner_grounding_rejected": int(ep_metrics_counters["n_planner_grounding_rejected"]),
+            "n_planner_budget_defer": int(ep_metrics_counters["n_planner_budget_defer"]),
+            "n_planner_stop": int(ep_metrics_counters["n_planner_stop"]),
+            "n_planner_retrieve_calls": int(ep_metrics_counters["n_planner_retrieve_calls"]),
             "n_detector_called": int(ep_metrics_counters["n_detector_called"]),
             "n_detector_localized": int(ep_metrics_counters["n_detector_localized"]),
             "n_detector_locate_failed": int(ep_metrics_counters["n_detector_locate_failed"]),

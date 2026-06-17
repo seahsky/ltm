@@ -89,7 +89,8 @@ def _bootstrap():
 
     percep.Keyframe = _Keyframe
     remembr = _stub_submodule("embodied_memory.remembr_backbone",
-                              ["ReMEmbRBuilder", "ReMEmbRPlanner"])
+                              ["ReMEmbRBuilder", "ReMEmbRPlanner",
+                               "planner_decision_kind", "planner_retrieve_calls"])
     # The advance check + arrival-STOP call these as functions — stub with
     # behaviour-equivalent implementations (word-boundary keyword match).
     remembr._goal_terms = _goal_terms_stub
