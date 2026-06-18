@@ -93,6 +93,14 @@ banner() { printf '\n########## %s ##########\n' "$1"; }
 
 banner "[1/5] git pull --ff-only (ONCE for the whole matrix)"
 git pull --ff-only || { echo "FATAL: git pull failed"; exit 1; }
+# The commit the matrix actually runs. A VARIANT A/B arm (--caption-rerank /
+# --temporal) writes to a PERSISTENT out-prefix (m3c-*/m3t-*); without provenance
+# a prior OLD-CODE run's out-dirs satisfy the summary.json-only RESUME check, so
+# the arm resumes STALE data and the newly-changed memory head never executes
+# (the caption-rerank zero-sum re-run that exited in 4 s with mem_chosen still
+# 499). Gate the VARIANT RESUME on this HEAD: a code change => new commit => new
+# HEAD => forced re-run. The baseline path never reads/writes the marker.
+HEAD_SHA="$(git rev-parse HEAD)"
 
 banner "[2/5] conda setup (source race-setup.sh -> ltm-embodied)"
 set +u; source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; exit 1; }; set -u
@@ -139,13 +147,26 @@ for S in $SCENES; do
     cell_dirs=""; done_count=0
     for N in $SETTINGS; do
       od="runs/${OUT_TAG}-${C}-s${N}"; cell_dirs="$cell_dirs $od"
-      [ -f "$od/summary.json" ] && done_count=$((done_count+1))
+      if [ -n "$VARIANT_ON" ]; then
+        # VARIANT arm: a dir counts done only if produced at the CURRENT HEAD —
+        # else it is stale old-code data (see the [1/5] note). Old dirs lack
+        # .driver_commit (or hold a different SHA) => not done => correctly re-run.
+        [ -f "$od/summary.json" ] && [ "$(cat "$od/.driver_commit" 2>/dev/null)" = "$HEAD_SHA" ] \
+          && done_count=$((done_count+1))
+      else
+        # BASELINE arm: UNCHANGED — summary.json existence only, never reads the
+        # marker, so the ~10 h baseline matrix is never force-re-run by this change.
+        [ -f "$od/summary.json" ] && done_count=$((done_count+1))
+      fi
     done
     # Track the S3 dir pair for the variant pooled compare (baseline A vs variant B).
     BASE_S3_DIRS="$BASE_S3_DIRS runs/${PREFIX}-${S}-${C}-s3"
     VAR_S3_DIRS="$VAR_S3_DIRS runs/${OUT_TAG}-${C}-s3"
     if [ "$done_count" -eq "$N_SET" ]; then
       echo "  RESUME: cell ($S,$C->$CAT) already complete ($N_SET/$N_SET out-dirs) — skipping"
+      # Variant arm: (re-)stamp the marker so it keeps meaning "complete at HEAD"
+      # (idempotent; baseline never writes it).
+      [ -n "$VARIANT_ON" ] && for od in $cell_dirs; do echo "$HEAD_SHA" > "$od/.driver_commit"; done
       OUT_DIRS="$OUT_DIRS $cell_dirs"; continue
     fi
     banner "cell: scene=$S class=$C category=$CAT  n_warm=$NWARM settings=[$SETTINGS] out_tag=$OUT_TAG"
@@ -162,6 +183,9 @@ for S in $SCENES; do
     for od in $cell_dirs; do
       [ -f "$od/summary.json" ] \
         || { echo "FATAL: cell ($S,$C->$CAT) returned OK but $od/summary.json is missing — refusing to analyze incomplete data."; exit 1; }
+      # Variant arm: stamp the marker so this fresh run's out-dirs are recognized
+      # as "complete at HEAD" on a later resume (baseline never writes it).
+      [ -n "$VARIANT_ON" ] && echo "$HEAD_SHA" > "$od/.driver_commit"
     done
     OUT_DIRS="$OUT_DIRS $cell_dirs"
   done

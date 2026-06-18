@@ -192,6 +192,59 @@ def pick_warm_poses(
     return [pose for _, pose in scored[:n]]
 
 
+def pick_warm_poses_changed_world(
+    candidate_poses: List[Dict[str, Any]],
+    reachable_poses: List[Dict[str, Any]],
+    goal_b_vp_positions: List[List[float]],
+    n: int,
+    min_dist: float = 2.0,
+) -> List[Dict[str, Any]]:
+    """Reachability-biased warm-start selection for the CHANGED-WORLD build.
+
+    The regular ``pick_warm_poses`` is FARTHEST-first, which on a real navmesh
+    maximises the chance of grabbing a start on a navmesh component DISCONNECTED
+    from goal B (a different floor / balcony / island) → Infinity start→B
+    geodesic → NaN soft_SPL (proven on RACE run cw-2: every wcojb chair warm
+    episode was Infinity/NaN, yet the cold episode — which starts at an instance
+    A view_point — had a FINITE geodesic to B). Same lesson already learned for
+    ``pick_warm_instance`` (nearest beats farthest for reachability).
+
+    So here we (1) draw from a PROVEN-REACHABLE pool — instance A's view_point
+    poses FIRST (the cold episode starts at A's best view_point and reaches B, so
+    A's region is navmesh-connected to B), then the category source starts as a
+    backfill — and (2) rank NEAREST-to-B first (proximity correlates with being
+    on the same navmesh component), while still dropping anything closer than
+    ``min_dist`` so a real path to B remains (the warm agent does not start on
+    top of B). The analyzer NaN-guard stays the backstop.
+
+    ``reachable_poses`` (instance A's view_point poses) are preferred over
+    ``candidate_poses`` (the category source starts) at equal distance, so an
+    A view_point always out-ranks a source start the same distance from B.
+    """
+    def _filter(poses: List[Dict[str, Any]]) -> List[Any]:
+        out: List[Any] = []
+        for pose in poses:
+            pos = pose.get("position")
+            if not pos:
+                continue
+            if goal_b_vp_positions:
+                d = min(_dist(pos, g) for g in goal_b_vp_positions)
+            else:
+                d = math.inf
+            if d < min_dist:
+                continue
+            out.append((d, pose))
+        return out
+
+    # Tag the proven-reachable A view_points with priority 0 (preferred) and the
+    # category source starts with priority 1, then sort NEAREST-to-B first with
+    # the proven-reachable poses winning ties.
+    scored: List[Any] = [(d, 0, pose) for d, pose in _filter(reachable_poses)]
+    scored += [(d, 1, pose) for d, pose in _filter(candidate_poses)]
+    scored.sort(key=lambda t: (t[0], t[1]))
+    return [pose for _, _, pose in scored[:n]]
+
+
 # ----------------------------------------------------------------------
 # episode assembly
 # ----------------------------------------------------------------------
@@ -318,7 +371,11 @@ def build_changed_world_dataset(
     keyed to a DIFFERENT instance B (``pick_warm_instance`` — the NEAREST other
     instance at least ``min_move`` m away, for navmesh reachability), so the cold
     sighting of A is now STALE — recalling it leads the agent to the wrong place.
-    Warm starts are far from B. Every episode is marked
+    Warm starts are drawn reachability-biased toward B (``pick_warm_poses_changed_world``:
+    A's view_point poses, proven navmesh-connected to B since cold-from-A reaches
+    it, plus same-category source starts ranked NEAREST-to-B, kept >= ``min_dist``
+    away) — the prior farthest-first selection grabbed disconnected-island starts
+    (Infinity geodesic → NaN soft_SPL on RACE cw-2). Every episode is marked
     ``info['goal_changed']=True`` (+ diagnostic stale/goal positions). Categories
     with <2 instances (no genuine move) are SKIPPED.
 
@@ -354,7 +411,20 @@ def build_changed_world_dataset(
             if ep.get("object_category") == cat
             and ep.get("start_position") and ep.get("start_rotation")
         ]
-        warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps_b, n=n_warm, min_dist=min_dist)
+        # Reachability-biased warm starts (see ``pick_warm_poses_changed_world``):
+        # the farthest-first ``pick_warm_poses`` grabbed a start on a navmesh
+        # component DISCONNECTED from B (→ Infinity geodesic / NaN soft_SPL on
+        # RACE cw-2). Draw from the PROVEN-reachable region — instance A's
+        # view_point poses (the cold episode starts there and reaches B) — plus
+        # the category source starts, ranked NEAREST-to-B (same-component bias),
+        # keeping a >= min_dist gap so a real path to B remains.
+        a_reachable_poses = [
+            {"position": list(vp), "rotation": list(cold_pose["rotation"])}
+            for vp in _goal_view_point_positions([cold_inst])
+        ]
+        warm_poses = pick_warm_poses_changed_world(
+            cat_candidate_poses, a_reachable_poses, goal_vps_b,
+            n=n_warm, min_dist=min_dist)
         out_goals[gkey] = [warm_inst]                        # success keyed to B
         eps = build_category_episodes(template, cold_pose, warm_poses, cat)
         a_pos = _instance_centroid(cold_inst)
