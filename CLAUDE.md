@@ -113,6 +113,34 @@ min_d2g *worsened*) = the SBERT instance ceiling surfacing, not a bug. Caveats: 
 `(scene_id, target_category, visit_order)` (stage-1 silently dropped pairs on Habitat
 `episode_id` renumbering). Next = **M4 temporal-context head** (default-OFF, A/B'd).
 
+**AudioGoal M4 outcome (2026-06-18, real ReMEmbR, `--temporal` A/B on the M3 warm matrix,
+`runs/m3t-*` — see `PHASE2_ABLATION_REPORT.md` → "AudioGoal M4").** The one net-new mechanism
+the ICRA plan promised: a **temporal-context head** (recency≈reliability — additive recency
+bonus, max `LTM_TEMPORAL_WEIGHT`=0.05, on the SBERT-cos `raw_score` of already-recalled
+same-category sightings; env-gated `LTM_TEMPORAL_CONTEXT`, default-OFF). A/B'd (A=baseline S3
+`m3-*`, B=temporal-on S3 `m3t-*`, paired on the renumbering-invariant key). **Clean honest
+negative: it does not change warm outcomes — warm soft-SPL B−A = −0.0005 (n=18, CI
+[−0.0015,+0.0000] — a tie at the floor, NOT a regression), binary SPL +0.0000, succ@1m/steps/
+fire-rate bit-identical.** The predicted over-fire DID appear at the *selection* layer (warm
+mem_chosen 271→339, +25%, concentrated in the documented wrong-instance `alarm:toilet`/TEEsav
+cell = 161) but was harmless: +25% extra picks are credit **re-attribution**, not re-routing
+(same goal category, same already-relevant region → same destination). Code-verified mechanism
+(3-lens adversarial review, all agree): the bonus is **read-side** (mutates `c.raw_score` after
+candidates are emitted, `memory_bridge.py:983-988`) and **never touches write-gating** — the
+genuine difference from the R/U importance heads (which changed write-gating → stored more
+wrong-instance frames). So this is a *cleaner* negative than coarse (never-chosen): the head was
+exercised (fired more) yet inert on outcomes. Cold is head-independent (mem_chosen=0 both arms ⇒
+the bonus block can't fire; the +0.068/step-swing is backbone variance; cold n=6 underpowered).
+**M4 joins coarse-affordance + R/U as built/correct/conservative-but-not-beating-the-heuristic;
+the bottleneck stays SBERT instance discrimination, default stays OFF.** Caveats for the paper:
+the eval lacks the head's *design regime* (a changed world — static map between cold-map and
+warm-visit, so no stale-vs-fresh signal); B is a *re-run* of M3's A arm (NOT a new repro — count
+stays on M3 +0.171); M4-inert proves "recency adds nothing on top," NOT "gain=recall" (that rests
+on the M3 decomposition S2−S1 n.s. / S3−S2 +0.172). Also fixed the analyzer's floor-artifact
+verdict line (`analyze_revisit._compare_verdict` + `_VERDICT_TIE_BAND`=0.005 → sub-band |Δ| now
+reports "tie at the floor"; 4 TDD cases, 33 total). Paper value: pre-empts the "did you try
+recency weighting?" reviewer question and sharpens the M3 story.
+
 ## Audit caveats (2026-06-08)
 
 A read-only fact-check (the "diagnose-first" program; full version in

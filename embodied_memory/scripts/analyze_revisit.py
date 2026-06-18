@@ -354,6 +354,32 @@ def compare_runs(
     }
 
 
+# Practical-significance floor for the compare verdict, on the soft-SPL [0,1]
+# scale. The paired bootstrap can clamp a CI bound at exactly 0 and report
+# p(<=0)≈0.000 for a delta of a few ten-thousandths (a floor artifact, not a
+# real win/loss) — reported verbatim that misreads as a significant regression.
+# The thesis-relevant effects (+0.10..+0.24) are >20x this; a |Δ| below it is a
+# tie regardless of the bootstrap sign. (M4's warm Δ=-0.0005 is well below.)
+_VERDICT_TIE_BAND = 0.005
+
+
+def _compare_verdict(wm: Dict, tie_band: float = _VERDICT_TIE_BAND) -> str:
+    """Render the warm soft-SPL B−A verdict, treating sub-band |Δ| as a tie."""
+    mean = wm["mean"]
+    p_le = wm["p_le_zero"]
+    if abs(mean) < tie_band:
+        return (f"no meaningful warm soft-SPL difference (Δ={mean:+.4f}, "
+                f"|Δ|<{tie_band:g} — statistical tie at the floor).")
+    if mean > 0 and p_le < 0.1:
+        return f"B beats A on warm soft-SPL (p={p_le:.3f})."
+    if mean > 0:
+        return (f"B higher on warm soft-SPL but not significant "
+                f"(p={p_le:.3f}) — directional only.")
+    if mean < 0 and (1.0 - p_le) < 0.1:
+        return f"A beats B on warm soft-SPL (p={1.0 - p_le:.3f})."
+    return "no significant warm soft-SPL difference (statistical tie)."
+
+
 def print_compare(run_a: RevisitRun, run_b: RevisitRun, n_bootstrap: int) -> None:
     """Report the head-to-head paired delta (B - A) between two same-setting runs."""
     assign_visit_order(run_a.episodes)
@@ -381,17 +407,7 @@ def print_compare(run_a: RevisitRun, run_b: RevisitRun, n_bootstrap: int) -> Non
     _print_delta(f"WARM  {run_b.name} - {run_a.name}", res["warm_spl"])
     _print_delta(f"COLD  {run_b.name} - {run_a.name}", res["cold_spl"])
     print()
-    wm = res["warm_soft"]
-    if wm["mean"] > 0 and wm["p_le_zero"] < 0.1:
-        verdict = f"B beats A on warm soft-SPL (p={wm['p_le_zero']:.3f})."
-    elif wm["mean"] > 0:
-        verdict = (f"B higher on warm soft-SPL but not significant "
-                   f"(p={wm['p_le_zero']:.3f}) — directional only.")
-    elif wm["mean"] < 0 and (1.0 - wm["p_le_zero"]) < 0.1:
-        verdict = f"A beats B on warm soft-SPL (p={1.0 - wm['p_le_zero']:.3f})."
-    else:
-        verdict = "no significant warm soft-SPL difference (statistical tie)."
-    print(f"=== verdict ===\n  {verdict}\n")
+    print(f"=== verdict ===\n  {_compare_verdict(res['warm_soft'])}\n")
 
 
 # ----------------------------------------------------------------------
