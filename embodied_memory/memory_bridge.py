@@ -126,6 +126,44 @@ _GOAL_QUERY_TEMPLATE = "there is a {}"
 
 
 # ----------------------------------------------------------------------
+# M4 temporal-context head (env-gated LTM_TEMPORAL_CONTEXT, DEFAULT-OFF).
+# Among the recalled same-category sightings, give the MORE RECENTLY consolidated
+# ones a small additive bonus on the SBERT-cos scale before rerank — recency ~
+# reliability in a lifelong map (the world may have changed, so prefer the freshest
+# sighting). Default weight 0.05 but only applied when LTM_TEMPORAL_CONTEXT is set,
+# so the standard objectnav/revisit/audiogoal path stays byte-identical. A/B-ablated.
+# ----------------------------------------------------------------------
+_TEMPORAL_WEIGHT = float(os.environ.get("LTM_TEMPORAL_WEIGHT", "0.05"))
+
+
+def _temporal_recency_bonus(step_indices: List[Any], weight: float) -> List[float]:
+    """Per-candidate additive recency bonus, aligned to ``step_indices``.
+
+    ``step_indices`` is each memory candidate's consolidation ``step_idx``
+    (``-1`` or ``None`` = unknown). The most-recent valid entry gets ``+weight``,
+    the oldest ``0``, linear in step value between. Unknown entries and the
+    degenerate cases (``weight <= 0`` or fewer than 2 DISTINCT valid steps) get
+    ``0`` — a strict no-op, so the head can never *introduce* a signal where
+    recency is undefined.
+    """
+    n = len(step_indices)
+    if weight <= 0.0:
+        return [0.0] * n
+    valid = [int(s) for s in step_indices if s is not None and s >= 0]
+    if len(set(valid)) < 2:
+        return [0.0] * n
+    lo, hi = min(valid), max(valid)
+    span = float(hi - lo)
+    out: List[float] = []
+    for s in step_indices:
+        if s is None or s < 0:
+            out.append(0.0)
+        else:
+            out.append(weight * (float(int(s)) - lo) / span)
+    return out
+
+
+# ----------------------------------------------------------------------
 # Frontier physics scorer (S_phys)
 # ----------------------------------------------------------------------
 
@@ -937,6 +975,17 @@ class EmbodiedMemoryBridge:
             )
             if len(out) >= top_k:
                 break
+
+        # M4 temporal-context head (default-OFF). Among the recalled same-category
+        # sightings, boost the more-recently consolidated ones' rerank score so
+        # the freshest relevant sighting wins. Env-gated; off → raw_score
+        # untouched → byte-identical to every prior run.
+        if out and os.environ.get("LTM_TEMPORAL_CONTEXT"):
+            steps = [c.metadata.get("ltm_step_idx", -1) for c in out]
+            for c, b in zip(out, _temporal_recency_bonus(steps, _TEMPORAL_WEIGHT)):
+                if b:
+                    c.raw_score = float(c.raw_score) + b
+                    c.metadata["temporal_bonus"] = float(b)
 
         _dbg["emitted"] = len(out)
         if os.environ.get("LTM_PROPOSE_DEBUG"):
