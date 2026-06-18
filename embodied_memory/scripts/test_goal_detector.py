@@ -410,19 +410,32 @@ def _env(**kv):
 
 class _MockOwlModel:
     """Mock OWLv2 model — forward pass returns an opaque outputs object that
-    only the paired _MockOwlProcessor knows how to post-process."""
+    only the paired _MockOwlProcessor knows how to post-process. ASSERTS the
+    real forward contract: Owlv2ForObjectDetection.forward REQUIRES input_ids
+    (a text prompt) AND pixel_values, so a kwargs build that drops input_ids
+    (the BatchFeature-is-not-a-dict bug) must fail HERE in the unit test, not
+    only on RACE. Records the last kwargs for direct inspection."""
+    def __init__(self):
+        self.last_kwargs = None
     def __call__(self, **kwargs):
+        self.last_kwargs = kwargs
+        assert "input_ids" in kwargs, f"OWLv2 forward missing input_ids: {sorted(kwargs)}"
+        assert "pixel_values" in kwargs, f"OWLv2 forward missing pixel_values: {sorted(kwargs)}"
         return "owl-outputs"
 
 
 class _MockOwlProcessor:
-    """Mock OWLv2 processor: __call__ returns a dict (BatchEncoding stand-in);
-    post-processing returns the configured pixel-space xyxy boxes + scores."""
+    """Mock OWLv2 processor. __call__ returns a ``UserDict`` — the real
+    Owlv2Processor returns a ``BatchFeature``, which is a ``UserDict`` and is
+    NOT a ``dict`` subclass (``isinstance(x, dict)`` is False). It carries
+    input_ids + attention_mask + pixel_values, so the detector must extract
+    them by mapping key (not via ``isinstance(.,dict)`` / ``.pixel_values``)."""
     def __init__(self, boxes, scores):
         self.boxes = boxes
         self.scores = scores
     def __call__(self, text=None, images=None, return_tensors=None):
-        return {"pixel_values": "px"}
+        from collections import UserDict
+        return UserDict({"input_ids": "ids", "attention_mask": "am", "pixel_values": "px"})
     def post_process_grounded_object_detection(
         self, outputs, threshold=0.0, target_sizes=None, **kw
     ):
@@ -547,6 +560,24 @@ def case_owlv2_picks_lowest_depth_box_among_confident():
     print("  case_owlv2_picks_lowest_depth_box_among_confident: OK")
 
 
+def case_owlv2_forwards_input_ids_to_model():
+    # The RACE crash: Owlv2Processor returns a BatchFeature (a UserDict, NOT a
+    # dict), so isinstance(inputs, dict) was False and the kwargs build dropped
+    # the REQUIRED input_ids -> forward() TypeError. Lock the fix: the model
+    # must receive input_ids AND pixel_values (extracted by mapping key).
+    snap = np.array([0.1, 0.0, 2.0], dtype=np.float32)
+    det = _owl_detector([[120, 120, 160, 160]], [0.42], snap)
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_SCORE_THRESH=None):
+        det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                   depth=np.full((256, 256), 2.0, dtype=np.float32),
+                   goal_category="chair",
+                   agent_pose=np.eye(4, dtype=np.float32),
+                   intrinsics=_intrinsics())
+    kw = det._owl_model.last_kwargs
+    assert kw is not None and "input_ids" in kw and "pixel_values" in kw, kw
+    print("  case_owlv2_forwards_input_ids_to_model: OK")
+
+
 def case_default_backend_is_qwen_and_untouched():
     # DETECTOR_BACKEND unset => the qwen path runs byte-identically and the
     # OWLv2 attributes are never touched (poison object trips otherwise).
@@ -599,6 +630,7 @@ def main() -> int:
     case_owlv2_no_detection_returns_none()
     case_owlv2_clips_out_of_bounds_box()
     case_owlv2_picks_lowest_depth_box_among_confident()
+    case_owlv2_forwards_input_ids_to_model()
     case_default_backend_is_qwen_and_untouched()
     print("All cases passed.")
     return 0

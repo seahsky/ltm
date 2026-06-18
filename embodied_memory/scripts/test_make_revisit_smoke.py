@@ -448,20 +448,91 @@ def _single_instance_src(glb="wcojb4TFT35.basis.glb"):
     }
 
 
-def case_pick_warm_instance_returns_farthest_other():
+def _three_instance_src(glb="wcojb4TFT35.basis.glb"):
+    """chair with THREE instances: cold target A (best iou) at origin, a NEAR
+    other B_near, and a FAR other B_far. The moved-to goal must be B_near (a
+    genuine move, but nearest → most likely same navmesh component → reachable;
+    the farthest is the one that produced Infinity geodesic / NaN soft_SPL)."""
+    return {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {
+            f"{glb}_chair": [
+                _goal([0, 0, 0], [_vp([0, 0, 0], iou=1.8)]),     # A (cold target)
+                _goal([5, 0, 5], [_vp([5, 0, 5], iou=0.6)]),     # B_near
+                _goal([40, 0, 40], [_vp([40, 0, 40], iou=0.5)]),  # B_far
+            ],
+        },
+        "episodes": [{**_template("chair", "1"), "start_position": [3, 0, 3]}],
+    }
+
+
+def case_pick_warm_instance_returns_the_other_instance():
+    # 2-instance fixture: nearest==farthest==the only other instance, so the
+    # result is unchanged ([20,0,20]) — but the semantics are now "the one valid
+    # move", not "farthest".
     src = _multi_instance_src()
     insts = src["goals_by_category"]["wcojb4TFT35.basis.glb_chair"]
     cold = mk.pick_cold_instance(insts)          # TARGET at [0,0,0]
-    warm = mk.pick_warm_instance(insts, cold)    # the OTHER instance
-    assert warm is not None
-    assert warm["position"] == [20, 0, 20], warm  # the distractor, farthest from A
-    print("  case pick_warm_instance_returns_farthest_other: OK")
+    warm = mk.pick_warm_instance(insts, cold)
+    assert warm is not None and warm["position"] == [20, 0, 20], warm
+    print("  case pick_warm_instance_returns_the_other_instance: OK")
+
+
+def case_pick_warm_instance_prefers_nearest_genuine_move():
+    # 3 instances: the moved-to goal must be the NEAREST other (B_near at [5,0,5]),
+    # NOT the farthest ([40,0,40]) — reachability over distance.
+    insts = _three_instance_src()["goals_by_category"]["wcojb4TFT35.basis.glb_chair"]
+    cold = mk.pick_cold_instance(insts)          # A (iou 1.8) at [0,0,0]
+    warm = mk.pick_warm_instance(insts, cold)
+    assert warm["position"] == [5, 0, 5], warm
+    print("  case pick_warm_instance_prefers_nearest_genuine_move: OK")
+
+
+def case_pick_warm_instance_respects_min_move():
+    # An other instance within min_move (0.5 m < 1.5) is NOT a genuine move and
+    # is skipped in favour of the next-nearest above the floor.
+    glb = "wcojb4TFT35.basis.glb"
+    insts = [
+        _goal([0, 0, 0], [_vp([0, 0, 0], iou=1.8)]),     # A
+        _goal([0.5, 0, 0], [_vp([0.5, 0, 0], iou=0.6)]),  # too close (< min_move)
+        _goal([6, 0, 6], [_vp([6, 0, 6], iou=0.5)]),     # genuine move
+    ]
+    cold = mk.pick_cold_instance(insts)
+    warm = mk.pick_warm_instance(insts, cold, min_move=1.5)
+    assert warm["position"] == [6, 0, 6], warm
+    print("  case pick_warm_instance_respects_min_move: OK")
+
+
+def case_pick_warm_instance_falls_back_when_all_below_min_move():
+    # Only one other instance and it is below min_move → still return it (never
+    # silently drop a >=2-instance category); the NaN-guard is the backstop.
+    insts = [
+        _goal([0, 0, 0], [_vp([0, 0, 0], iou=1.8)]),
+        _goal([0.3, 0, 0], [_vp([0.3, 0, 0], iou=0.6)]),
+    ]
+    cold = mk.pick_cold_instance(insts)
+    warm = mk.pick_warm_instance(insts, cold, min_move=1.5)
+    assert warm is not None and warm["position"] == [0.3, 0, 0], warm
+    print("  case pick_warm_instance_falls_back_when_all_below_min_move: OK")
 
 
 def case_pick_warm_instance_none_when_single():
     insts = _single_instance_src()["goals_by_category"]["wcojb4TFT35.basis.glb_chair"]
     assert mk.pick_warm_instance(insts, insts[0]) is None
     print("  case pick_warm_instance_none_when_single: OK")
+
+
+def case_changed_world_keys_goal_to_nearest_move():
+    # End-to-end: the 3-instance src keys success to B_near ([5,0,5]) and the cold
+    # episode still starts at A's best view_point (seeds the now-stale A).
+    src = _three_instance_src()
+    gkey = "wcojb4TFT35.basis.glb_chair"
+    content = mk.build_changed_world_dataset(src, categories=["chair"], n_warm=1)
+    goals = content["goals_by_category"][gkey]
+    assert len(goals) == 1 and goals[0]["position"] == [5, 0, 5], goals
+    assert content["episodes"][0]["start_position"] == [0, 0, 0], content["episodes"][0]
+    print("  case changed_world_keys_goal_to_nearest_move: OK")
 
 
 def case_changed_world_keys_goal_to_different_instance():
@@ -521,8 +592,12 @@ def main() -> int:
     case_cross_env_cold_home_warm_away()
     case_cross_env_warm_starts_from_away_scene()
     case_cross_env_skips_category_absent_in_either_scene()
-    case_pick_warm_instance_returns_farthest_other()
+    case_pick_warm_instance_returns_the_other_instance()
+    case_pick_warm_instance_prefers_nearest_genuine_move()
+    case_pick_warm_instance_respects_min_move()
+    case_pick_warm_instance_falls_back_when_all_below_min_move()
     case_pick_warm_instance_none_when_single()
+    case_changed_world_keys_goal_to_nearest_move()
     case_changed_world_keys_goal_to_different_instance()
     case_changed_world_marks_every_episode()
     case_changed_world_skips_single_instance_category()

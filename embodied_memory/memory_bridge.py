@@ -179,15 +179,20 @@ _CAPTION_RERANK_WEIGHT = float(os.environ.get("LTM_CAPTION_RERANK_WEIGHT", "0.05
 
 
 def _caption_centrality_bonus(embeddings: List[Any], weight: float) -> List[float]:
-    """Per-candidate additive centrality bonus, aligned to ``embeddings``.
+    """Per-candidate ZERO-SUM centrality bonus, aligned to ``embeddings``.
 
     Centrality of candidate ``i`` = mean cosine of its caption embedding to every
-    OTHER candidate's. The most-central candidate (the dominant same-instance
-    cluster) gets ``+weight``, the least-central ``0``, linear between. A strict
-    no-op (all zeros) when ``weight <= 0``, fewer than 2 candidates, or no spread
-    in centrality — so the head can never *introduce* a signal where the recalled
+    OTHER candidate's. The bonus is MEAN-CENTERED and span-normalized to
+    ``[-weight, +weight]`` with ``sum ≈ 0``: the most-central candidate (the
+    well-observed instance cluster) is BOOSTED, the outliers are DEMOTED by the
+    same total. This RE-ORDERS *within* the recalled memory candidates without
+    inflating memory-vs-frontier mass — the earlier all-positive ``[0, weight]``
+    form over-fired (warm mem_chosen +84%, no benefit) by pushing memory
+    candidates (incl. ones below the physics NULL floor) over frontier wholesale.
+    Strict no-op (all zeros) when ``weight <= 0``, fewer than 2 candidates, or no
+    centrality spread — so it never *introduces* a signal where the recalled
     sightings are indistinguishable. Zero-norm embeddings are treated as cos 0
-    with everything (maximally un-central), never NaN.
+    with everything (maximally un-central → most demoted), never NaN.
     """
     n = len(embeddings)
     if weight <= 0.0 or n < 2:
@@ -201,11 +206,12 @@ def _caption_centrality_bonus(embeddings: List[Any], weight: float) -> List[floa
     for i in range(n):
         sims = [float(np.dot(units[i], units[j])) for j in range(n) if j != i]
         cent.append(sum(sims) / len(sims) if sims else 0.0)
-    lo, hi = min(cent), max(cent)
-    span = hi - lo
-    if span <= 1e-9:
+    mean_c = sum(cent) / n
+    centered = [c - mean_c for c in cent]   # sums to 0 by construction
+    m = max(abs(x) for x in centered)
+    if m <= 1e-9:                            # no centrality spread → no-op
         return [0.0] * n
-    return [weight * (c - lo) / span for c in cent]
+    return [weight * x / m for x in centered]   # in [-weight, +weight], sum ≈ 0
 
 
 # ----------------------------------------------------------------------
@@ -1031,7 +1037,9 @@ class EmbodiedMemoryBridge:
         if out and os.environ.get("LTM_CAPTION_RERANK"):
             for c, b in zip(out, _caption_centrality_bonus(out_embs, _CAPTION_RERANK_WEIGHT)):
                 if b:
-                    c.raw_score = float(c.raw_score) + b
+                    # zero-sum bonus can be negative; clamp so a demotion never
+                    # drives the cosine score below 0 (cos is naturally >= 0 here).
+                    c.raw_score = max(float(c.raw_score) + b, 0.0)
                     c.metadata["caption_rerank_bonus"] = float(b)
 
         # M4 temporal-context head (default-OFF). Among the recalled same-category

@@ -109,34 +109,52 @@ def case_no_spread_is_noop():
     print("  case no_spread_is_noop: OK")
 
 
-def case_boosts_clustered_instance_over_outlier():
-    # v0,v1 are a tight cluster (cos 0.8 — the well-observed goal instance seen
-    # twice); v2 is orthogonal (a one-off distractor). The clustered pair is more
-    # central → gets +weight; the outlier is least central → 0.
+def case_central_boosted_outlier_demoted():
+    # v0,v1 are a tight cluster (cos 0.8 — the well-observed instance seen twice);
+    # v2 is orthogonal (a one-off distractor). ZERO-SUM: the clustered pair is
+    # BOOSTED (>0), the outlier DEMOTED (<0), and the bonuses sum to ~0 (no
+    # memory-mass inflation). cent=[0.4,0.4,0]→centered=[.133,.133,-.267]→
+    # /max=.267, ×0.1 → [+0.05,+0.05,-0.1].
     v0, v1, v2 = _v(1, 0, 0), _v(0.8, 0.6, 0), _v(0, 0, 1)
     b = cent([v0, v1, v2], 0.1)
-    assert abs(b[0] - 0.1) < 1e-6, b
-    assert abs(b[1] - 0.1) < 1e-6, b
-    assert abs(b[2] - 0.0) < 1e-6, b
-    print("  case boosts_clustered_instance_over_outlier: OK")
+    assert abs(b[0] - 0.05) < 1e-6, b
+    assert abs(b[1] - 0.05) < 1e-6, b
+    assert abs(b[2] + 0.10) < 1e-6, b      # outlier demoted (negative)
+    assert b[0] > 0 and b[1] > 0 and b[2] < 0, b
+    assert abs(sum(b)) < 1e-6, b           # zero-sum
+    print("  case central_boosted_outlier_demoted: OK")
+
+
+def case_zero_sum_invariant():
+    # The load-bearing contract: bonuses sum to ~0 for any non-degenerate input,
+    # so the head re-orders WITHIN memory without inflating memory-vs-frontier
+    # mass (this is what kills the +84% over-fire).
+    for embs in ([_v(1, 0, 0), _v(0.9, 0.4, 0), _v(0, 1, 0)],
+                 [_v(1, 0, 0), _v(0.8, 0.6, 0), _v(0, 0, 1), _v(0.1, 0.1, 0.99)]):
+        b = cent(embs, 0.07)
+        assert abs(sum(b)) < 1e-6, (embs, b)
+        assert all(abs(x) <= 0.07 + 1e-6 for x in b), b   # bounded by weight
+    print("  case zero_sum_invariant: OK")
 
 
 def case_normalizes_unnormalized_embeddings():
     # Scaling an embedding must not change its cosine-derived centrality.
     v0, v1, v2 = _v(2, 0, 0), _v(0.8, 0.6, 0), _v(0, 0, 5)
     b = cent([v0, v1, v2], 0.1)
-    assert abs(b[0] - 0.1) < 1e-6, b
-    assert abs(b[2] - 0.0) < 1e-6, b
+    assert abs(b[0] - 0.05) < 1e-6, b
+    assert abs(b[2] + 0.10) < 1e-6, b
+    assert abs(sum(b)) < 1e-6, b
     print("  case normalizes_unnormalized_embeddings: OK")
 
 
 def case_zero_vector_is_safe():
     # A zero-norm embedding must not crash or NaN; it is treated as maximally
-    # un-central (cos 0 with everything) → 0 bonus, others computed normally.
+    # un-central (cos 0 with everything) → most DEMOTED (most negative), finite.
     v0, v1, vz = _v(1, 0, 0), _v(0.8, 0.6, 0), _v(0, 0, 0)
     b = cent([v0, v1, vz], 0.1)
     assert all(np.isfinite(x) for x in b), b
-    assert abs(b[2] - 0.0) < 1e-6, b   # zero vector is least central
+    assert b[2] < 0, b                      # zero vector is least central → demoted
+    assert abs(sum(b)) < 1e-6, b
     print("  case zero_vector_is_safe: OK")
 
 
@@ -146,7 +164,8 @@ def main() -> int:
     case_negative_weight_is_noop()
     case_too_few_candidates_is_noop()
     case_no_spread_is_noop()
-    case_boosts_clustered_instance_over_outlier()
+    case_central_boosted_outlier_demoted()
+    case_zero_sum_invariant()
     case_normalizes_unnormalized_embeddings()
     case_zero_vector_is_safe()
     print("All cases passed.")

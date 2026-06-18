@@ -82,13 +82,11 @@ banner "[2/7] conda setup (source scripts/race-setup.sh)"
 # shellcheck disable=SC1091
 source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; exit 1; }
 
-# Lever-3: select the OWLv2 open-vocab backend for every detector call. The
-# detector-OFF arm never calls locate(), so it stays byte-identical to baseline.
-export DETECTOR_BACKEND=owlv2
-export DETECTOR_OWL_SCORE_THRESH="$OWL_THRESH"
-echo "  [owlv2] DETECTOR_BACKEND=owlv2  DETECTOR_OWL_SCORE_THRESH=$OWL_THRESH"
-
 # --- 3. pre-test code verify ---
+# NOTE: DETECTOR_BACKEND is deliberately NOT exported yet — the pre-tests
+# (test_goal_detector.py) build a GoalDetector and would mis-dispatch to the
+# OWLv2 path (loading the real model) if the env var leaked in here. The export
+# happens AFTER this block, so the unit tests run in the clean qwen-default env.
 banner "[3/7] pre-test code verify (analyzer + builder + SPL-guard + encoder + episode-order + analyze_ablation + goal_detector + episode_runner_detector)"
 python embodied_memory/scripts/test_analyze_revisit.py \
   || { echo "FATAL: analyze_revisit sanity suite failed"; exit 1; }
@@ -106,6 +104,14 @@ python embodied_memory/scripts/test_goal_detector.py \
   || { echo "FATAL: goal_detector sanity suite failed (incl. OWLv2 dispatch/threshold)"; exit 1; }
 python embodied_memory/scripts/test_episode_runner_detector.py \
   || { echo "FATAL: episode_runner_detector sanity suite failed"; exit 1; }
+
+# Lever-3: select the OWLv2 open-vocab backend for every detector call (read
+# per-call in goal_detector._backend()). Exported HERE — after the pre-tests —
+# so the qwen unit tests above ran clean. The detector-OFF arm never calls
+# locate(), so it stays byte-identical to the c7/c9 baseline regardless.
+export DETECTOR_BACKEND=owlv2
+export DETECTOR_OWL_SCORE_THRESH="$OWL_THRESH"
+echo "  [owlv2] DETECTOR_BACKEND=owlv2  DETECTOR_OWL_SCORE_THRESH=$OWL_THRESH"
 
 # --- 4. build revisit dataset (same as race-revisit.sh) ---
 banner "[4/7] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR"
