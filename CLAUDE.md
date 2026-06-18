@@ -86,6 +86,33 @@ decomposition cleanly attributes the gain to the LTM**: S2−S1 = exactly 0.000
 multi-scene cold-first ordering) and the S2 delta reporting in `analyze_revisit.py`;
 the memory stack itself was unchanged from Run 8.
 
+## ICRA-2027 paper push — AudioGoal anomaly-response arc
+
+The project pivoted (2026-06-10) to an ICRA-2027 paper: **LTM-grounded temporal-context
+anomaly response**. The agent maps a home (silent pass → persistent SBERT-indexed LTM),
+then an FSD50K anomaly sound (baby cry / alarm / glass break) fires from a source
+co-located with a captioned goal object; the warm agent recalls the region. CLAP is a
+3-way onset trigger/classifier only (class→category decorative); retrieval reuses
+`propose_memory_candidates` verbatim. Audio is rendered offline (`render_rir_grid.py`,
+soundspaces env) and convolved O(1) in the live runner — the two-env split holds. Full
+arc in the `paper-push-icra2027` memory; M0–M2 (audio path / wiring / dataset builder)
+landed; **M3 = the powered milestone (see `PHASE2_ABLATION_REPORT.md` → "AudioGoal M3").**
+
+**AudioGoal M3 outcome (2026-06-18, real ReMEmbR, 2 scenes × 3 cells × S1/S2/S3,
+`runs/m3-*`).** Pooled warm soft-SPL **S3−S1 = +0.171 (n=18, 90% CI [+0.070,+0.277],
+p=0.002)** — a legitimate independent reproduction of the warm-relevant-LTM thesis in the
+new audio task (~12th repro; between priors +0.115/+0.24). Clean decomposition (S2−S1 n.s.
+⇒ 100 % LTM-specific S3−S2 +0.172, p=0.004) and cold control ≈ 0. **First significant
+binary SPL@0.1 m: +0.139, p=0.003** (code-verified real STOPs; *refines* not retracts the
+localization-bound finding — 0.1 m reachable because the cold seed starts at a goal
+viewpoint; concentrated in wcojb glass:chair). Heterogeneity HIGH (4/6 cells win, 2
+regress): alarm:toilet/TEEsav −0.113 is the documented wrong-instance over-fire (fired 93×,
+min_d2g *worsened*) = the SBERT instance ceiling surfacing, not a bug. Caveats: cell-fragile
+(leave-best-out → +0.095, p≈0.07); within-scene **not** cross-env; quote both 0.1 m and
+1.0 m rings. The analyzer pairing was re-keyed to the renumbering-invariant
+`(scene_id, target_category, visit_order)` (stage-1 silently dropped pairs on Habitat
+`episode_id` renumbering). Next = **M4 temporal-context head** (default-OFF, A/B'd).
+
 ## Audit caveats (2026-06-08)
 
 A read-only fact-check (the "diagnose-first" program; full version in
