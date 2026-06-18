@@ -111,7 +111,12 @@ python embodied_memory/scripts/test_episode_runner_detector.py \
 # locate(), so it stays byte-identical to the c7/c9 baseline regardless.
 export DETECTOR_BACKEND=owlv2
 export DETECTOR_OWL_SCORE_THRESH="$OWL_THRESH"
-echo "  [owlv2] DETECTOR_BACKEND=owlv2  DETECTOR_OWL_SCORE_THRESH=$OWL_THRESH"
+# OWLv2 lands on CPU by default (goal_detector._owl_device) — the L4 (22 GiB)
+# can't co-fit OWLv2 + the ReMEmbR backbone (Qwen2-VL-2B + Qwen2.5-7B); the
+# detector fires rarely (near-goal, gated) so CPU is fine. This export reduces
+# GPU fragmentation for the backbone (recommended by the OOM message itself).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+echo "  [owlv2] DETECTOR_BACKEND=owlv2  DETECTOR_OWL_SCORE_THRESH=$OWL_THRESH  DETECTOR_OWL_DEVICE=${DETECTOR_OWL_DEVICE:-cpu}  PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
 
 # --- 4. build revisit dataset (same as race-revisit.sh) ---
 banner "[4/7] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR"

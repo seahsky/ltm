@@ -571,6 +571,129 @@ def case_changed_world_skips_single_instance_category():
     print("  case changed_world_skips_single_instance_category: OK")
 
 
+# ----------------------------------------------------------------------
+# changed-world warm starts are REACHABILITY-biased toward B (RACE cw-2 bug):
+# the farthest-first selection grabbed a start on a navmesh component
+# DISCONNECTED from B (→ Infinity start→B geodesic → NaN soft_SPL on every
+# wcojb chair warm episode), while the cold episode — starting at an A
+# view_point — reached B fine. So warm starts must be drawn from the
+# PROVEN-reachable region (A's view_points + the NEAREST-to-B source starts),
+# NOT the farthest island. The regular revisit path stays farthest-first.
+# ----------------------------------------------------------------------
+
+
+def _disconnected_island_src(glb="wcojb4TFT35.basis.glb"):
+    """Cold target A at the origin; the moved-to goal B is the NEAREST genuine
+    move at [6,0,0]; there is also a 3rd instance so the category is buildable.
+    The category's source episode starts are a NEAR-B reachable start [10,0,0]
+    (4 m from B) and a FAR ISLAND start [100,0,100] (≈140 m from B → a different
+    navmesh component → Infinity geodesic). Farthest-first grabs the island;
+    reachability-biased selection must avoid it and prefer the near start and
+    A's own (proven-reachable) view_point."""
+    return {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {
+            f"{glb}_chair": [
+                _goal([0, 0, 0], [_vp([0, 0, 0], iou=1.8)]),      # A (cold target)
+                _goal([6, 0, 0], [_vp([6, 0, 0], iou=0.6)]),      # B (nearest move)
+                _goal([50, 0, 50], [_vp([50, 0, 50], iou=0.5)]),  # 3rd instance
+            ],
+        },
+        "episodes": [
+            {**_template("chair", "1"), "start_position": [10, 0, 0]},      # near B (reachable)
+            {**_template("chair", "2"), "start_position": [100, 0, 100]},   # far island (unreachable)
+        ],
+    }
+
+
+def case_changed_world_warm_avoids_disconnected_island():
+    # n_warm=2 → the two reachable poses (near-B source [10,0,0] at 4 m, then A's
+    # own view_point [0,0,0] at 6 m) are chosen; the farthest island [100,0,100]
+    # is NEVER selected even though farthest-first would grab it first.
+    src = _disconnected_island_src()
+    content = mk.build_changed_world_dataset(src, categories=["chair"], n_warm=2)
+    warm = [e["start_position"] for e in content["episodes"][1:]]
+    assert [100, 0, 100] not in warm, warm                  # island avoided
+    assert warm == [[10, 0, 0], [0, 0, 0]], warm            # near source, then A view_point
+    # success is keyed to B (the nearest move), cold still starts at A.
+    gkey = "wcojb4TFT35.basis.glb_chair"
+    assert content["goals_by_category"][gkey][0]["position"] == [6, 0, 0]
+    assert content["episodes"][0]["start_position"] == [0, 0, 0]
+    print("  case changed_world_warm_avoids_disconnected_island: OK")
+
+
+def case_changed_world_warm_drops_too_close_to_b():
+    # A reachable pose closer than min_dist to B must be dropped (a real path to
+    # B has to remain — the warm agent cannot start on top of B).
+    glb = "wcojb4TFT35.basis.glb"
+    src = {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {
+            f"{glb}_chair": [
+                _goal([0, 0, 0], [_vp([0, 0, 0], iou=1.8)]),   # A
+                _goal([6, 0, 0], [_vp([6, 0, 0], iou=0.6)]),   # B (nearest move)
+                _goal([50, 0, 50], [_vp([50, 0, 50], iou=0.5)]),
+            ],
+        },
+        "episodes": [
+            {**_template("chair", "1"), "start_position": [6.5, 0, 0]},  # 0.5 m from B (< min_dist)
+            {**_template("chair", "2"), "start_position": [10, 0, 0]},   # 4 m from B (kept)
+        ],
+    }
+    content = mk.build_changed_world_dataset(src, categories=["chair"], n_warm=3, min_dist=2.0)
+    warm = [e["start_position"] for e in content["episodes"][1:]]
+    assert [6.5, 0, 0] not in warm, warm                    # too close → dropped
+    assert [10, 0, 0] in warm, warm
+    assert [0, 0, 0] in warm, warm                          # A view_point (6 m, kept)
+    print("  case changed_world_warm_drops_too_close_to_b: OK")
+
+
+def case_pick_warm_poses_changed_world_nearest_first():
+    # Unit test of the new selector: NEAREST-to-B first (NOT farthest), with the
+    # proven-reachable A poses winning ties against equidistant source starts.
+    goal_b = [[0, 0, 0]]
+    source = [
+        {"position": [20, 0, 0], "rotation": [0, 0, 0, 1]},  # far island
+        {"position": [3, 0, 0], "rotation": [0, 0, 0, 1]},   # nearer
+    ]
+    reachable = [{"position": [5, 0, 0], "rotation": [0, 0, 0, 1]}]  # A view_point
+    warm = mk.pick_warm_poses_changed_world(source, reachable, goal_b, n=3, min_dist=2.0)
+    # nearest-first: source [3] (3 m), A vp [5] (5 m), source island [20] (20 m)
+    assert [p["position"] for p in warm] == [[3, 0, 0], [5, 0, 0], [20, 0, 0]], warm
+    print("  case pick_warm_poses_changed_world_nearest_first: OK")
+
+
+def case_pick_warm_poses_changed_world_prefers_reachable_on_tie():
+    # At equal distance to B, the proven-reachable A pose out-ranks the source
+    # start (priority tiebreak → reachability bias).
+    goal_b = [[0, 0, 0]]
+    source = [{"position": [5, 0, 0], "rotation": [0, 0, 0, 1]}]
+    reachable = [{"position": [0, 0, 5], "rotation": [0, 0, 0, 1]}]  # also 5 m from B
+    warm = mk.pick_warm_poses_changed_world(source, reachable, goal_b, n=1, min_dist=2.0)
+    assert warm[0]["position"] == [0, 0, 5], warm  # A view_point wins the tie
+    print("  case pick_warm_poses_changed_world_prefers_reachable_on_tie: OK")
+
+
+def case_build_dataset_regular_path_still_farthest_first():
+    # Regression guard: the REGULAR revisit build (build_dataset) MUST stay
+    # farthest-first and is NOT changed by the changed-world reachability fix.
+    # On the same island fixture, the regular path grabs the farthest source
+    # start ([100,0,100]) first — the exact behaviour the revisit eval depends on.
+    src = _disconnected_island_src()
+    content = mk.build_dataset(src, categories=["chair"], n_warm=2)
+    warm = [e["start_position"] for e in content["episodes"][1:]]
+    assert warm[0] == [100, 0, 100], warm  # farthest from all goals → first (unchanged)
+    # and pick_warm_poses itself is byte-identical farthest-first
+    fw = mk.pick_warm_poses(
+        [{"position": [10, 0, 0], "rotation": [0, 0, 0, 1]},
+         {"position": [100, 0, 100], "rotation": [0, 0, 0, 1]}],
+        [[0, 0, 0]], n=2, min_dist=2.0)
+    assert [p["position"] for p in fw] == [[100, 0, 100], [10, 0, 0]], fw
+    print("  case build_dataset_regular_path_still_farthest_first: OK")
+
+
 def main() -> int:
     print("Phase-B1 controlled-start dataset builder sanity tests")
     case_cold_pose_picks_max_iou_viewpoint()
@@ -601,6 +724,11 @@ def main() -> int:
     case_changed_world_keys_goal_to_different_instance()
     case_changed_world_marks_every_episode()
     case_changed_world_skips_single_instance_category()
+    case_changed_world_warm_avoids_disconnected_island()
+    case_changed_world_warm_drops_too_close_to_b()
+    case_pick_warm_poses_changed_world_nearest_first()
+    case_pick_warm_poses_changed_world_prefers_reachable_on_tie()
+    case_build_dataset_regular_path_still_farthest_first()
     print("All cases passed.")
     return 0
 

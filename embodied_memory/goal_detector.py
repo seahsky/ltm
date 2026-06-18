@@ -248,6 +248,19 @@ class GoalDetector:
         shared). Read per-call so drivers can flip the env without rebuilding."""
         return (os.environ.get("DETECTOR_BACKEND") or "qwen").strip().lower()
 
+    def _owl_device(self) -> Optional[str]:
+        """Device for the OWLv2 detector — INDEPENDENT of self.device (which the
+        Qwen captioner/planner backbone fills). On an L4 (22 GiB) the OWLv2
+        detector does NOT co-fit with the ReMEmbR backbone (Qwen2-VL-2B +
+        Qwen2.5-7B) → episode-0 CUDA OOM. The detector fires rarely (near-goal,
+        gated) so OWLv2 on CPU (~1–2 s/call) frees the GPU for the backbone.
+        Default 'cpu'; DETECTOR_OWL_DEVICE=cuda explicitly opts back onto GPU.
+        Read per-call so drivers can flip it without rebuilding."""
+        dev = os.environ.get("DETECTOR_OWL_DEVICE")
+        if dev is None or not dev.strip():
+            return "cpu"
+        return dev.strip()
+
     def locate(
         self,
         rgb: np.ndarray,
@@ -399,8 +412,12 @@ class GoalDetector:
             from transformers import Owlv2ForObjectDetection, Owlv2Processor
             self._owl_processor = Owlv2Processor.from_pretrained(model_id)
             model = Owlv2ForObjectDetection.from_pretrained(model_id)
-            if self.device is not None:
-                model = model.to(self.device)
+            # Place on the OWLv2-specific device (default CPU), NOT self.device:
+            # the GPU is reserved for the Qwen backbone (L4 OOM fix). See
+            # _owl_device() for the rationale.
+            owl_device = self._owl_device()
+            if owl_device is not None:
+                model = model.to(owl_device)
             self._owl_model = model.eval()
         return self._owl_model, self._owl_processor
 
@@ -421,8 +438,12 @@ class GoalDetector:
             text=[[f"a photo of a {goal_category}"]], images=img,
             return_tensors="pt",
         )
-        if self.device is not None:
-            inputs = inputs.to(self.device)
+        # Move inputs to the SAME device the OWLv2 model lives on (the owl-device,
+        # default CPU) — using self.device here would device-mismatch when the
+        # backbone GPU and the detector CPU differ.
+        owl_device = self._owl_device()
+        if owl_device is not None:
+            inputs = inputs.to(owl_device)
         # Owlv2Processor returns a transformers BatchFeature — a UserDict, which
         # is NOT a dict subclass, so isinstance(inputs, dict) is False. The old
         # `dict(inputs) if isinstance(inputs, dict) else {pixel_values: ...}` fell

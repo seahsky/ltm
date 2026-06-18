@@ -414,14 +414,39 @@ class _MockOwlModel:
     real forward contract: Owlv2ForObjectDetection.forward REQUIRES input_ids
     (a text prompt) AND pixel_values, so a kwargs build that drops input_ids
     (the BatchFeature-is-not-a-dict bug) must fail HERE in the unit test, not
-    only on RACE. Records the last kwargs for direct inspection."""
+    only on RACE. Records the last kwargs for direct inspection.
+
+    Also records the device passed to ``.to()`` / ``.eval()`` so the OWLv2
+    CPU-placement fix (DETECTOR_OWL_DEVICE) can be asserted without a GPU."""
     def __init__(self):
         self.last_kwargs = None
+        self.to_device = None      # device passed to .to() during _ensure_owlv2
+    def to(self, device):
+        self.to_device = device
+        return self
+    def eval(self):
+        return self
     def __call__(self, **kwargs):
         self.last_kwargs = kwargs
         assert "input_ids" in kwargs, f"OWLv2 forward missing input_ids: {sorted(kwargs)}"
         assert "pixel_values" in kwargs, f"OWLv2 forward missing pixel_values: {sorted(kwargs)}"
         return "owl-outputs"
+
+
+from collections import UserDict  # noqa: E402
+
+
+class _RecordingBatchFeature(UserDict):
+    """Stand-in for the real Owlv2Processor BatchFeature: a UserDict (NOT a
+    dict subclass) that also records the device passed to ``.to()`` so the
+    input-placement half of the CPU fix is observable. Real BatchFeature.to()
+    moves tensors and returns self; this records and returns self."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.to_device = None
+    def to(self, device):
+        self.to_device = device
+        return self
 
 
 class _MockOwlProcessor:
@@ -433,9 +458,12 @@ class _MockOwlProcessor:
     def __init__(self, boxes, scores):
         self.boxes = boxes
         self.scores = scores
+        self.last_inputs = None    # the _RecordingBatchFeature returned last
     def __call__(self, text=None, images=None, return_tensors=None):
-        from collections import UserDict
-        return UserDict({"input_ids": "ids", "attention_mask": "am", "pixel_values": "px"})
+        self.last_inputs = _RecordingBatchFeature(
+            {"input_ids": "ids", "attention_mask": "am", "pixel_values": "px"}
+        )
+        return self.last_inputs
     def post_process_grounded_object_detection(
         self, outputs, threshold=0.0, target_sizes=None, **kw
     ):
@@ -578,6 +606,81 @@ def case_owlv2_forwards_input_ids_to_model():
     print("  case_owlv2_forwards_input_ids_to_model: OK")
 
 
+@contextlib.contextmanager
+def _fake_transformers(model, processor):
+    """Inject a fake ``transformers`` module so _ensure_owlv2's lazy load runs
+    its device-placement logic against mocks — WITHOUT importing the real
+    (heavy, possibly-absent) transformers package. from_pretrained returns the
+    supplied mocks. Restores sys.modules on exit."""
+    import types as _types
+    fake = _types.ModuleType("transformers")
+    fake.Owlv2ForObjectDetection = type(
+        "Owlv2ForObjectDetection", (),
+        {"from_pretrained": staticmethod(lambda *a, **k: model)},
+    )
+    fake.Owlv2Processor = type(
+        "Owlv2Processor", (),
+        {"from_pretrained": staticmethod(lambda *a, **k: processor)},
+    )
+    prev = sys.modules.get("transformers")
+    sys.modules["transformers"] = fake
+    try:
+        yield
+    finally:
+        if prev is None:
+            sys.modules.pop("transformers", None)
+        else:
+            sys.modules["transformers"] = prev
+
+
+def case_owlv2_loads_on_cpu_by_default_and_honors_env():
+    """The L4 OOM fix: OWLv2 must NOT land on self.device (the GPU the Qwen
+    backbone fills). With DETECTOR_OWL_DEVICE unset, _ensure_owlv2 moves the
+    model to CPU and _infer_owlv2 moves the processor inputs to the SAME
+    owl-device (a self.device move would device-mismatch). DETECTOR_OWL_DEVICE
+    is honored when set explicitly. self.device stays the Qwen device."""
+    # --- default: CPU even though self.device='cuda' (the backbone's GPU) ---
+    owl_model = _MockOwlModel()
+    owl_proc = _MockOwlProcessor([[120, 120, 160, 160]], [0.42])
+    det = gd.GoalDetector(
+        _MockModel(), _MockProcessor("qwen path must not run on owlv2 backend"),
+        _MockPathfinder(snap_target=np.array([0.1, 0.0, 2.0], dtype=np.float32)),
+        max_snap_dist=0.5, device="cuda",
+    )
+    rgb = np.zeros((256, 256, 3), dtype=np.uint8)
+    depth = np.full((256, 256), 2.0, dtype=np.float32)
+    pose = np.eye(4, dtype=np.float32)
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_DEVICE=None,
+              DETECTOR_OWL_SCORE_THRESH=None), \
+            _fake_transformers(owl_model, owl_proc):
+        det.locate(rgb=rgb, depth=depth, goal_category="chair",
+                   agent_pose=pose, intrinsics=_intrinsics())
+    # _ensure_owlv2 moved the model to CPU, NOT to self.device ('cuda').
+    assert owl_model.to_device == "cpu", owl_model.to_device
+    # _infer_owlv2 moved the processor inputs to the SAME owl-device (CPU).
+    assert owl_proc.last_inputs is not None
+    assert owl_proc.last_inputs.to_device == "cpu", owl_proc.last_inputs.to_device
+    # self.device (the Qwen device) is unchanged.
+    assert det.device == "cuda", det.device
+
+    # --- explicit DETECTOR_OWL_DEVICE=cuda is honored ---
+    owl_model2 = _MockOwlModel()
+    owl_proc2 = _MockOwlProcessor([[120, 120, 160, 160]], [0.42])
+    det2 = gd.GoalDetector(
+        _MockModel(), _MockProcessor("qwen path must not run on owlv2 backend"),
+        _MockPathfinder(snap_target=np.array([0.1, 0.0, 2.0], dtype=np.float32)),
+        max_snap_dist=0.5, device="cpu",
+    )
+    with _env(DETECTOR_BACKEND="owlv2", DETECTOR_OWL_DEVICE="cuda",
+              DETECTOR_OWL_SCORE_THRESH=None), \
+            _fake_transformers(owl_model2, owl_proc2):
+        det2.locate(rgb=rgb, depth=depth, goal_category="chair",
+                    agent_pose=pose, intrinsics=_intrinsics())
+    assert owl_model2.to_device == "cuda", owl_model2.to_device
+    assert owl_proc2.last_inputs.to_device == "cuda", owl_proc2.last_inputs.to_device
+    print("  case_owlv2_loads_on_cpu_by_default_and_honors_env: OK")
+
+
 def case_default_backend_is_qwen_and_untouched():
     # DETECTOR_BACKEND unset => the qwen path runs byte-identically and the
     # OWLv2 attributes are never touched (poison object trips otherwise).
@@ -631,6 +734,7 @@ def main() -> int:
     case_owlv2_clips_out_of_bounds_box()
     case_owlv2_picks_lowest_depth_box_among_confident()
     case_owlv2_forwards_input_ids_to_model()
+    case_owlv2_loads_on_cpu_by_default_and_honors_env()
     case_default_backend_is_qwen_and_untouched()
     print("All cases passed.")
     return 0
