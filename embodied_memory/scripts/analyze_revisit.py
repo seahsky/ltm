@@ -257,6 +257,49 @@ def stratified_summary(episodes: List[RevisitEpisode]) -> Dict[str, Dict[str, fl
 # ----------------------------------------------------------------------
 
 
+def _visit_key(e: RevisitEpisode) -> Tuple[str, str, int]:
+    """Renumbering-invariant identity of a visit: ``(scene, category, visit_order)``.
+
+    NOT ``episode_id`` — Habitat renumbers ``episode_id`` per run, so the SAME
+    logical visit (same scene, category, and rank-by-pinned-``episode_idx``) can
+    carry different ids across settings. Keying on ``episode_id`` silently drops
+    such a pair (the M3 stage-1 regression: 3 of 7 warm pairs vanished, the
+    strongest cell, skewing the headline). ``visit_order`` is derived from the
+    pinned ``episode_idx`` ordering, so it pairs the same physical episode across
+    settings regardless of the id label.
+    """
+    return (e.scene_id, e.target_category, e.visit_order)
+
+
+def _paired_delta(
+    s1: List[RevisitEpisode],
+    s3: List[RevisitEpisode],
+    select,
+    n_bootstrap: int,
+    metric: str,
+) -> Dict[str, Any]:
+    """Paired S3-S1 delta over episodes matching ``select`` (is_warm / is_cold)
+    in BOTH runs, keyed on ``_visit_key``.
+
+    Surfaces ``n_dropped`` (visits present in exactly one setting — a genuine
+    structural mismatch the caller MUST report, e.g. a crashed episode) plus the
+    per-setting counts and the unpaired keys, so a partial pairing can never be
+    mistaken for a complete one. ``assign_visit_order`` must have been called on
+    both lists. Returns mean / 90% CI / one-sided p(<=0) / n.
+    """
+    s1_by = {_visit_key(e): e for e in s1 if select(e)}
+    s3_by = {_visit_key(e): e for e in s3 if select(e)}
+    keys = sorted(set(s1_by) & set(s3_by))
+    unpaired = sorted(set(s1_by) ^ set(s3_by))
+    deltas = [getattr(s3_by[k], metric) - getattr(s1_by[k], metric) for k in keys]
+    mean, lo, hi = paired_bootstrap_mean_diff(deltas, n_resamples=n_bootstrap, ci=0.9)
+    p = _one_sided_p_le_zero(deltas, n_bootstrap)
+    return {"n": len(keys), "mean": mean, "lo": lo, "hi": hi, "p_le_zero": p,
+            "keys": keys, "deltas": deltas,
+            "n_dropped": len(unpaired), "n_s1": len(s1_by), "n_s3": len(s3_by),
+            "unpaired_keys": unpaired}
+
+
 def paired_warm_delta(
     s1: List[RevisitEpisode],
     s3: List[RevisitEpisode],
@@ -265,17 +308,9 @@ def paired_warm_delta(
 ) -> Dict[str, Any]:
     """Paired S3-S1 delta on the metric over episodes that are warm in BOTH runs.
 
-    Pairs on ``(scene_id, episode_id)``. ``assign_visit_order`` must have been
-    called on both lists. Returns mean / 90% CI / one-sided p(<=0) / n.
+    Pairs on ``(scene_id, target_category, visit_order)`` (see ``_visit_key``).
     """
-    s1_by = {(e.scene_id, e.episode_id): e for e in s1 if e.is_warm}
-    s3_by = {(e.scene_id, e.episode_id): e for e in s3 if e.is_warm}
-    keys = sorted(set(s1_by) & set(s3_by))
-    deltas = [getattr(s3_by[k], metric) - getattr(s1_by[k], metric) for k in keys]
-    mean, lo, hi = paired_bootstrap_mean_diff(deltas, n_resamples=n_bootstrap, ci=0.9)
-    p = _one_sided_p_le_zero(deltas, n_bootstrap)
-    return {"n": len(keys), "mean": mean, "lo": lo, "hi": hi, "p_le_zero": p,
-            "keys": keys, "deltas": deltas}
+    return _paired_delta(s1, s3, lambda e: e.is_warm, n_bootstrap, metric)
 
 
 def paired_cold_delta(
@@ -287,16 +322,10 @@ def paired_cold_delta(
     """Control: paired S3-S1 delta over episodes that are cold in BOTH runs.
 
     Memory should be inert on cold visits (no prior same-category sighting), so
-    this is the expected-near-zero control for the warm delta.
+    this is the expected-near-zero control for the warm delta. Same keying as
+    ``paired_warm_delta``.
     """
-    s1_by = {(e.scene_id, e.episode_id): e for e in s1 if e.is_cold}
-    s3_by = {(e.scene_id, e.episode_id): e for e in s3 if e.is_cold}
-    keys = sorted(set(s1_by) & set(s3_by))
-    deltas = [getattr(s3_by[k], metric) - getattr(s1_by[k], metric) for k in keys]
-    mean, lo, hi = paired_bootstrap_mean_diff(deltas, n_resamples=n_bootstrap, ci=0.9)
-    p = _one_sided_p_le_zero(deltas, n_bootstrap)
-    return {"n": len(keys), "mean": mean, "lo": lo, "hi": hi, "p_le_zero": p,
-            "keys": keys, "deltas": deltas}
+    return _paired_delta(s1, s3, lambda e: e.is_cold, n_bootstrap, metric)
 
 
 # ----------------------------------------------------------------------
@@ -312,7 +341,7 @@ def compare_runs(
     """Paired B - A deltas between two runs of the SAME setting.
 
     Both runs must cover the SAME episodes (same dataset); pairs on
-    ``(scene_id, episode_id)``. Used to compare two variants of Setting 3 (e.g.
+    ``(scene_id, target_category, visit_order)``. Used to compare two variants of Setting 3 (e.g.
     a trained importance head vs the heuristic) head-to-head, instead of each
     vs the memory-off S1. ``assign_visit_order`` must have been called on both.
     Returns warm/cold deltas on soft-SPL and binary SPL.
@@ -423,10 +452,19 @@ def print_visit_distribution(run: RevisitRun) -> None:
 
 def _print_delta(label: str, res: Dict[str, Any]) -> None:
     """Print one paired-delta block uniformly (used for S3-S1, S2-S1, S3-S2,
-    and the cold control)."""
+    and the cold control), then a LOUD warning if any visit was unpairable.
+
+    A non-zero ``n_dropped`` means a visit existed in exactly one setting (a
+    genuine structural mismatch, e.g. a crashed episode) — the delta is over a
+    SUBSET, so we must never let it pass for a complete headline silently."""
     print(f"  {label}: n={res['n']:d}  mean={res['mean']:+.4f}  "
           f"90% CI=[{res['lo']:+.4f}, {res['hi']:+.4f}]  "
           f"one-sided p(<=0)={res['p_le_zero']:.3f}")
+    if res.get("n_dropped", 0) > 0:
+        print(f"  ⚠️  WARNING [{label}]: {res['n_dropped']} visit(s) unpaired and "
+              f"EXCLUDED (S1 had {res['n_s1']}, S3 had {res['n_s3']}, paired {res['n']}) "
+              f"— this delta is over a SUBSET, NOT a clean headline. "
+              f"Unpaired (scene,category,visit_order): {res['unpaired_keys']}")
 
 
 def pool_runs_by_setting(runs: List[RevisitRun]) -> Dict[int, "RevisitRun"]:
