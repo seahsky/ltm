@@ -134,19 +134,30 @@ OUT_DIRS=""
 for S in $SETTINGS; do
   out_dir="runs/${TAG}-${CLASS}-s$S"
   banner "run: setting=$S -> $out_dir"
+  # Clear any STALE summary first, so the completion gate below can't be fooled
+  # by a previous attempt's summary.json if THIS run hard-crashes before writing.
+  rm -f "$out_dir/summary.json"
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --task audiogoal \
       --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
       --episodes-path "$DS" --scene "$SCENE" --target any \
       --n-episodes "$N_EPISODES" --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
-  # Abort LOUD on a hard crash (CUDA OOM / sim or model load / uncaught exception):
-  # pipefail makes PIPESTATUS[0] the python rc, and summary.json is written ONLY
-  # after the full episode loop completes — so a missing one == incomplete data.
-  # Without this the child would exit 0 and a matrix run would feed silently-
-  # under-powered data into the combined analyze.
   rc=${PIPESTATUS[0]}
-  [ "$rc" -eq 0 ] && [ -f "$out_dir/summary.json" ] \
-    || { echo "FATAL: setting=$S run failed (rc=$rc) or no summary.json at $out_dir — incomplete; see ${out_dir}.log."; exit 1; }
+  # Gate on COMPLETION, not rc. run_hm3d_pol returns 1 whenever pass_conditions
+  # fail (run_hm3d_pol.py:568-571) — which is EXPECTED for S1 (memory-off) and S2
+  # (STM-only), since those gates are S3-oriented. So rc!=0 is NORMAL there, NOT a
+  # crash. A hard crash (CUDA OOM / sim or model load) instead leaves NO
+  # summary.json (written only after the full episode loop) or
+  # n_completed < n_attempted. Gate on exactly that.
+  complete="$(python -c "import json,sys
+try:
+    s=json.load(open(sys.argv[1])); a=s.get('n_episodes_attempted',0); c=s.get('n_episodes_completed',0)
+    print(1 if a>0 and c==a else 0)
+except Exception:
+    print(0)" "$out_dir/summary.json" 2>/dev/null || echo 0)"
+  [ "$complete" = 1 ] \
+    || { echo "FATAL: setting=$S run INCOMPLETE at $out_dir (rc=$rc; summary missing or n_completed<n_attempted = a hard crash, NOT a pass-condition exit). See ${out_dir}.log."; exit 1; }
+  echo "  setting=$S complete (rc=$rc; rc=1 is normal for S1/S2 — pass_conditions are S3-oriented)"
   OUT_DIRS="$OUT_DIRS $out_dir"
 done
 
