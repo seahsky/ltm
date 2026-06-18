@@ -443,6 +443,65 @@ def case_report_warns_on_unpaired_visits():
     print("  case_report_warns_on_unpaired_visits: OK")
 
 
+def _write_run_dir(root, name, cat, eids_softs, setting=3):
+    # helper: write a run dir with episode_*.json (idx0=cold, idx>=1=warm) + summary
+    d = os.path.join(root, name)
+    os.makedirs(d)
+    for i, (eid, soft) in enumerate(eids_softs):
+        ep = {"scene_id": "S", "episode_id": str(eid), "target_category": cat,
+              "episode_idx": i, "soft_spl": soft, "spl": 0.0, "success": False,
+              "n_steps": 10, "distance_to_goal": 2.0}
+        with open(os.path.join(d, f"episode_{i:03d}.json"), "w") as f:
+            json.dump(ep, f)
+    with open(os.path.join(d, "summary.json"), "w") as f:
+        json.dump({"ablation": {"setting": setting}, "episodes": []}, f)
+    return d
+
+
+def case_pool_dirs_merges_episodes():
+    # pool_dirs concatenates episodes across several run dirs into ONE RevisitRun
+    # (used to pool the per-cell temporal/baseline S3 dirs for a matrix-wide A/B).
+    with tempfile.TemporaryDirectory() as root:
+        d1 = _write_run_dir(root, "m3t-A-bed-s3", "bed", [(1, 0.3)])
+        d2 = _write_run_dir(root, "m3t-A-chair-s3", "chair", [(2, 0.4)])
+        pooled = ar.pool_dirs([d1, d2], "temporal")
+    assert len(pooled.episodes) == 2, len(pooled.episodes)
+    assert pooled.setting == 3, pooled.setting
+    assert sorted(e.target_category for e in pooled.episodes) == ["bed", "chair"]
+    print("  case_pool_dirs_merges_episodes: OK")
+
+
+def case_compare_pooled_cli_routes():
+    # main(--compare-a A... --compare-b B...) pools each side and prints the
+    # paired B-A head-to-head (temporal-vs-baseline S3 across cells).
+    with tempfile.TemporaryDirectory() as root:
+        # each cell: cold (idx0) + warm (idx1); B (temporal) warm > A (baseline) warm
+        a1 = _write_run_dir(root, "m3-bed-s3", "bed", [(1, 0.2), (11, 0.2)])
+        a2 = _write_run_dir(root, "m3-chair-s3", "chair", [(1, 0.1), (12, 0.1)])
+        b1 = _write_run_dir(root, "m3t-bed-s3", "bed", [(5, 0.2), (15, 0.6)])
+        b2 = _write_run_dir(root, "m3t-chair-s3", "chair", [(6, 0.1), (16, 0.5)])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = ar.main(["--compare-a", a1, a2, "--compare-b", b1, b2])
+        out = buf.getvalue()
+    assert rc == 0, rc
+    assert "compare" in out.lower(), out
+    import re
+    m = re.search(r"WARM[^\n]*?n=(\d+)", out)
+    assert m and int(m.group(1)) == 2, out      # both cells' warm pairs contribute
+    print("  case_compare_pooled_cli_routes: OK")
+
+
+def case_compare_pooled_requires_both_groups():
+    # --compare-a without --compare-b (or vice-versa) is a usage error, not a crash.
+    try:
+        ar.main(["--compare-a", "x"])
+    except SystemExit:
+        print("  case_compare_pooled_requires_both_groups: OK")
+        return
+    raise AssertionError("expected SystemExit (parser.error) when only one group given")
+
+
 def case_binary_spl_block_printed_when_runs_have_spl():
     s1 = _run(1, [_ep("S", "a", "chair", 0, soft=0.1, spl=0.0),
                   _ep("S", "b", "chair", 6, soft=0.2, spl=0.0)])
@@ -528,6 +587,9 @@ def main() -> int:
     case_warm_delta_reports_unpaired_count()
     case_report_pairs_despite_renumbered_ids()
     case_report_warns_on_unpaired_visits()
+    case_pool_dirs_merges_episodes()
+    case_compare_pooled_cli_routes()
+    case_compare_pooled_requires_both_groups()
     case_load_reads_episode_files()
     case_load_infers_setting_from_name()
     case_binary_spl_block_printed_when_runs_have_spl()

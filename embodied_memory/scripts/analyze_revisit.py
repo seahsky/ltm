@@ -495,6 +495,25 @@ def pool_runs_by_setting(runs: List[RevisitRun]) -> Dict[int, "RevisitRun"]:
     return out
 
 
+def pool_dirs(paths: List[str], label: str) -> "RevisitRun":
+    """Load several run dirs and POOL their episodes into one ``RevisitRun``.
+
+    Used by the pooled head-to-head compare (``--compare-a`` / ``--compare-b``):
+    the per-cell S3 dirs of one arm (e.g. temporal-context-on) are pooled into a
+    single run, then compared paired against the other arm's pooled run. Pairing
+    downstream keys on ``(scene_id, target_category, visit_order)``, so pooling
+    distinct-category cells is correct (no key collisions). Setting is taken from
+    the first dir (both arms are normally S3)."""
+    eps: List[RevisitEpisode] = []
+    setting: Optional[int] = None
+    for p in paths:
+        r = load_revisit_run(p)
+        if setting is None:
+            setting = r.setting
+        eps.extend(r.episodes)
+    return RevisitRun(name=label, path="", setting=setting, episodes=eps)
+
+
 def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
     """Print the full Phase-A report and return the Gate A classification."""
     for r in runs:
@@ -595,13 +614,29 @@ def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Visit-order (revisit) ablation analysis")
-    parser.add_argument("run_dirs", nargs="+", help="Run directories (>=2; need S1 and S3).")
+    parser.add_argument("run_dirs", nargs="*", help="Run directories (>=2; need S1 and S3).")
     parser.add_argument("--bootstrap", type=int, default=5000)
     parser.add_argument("--compare", action="store_true",
                         help="Head-to-head paired B - A delta between exactly two "
                              "same-setting runs (e.g. heuristic-R vs trained-R S3), "
                              "instead of the S1/S2/S3 Gate-A report.")
+    parser.add_argument("--compare-a", nargs="+", metavar="DIR",
+                        help="POOLED head-to-head: baseline run dirs (group A). Each "
+                             "arm's per-cell S3 dirs are pooled into one run, then "
+                             "compared paired B-A (e.g. temporal-context S3 vs baseline "
+                             "S3 across the matrix). Pair with --compare-b.")
+    parser.add_argument("--compare-b", nargs="+", metavar="DIR",
+                        help="POOLED head-to-head: variant run dirs (group B).")
     args = parser.parse_args(argv)
+
+    # Pooled head-to-head (matrix-wide temporal-vs-baseline A/B).
+    if args.compare_a or args.compare_b:
+        if not (args.compare_a and args.compare_b):
+            parser.error("--compare-a and --compare-b must be given together")
+        run_a = pool_dirs(args.compare_a, f"A:{len(args.compare_a)}cells-pooled")
+        run_b = pool_dirs(args.compare_b, f"B:{len(args.compare_b)}cells-pooled")
+        print_compare(run_a, run_b, args.bootstrap)
+        return 0
 
     if len(args.run_dirs) < 2:
         parser.error("at least two run directories are required")
