@@ -429,6 +429,77 @@ def case_cross_env_skips_category_absent_in_either_scene():
     print("  case cross_env_skips_category_absent_in_either_scene: OK")
 
 
+# ----------------------------------------------------------------------
+# build_changed_world_dataset — the goal MOVES between the cold mapping pass
+# and the warm visit: cold starts AT instance A (seeds it), warm success is
+# keyed to a DIFFERENT instance B, so the cold sighting of A is now STALE. The
+# regime the M4 temporal-context head was designed for (recency≈reliability).
+# ----------------------------------------------------------------------
+
+
+def _single_instance_src(glb="wcojb4TFT35.basis.glb"):
+    """One category ("chair") with a SINGLE instance — changed-world needs two,
+    so this category must be SKIPPED."""
+    return {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {f"{glb}_chair": [_goal([0, 0, 0], [_vp([1, 0, 1], iou=1.8)])]},
+        "episodes": [{**_template("chair", "1"), "start_position": [1, 0, 1]}],
+    }
+
+
+def case_pick_warm_instance_returns_farthest_other():
+    src = _multi_instance_src()
+    insts = src["goals_by_category"]["wcojb4TFT35.basis.glb_chair"]
+    cold = mk.pick_cold_instance(insts)          # TARGET at [0,0,0]
+    warm = mk.pick_warm_instance(insts, cold)    # the OTHER instance
+    assert warm is not None
+    assert warm["position"] == [20, 0, 20], warm  # the distractor, farthest from A
+    print("  case pick_warm_instance_returns_farthest_other: OK")
+
+
+def case_pick_warm_instance_none_when_single():
+    insts = _single_instance_src()["goals_by_category"]["wcojb4TFT35.basis.glb_chair"]
+    assert mk.pick_warm_instance(insts, insts[0]) is None
+    print("  case pick_warm_instance_none_when_single: OK")
+
+
+def case_changed_world_keys_goal_to_different_instance():
+    src = _multi_instance_src()
+    glb = "wcojb4TFT35.basis.glb"
+    gkey = f"{glb}_chair"
+    content = mk.build_changed_world_dataset(src, categories=["chair"], n_warm=1)
+    goals = content["goals_by_category"][gkey]
+    # success is keyed to the MOVED-TO instance B (the distractor at [20,0,20]),
+    # NOT the cold-seeded A — so reaching the stale sighting no longer counts.
+    assert len(goals) == 1, goals
+    assert goals[0]["position"] == [20, 0, 20], goals
+    # the cold episode still STARTS at instance A's best view_point, so A is
+    # captioned and seeded into the (now-stale) LTM.
+    assert content["episodes"][0]["start_position"] == [1, 0, 1], content["episodes"][0]
+    # category unchanged → "there is a chair" query intact; source not mutated.
+    assert all(e["object_category"] == "chair" for e in content["episodes"])
+    assert len(src["goals_by_category"][gkey]) == 2
+    print("  case changed_world_keys_goal_to_different_instance: OK")
+
+
+def case_changed_world_marks_every_episode():
+    src = _multi_instance_src()
+    content = mk.build_changed_world_dataset(src, categories=["chair"], n_warm=2)
+    assert content["episodes"], "expected cold+warm episodes"
+    assert all(e.get("info", {}).get("goal_changed") is True for e in content["episodes"]), \
+        [e.get("info") for e in content["episodes"]]
+    print("  case changed_world_marks_every_episode: OK")
+
+
+def case_changed_world_skips_single_instance_category():
+    src = _single_instance_src()
+    content = mk.build_changed_world_dataset(src, categories=["chair"], n_warm=1)
+    # only one instance → no genuine move → category skipped (no episodes).
+    assert content["episodes"] == [], content["episodes"]
+    print("  case changed_world_skips_single_instance_category: OK")
+
+
 def main() -> int:
     print("Phase-B1 controlled-start dataset builder sanity tests")
     case_cold_pose_picks_max_iou_viewpoint()
@@ -450,6 +521,11 @@ def main() -> int:
     case_cross_env_cold_home_warm_away()
     case_cross_env_warm_starts_from_away_scene()
     case_cross_env_skips_category_absent_in_either_scene()
+    case_pick_warm_instance_returns_farthest_other()
+    case_pick_warm_instance_none_when_single()
+    case_changed_world_keys_goal_to_different_instance()
+    case_changed_world_marks_every_episode()
+    case_changed_world_skips_single_instance_category()
     print("All cases passed.")
     return 0
 

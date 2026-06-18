@@ -144,6 +144,51 @@ def case_rank_gap_positive_when_instances_differ():
 
 
 # ----------------------------------------------------------------------
+# caption_to_caption_rank_gap — does ranking by a prior-sighting caption
+# (not the bare category query) recover the instance gap? (Lever 1 pre-screen)
+# ----------------------------------------------------------------------
+
+
+def case_c2c_rank_gap_orthogonal_instances_high():
+    # Query with a held-out caption of the goal instance. Goal's other captions
+    # are identical to the query (cos 1); the distractor instance is orthogonal
+    # (cos 0) -> gap 1.0. The category query gave 0 here when both instances tie.
+    enc = _fake_encode({
+        "a1": (1, 0, 0), "a2": (1, 0, 0),   # instance A (the goal)
+        "b1": (0, 1, 0), "b2": (0, 1, 0),   # instance B (distractor)
+    })
+    out = ds.caption_to_caption_rank_gap({"chair": [["a1", "a2"], ["b1", "b2"]]}, enc)
+    assert abs(out["per_category"]["chair"]["rank_gap"] - 1.0) < 1e-6, out
+    assert out["per_category"]["chair"]["n_samples"] > 0, out
+    print("  case c2c_rank_gap_orthogonal_instances_high: OK")
+
+
+def case_c2c_rank_gap_identical_instances_zero():
+    # Goal and distractor captions identical -> query can't separate -> gap 0.
+    enc = _fake_encode({
+        "a1": (1, 0, 0), "a2": (1, 0, 0),
+        "b1": (1, 0, 0), "b2": (1, 0, 0),
+    })
+    out = ds.caption_to_caption_rank_gap({"chair": [["a1", "a2"], ["b1", "b2"]]}, enc)
+    assert abs(out["per_category"]["chair"]["rank_gap"] - 0.0) < 1e-6, out
+    print("  case c2c_rank_gap_identical_instances_zero: OK")
+
+
+def case_c2c_rank_gap_skips_singleton_goal():
+    # A goal instance with a single caption has no held-out reference -> it
+    # contributes no samples; only the 2-caption instance can be the goal.
+    enc = _fake_encode({
+        "a1": (1, 0, 0), "a2": (1, 0, 0),   # 2-caption goal -> contributes
+        "b1": (0, 1, 0),                      # singleton -> cannot be goal
+    })
+    out = ds.caption_to_caption_rank_gap({"chair": [["a1", "a2"], ["b1"]]}, enc)
+    # one goal instance usable, 2 query choices (a1, a2) -> 2 samples
+    assert out["per_category"]["chair"]["n_samples"] == 2, out
+    assert abs(out["per_category"]["chair"]["rank_gap"] - 1.0) < 1e-6, out
+    print("  case c2c_rank_gap_skips_singleton_goal: OK")
+
+
+# ----------------------------------------------------------------------
 # instance_verdict — the plan's decision rule
 # ----------------------------------------------------------------------
 
@@ -194,6 +239,9 @@ def main() -> int:
     case_separability_per_category_breakdown()
     case_rank_gap_zero_when_instances_tie()
     case_rank_gap_positive_when_instances_differ()
+    case_c2c_rank_gap_orthogonal_instances_high()
+    case_c2c_rank_gap_identical_instances_zero()
+    case_c2c_rank_gap_skips_singleton_goal()
     case_verdict_overlap_blames_embedding()
     case_verdict_mixed_signal_exists_query_collapses()
     case_verdict_separated_no_bottleneck()

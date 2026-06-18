@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import sys
@@ -289,15 +290,24 @@ def _paired_delta(
     """
     s1_by = {_visit_key(e): e for e in s1 if select(e)}
     s3_by = {_visit_key(e): e for e in s3 if select(e)}
-    keys = sorted(set(s1_by) & set(s3_by))
+    paired = sorted(set(s1_by) & set(s3_by))
     unpaired = sorted(set(s1_by) ^ set(s3_by))
+    # Drop pairs whose metric is non-finite in EITHER setting. A navmesh-
+    # unreachable goal gives Infinity geodesic → NaN soft_SPL; a single NaN would
+    # otherwise poison the entire paired mean (sum/n propagates NaN). Surfaced as
+    # n_nonfinite + a loud warning so a silently-shrunken pairing can't masquerade
+    # as the full set.
+    keys = [k for k in paired
+            if math.isfinite(getattr(s1_by[k], metric))
+            and math.isfinite(getattr(s3_by[k], metric))]
+    n_nonfinite = len(paired) - len(keys)
     deltas = [getattr(s3_by[k], metric) - getattr(s1_by[k], metric) for k in keys]
     mean, lo, hi = paired_bootstrap_mean_diff(deltas, n_resamples=n_bootstrap, ci=0.9)
     p = _one_sided_p_le_zero(deltas, n_bootstrap)
     return {"n": len(keys), "mean": mean, "lo": lo, "hi": hi, "p_le_zero": p,
             "keys": keys, "deltas": deltas,
             "n_dropped": len(unpaired), "n_s1": len(s1_by), "n_s3": len(s3_by),
-            "unpaired_keys": unpaired}
+            "unpaired_keys": unpaired, "n_nonfinite": n_nonfinite}
 
 
 def paired_warm_delta(
@@ -481,6 +491,10 @@ def _print_delta(label: str, res: Dict[str, Any]) -> None:
               f"EXCLUDED (S1 had {res['n_s1']}, S3 had {res['n_s3']}, paired {res['n']}) "
               f"— this delta is over a SUBSET, NOT a clean headline. "
               f"Unpaired (scene,category,visit_order): {res['unpaired_keys']}")
+    if res.get("n_nonfinite", 0) > 0:
+        print(f"  ⚠️  WARNING [{label}]: {res['n_nonfinite']} paired visit(s) had a "
+              f"NON-FINITE metric (NaN/Inf — e.g. a navmesh-unreachable goal) and were "
+              f"DROPPED so the mean stays finite. The delta is over the remaining n={res['n']}.")
 
 
 def pool_runs_by_setting(runs: List[RevisitRun]) -> Dict[int, "RevisitRun"]:
