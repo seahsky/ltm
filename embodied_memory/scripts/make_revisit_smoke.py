@@ -120,30 +120,39 @@ def _instance_centroid(inst: Dict[str, Any]) -> Optional[List[float]]:
 
 
 def pick_warm_instance(
-    goal_instances: List[Dict[str, Any]], cold_instance: Dict[str, Any]
+    goal_instances: List[Dict[str, Any]],
+    cold_instance: Dict[str, Any],
+    min_move: float = 1.5,
 ) -> Optional[Dict[str, Any]]:
-    """Return the goal INSTANCE farthest (by view_point centroid) from
-    ``cold_instance`` — the "moved-to" goal for the changed-world build, so the
-    cold sighting of ``cold_instance`` is genuinely stale. Returns ``None`` when
-    there is no other instance with view_points (a single-instance category
-    cannot express a moved goal → the caller skips it).
+    """Return a DIFFERENT goal INSTANCE to serve as the moved-to goal B for the
+    changed-world build, so the cold sighting of ``cold_instance`` (A) is stale.
+
+    Prefer the NEAREST other instance whose view_point centroid is at least
+    ``min_move`` m from A: it is still a genuine move (B != A) yet most likely on
+    the SAME navmesh component, so the warm starts can reach it. (The earlier
+    FARTHEST choice frequently landed on a disconnected island / different floor
+    → Infinity start→B geodesic → NaN soft_SPL, which voided whole cells.) If no
+    other instance clears ``min_move``, fall back to the single nearest other
+    instance so a >=2-instance category is never silently dropped (the analyzer
+    NaN-guard is the backstop). Returns ``None`` only when there is no other
+    instance with view_points.
     """
     ca = _instance_centroid(cold_instance)
     if ca is None:
         return None
-    best: Optional[Dict[str, Any]] = None
-    best_d = -math.inf
+    others: List["tuple[float, Dict[str, Any]]"] = []
     for inst in goal_instances:
         if inst is cold_instance:
             continue
         c = _instance_centroid(inst)
         if c is None:
             continue
-        d = _dist(ca, c)
-        if d > best_d:
-            best_d = d
-            best = inst
-    return best
+        others.append((_dist(ca, c), inst))
+    if not others:
+        return None
+    moved = [t for t in others if t[0] >= min_move]
+    pool = moved if moved else others
+    return min(pool, key=lambda t: t[0])[1]
 
 
 def _goal_view_point_positions(goal_instances: List[Dict[str, Any]]) -> List[List[float]]:
@@ -301,13 +310,15 @@ def build_changed_world_dataset(
     categories: List[str],
     n_warm: int,
     min_dist: float = 2.0,
+    min_move: float = 1.5,
 ) -> Dict[str, Any]:
     """Changed-world revisit (the regime the M4 temporal-context head was built
     for). Per category: the cold episode STARTS at instance A (the highest-iou
     instance → provably captioned & seeded) but success for the WHOLE category is
-    keyed to a DIFFERENT instance B (``pick_warm_instance``, farthest from A), so
-    the cold sighting of A is now STALE — recalling it leads the agent to the
-    wrong place. Warm starts are far from B. Every episode is marked
+    keyed to a DIFFERENT instance B (``pick_warm_instance`` — the NEAREST other
+    instance at least ``min_move`` m away, for navmesh reachability), so the cold
+    sighting of A is now STALE — recalling it leads the agent to the wrong place.
+    Warm starts are far from B. Every episode is marked
     ``info['goal_changed']=True`` (+ diagnostic stale/goal positions). Categories
     with <2 instances (no genuine move) are SKIPPED.
 
@@ -330,7 +341,7 @@ def build_changed_world_dataset(
             continue
         goal_instances = goals_by_category[gkey]
         cold_inst = pick_cold_instance(goal_instances)
-        warm_inst = pick_warm_instance(goal_instances, cold_inst)
+        warm_inst = pick_warm_instance(goal_instances, cold_inst, min_move=min_move)
         if warm_inst is None:
             continue  # single-instance category: no moved goal to express → skip
 
@@ -563,6 +574,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "but success is keyed to a DIFFERENT instance B, so the "
                              "cold sighting is STALE — the regime the M4 temporal head "
                              "was built for. Needs >=2 instances per category.")
+    parser.add_argument("--min-move", type=float, default=1.5,
+                        help="changed-world: min metres B must be from A (a genuine "
+                             "move) while preferring the NEAREST such instance for "
+                             "navmesh reachability.")
     parser.add_argument("--out-dir", required=True)
     # cross-environment mode (step 2): a sighting in --home-scene, queried in --away-scene.
     parser.add_argument("--cross-env", action="store_true",
@@ -585,7 +600,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     src = _load_gz(args.src)
     if args.changed_world:
-        content = build_changed_world_dataset(src, args.categories, args.n_warm, args.min_dist)
+        content = build_changed_world_dataset(src, args.categories, args.n_warm,
+                                              args.min_dist, min_move=args.min_move)
     else:
         content = build_dataset(src, args.categories, args.n_warm, args.min_dist,
                                 instance_keyed=args.instance_keyed)

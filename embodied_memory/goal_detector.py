@@ -423,10 +423,22 @@ class GoalDetector:
         )
         if self.device is not None:
             inputs = inputs.to(self.device)
-        # BatchEncoding is a dict subclass; mocks return a plain dict.
-        kwargs = dict(inputs) if isinstance(inputs, dict) else {
-            "pixel_values": inputs.pixel_values
-        }
+        # Owlv2Processor returns a transformers BatchFeature — a UserDict, which
+        # is NOT a dict subclass, so isinstance(inputs, dict) is False. The old
+        # `dict(inputs) if isinstance(inputs, dict) else {pixel_values: ...}` fell
+        # to the else branch for the real processor and DROPPED the required
+        # input_ids → Owlv2ForObjectDetection.forward(input_ids, pixel_values, …)
+        # raised "missing required positional argument: input_ids". Pull every
+        # needed tensor by MAPPING KEY instead (works for BatchFeature, dict, and
+        # the test mocks; `in` and `[]` are defined on all three).
+        kwargs = {k: inputs[k]
+                  for k in ("input_ids", "attention_mask", "pixel_values")
+                  if k in inputs}
+        if "input_ids" not in kwargs or "pixel_values" not in kwargs:
+            raise RuntimeError(
+                "OWLv2 processor output missing required keys "
+                f"(have {sorted(kwargs)}); cannot run open-vocab detection."
+            )
         try:
             import torch
             ctx = torch.no_grad()
