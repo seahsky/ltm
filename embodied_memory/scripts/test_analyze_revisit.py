@@ -338,7 +338,8 @@ def case_back_compat_no_s2_block():
 
 def case_warm_delta_multiscene_no_id_collision():
     # two scenes with the SAME episode_ids; pairing must key on
-    # (scene_id, episode_id) so the scenes don't collide into one pair.
+    # (scene_id, target_category, visit_order) — scene_id is in the key so the
+    # two scenes don't collide into one pair.
     s1 = [
         _ep("S", "chair-cold-0", "chair", 0, soft=0.1),
         _ep("S", "chair-warm-1", "chair", 1, soft=0.2),
@@ -358,6 +359,88 @@ def case_warm_delta_multiscene_no_id_collision():
     # deltas [0.6-0.2, 0.8-0.3] = [0.4, 0.5] -> mean 0.45
     assert abs(res["mean"] - 0.45) < 1e-9, res["mean"]
     print("  case warm_delta_multiscene_no_id_collision: OK")
+
+
+def case_warm_delta_pairs_across_renumbered_episode_ids():
+    # Habitat renumbers episode_id per run, so the SAME logical warm visit
+    # (same scene, category, and rank-by-pinned-episode_idx) can carry a
+    # DIFFERENT episode_id in S1 vs S3. Pairing MUST key on the renumbering-
+    # invariant (scene, category, visit_order), NOT episode_id — else the pair
+    # is silently dropped. This is the M3 stage-1 bug that vanished 3 of 7 warm
+    # pairs (the strongest cell), biasing the headline.
+    s1 = [
+        _ep("S", "0", "bed", 0, soft=0.20),   # cold (id "0")
+        _ep("S", "2", "bed", 1, soft=0.20),   # warm visit 1 (id "2")
+    ]
+    s3 = [
+        _ep("S", "0", "bed", 0, soft=0.20),   # cold (id "0")
+        _ep("S", "1", "bed", 1, soft=0.75),   # warm visit 1 — SAME visit, id "1" != "2"
+    ]
+    ar.assign_visit_order(s1)
+    ar.assign_visit_order(s3)
+    res = ar.paired_warm_delta(s1, s3, n_bootstrap=1000)
+    assert res["n"] == 1, f"renumbered warm visit must still pair: n={res['n']}"
+    assert abs(res["mean"] - 0.55) < 1e-9, res["mean"]
+    assert res["n_dropped"] == 0, res["n_dropped"]
+    print("  case warm_delta_pairs_across_renumbered_episode_ids: OK")
+
+
+def case_warm_delta_reports_unpaired_count():
+    # A genuine structural mismatch — a (scene,category) with a DIFFERENT number
+    # of warm visits in S1 vs S3 (e.g. an episode crashed) — must be SURFACED
+    # (n_dropped / n_s1 / n_s3), not silently dropped.
+    s1 = [
+        _ep("S", "a", "bed", 0, soft=0.1),   # cold
+        _ep("S", "b", "bed", 1, soft=0.2),   # warm vo1
+        _ep("S", "c", "bed", 2, soft=0.3),   # warm vo2 (no S3 counterpart)
+    ]
+    s3 = [
+        _ep("S", "a", "bed", 0, soft=0.1),   # cold
+        _ep("S", "b", "bed", 1, soft=0.8),   # warm vo1
+    ]
+    ar.assign_visit_order(s1)
+    ar.assign_visit_order(s3)
+    res = ar.paired_warm_delta(s1, s3, n_bootstrap=1000)
+    assert res["n"] == 1, res["n"]             # only vo1 pairs
+    assert res["n_dropped"] == 1, res["n_dropped"]  # vo2 unpaired -> reported
+    assert res["n_s1"] == 2 and res["n_s3"] == 1, (res["n_s1"], res["n_s3"])
+    print("  case warm_delta_reports_unpaired_count: OK")
+
+
+def case_report_pairs_despite_renumbered_ids():
+    # Report-level reproduction of the M3 stage-1 regression: a cell whose S3
+    # run carries different episode_ids than its S1 run must STILL contribute
+    # its warm pairs to the pooled WARM S3-S1 n (was 0 under the episode_id bug).
+    s1 = _run(1, [_ep("A", "0", "bed", 0, soft=0.20),
+                  _ep("A", "2", "bed", 1, soft=0.20),
+                  _ep("A", "3", "bed", 2, soft=0.20)])
+    s3 = _run(3, [_ep("A", "0", "bed", 0, soft=0.20),
+                  _ep("A", "1", "bed", 1, soft=0.75, n_mem_chosen=1),
+                  _ep("A", "5", "bed", 2, soft=0.70, n_mem_chosen=1)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ar.print_report([s1, s3], n_bootstrap=500)
+    out = buf.getvalue()
+    import re
+    m = re.search(r"WARM S3 - S1[^\n]*?n=(\d+)", out)
+    assert m and int(m.group(1)) == 2, out   # both warm visits pair (was 0 under bug)
+    print("  case_report_pairs_despite_renumbered_ids: OK")
+
+
+def case_report_warns_on_unpaired_visits():
+    # When warm visits are genuinely unpairable (different warm counts across
+    # settings), the report must LOUDLY warn rather than silently shrink n.
+    s1 = _run(1, [_ep("A", "a", "bed", 0, soft=0.1),
+                  _ep("A", "b", "bed", 1, soft=0.2),
+                  _ep("A", "c", "bed", 2, soft=0.3)])
+    s3 = _run(3, [_ep("A", "a", "bed", 0, soft=0.1),
+                  _ep("A", "b", "bed", 1, soft=0.8, n_mem_chosen=1)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ar.print_report([s1, s3], n_bootstrap=500)
+    out = buf.getvalue()
+    assert "WARNING" in out and "unpaired" in out.lower(), out
+    print("  case_report_warns_on_unpaired_visits: OK")
 
 
 def case_binary_spl_block_printed_when_runs_have_spl():
@@ -441,6 +524,10 @@ def main() -> int:
     case_gate_unchanged_by_s2()
     case_back_compat_no_s2_block()
     case_warm_delta_multiscene_no_id_collision()
+    case_warm_delta_pairs_across_renumbered_episode_ids()
+    case_warm_delta_reports_unpaired_count()
+    case_report_pairs_despite_renumbered_ids()
+    case_report_warns_on_unpaired_visits()
     case_load_reads_episode_files()
     case_load_infers_setting_from_name()
     case_binary_spl_block_printed_when_runs_have_spl()
