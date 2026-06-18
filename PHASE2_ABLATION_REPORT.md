@@ -2619,3 +2619,119 @@ project — not another LTM head.
 | `embodied_memory/scripts/test_{room_classifier,room_clip_wiring,coarse_propose}.py` | TDD suites (incl. the self-dedup regression) |
 | `scripts/race-room-clip.sh` | one-run calibrate → cross-env A/B → revisit over-fire A/B |
 | `runs/clip2-{clipon,caponly,revoff,revon}-s*` | the clip2 cells (cross-env n=4 away + revisit n=12 warm) |
+
+
+# AudioGoal M3 — LTM-grounded anomaly response: powered 2-scene matrix reproduces the warm thesis + first significant binary SPL@0.1 m (RACE, 2026-06-18)
+
+The project pivoted to an ICRA-2027 paper (audio-on-our-stack; full arc in the
+`paper-push-icra2027` memory). Task: the agent first runs a **silent mapping pass** that
+consolidates a persistent LTM of the home (Qwen-VL captions + positions, SBERT-indexed fine
+layer); then an FSD50K anomaly clip fires from a source **co-located with a captioned goal
+object**, so the prior sighting is *relevant*. CLAP is a **3-way onset trigger/classifier
+only** (the class→category mapping is decorative); retrieval reuses the proven SBERT
+`propose_memory_candidates` path verbatim. Audio is rendered **offline**
+(`render_rir_grid.py`) and convolved O(1) in the live runner — the two-env split holds.
+M0/M1/M2 (audio path, wiring, dataset builder) landed earlier; **M3 is the full ablation
+matrix.** It also exercised an analyzer fix (paired delta re-keyed to the
+renumbering-invariant `(scene_id, target_category, visit_order)` — the stage-1 run silently
+dropped 3 of 7 warm pairs on Habitat-renumbered `episode_id`s; clean here, NO unpaired
+WARNING).
+
+## Headline (real ReMEmbR, 2 scenes × 3 onset-trigger cells × S1/S2/S3, exit 0, 3h3m)
+
+`scripts/race-audiogoal-matrix.sh --cells "baby_cry:bed alarm:toilet glass_break:chair"`
+on `{TEEsavR23oF, wcojb4TFT35}` (toilet replaced the degenerate, scene-sparse sofa):
+
+| metric | n | mean | 90% CI | p(≤0) |
+|---|---|---|---|---|
+| **WARM soft-SPL S3−S1** (primary gate) | 18 | **+0.171** | [+0.070, +0.277] | **0.002** |
+| WARM S2−S1 (STM-only; module 1) | 18 | −0.001 | [−0.034, +0.032] | 0.561 |
+| WARM S3−S2 (LTM-specific; modules 2–4) | 18 | +0.172 | [+0.067, +0.279] | 0.004 |
+| COLD S3−S1 (control, expect ~0) | 6 | +0.003 | [−0.086, +0.095] | 0.446 |
+| **WARM binary SPL@0.1 m S3−S1** | 18 | **+0.139** | [+0.051, +0.235] | **0.003** |
+| COLD binary S3−S1 | 6 | 0.000 | — | 1.000 |
+
+Memory fired on 15/18 warm visits (0.833). A **legitimate independent reproduction** of the
+warm-relevant-LTM thesis in a new task (~12th warm repro); +0.171 sits between the
+audit-honest priors (+0.115 n=26, +0.24 n=12), closest to the better-powered +0.115 —
+consistent, not larger.
+
+## Decomposition + control (clean)
+
+The decomposition is an exact algebraic identity (−0.001 + 0.172 = 0.171). STM-only (S2) is
+genuinely inert, so **100 % of the gain localizes to the LTM-specific step** (S3−S2,
+p=0.004) — reproducing the Phase-C / Run-17 attribution. Cold control ≈ 0 confirms memory is
+inert without a relevant prior — though the cold zero is a low-power *cancellation* of two
+opposite n=1/cell effects (wcojb alarm cold −0.258 vs glass +0.276), not a tight zero.
+
+## New result — first significant binary SPL@0.1 m
+
+`+0.139` (p=0.003) is the **first time** the long-standing "binary SPL@0.1 m is
+localization-bound ≈ 0" finding is falsified. It is **legitimate** (verified against
+habitat-lab `nav.py`: Success ⇐ `is_stop_called ∧ distance_to_VIEW_POINTS < 0.1`; the
+fractional native SPL 0.46–0.67 on the wcojb chair episodes is impossible without a real
+in-ring STOP after 78–147 steps), **not** a fallback artifact. It **refines, not retracts**
+the prior claim: 0.1 m becomes reachable *because* the cold seed starts at a goal viewpoint,
+so the recalled sighting's stored position coincides with a success-credited viewpoint. It is
+**concentrated** — wcojb glass:chair (SPL 0.404, succ@1m 1.0) dominates; 4/6 cells are still
+≈ 0. Frame as a narrow regime-specific exception, and quote the 1.0 m SR alongside.
+
+## Per-cell — heterogeneity is HIGH and reported openly
+
+(between-cell SD 0.262 > pooled mean; 4/6 win, 2 regress — expected thesis behaviour)
+
+| cell | warm S3−S1 | S3 mem_chosen | min_d2g S1→S3 | note |
+|---|---|---|---|---|
+| TEEsav baby_cry:bed | **+0.548** | 30 | 4.28→0.78 | biggest winner |
+| TEEsav glass:chair | +0.394 | 104 | 3.59→0.88 | winner |
+| wcojb glass:chair | +0.174 | 23 | 2.52→**0.04** | winner; binary driver |
+| wcojb alarm:toilet | +0.012 | 0 | 2.93→2.49 | inert (never fired) |
+| wcojb baby_cry:bed | −0.045 | 21 | 2.77→3.02 | n=3 noise |
+| TEEsav alarm:toilet | **−0.113** | 93 | 11.79→**13.95** | wrong-instance over-fire |
+
+The **alarm:toilet/TEEsav regression** is the documented SBERT instance-discrimination
+bottleneck surfacing, not a bug: the cell is independently hard (S1 min_d2g already 11.8 m),
+and the bare `"there is a toilet"` query can't disambiguate toilet instances, so the fine
+layer surfaces a wrong/far toilet's viewing pose and the navmesh follower drives there
+(min_d2g *worsens*; S2 0.103 > S3 0.079 ⇒ the LTM injection is steering away, not STM noise).
+**Fire-count is non-diagnostic** (glass fires 23–104 and wins; alarm fires 93 and loses) —
+what matters is *where* the fired waypoint points. The same toilet cell over-fires in TEEsav
+(93×) but **never fires** in wcojb (0×: no bathroom caption cleared cos ≥ 0.23) — a clean
+illustration of the query-construction / instance ceiling.
+
+## AUDIT CAVEATS (state precisely; this goes in a paper)
+
+1. **Cell-fragile power.** n=18 episode-pairs but only 6 cells; effect carried by 2–3.
+   Leave-best-out (drop TEEsav baby_cry, n=15) → **+0.095, p≈0.07**. The *sign* is robust to
+   dropping any one cell; pooled p<0.01 leans on the strongest cells. Quote +0.095 as the
+   conservative floor.
+2. **Binary SPL is concentrated + regime-specific** — still ≈ 0 in 4/6 cells; not a general
+   localization capability.
+3. **Within-scene, same-category recall — NOT cross-env transfer** (injector hard-filters to
+   the current scene).
+4. **Non-instance-keyed**: warm "success" credits reaching *any* same-category viewpoint, not
+   the specifically recalled instance.
+5. **0.1 m vs 1.0 m ring**: quote both for every binary number (wcojb glass succ@1m 1.0).
+6. **Pre-publish chore (RACE, $0):** recompute binary SPL from raw `episode_*.json` (confirm
+   fractional `spl`) and confirm the `*-alarm-*` dirs hold `target_category=toilet` (dir name
+   says `alarm` regardless; driver default is sofa; the run used `--cells`).
+
+## Verdict + next
+
+A clean, powered, honestly-caveated milestone: the hierarchical LTM helps when the recalled
+sighting is relevant (warm +0.171, p=0.002), is module-attributable to the LTM (S2 inert),
+inert on the cold control, and — for the first time — lifts strict 0.1 m binary success in a
+favorable regime. The remaining heterogeneity is the embedding/instance-discrimination
+ceiling (a separate, larger project), not a power problem. **Next: M4 — the temporal-context
+head** (the paper's named novelty; recency-weighted recall, default-OFF, A/B-ablated).
+
+## File index (AudioGoal M3)
+
+| Path | Purpose |
+|---|---|
+| `scripts/race-audiogoal-matrix.sh` | M3 matrix driver (N scenes × M cells × S1/S2/S3, pooled analyze) |
+| `scripts/race-audiogoal.sh` | single-cell child (build → render → run → per-cell Gate-A) |
+| `embodied_memory/scripts/make_audiogoal_smoke.py` | warm-episode dataset builder (anomaly source co-located with a captioned goal) |
+| `embodied_memory/audio.py`, `perception.CLAPAudioEncoder` | offline RIR render + O(1) convolve + CLAP 3-way classify |
+| `embodied_memory/scripts/analyze_revisit.py` | pooled `(scene,category,visit_order)` paired delta (renumbering-invariant pairing fix) |
+| `runs/m3-{TEEsavR23oF,wcojb4TFT35}-{baby_cry,alarm,glass_break}-s{1,2,3}` | the 18 cells (RACE-only) |
