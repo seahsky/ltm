@@ -2735,3 +2735,113 @@ head** (the paper's named novelty; recency-weighted recall, default-OFF, A/B-abl
 | `embodied_memory/audio.py`, `perception.CLAPAudioEncoder` | offline RIR render + O(1) convolve + CLAP 3-way classify |
 | `embodied_memory/scripts/analyze_revisit.py` | pooled `(scene,category,visit_order)` paired delta (renumbering-invariant pairing fix) |
 | `runs/m3-{TEEsavR23oF,wcojb4TFT35}-{baby_cry,alarm,glass_break}-s{1,2,3}` | the 18 cells (RACE-only) |
+
+
+# AudioGoal M4 — temporal-context head: a clean, code-verified honest negative (recency weighting adds nothing on the warm matrix) (RACE, 2026-06-18)
+
+The one net-new mechanism the ICRA plan promised beyond the M3 stack. Motivation:
+**recency ≈ reliability** in a lifelong map — among the recalled same-category sightings,
+prefer the freshest, because the world may have changed since an older sighting. Built as
+the only untouched LTM head (`memory_bridge._temporal_recency_bonus`, wired into
+`propose_memory_candidates`): a small **additive recency bonus** (max `LTM_TEMPORAL_WEIGHT`,
+default 0.05, linear in consolidation `step_idx`) on the SBERT-cosine `raw_score` of already-
+retrieved memory candidates, **env-gated `LTM_TEMPORAL_CONTEXT`, default-OFF**, strict no-op
+when <2 distinct valid step indices. A/B'd on the exact M3 warm matrix (2 scenes × 3 anomaly
+classes, S3 only): **A** = baseline S3 (`runs/m3-*`, head off), **B** = temporal-on S3
+(`runs/m3t-*`), paired on the renumbering-invariant `(scene_id, target_category, visit_order)`
+key. Driver: `scripts/race-audiogoal-matrix.sh --temporal --cells "baby_cry:bed alarm:toilet
+glass_break:chair"` (reuses the M3 datasets/grids; `analyze_revisit.py --compare-a/-b`).
+
+## Headline: the head does not change warm outcomes
+
+| Warm (n=18, paired B−A) | A (off) | B (temporal) | B−A | verdict |
+|---|---|---|---|---|
+| soft-SPL | 0.3489 | 0.3484 | **−0.0005**, 90% CI [−0.0015, +0.0000] | tie at the floor |
+| binary SPL@0.1 m | +0.1391 | +0.1391 | **+0.0000**, CI [0,0] | unchanged |
+| success@1 m | 0.611 | 0.611 | 0.000 | unchanged |
+| n_steps | 108.0 | 108.0 | 0.0 | unchanged |
+| mem_fire_rate | 0.833 | 0.833 | 0.000 | unchanged |
+| min_d2g | 3.391 m | 3.358 m | −0.033 m (~1%) | noise floor |
+| **mem_chosen** | **271** | **339** | **+68 (+25%)** | over-fire at the *selection* layer |
+
+The warm soft-SPL Δ is **−0.0005** — operationally zero (~0.14% of the 0.349 warm mean, ~300×
+smaller than the +0.171 M3 warm gain it sits inside). The analyzer originally printed
+*"A beats B on warm soft-SPL (p=0.000)"*: a **floor artifact**, not a regression — the paired
+bootstrap clamps the CI upper bound at exactly 0 and p(B>A) rounds to 0.000 for a delta this
+deterministic-near-identical. (Fixed: `analyze_revisit._compare_verdict` now applies a
+`_VERDICT_TIE_BAND` of 0.005, so a sub-band |Δ| reports *"statistical tie at the floor"*; a
+genuine −0.05 still reports "A beats B". 4 TDD cases.)
+
+**The predicted over-fire appeared but was harmless.** Warm `mem_chosen` rose +25% (271→339),
+concentrated in the documented wrong-instance cell (`alarm:toilet`/`TEEsavR23oF`, per-cell
+mem_chosen 161 — by far the highest, the same SBERT-instance-ceiling over-fire flagged in M3).
+Yet every *outcome* metric is bit-identical (binary SPL CI exactly [0,0]; steps, succ@1m,
+fire-rate equal). The +25% extra picks are **credit re-attribution** (more candidates tagged
+memory-sourced), **not re-routing**: genuine path change would jitter steps/min_d2g/binary
+SPL — their exact equality shows the recency-favored sighting is the *same goal category in
+the same already-relevant region*, so the destination is unchanged.
+
+## Mechanism (code-verified): why this negative is *cleaner* than the importance heads
+
+A 3-lens adversarial review (statistics / code-grounded mechanism / thesis-consistency; all
+agree, high confidence) confirmed and refined the verdict:
+
+- **Read-side, not write-side.** `_temporal_recency_bonus` mutates `c.raw_score` *after*
+  candidates are emitted from the fine LTM (`memory_bridge.py:983-988`); it **never touches
+  consolidation / write-gating** (grep confirms zero `temporal`/`recency` references in
+  `_consolidate_pending` or `consolidation.compute_importance`). This is the genuine
+  mechanistic difference from the R-scorer / U-predictor heads, which changed importance →
+  write-gating → *stored more wrong-instance frames* and thereby surfaced wrong instances at
+  retrieval. The temporal head **cannot change what is stored** — only the rerank order of
+  what was already recalled.
+- **A stronger negative than coarse-affordance.** Coarse was inert because it was *never
+  chosen* (`n_coarse_chosen=0`). The temporal head **was exercised** — it fired +25% more
+  memory picks and the 0.05 cosine bonus is competitive at the selection layer (in the
+  `[0.30, 0.42]` physics band it maps to up to +0.33 in the final memory score, enough to
+  out-vote a frontier). So "inert" here means **inert on *outcomes* despite changing
+  *selection*** — a cleaner result.
+- **Cold is head-independent.** `mem_chosen = 0` on **both** cold arms ⇒ the bonus block
+  (gated `if out and …`) never fires when there is no prior goal sighting ⇒ the head is
+  *mechanically incapable* of causing the cold +0.068 (p=0.330) or the cold step swing
+  (83.5→53.8). Those are real-ReMEmbR backbone run-to-run variance; cold n=6 is **underpowered
+  + mechanically inert**, not a measured null.
+
+## Verdict and scope
+
+**M4 = clean honest negative.** The temporal-context head is built, correct, conservative, and
+**does not beat the {fine layer + heuristic importance} baseline** — joining coarse-affordance
+and the R/U importance heads. The binding constraint is unchanged: the SBERT caption embedding
+cannot distinguish object instances, so the only place recency moves selection (the wrong-
+instance cell), the extra picks are wrong-instance — harmless here, predicted neutral-to-harmful
+at a larger weight. **Default stays OFF; reported as a negative.**
+
+Honest caveats (carried into the paper):
+1. **Fair-test.** The head got a competitive test at the *selection* layer (+25% mem_chosen),
+   but the eval lacks the regime it was *designed* for: a **changed world**. The AudioGoal task
+   is single-anomaly within-scene with a static map between the cold mapping pass and the warm
+   visit, so there is **no stale-vs-fresh distinction** for recency to exploit. A larger
+   `LTM_TEMPORAL_WEIGHT` was not swept (one higher-weight cell would convert "argued" → "measured");
+   the over-fire concentration predicts it regresses, not helps.
+2. **Not a reproduction.** B is a re-run of the M3 A arm with a near-no-op head (A/B warm
+   soft-SPL 0.3489 vs 0.3484 are the *same* measurement) — the warm-thesis repro count stays
+   anchored on the M3 +0.171 (n=18, p=0.002).
+3. **Attribution.** M4 being inert does **not** by itself prove the M3 gain is fine-layer recall;
+   it proves recency *on top of* the stack adds nothing. The gain→recall attribution rests on
+   the **M3 decomposition** (S2−S1 n.s., S3−S2 +0.172), cited alongside, not replaced by, this A/B.
+4. **Dual ring.** Binary SPL deltas are at the 0.1 m localization-bound ring; quote 0.1 m AND
+   1.0 m, as throughout.
+
+**Paper value:** a well-instrumented negative that pre-empts the obvious reviewer question
+("did you try recency/temporal weighting?") and sharpens the M3 story — the warm gain is the
+LTM *recall* mechanism, not an added head.
+
+## File index (AudioGoal M4)
+
+| Path | Purpose |
+|---|---|
+| `embodied_memory/memory_bridge.py` | `_temporal_recency_bonus` + the env-gated wire into `propose_memory_candidates` |
+| `embodied_memory/scripts/test_temporal_context.py` | 7 faiss-free TDD cases (no-op guards, value-keyed, gating) |
+| `scripts/race-audiogoal-matrix.sh` | `--temporal` arm: S3-only, `m3t-*` out-dirs, reuse datasets, pooled `--compare-a/-b` |
+| `embodied_memory/scripts/analyze_revisit.py` | `_compare_verdict` + `_VERDICT_TIE_BAND` (floor-artifact fix) |
+| `embodied_memory/scripts/test_analyze_revisit.py` | +4 verdict-tie-band TDD cases (33 total) |
+| `runs/m3t-{TEEsavR23oF,wcojb4TFT35}-{baby_cry,alarm,glass_break}-s3` | the 6 temporal-on S3 cells (RACE-only) |

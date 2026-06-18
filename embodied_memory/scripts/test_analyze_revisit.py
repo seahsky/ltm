@@ -502,6 +502,43 @@ def case_compare_pooled_requires_both_groups():
     raise AssertionError("expected SystemExit (parser.error) when only one group given")
 
 
+def case_compare_verdict_negligible_negative_is_tie():
+    # M4 floor artifact: a paired bootstrap can clamp the CI upper bound at
+    # exactly 0 and report p(<=0)=1.000 for a delta of a few ten-thousandths.
+    # Reported verbatim ("A beats B (p=0.000)") this reads as a real regression.
+    # A |mean| below the practical-significance band must be called a TIE.
+    wm = {"mean": -0.0005, "p_le_zero": 1.0}
+    v = ar._compare_verdict(wm).lower()
+    assert "tie" in v, v
+    assert "a beats b" not in v, v
+    print("  case_compare_verdict_negligible_negative_is_tie: OK")
+
+
+def case_compare_verdict_real_negative_still_a_beats_b():
+    # A genuine, above-band negative is still reported as A beating B.
+    wm = {"mean": -0.05, "p_le_zero": 1.0}
+    v = ar._compare_verdict(wm).lower()
+    assert "a beats b" in v, v
+    print("  case_compare_verdict_real_negative_still_a_beats_b: OK")
+
+
+def case_compare_verdict_negligible_positive_is_tie():
+    # Symmetric: a tiny positive floor delta is also a tie, not "B beats A".
+    wm = {"mean": +0.0007, "p_le_zero": 0.02}
+    v = ar._compare_verdict(wm).lower()
+    assert "tie" in v, v
+    assert "b beats a" not in v, v
+    print("  case_compare_verdict_negligible_positive_is_tie: OK")
+
+
+def case_compare_verdict_real_positive_b_beats_a():
+    # A genuine, above-band, significant positive is still "B beats A".
+    wm = {"mean": +0.171, "p_le_zero": 0.002}
+    v = ar._compare_verdict(wm).lower()
+    assert "b beats a" in v, v
+    print("  case_compare_verdict_real_positive_b_beats_a: OK")
+
+
 def case_binary_spl_block_printed_when_runs_have_spl():
     s1 = _run(1, [_ep("S", "a", "chair", 0, soft=0.1, spl=0.0),
                   _ep("S", "b", "chair", 6, soft=0.2, spl=0.0)])
@@ -590,6 +627,10 @@ def main() -> int:
     case_pool_dirs_merges_episodes()
     case_compare_pooled_cli_routes()
     case_compare_pooled_requires_both_groups()
+    case_compare_verdict_negligible_negative_is_tie()
+    case_compare_verdict_real_negative_still_a_beats_b()
+    case_compare_verdict_negligible_positive_is_tie()
+    case_compare_verdict_real_positive_b_beats_a()
     case_load_reads_episode_files()
     case_load_infers_setting_from_name()
     case_binary_spl_block_printed_when_runs_have_spl()
