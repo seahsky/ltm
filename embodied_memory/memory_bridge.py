@@ -164,6 +164,51 @@ def _temporal_recency_bonus(step_indices: List[Any], weight: float) -> List[floa
 
 
 # ----------------------------------------------------------------------
+# Lever 1 — caption-to-caption rerank head (env-gated LTM_CAPTION_RERANK,
+# DEFAULT-OFF). The bare category query "there is a {cat}" matches every
+# same-category instance about equally (diagnose_sbert_cosines: instance rank
+# gap +0.047) even though the captions carry an instance signal (within-instance
+# 0.628 > between-instance 0.535 = +0.093). Reference-free fix: the WELL-OBSERVED
+# instance (seen repeatedly → a tight caption cluster) is more CENTRAL among the
+# recalled same-category sightings than a one-off distractor, so give the more
+# central candidates a small additive bonus on the SBERT-cos scale. Uses the
+# already-stored entry embeddings (no re-encode). Off → raw_score untouched →
+# byte-identical to every prior run. A/B-ablated.
+# ----------------------------------------------------------------------
+_CAPTION_RERANK_WEIGHT = float(os.environ.get("LTM_CAPTION_RERANK_WEIGHT", "0.05"))
+
+
+def _caption_centrality_bonus(embeddings: List[Any], weight: float) -> List[float]:
+    """Per-candidate additive centrality bonus, aligned to ``embeddings``.
+
+    Centrality of candidate ``i`` = mean cosine of its caption embedding to every
+    OTHER candidate's. The most-central candidate (the dominant same-instance
+    cluster) gets ``+weight``, the least-central ``0``, linear between. A strict
+    no-op (all zeros) when ``weight <= 0``, fewer than 2 candidates, or no spread
+    in centrality — so the head can never *introduce* a signal where the recalled
+    sightings are indistinguishable. Zero-norm embeddings are treated as cos 0
+    with everything (maximally un-central), never NaN.
+    """
+    n = len(embeddings)
+    if weight <= 0.0 or n < 2:
+        return [0.0] * n
+    units: List[np.ndarray] = []
+    for e in embeddings:
+        v = np.asarray(e, dtype=np.float32).ravel()
+        nrm = float(np.linalg.norm(v))
+        units.append(v / nrm if nrm > 0.0 else v)
+    cent: List[float] = []
+    for i in range(n):
+        sims = [float(np.dot(units[i], units[j])) for j in range(n) if j != i]
+        cent.append(sum(sims) / len(sims) if sims else 0.0)
+    lo, hi = min(cent), max(cent)
+    span = hi - lo
+    if span <= 1e-9:
+        return [0.0] * n
+    return [weight * (c - lo) / span for c in cent]
+
+
+# ----------------------------------------------------------------------
 # Frontier physics scorer (S_phys)
 # ----------------------------------------------------------------------
 
@@ -890,6 +935,7 @@ class EmbodiedMemoryBridge:
         hits = self.ltm.fine.search(query, fetch_k)
 
         out: List[FrontierCandidate] = []
+        out_embs: List[Any] = []  # parallel to `out`: each emitted entry's caption embedding (Lever-1 rerank)
         seen_xys: List[np.ndarray] = list(planner_world_xys or [])
         ax = float(agent_pos[0])
         az = float(agent_pos[2])
@@ -973,8 +1019,20 @@ class EmbodiedMemoryBridge:
                     },
                 )
             )
+            out_embs.append(entry.embedding)
             if len(out) >= top_k:
                 break
+
+        # Lever-1 caption-to-caption rerank (default-OFF). Boost the candidate
+        # most CENTRAL among the recalled same-category sightings — the
+        # well-observed instance (a tight caption cluster) over a one-off
+        # distractor — using the stored caption embeddings (no re-encode).
+        # Env-gated; off → raw_score untouched → byte-identical to prior runs.
+        if out and os.environ.get("LTM_CAPTION_RERANK"):
+            for c, b in zip(out, _caption_centrality_bonus(out_embs, _CAPTION_RERANK_WEIGHT)):
+                if b:
+                    c.raw_score = float(c.raw_score) + b
+                    c.metadata["caption_rerank_bonus"] = float(b)
 
         # M4 temporal-context head (default-OFF). Among the recalled same-category
         # sightings, boost the more-recently consolidated ones' rerank score so

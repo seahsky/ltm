@@ -45,7 +45,7 @@ SCENES="TEEsavR23oF wcojb4TFT35"
 # present in both default val_mini scenes; the class->category mapping is for
 # trigger diversity (onset-trigger framing — class is decorative for retrieval).
 CELLS="baby_cry:bed alarm:sofa glass_break:chair"
-NWARM=16; SETTINGS="1 2 3"; PREFIX="m3"; TEMPORAL=""
+NWARM=16; SETTINGS="1 2 3"; PREFIX="m3"; TEMPORAL=""; CAPTION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenes) SCENES="$2"; shift 2 ;;
@@ -53,26 +53,33 @@ while [ $# -gt 0 ]; do
     --n-warm) NWARM="$2"; shift 2 ;;
     --settings) SETTINGS="$2"; shift 2 ;;
     --tag-prefix) PREFIX="$2"; shift 2 ;;
-    # --temporal: run the M4 temporal-context A/B arm. Only S3 is affected by
-    # LTM_TEMPORAL_CONTEXT (S1=mem-off, S2=STM-only never call the memory head),
-    # so this runs ONLY S3, REUSING each cell's baseline dataset/grid, into
-    # distinct out-dirs (<prefix>t-*), then a POOLED paired compare of the
-    # temporal S3 vs the baseline S3. REQUIRES the baseline matrix (<prefix>-*)
-    # to have run first (its S3 dirs are the compare's A arm).
+    # A/B-VARIANT arms. Each toggles ONE default-OFF S3 memory head and A/B's it
+    # against the baseline S3. Only S3 calls the memory head (S1=mem-off,
+    # S2=STM-only), so a variant runs ONLY S3, REUSING each cell's baseline
+    # dataset/grid, into a distinct out-prefix (so baseline S3 is never
+    # clobbered), then a POOLED paired compare of variant S3 (B) vs baseline S3
+    # (A). REQUIRES the baseline matrix (<prefix>-*) to have run first.
+    #   --temporal       → M4 recency head  (LTM_TEMPORAL_CONTEXT, out <prefix>t-*)
+    #   --caption-rerank → Lever-1 caption-to-caption head (LTM_CAPTION_RERANK, out <prefix>c-*)
     --temporal) TEMPORAL=1; shift ;;
+    --caption-rerank) CAPTION=1; shift ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
 [[ "$PREFIX" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --tag-prefix must be alnum/dash/underscore"; exit 1; }
+[ -n "$TEMPORAL" ] && [ -n "$CAPTION" ] && { echo "FATAL: pass at most one A/B variant (--temporal XOR --caption-rerank)"; exit 1; }
 
-# M4 temporal A/B setup: force S3-only, turn the head on for every child run, and
-# write to a distinct out-prefix so the baseline S3 dirs are never clobbered.
-OUT_PREFIX="$PREFIX"
+# A/B-variant setup: force S3-only, turn the chosen head on for every child run,
+# and write to a distinct out-prefix so the baseline S3 dirs are never clobbered.
+OUT_PREFIX="$PREFIX"; VARIANT_ON=""; VARIANT_LABEL=""
 if [ -n "$TEMPORAL" ]; then
+  VARIANT_ON=1; VARIANT_LABEL="temporal"; OUT_PREFIX="${PREFIX}t"; export LTM_TEMPORAL_CONTEXT=1
+elif [ -n "$CAPTION" ]; then
+  VARIANT_ON=1; VARIANT_LABEL="caption-rerank"; OUT_PREFIX="${PREFIX}c"; export LTM_CAPTION_RERANK=1
+fi
+if [ -n "$VARIANT_ON" ]; then
   SETTINGS="3"
-  OUT_PREFIX="${PREFIX}t"
-  export LTM_TEMPORAL_CONTEXT=1
-  echo "  [temporal] M4 A/B arm: S3-only, LTM_TEMPORAL_CONTEXT=1, out-prefix=$OUT_PREFIX (baseline=$PREFIX reused)"
+  echo "  [$VARIANT_LABEL] A/B arm: S3-only, out-prefix=$OUT_PREFIX (baseline=$PREFIX reused)"
 fi
 
 # Distinct-category guard (a shared category would cross-pair classes in the analyzer).
@@ -115,8 +122,8 @@ rc=$?
 [ "$rc" -eq 0 ] || { echo "FATAL: a (scene,category) cell is empty — fix --cells; NOT spending on GPU."; exit 1; }
 
 N_CELLS=$(echo $CELLS | wc -w); N_SCENES=$(echo $SCENES | wc -w); N_SET=$(echo $SETTINGS | wc -w)
-banner "[4/5] run matrix: $N_SCENES scenes × $N_CELLS classes × settings [$SETTINGS], n_warm=$NWARM${TEMPORAL:+ (M4 TEMPORAL A/B arm)}"
-OUT_DIRS=""; BASE_S3_DIRS=""; TEMP_S3_DIRS=""
+banner "[4/5] run matrix: $N_SCENES scenes × $N_CELLS classes × settings [$SETTINGS], n_warm=$NWARM${VARIANT_ON:+ ($VARIANT_LABEL A/B arm)}"
+OUT_DIRS=""; BASE_S3_DIRS=""; VAR_S3_DIRS=""
 for S in $SCENES; do
   for cell in $CELLS; do
     C="${cell%%:*}"; CAT="${cell#*:}"
@@ -134,20 +141,20 @@ for S in $SCENES; do
       od="runs/${OUT_TAG}-${C}-s${N}"; cell_dirs="$cell_dirs $od"
       [ -f "$od/summary.json" ] && done_count=$((done_count+1))
     done
-    # Track the S3 dir pair for the temporal pooled compare (baseline A vs temporal B).
+    # Track the S3 dir pair for the variant pooled compare (baseline A vs variant B).
     BASE_S3_DIRS="$BASE_S3_DIRS runs/${PREFIX}-${S}-${C}-s3"
-    TEMP_S3_DIRS="$TEMP_S3_DIRS runs/${OUT_TAG}-${C}-s3"
+    VAR_S3_DIRS="$VAR_S3_DIRS runs/${OUT_TAG}-${C}-s3"
     if [ "$done_count" -eq "$N_SET" ]; then
       echo "  RESUME: cell ($S,$C->$CAT) already complete ($N_SET/$N_SET out-dirs) — skipping"
       OUT_DIRS="$OUT_DIRS $cell_dirs"; continue
     fi
     banner "cell: scene=$S class=$C category=$CAT  n_warm=$NWARM settings=[$SETTINGS] out_tag=$OUT_TAG"
-    # --out-tag == --tag in baseline mode (unchanged); in temporal mode it diverges so
+    # --out-tag == --tag in baseline mode (unchanged); in a variant arm it diverges so
     # the baseline S3 dirs are never clobbered, and --reuse-dataset reuses the baseline
     # build (same episodes → the (scene,category,visit_order) pairing matches).
     bash scripts/race-audiogoal.sh --scene "$S" --class "$C" --category "$CAT" \
         --n-warm "$NWARM" --settings "$SETTINGS" --tag "$BASE_TAG" --out-tag "$OUT_TAG" \
-        ${TEMPORAL:+--reuse-dataset} \
+        ${VARIANT_ON:+--reuse-dataset} \
       || { echo "FATAL: cell ($S,$C->$CAT) failed — fix + re-run (completed cells resume)."; exit 1; }
     # Belt-and-suspenders: don't trust the child's exit code alone — verify every
     # setting wrote a summary.json before counting the cell done, so a silent
@@ -160,22 +167,22 @@ for S in $SCENES; do
   done
 done
 
-if [ -n "$TEMPORAL" ]; then
-  banner "[5/5] M4 TEMPORAL A/B verdict (pooled paired S3: temporal-on B − baseline-off A)"
-  # The A arm is the BASELINE matrix's S3 dirs — require them (the temporal arm only
+if [ -n "$VARIANT_ON" ]; then
+  banner "[5/5] $VARIANT_LABEL A/B verdict (pooled paired S3: variant-on B − baseline-off A)"
+  # The A arm is the BASELINE matrix's S3 dirs — require them (the variant arm only
   # ran/reused S3; it never produced the baseline-off S3). Fail loud if absent.
   _missing=""
   for d in $BASE_S3_DIRS; do [ -f "$d/summary.json" ] || _missing="$_missing $d"; done
-  [ -z "$_missing" ] || { echo "FATAL: baseline S3 dir(s) missing — run the baseline matrix (no --temporal) first:$_missing"; exit 1; }
+  [ -z "$_missing" ] || { echo "FATAL: baseline S3 dir(s) missing — run the baseline matrix (no variant flag) first:$_missing"; exit 1; }
   # shellcheck disable=SC2086
   python embodied_memory/scripts/analyze_revisit.py \
-      --compare-a $BASE_S3_DIRS --compare-b $TEMP_S3_DIRS \
-      2>&1 | tee "runs/${OUT_PREFIX}-temporal-compare.log"
+      --compare-a $BASE_S3_DIRS --compare-b $VAR_S3_DIRS \
+      2>&1 | tee "runs/${OUT_PREFIX}-${VARIANT_LABEL}-compare.log"
   echo
-  echo "DONE. M4 temporal-context A/B (pooled paired S3 temporal-on vs baseline-off)."
+  echo "DONE. $VARIANT_LABEL A/B (pooled paired S3 variant-on vs baseline-off)."
   echo "  A (baseline S3):$BASE_S3_DIRS"
-  echo "  B (temporal S3):$TEMP_S3_DIRS"
-  echo "  WARM B−A > 0 (p<0.1) ⇒ temporal head helps; ≤ 0 / mem over-fires ⇒ honest negative."
+  echo "  B ($VARIANT_LABEL S3):$VAR_S3_DIRS"
+  echo "  WARM B−A > 0 (p<0.1) ⇒ $VARIANT_LABEL head helps; ≤ 0 / mem over-fires ⇒ honest negative."
 else
   banner "[5/5] COMBINED matrix verdict (pooled across cells: warm S3-S1 + S2 decomposition + cold control)"
   # shellcheck disable=SC2086

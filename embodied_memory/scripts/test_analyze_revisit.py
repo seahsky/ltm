@@ -502,6 +502,40 @@ def case_compare_pooled_requires_both_groups():
     raise AssertionError("expected SystemExit (parser.error) when only one group given")
 
 
+def case_paired_delta_drops_nonfinite_pair():
+    # A navmesh-unreachable goal → Infinity geodesic → NaN soft_SPL. A single NaN
+    # must NOT poison the paired mean: the bad pair is dropped, counted, and the
+    # headline stays finite. (Lever-2 changed-world blocker fix; protects every
+    # revisit analysis.)
+    import math as _m
+    s1 = [_ep("S", "a", "chair", 0, soft=0.1),
+          _ep("S", "b", "chair", 5, soft=0.2),
+          _ep("S", "c", "chair", 10, soft=0.3)]
+    s3 = [_ep("S", "a", "chair", 0, soft=0.1),
+          _ep("S", "b", "chair", 5, soft=0.6),
+          _ep("S", "c", "chair", 10, soft=float("nan"))]
+    ar.assign_visit_order(s1)
+    ar.assign_visit_order(s3)
+    res = ar.paired_warm_delta(s1, s3, n_bootstrap=1000)
+    assert res["n"] == 1, res                      # only the finite warm pair
+    assert res["n_nonfinite"] == 1, res            # the NaN pair was dropped + counted
+    assert _m.isfinite(res["mean"]), res           # headline not poisoned
+    assert abs(res["mean"] - 0.4) < 1e-6, res       # 0.6 - 0.2
+    print("  case_paired_delta_drops_nonfinite_pair: OK")
+
+
+def case_paired_delta_nonfinite_warning_printed():
+    res = {"n": 1, "mean": 0.4, "lo": 0.4, "hi": 0.4, "p_le_zero": 0.0,
+           "keys": [("S", "chair", 1)], "deltas": [0.4], "n_dropped": 0,
+           "n_s1": 2, "n_s3": 2, "unpaired_keys": [], "n_nonfinite": 1}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ar._print_delta("WARM test", res)
+    out = buf.getvalue().lower()
+    assert "non-finite" in out or "nan" in out, out
+    print("  case_paired_delta_nonfinite_warning_printed: OK")
+
+
 def case_compare_verdict_negligible_negative_is_tie():
     # M4 floor artifact: a paired bootstrap can clamp the CI upper bound at
     # exactly 0 and report p(<=0)=1.000 for a delta of a few ten-thousandths.
@@ -627,6 +661,8 @@ def main() -> int:
     case_pool_dirs_merges_episodes()
     case_compare_pooled_cli_routes()
     case_compare_pooled_requires_both_groups()
+    case_paired_delta_drops_nonfinite_pair()
+    case_paired_delta_nonfinite_warning_printed()
     case_compare_verdict_negligible_negative_is_tie()
     case_compare_verdict_real_negative_still_a_beats_b()
     case_compare_verdict_negligible_positive_is_tie()

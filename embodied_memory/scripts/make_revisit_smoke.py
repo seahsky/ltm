@@ -110,6 +110,42 @@ def pick_cold_instance(goal_instances: List[Dict[str, Any]]) -> Dict[str, Any]:
     return best
 
 
+def _instance_centroid(inst: Dict[str, Any]) -> Optional[List[float]]:
+    """Mean of an instance's view_point positions (its spatial centre), or None."""
+    vps = _goal_view_point_positions([inst])
+    if not vps:
+        return None
+    n = len(vps)
+    return [sum(v[i] for v in vps) / n for i in range(len(vps[0]))]
+
+
+def pick_warm_instance(
+    goal_instances: List[Dict[str, Any]], cold_instance: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Return the goal INSTANCE farthest (by view_point centroid) from
+    ``cold_instance`` — the "moved-to" goal for the changed-world build, so the
+    cold sighting of ``cold_instance`` is genuinely stale. Returns ``None`` when
+    there is no other instance with view_points (a single-instance category
+    cannot express a moved goal → the caller skips it).
+    """
+    ca = _instance_centroid(cold_instance)
+    if ca is None:
+        return None
+    best: Optional[Dict[str, Any]] = None
+    best_d = -math.inf
+    for inst in goal_instances:
+        if inst is cold_instance:
+            continue
+        c = _instance_centroid(inst)
+        if c is None:
+            continue
+        d = _dist(ca, c)
+        if d > best_d:
+            best_d = d
+            best = inst
+    return best
+
+
 def _goal_view_point_positions(goal_instances: List[Dict[str, Any]]) -> List[List[float]]:
     out: List[List[float]] = []
     for inst in goal_instances:
@@ -250,6 +286,76 @@ def build_dataset(
             goal_vps = _goal_view_point_positions(goal_instances)
         warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps, n=n_warm, min_dist=min_dist)
         out_eps.extend(build_category_episodes(template, cold_pose, warm_poses, cat))
+
+    return {
+        "category_to_task_category_id": src_content.get("category_to_task_category_id", {}),
+        "category_to_scene_annotation_category_id":
+            src_content.get("category_to_scene_annotation_category_id", {}),
+        "goals_by_category": out_goals,
+        "episodes": out_eps,
+    }
+
+
+def build_changed_world_dataset(
+    src_content: Dict[str, Any],
+    categories: List[str],
+    n_warm: int,
+    min_dist: float = 2.0,
+) -> Dict[str, Any]:
+    """Changed-world revisit (the regime the M4 temporal-context head was built
+    for). Per category: the cold episode STARTS at instance A (the highest-iou
+    instance → provably captioned & seeded) but success for the WHOLE category is
+    keyed to a DIFFERENT instance B (``pick_warm_instance``, farthest from A), so
+    the cold sighting of A is now STALE — recalling it leads the agent to the
+    wrong place. Warm starts are far from B. Every episode is marked
+    ``info['goal_changed']=True`` (+ diagnostic stale/goal positions). Categories
+    with <2 instances (no genuine move) are SKIPPED.
+
+    Mechanically this is the instance-keyed restriction (success keyed to ``[B]``)
+    with the cold START moved onto A, so it reuses the existing goal-restriction
+    path and needs NO runtime override. ``object_category`` stays "{cat}" → the
+    "there is a {cat}" retrieval query is unchanged. Source is not mutated.
+    """
+    goals_by_category = src_content.get("goals_by_category") or {}
+    src_eps = src_content.get("episodes") or []
+
+    out_eps: List[Dict[str, Any]] = []
+    out_goals: Dict[str, Any] = dict(goals_by_category)
+    for cat in categories:
+        gkey = _goals_key(goals_by_category, cat)
+        if gkey is None:
+            continue
+        template = next((ep for ep in src_eps if ep.get("object_category") == cat), None)
+        if template is None:
+            continue
+        goal_instances = goals_by_category[gkey]
+        cold_inst = pick_cold_instance(goal_instances)
+        warm_inst = pick_warm_instance(goal_instances, cold_inst)
+        if warm_inst is None:
+            continue  # single-instance category: no moved goal to express → skip
+
+        cold_pose = pick_cold_pose([cold_inst])              # start AT A → seed it
+        goal_vps_b = _goal_view_point_positions([warm_inst])  # warm distance ref = B
+        cat_candidate_poses = [
+            {"position": list(ep["start_position"]),
+             "rotation": list(ep["start_rotation"])}
+            for ep in src_eps
+            if ep.get("object_category") == cat
+            and ep.get("start_position") and ep.get("start_rotation")
+        ]
+        warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps_b, n=n_warm, min_dist=min_dist)
+        out_goals[gkey] = [warm_inst]                        # success keyed to B
+        eps = build_category_episodes(template, cold_pose, warm_poses, cat)
+        a_pos = _instance_centroid(cold_inst)
+        b_pos = _instance_centroid(warm_inst)
+        for ep in eps:
+            info = ep.setdefault("info", {})
+            info["goal_changed"] = True
+            if a_pos is not None:
+                info["stale_instance_position"] = a_pos
+            if b_pos is not None:
+                info["goal_instance_position"] = b_pos
+        out_eps.extend(eps)
 
     return {
         "category_to_task_category_id": src_content.get("category_to_task_category_id", {}),
@@ -452,6 +558,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "cold-sighted (highest-iou) instance, so reaching a "
                              "different same-category instance no longer counts "
                              "(gives instance discrimination a metric target).")
+    parser.add_argument("--changed-world", action="store_true",
+                        help="Changed-world mode: cold starts AT instance A (seeds it) "
+                             "but success is keyed to a DIFFERENT instance B, so the "
+                             "cold sighting is STALE — the regime the M4 temporal head "
+                             "was built for. Needs >=2 instances per category.")
     parser.add_argument("--out-dir", required=True)
     # cross-environment mode (step 2): a sighting in --home-scene, queried in --away-scene.
     parser.add_argument("--cross-env", action="store_true",
@@ -469,12 +580,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.src or not args.scene:
         parser.error("--src and --scene are required (single-scene mode), or use --cross-env")
 
+    if args.instance_keyed and args.changed_world:
+        parser.error("--instance-keyed and --changed-world are mutually exclusive")
+
     src = _load_gz(args.src)
-    content = build_dataset(src, args.categories, args.n_warm, args.min_dist,
-                            instance_keyed=args.instance_keyed)
+    if args.changed_world:
+        content = build_changed_world_dataset(src, args.categories, args.n_warm, args.min_dist)
+    else:
+        content = build_dataset(src, args.categories, args.n_warm, args.min_dist,
+                                instance_keyed=args.instance_keyed)
     if not content["episodes"]:
         print(f"ERROR: no episodes built for categories={args.categories} "
-              f"(none present in {args.src}).", file=sys.stderr)
+              f"({'need >=2 instances per category for --changed-world; ' if args.changed_world else ''}"
+              f"check they are present in {args.src}).", file=sys.stderr)
         return 1
 
     top = write_dataset(args.out_dir, args.scene, content, src)
@@ -483,8 +601,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     by_cat: Dict[str, int] = {}
     for ep in content["episodes"]:
         by_cat[ep["object_category"]] = by_cat.get(ep["object_category"], 0) + 1
+    _mode = "CHANGED-WORLD" if args.changed_world else (
+        "INSTANCE-KEYED" if args.instance_keyed else "category-level")
     print(f"wrote {top}")
-    print(f"  mode: {'INSTANCE-KEYED' if args.instance_keyed else 'category-level'}")
+    print(f"  mode: {_mode}")
     print(f"  content/{args.scene}.json.gz: {len(content['episodes'])} episodes")
     for cat, n in by_cat.items():
         print(f"    {cat}: 1 cold + {n - 1} warm")

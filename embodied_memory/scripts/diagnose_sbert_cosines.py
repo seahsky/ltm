@@ -311,6 +311,53 @@ def goal_query_rank_gap(
     return {"per_category": per_cat, "mean_rank_gap": float(np.mean(gaps)) if gaps else float("nan")}
 
 
+def caption_to_caption_rank_gap(
+    instance_corpus: Dict[str, List[List[str]]],
+    encode: Callable[[str], np.ndarray],
+) -> Dict[str, Any]:
+    """Leave-one-out caption-to-caption retrieval rank gap (Lever-1 pre-screen).
+
+    Models the realistic warm-revisit retrieval: instead of the bare category
+    query (``goal_query_rank_gap``), query with ONE prior-sighting caption of the
+    goal instance and rank same-category instances by caption-to-caption
+    similarity — the +0.093 within>between signal the category query discards.
+
+    For each instance treated as the goal, each of its captions is held out as
+    the query in turn; the goal's score is that query's mean cosine to its
+    *other* captions (leave-one-out, so a sighting never matches itself), each
+    distractor instance's score is the query's mean cosine to all its captions,
+    and ``rank_gap = goal_mean − max_distractor_mean``. A goal instance needs ≥2
+    captions (to have a held-out reference); a category needs ≥2 instances.
+    ``mean_rank_gap`` clearly above ``goal_query_rank_gap``'s ⇒ caption-to-caption
+    retrieval recovers instance discrimination the category query throws away.
+    """
+    enc = _encode_cached(encode)
+    per_cat: Dict[str, Any] = {}
+    gaps: List[float] = []
+    for cat, instances in instance_corpus.items():
+        vecs = [[enc(c) for c in inst] for inst in instances]
+        cat_gaps: List[float] = []
+        for gi, gvecs in enumerate(vecs):
+            if len(gvecs) < 2:
+                continue  # goal needs a held-out caption to reference itself
+            for qi in range(len(gvecs)):
+                q = gvecs[qi]
+                others = [gvecs[k] for k in range(len(gvecs)) if k != qi]
+                goal_mean = float(np.mean([_cos(q, v) for v in others]))
+                distractor_means = [
+                    float(np.mean([_cos(q, v) for v in vecs[dj]]))
+                    for dj in range(len(vecs)) if dj != gi and vecs[dj]
+                ]
+                if not distractor_means:
+                    continue
+                cat_gaps.append(goal_mean - max(distractor_means))
+        gap = float(np.mean(cat_gaps)) if cat_gaps else float("nan")
+        per_cat[cat] = {"rank_gap": gap, "n_samples": len(cat_gaps)}
+        if cat_gaps:
+            gaps.append(gap)
+    return {"per_category": per_cat, "mean_rank_gap": float(np.mean(gaps)) if gaps else float("nan")}
+
+
 def instance_verdict(
     separation: float,
     rank_gap: float,
@@ -366,6 +413,7 @@ def instance_report(encode: Callable[[str], np.ndarray]) -> Dict[str, Any]:
     enc = _encode_cached(encode)
     sep = instance_separability(INSTANCE_CORPUS, enc)
     gaps = goal_query_rank_gap(INSTANCE_CORPUS, enc)
+    c2c = caption_to_caption_rank_gap(INSTANCE_CORPUS, enc)
 
     print("Within-category INSTANCE separability (all-MiniLM-L6-v2)")
     print("  within-instance = two captions of the SAME object;")
@@ -381,10 +429,14 @@ def instance_report(encode: Callable[[str], np.ndarray]) -> Dict[str, Any]:
     print(f"\n  --> ALL: within-instance mean={sep['within_mean']:.3f} | "
           f"between-instance(same-cat) mean={sep['between_mean']:.3f} | "
           f"separation={sep['separation']:+.3f}")
-    print(f"      mean goal-query rank gap across instances = {gaps['mean_rank_gap']:.3f}")
+    print(f"      mean goal-query rank gap across instances    = {gaps['mean_rank_gap']:.3f}  (bare category query 'there is a {{cat}}')")
+    print(f"      mean caption-to-caption rank gap (Lever 1)    = {c2c['mean_rank_gap']:.3f}  (query with a prior-sighting caption)")
+    recovered = c2c["mean_rank_gap"] - gaps["mean_rank_gap"]
+    print(f"      --> Lever-1 recovery = {recovered:+.3f}  ("
+          f"{'caption-to-caption retrieval recovers the instance gap the category query discards' if recovered > 0.02 else 'no meaningful recovery — query-side fix unlikely to help'})")
     verdict = instance_verdict(sep["separation"], gaps["mean_rank_gap"])
     print(f"\n  VERDICT: {verdict}\n")
-    return {"separability": sep, "rank_gap": gaps, "verdict": verdict}
+    return {"separability": sep, "rank_gap": gaps, "c2c_rank_gap": c2c, "verdict": verdict}
 
 
 def main() -> int:
