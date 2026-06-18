@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO_ROOT" ||
 MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodied"
 
 SCENE="TEEsavR23oF"; CLASS="alarm"; CATEGORY="bed"
-NWARM=3; SETTINGS="1 3"; TAG="audiogoal"; T_ANOM_WARM=30; SOURCE_OVERRIDE=""; REUSE_DS=""
+NWARM=3; SETTINGS="1 3"; TAG="audiogoal"; OUT_TAG=""; T_ANOM_WARM=30; SOURCE_OVERRIDE=""; REUSE_DS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scene) SCENE="$2"; shift 2 ;;
@@ -34,6 +34,11 @@ while [ $# -gt 0 ]; do
     --n-warm) NWARM="$2"; shift 2 ;;
     --settings) SETTINGS="$2"; shift 2 ;;
     --tag) TAG="$2"; shift 2 ;;
+    # --out-tag decouples the OUTPUT dir tag from the DATASET tag, so a temporal
+    # A/B arm can REUSE the baseline's dataset (--tag m3-<scene> --reuse-dataset)
+    # while writing to distinct out-dirs (--out-tag m3t-<scene>) — never clobbering
+    # the baseline run. Defaults to --tag (unchanged behaviour for every caller).
+    --out-tag) OUT_TAG="$2"; shift 2 ;;
     --t-anom) T_ANOM_WARM="$2"; shift 2 ;;
     --source) SOURCE_OVERRIDE="$2"; shift 2 ;;
     --reuse-dataset) REUSE_DS=1; shift ;;
@@ -41,6 +46,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 [[ "$TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --tag must be alnum/dash/underscore"; exit 1; }
+OUT_TAG="${OUT_TAG:-$TAG}"
+[[ "$OUT_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --out-tag must be alnum/dash/underscore"; exit 1; }
+[ -n "${LTM_TEMPORAL_CONTEXT:-}" ] && echo "  [temporal] LTM_TEMPORAL_CONTEXT=$LTM_TEMPORAL_CONTEXT (weight=${LTM_TEMPORAL_WEIGHT:-0.05}) — M4 temporal-context head ON for this run"
 
 VALMINI="data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content"
 DS_DIR="data/hm3d/datasets/objectnav/hm3d/v1/audiogoal_${TAG}"
@@ -132,7 +140,7 @@ echo "  n-episodes = $N_EPISODES"
 banner "[6/7] run settings [$SETTINGS] (--task audiogoal --backbone remembr)"
 OUT_DIRS=""
 for S in $SETTINGS; do
-  out_dir="runs/${TAG}-${CLASS}-s$S"
+  out_dir="runs/${OUT_TAG}-${CLASS}-s$S"
   banner "run: setting=$S -> $out_dir"
   # Clear any STALE summary first, so the completion gate below can't be fooled
   # by a previous attempt's summary.json if THIS run hard-crashes before writing.
@@ -163,7 +171,7 @@ done
 
 banner "[7/7] Gate-A verdict (warm paired soft-SPL S3-S1 + S2 decomposition)"
 # shellcheck disable=SC2086
-python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS 2>&1 | tee "runs/${TAG}-${CLASS}-analysis.log"
+python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS 2>&1 | tee "runs/${OUT_TAG}-${CLASS}-analysis.log"
 echo
 
 # Planner-decision census (S3): WHY the LLM planner's own pick never wins the
@@ -171,7 +179,7 @@ echo
 # the rerank to the injected memory candidate for the same spot); explore = it
 # said nothing relevant; retrieve_calls=0 == it never queried memory at all.
 banner "planner decision census (S3 — is the LLM 'too dumb to recall'?)"
-S3_SUM="runs/${TAG}-${CLASS}-s3/summary.json"
+S3_SUM="runs/${OUT_TAG}-${CLASS}-s3/summary.json"
 if [ -f "$S3_SUM" ]; then
   python - "$S3_SUM" <<'PYEOF'
 import json, sys
