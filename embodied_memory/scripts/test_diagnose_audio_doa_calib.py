@@ -27,10 +27,19 @@ def _mem(world_xy):
             "bearing_rad": 0.0, "cluster_size": 1, "raw_score": 0.4, "source": "memory"}
 
 
-def _decision(idx, mem_world_xys):
-    return {"step_idx": idx,
-            "candidates": [_mem(xy) for xy in mem_world_xys]
-            + [{"id": 99, "world_xy": [0.0, 1.0], "source": "frontier"}]}
+def _decision(idx, mem_world_xys, *, pos=None, yaw=None, sign=None):
+    # Decision-level pose + heard sign (the primary path: logged at the
+    # audio-processed decision step). Omit to test the step-join fallback.
+    d = {"step_idx": idx,
+         "candidates": [_mem(xy) for xy in mem_world_xys]
+         + [{"id": 99, "world_xy": [0.0, 1.0], "source": "frontier"}]}
+    if pos is not None:
+        d["agent_pos"] = list(pos)
+    if yaw is not None:
+        d["agent_yaw"] = yaw
+    if sign is not None:
+        d["audio_lateral_sign"] = sign
+    return d
 
 
 def _ep(decisions, steps, source=None, target=None):
@@ -65,9 +74,9 @@ def case_go():
     tgt = [2.0, 0.0, 2.0]
     src = [2.0, 0.0, 2.0]
     rs = dg.right_sign_from_bearing(dg.bearing_agent_frame([0, 0, 0], 0.0, (src[0], src[2])))
-    steps = [_step(0, sign=rs), _step(1, sign=rs)]               # heard agrees with source side
-    decs = [_decision(0, [(2.0, 2.0), (-3.0, 2.0)]),             # correct + opposite-side wrong
-            _decision(1, [(2.0, 2.0), (-3.0, 2.0)])]
+    steps = [_step(0)]                                           # only for start_yaw (drift)
+    decs = [_decision(0, [(2.0, 2.0), (-3.0, 2.0)], pos=(0, 0, 0), yaw=0.0, sign=rs),
+            _decision(1, [(2.0, 2.0), (-3.0, 2.0)], pos=(0, 0, 0), yaw=0.0, sign=rs)]
     v, _ = dg.recommend(dg.aggregate([_ep(decs, steps, src, tgt)]))
     assert v == "GO", v
     print("  case go: OK")
@@ -76,8 +85,9 @@ def case_go():
 def case_recall_gap():
     tgt = [2.0, 0.0, 2.0]
     src = [2.0, 0.0, 2.0]
-    steps = [_step(0, sign=-1), _step(1, sign=-1)]
-    decs = [_decision(0, [(-5.0, -5.0)]), _decision(1, [(-6.0, -6.0)])]  # no candidate near goal
+    steps = [_step(0)]
+    decs = [_decision(0, [(-5.0, -5.0)], pos=(0, 0, 0), yaw=0.0, sign=-1),
+            _decision(1, [(-6.0, -6.0)], pos=(0, 0, 0), yaw=0.0, sign=-1)]  # none near goal
     v, _ = dg.recommend(dg.aggregate([_ep(decs, steps, src, tgt)]))
     assert v == "RECALL-GAP", v
     print("  case recall_gap: OK")
@@ -87,10 +97,11 @@ def case_frame_broken():
     tgt = [2.0, 0.0, 2.0]
     src = [2.0, 0.0, 2.0]
     rs = dg.right_sign_from_bearing(dg.bearing_agent_frame([0, 0, 0], 0.0, (src[0], src[2])))
-    # even split: 2 steps heard==rs, 2 steps heard==-rs -> agreeA=agreeB=0.5 -> max 0.5 < 0.60
+    # even split: 2 decisions heard==rs, 2 heard==-rs -> agreeA=agreeB=0.5 -> max 0.5 < 0.60
     signs = [rs, rs, -rs, -rs]
-    steps = [_step(i, sign=signs[i]) for i in range(4)]
-    decs = [_decision(i, [(2.0, 2.0), (-3.0, 2.0)]) for i in range(4)]  # presence+sep fine
+    steps = [_step(0)]
+    decs = [_decision(i, [(2.0, 2.0), (-3.0, 2.0)], pos=(0, 0, 0), yaw=0.0, sign=signs[i])
+            for i in range(4)]                                  # presence+sep fine
     v, _ = dg.recommend(dg.aggregate([_ep(decs, steps, src, tgt)]))
     assert v == "FRAME-BROKEN", v
     print("  case frame_broken: OK")
@@ -100,29 +111,45 @@ def case_co_linear():
     tgt = [2.0, 0.0, 2.0]
     src = [2.0, 0.0, 2.0]
     rs = dg.right_sign_from_bearing(dg.bearing_agent_frame([0, 0, 0], 0.0, (src[0], src[2])))
-    steps = [_step(0, sign=rs), _step(1, sign=rs)]               # frame agrees
-    decs = [_decision(0, [(2.0, 2.0), (3.0, 5.0)]),              # correct + SAME-side wrong
-            _decision(1, [(2.0, 2.0), (3.0, 5.0)])]
+    steps = [_step(0)]
+    decs = [_decision(0, [(2.0, 2.0), (3.0, 5.0)], pos=(0, 0, 0), yaw=0.0, sign=rs),
+            _decision(1, [(2.0, 2.0), (3.0, 5.0)], pos=(0, 0, 0), yaw=0.0, sign=rs)]  # SAME side
     v, _ = dg.recommend(dg.aggregate([_ep(decs, steps, src, tgt)]))
     assert v == "CO-LINEAR", v
     print("  case co_linear: OK")
 
 
+def case_back_compat_step_join():
+    # OLDER logs: decision lacks the pose/sign fields, but a keyframe step at the
+    # same step_idx carries them -> the diagnostic falls back to the joined step.
+    tgt = [2.0, 0.0, 2.0]
+    src = [2.0, 0.0, 2.0]
+    rs = dg.right_sign_from_bearing(dg.bearing_agent_frame([0, 0, 0], 0.0, (src[0], src[2])))
+    steps = [_step(0, sign=rs), _step(1, sign=rs)]              # sign on the step, not decision
+    decs = [_decision(0, [(2.0, 2.0), (-3.0, 2.0)]),           # no decision-level fields
+            _decision(1, [(2.0, 2.0), (-3.0, 2.0)])]
+    v, _ = dg.recommend(dg.aggregate([_ep(decs, steps, src, tgt)]))
+    assert v == "GO", v
+    print("  case back_compat_step_join: OK")
+
+
 def case_insufficient_when_no_gt():
     # fires present but no GT source/target -> cannot label -> INSUFFICIENT-DATA
-    steps = [_step(0, sign=-1)]
-    decs = [_decision(0, [(2.0, 2.0)])]
+    steps = [_step(0)]
+    decs = [_decision(0, [(2.0, 2.0)], pos=(0, 0, 0), yaw=0.0, sign=-1)]
     v, _ = dg.recommend(dg.aggregate([_ep(decs, steps, source=None, target=None)]))
     assert v == "INSUFFICIENT-DATA", v
     print("  case insufficient_when_no_gt: OK")
 
 
 def case_insufficient_when_no_audio_sign():
-    # GT present + correct recalled, but no audio_lateral_sign logged
+    # GT present + correct recalled, but no audio_lateral_sign anywhere (the bug
+    # the first RACE run exposed: source/target logged but the heard sign absent)
     tgt = [2.0, 0.0, 2.0]
     src = [2.0, 0.0, 2.0]
-    steps = [_step(0, sign=None), _step(1, sign=None)]
-    decs = [_decision(0, [(2.0, 2.0)]), _decision(1, [(2.0, 2.0)])]
+    steps = [_step(0)]
+    decs = [_decision(0, [(2.0, 2.0)], pos=(0, 0, 0), yaw=0.0),
+            _decision(1, [(2.0, 2.0)], pos=(0, 0, 0), yaw=0.0)]
     v, _ = dg.recommend(dg.aggregate([_ep(decs, steps, src, tgt)]))
     assert v == "INSUFFICIENT-DATA", v
     print("  case insufficient_when_no_audio_sign: OK")
@@ -136,6 +163,7 @@ def main() -> int:
         case_recall_gap,
         case_frame_broken,
         case_co_linear,
+        case_back_compat_step_join,
         case_insufficient_when_no_gt,
         case_insufficient_when_no_audio_sign,
     ]

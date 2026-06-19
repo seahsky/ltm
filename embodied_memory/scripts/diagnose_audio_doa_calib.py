@@ -87,6 +87,19 @@ def _memory_cands(decision: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [c for c in decision.get("candidates", []) if c.get("source") == "memory"]
 
 
+def decision_pose(decision: Dict[str, Any], steps_by_idx: Dict[int, Dict[str, Any]]):
+    """(agent_pos, agent_yaw, audio_lateral_sign) at a decision, PREFERRING the
+    decision-level fields (logged at the audio-processed decision step) and
+    falling back to the joined keyframe step for back-compat with older logs.
+    Older logs without decision-level fields only join when the decision happens
+    to land on a (sparse) keyframe step."""
+    s = steps_by_idx.get(decision.get("step_idx")) or {}
+    pos = decision.get("agent_pos", s.get("agent_pos"))
+    yaw = decision.get("agent_yaw", s.get("agent_yaw"))
+    sign = decision.get("audio_lateral_sign", s.get("audio_lateral_sign"))
+    return pos, yaw, sign
+
+
 def _dist_xz(world_xy, target_xz) -> float:
     return math.hypot(float(world_xy[0]) - float(target_xz[0]),
                       float(world_xy[1]) - float(target_xz[1]))
@@ -138,25 +151,25 @@ def analyze_episode(ep: Dict[str, Any], near_m: float = NEAR_M) -> Dict[str, Any
         if not mc:
             continue
         a["fire_decisions"] += 1
-        s = steps_by_idx.get(d.get("step_idx"))
+        pos, yaw, sign = decision_pose(d, steps_by_idx)
         if tgt_xz is not None and correct_present(d, tgt_xz, near_m):
             a["correct_present"] += 1
-        if tgt_xz is not None and s is not None:
+        if tgt_xz is not None and pos is not None and yaw is not None:
             a["sep_eligible"] += 1
-            if opposite_side_present(d, s["agent_pos"], s["agent_yaw"], tgt_xz, near_m):
+            if opposite_side_present(d, pos, yaw, tgt_xz, near_m):
                 a["sep_opposite"] += 1
-        if src_xz is not None and s is not None and s.get("audio_lateral_sign") not in (None, 0):
+        if src_xz is not None and pos is not None and yaw is not None and sign not in (None, 0):
             a["has_audio_sign"] = True
-            rel = bearing_agent_frame(s["agent_pos"], s["agent_yaw"], src_xz)
+            rel = bearing_agent_frame(pos, yaw, src_xz)
             rs = right_sign_from_bearing(rel)
             if rs != 0:
-                heard = int(s["audio_lateral_sign"] > 0) - int(s["audio_lateral_sign"] < 0)
+                heard = int(sign > 0) - int(sign < 0)
                 a["frame_steps"] += 1
                 agree = int(heard == rs)
                 a["agreeA"] += agree
                 a["agreeB"] += int(heard == -rs)
                 if start_yaw is not None:
-                    drift = abs(math.degrees(_norm_angle(s["agent_yaw"] - start_yaw)))
+                    drift = abs(math.degrees(_norm_angle(yaw - start_yaw)))
                     if drift < DRIFT_SPLIT_DEG:
                         a["frame_lowdrift"] += 1
                         a["agree_lowdrift"] += agree
