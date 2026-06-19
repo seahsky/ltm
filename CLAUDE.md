@@ -167,6 +167,38 @@ Caveat: L3 absolute SPL is on the Phi planner, NOT cross-quotable to the +0.171/
 nodet A/B is internally valid — memory injection is planner-independent).** Three diagnosis workflows
 (planner-gate / owlv2-low-confidence / owlv2-snap) informed the milestone.
 
+**Audio-visual fusion S0–S2 outcome (2026-06-19 — see `PHASE2_ABLATION_REPORT.md` → "Audio-visual
+fusion").** Through M4 the audio was a **no-op for retrieval** (`anomaly_object==target_category==goal`
+→ the LTM queried the goal from step 0 regardless of the sound; M3 +0.171 was pure *visual* recall with
+audio as dressing). A staged diagnose-first program made audio genuinely contribute. **What LANDED
+(durable):** S1 **onset-gate** (`LTM_AUDIO_DOA`, `gate_retrieval_target`) → audio is *causally
+necessary* for recall; **onset calibration** (`diagnose_onset_calib`, `onset_rms` 0.05→0.065 → onset
+130→101, ~29 more steps of runway); **real ESC-50 audio** (`fetch_anomaly_clips` + `resolve_anomaly_clip`:
+baby_cry/alarm/glass_break, so CLAP classifies a *real* clip for the first time); the **S0 gate**
+(`diagnose_audio_doa_calib`) whose first FRAME-BROKEN verdict it then resolved itself — `render_rir_grid`
+renders at **identity listener yaw**, so `lateral_sign` is a **world-frame** cue and the agent-frame
+comparison was wrong; testing both frames flipped it to **GO, world frame, `heard==-right(world-bearing)`**
+(a free fix, no re-render). **The S2 head = STRUCTURAL honest negative (user: close+document).** The
+audio-DOA rerank head (`memory_bridge._audio_doa_bonus`, read-side, zero-sum) was built, S0-GO,
+convention-pinned — but the dataset-controlled A/B (arm A head-off `audiodoa3-s3` vs arm B head-on
+`audiodoa3h-s3`, n=3, real audio) is **byte-identical to 16 digits** (warm soft-SPL B−A +0.0000; episode2
+soft_spl `0.5087535118960671` both). **CODE PROOF (4-agent triage):** the head *fired* but every per-
+candidate bonus was exactly `0.0` — `bonus_i = W·g·(r_i − mean(r))` is **zero-sum/mean-centered**, and
+`alarm:bed` is a *single goal instance* → the warm agent recalls one bed clustered at one location → all
+top-3 candidates on **one side** → uniform `r` → `r_i−mean(r)=0` for **any weight or g** (so a weight-boost
+re-run is *provably futile*; magnitude was never the limiter — the reranker's 0.30→0.42 cos_norm window
+amplifies even a 0.017 bonus past the 0.047 instance gap). The head's purpose is instance
+disambiguation, but the **single-goal-per-episode eval gives it one instance → nothing to disambiguate
+→ inert by construction** — the sharpest form of the recurring "single-goal eval doesn't reward recall"
+finding, same family as coarse-affordance / R-U / M4. Its **design regime** (episodes with multiple
+laterally-separated same-category instances) is absent here; demonstrating value + testing the over-fire
+direction (side-correct vs side-correct-WRONG-instance per the `alarm:toilet` −0.113) needs a new
+multi-instance harness — deferred. Default stays OFF; kept env-tunable. **Caveat:** arm-A warm S3−S1
+**+0.107 p=0.037 (n=3)** is a single-cell *re-confirmation* (idx2-carried, leave-one-out straddles zero),
+NOT a step up over +0.085 and NOT a paper-grade reproduction; plausible drivers (earlier onset, real
+audio) are upstream of the head. Built+pushed both branches; ESC-50 clips gitignored (fetched). Three
+workflows informed it (env-compare / fusion-research / head-inert-triage).
+
 ## Audit caveats (2026-06-08)
 
 A read-only fact-check (the "diagnose-first" program; full version in
