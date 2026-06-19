@@ -9,6 +9,7 @@ verdict (GO / RECALL-GAP / FRAME-BROKEN / CO-LINEAR / INSUFFICIENT-DATA).
 """
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -107,6 +108,29 @@ def case_frame_broken():
     print("  case frame_broken: OK")
 
 
+def case_world_frame_recovers_when_agent_rotates():
+    # The real RACE scenario: the RIR is rendered at IDENTITY listener orientation,
+    # so the heard sign tracks the WORLD bearing to the source. With the agent
+    # rotating across decisions, the AGENT-frame agreement collapses to ~chance
+    # (the step-130 FRAME-BROKEN), but the WORLD frame recovers -> GO (free fix,
+    # no re-render). heard = world-frame right-sign, constant (agent pos + source
+    # fixed); agent yaw varies so agent-frame sign flips.
+    tgt = [2.0, 0.0, 2.0]
+    src = [2.0, 0.0, 2.0]
+    rs_world = dg.right_sign_from_bearing(dg.bearing_agent_frame([0, 0, 0], 0.0, (src[0], src[2])))
+    yaws = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
+    steps = [_step(0)]
+    decs = [_decision(i, [(2.0, 2.0), (-3.0, 2.0)], pos=(0, 0, 0), yaw=yaws[i], sign=rs_world)
+            for i in range(4)]
+    agg = dg.aggregate([_ep(decs, steps, src, tgt)])
+    # agent frame is at chance, world frame is perfect
+    assert agg["agreeWA"] == agg["frame_steps_world"], agg          # world A = 100%
+    assert agg["agreeA"] < agg["frame_steps_agent"], agg            # agent A < 100%
+    v, reason = dg.recommend(agg)
+    assert v == "GO" and "WORLD" in reason, (v, reason)
+    print("  case world_frame_recovers_when_agent_rotates: OK")
+
+
 def case_co_linear():
     tgt = [2.0, 0.0, 2.0]
     src = [2.0, 0.0, 2.0]
@@ -162,6 +186,7 @@ def main() -> int:
         case_go,
         case_recall_gap,
         case_frame_broken,
+        case_world_frame_recovers_when_agent_rotates,
         case_co_linear,
         case_back_compat_step_join,
         case_insufficient_when_no_gt,

@@ -138,17 +138,14 @@ def analyze_episode(ep: Dict[str, Any], near_m: float = NEAR_M) -> Dict[str, Any
     tgt_xz = (tgt[0], tgt[2]) if tgt else None
     start_yaw = ep["steps"][0]["agent_yaw"] if ep.get("steps") else None
 
-    a = {"fire_decisions": 0, "correct_present": 0,
-         "sep_eligible": 0, "sep_opposite": 0,
-         "frame_steps": 0, "agreeA": 0, "agreeB": 0,
-         "frame_lowdrift": 0, "agree_lowdrift": 0,
-         "frame_highdrift": 0, "agree_highdrift": 0,
-         "has_src": src is not None, "has_tgt": tgt is not None,
-         "has_audio_sign": False}
+    a = {k: 0 for k in (
+        "fire_decisions", "correct_present", "sep_eligible", "sep_opp_agent", "sep_opp_world",
+        "frame_steps_agent", "frame_steps_world", "agreeA", "agreeB", "agreeWA", "agreeWB",
+        "frame_lowdrift", "agree_lowdrift", "frame_highdrift", "agree_highdrift")}
+    a.update({"has_src": src is not None, "has_tgt": tgt is not None, "has_audio_sign": False})
 
     for d in ep.get("decisions", []):
-        mc = _memory_cands(d)
-        if not mc:
+        if not _memory_cands(d):
             continue
         a["fire_decisions"] += 1
         pos, yaw, sign = decision_pose(d, steps_by_idx)
@@ -156,33 +153,47 @@ def analyze_episode(ep: Dict[str, Any], near_m: float = NEAR_M) -> Dict[str, Any
             a["correct_present"] += 1
         if tgt_xz is not None and pos is not None and yaw is not None:
             a["sep_eligible"] += 1
+            # separation in the agent frame AND the world frame (render is identity-
+            # oriented, render_rir_grid.py sets only st.position) so the audio cue is
+            # a WORLD-frame left/right — see the frame agreement below.
             if opposite_side_present(d, pos, yaw, tgt_xz, near_m):
-                a["sep_opposite"] += 1
+                a["sep_opp_agent"] += 1
+            if opposite_side_present(d, pos, 0.0, tgt_xz, near_m):
+                a["sep_opp_world"] += 1
         if src_xz is not None and pos is not None and yaw is not None and sign not in (None, 0):
             a["has_audio_sign"] = True
-            rel = bearing_agent_frame(pos, yaw, src_xz)
-            rs = right_sign_from_bearing(rel)
-            if rs != 0:
-                heard = int(sign > 0) - int(sign < 0)
-                a["frame_steps"] += 1
-                agree = int(heard == rs)
-                a["agreeA"] += agree
-                a["agreeB"] += int(heard == -rs)
+            heard = int(sign > 0) - int(sign < 0)
+            # The RIR grid is rendered with the listener at IDENTITY orientation
+            # (render_rir_grid.py:243 sets st.position only) → lateral_sign lives in
+            # the WORLD frame, not the agent's rotating frame. Test BOTH so the
+            # verdict tells "wrong comparison frame (free fix → use world bearing)"
+            # apart from "RIR can't localize (needs an S1b re-render)".
+            rs_agent = right_sign_from_bearing(bearing_agent_frame(pos, yaw, src_xz))
+            rs_world = right_sign_from_bearing(bearing_agent_frame(pos, 0.0, src_xz))
+            if rs_agent != 0:
+                a["frame_steps_agent"] += 1
+                aa = int(heard == rs_agent)
+                a["agreeA"] += aa
+                a["agreeB"] += int(heard == -rs_agent)
                 if start_yaw is not None:
                     drift = abs(math.degrees(_norm_angle(yaw - start_yaw)))
                     if drift < DRIFT_SPLIT_DEG:
                         a["frame_lowdrift"] += 1
-                        a["agree_lowdrift"] += agree
+                        a["agree_lowdrift"] += aa
                     else:
                         a["frame_highdrift"] += 1
-                        a["agree_highdrift"] += agree
+                        a["agree_highdrift"] += aa
+            if rs_world != 0:
+                a["frame_steps_world"] += 1
+                a["agreeWA"] += int(heard == rs_world)
+                a["agreeWB"] += int(heard == -rs_world)
     return a
 
 
 def aggregate(episodes: List[Dict[str, Any]], near_m: float = NEAR_M) -> Dict[str, Any]:
-    keys = ["fire_decisions", "correct_present", "sep_eligible", "sep_opposite",
-            "frame_steps", "agreeA", "agreeB", "frame_lowdrift", "agree_lowdrift",
-            "frame_highdrift", "agree_highdrift"]
+    keys = ["fire_decisions", "correct_present", "sep_eligible", "sep_opp_agent", "sep_opp_world",
+            "frame_steps_agent", "frame_steps_world", "agreeA", "agreeB", "agreeWA", "agreeWB",
+            "frame_lowdrift", "agree_lowdrift", "frame_highdrift", "agree_highdrift"]
     agg = {k: 0 for k in keys}
     agg.update({"has_src_any": False, "has_tgt_any": False, "has_audio_sign_any": False,
                 "n_episodes": 0})
@@ -215,23 +226,38 @@ def recommend(agg: Dict[str, Any], *, min_presence: float = MIN_PRESENCE,
     if not agg["has_audio_sign_any"]:
         return ("INSUFFICIENT-DATA",
                 "audio_lateral_sign absent — re-run a batch with the S0 instrumentation")
-    frameA = agg["agreeA"] / max(agg["frame_steps"], 1)
-    frameB = agg["agreeB"] / max(agg["frame_steps"], 1)
-    frame = max(frameA, frameB)
-    sign_hyp = "heard==right(rel)" if frameA >= frameB else "heard==-right(rel) (INVERTED)"
+    if agg["frame_steps_agent"] == 0 and agg["frame_steps_world"] == 0:
+        return ("INSUFFICIENT-DATA",
+                "source always abeam/behind — no lateral side to test the heard sign against")
+    na = max(agg["frame_steps_agent"], 1)
+    nw = max(agg["frame_steps_world"], 1)
+    # Test BOTH frames (agent / world=identity-render) × BOTH sign conventions;
+    # the audio cue is a WORLD-frame left/right, so the world frame is expected
+    # to win unless a future S1b re-render moves it to the agent frame.
+    combos = [
+        ("agent", "heard==right(agent-bearing)", agg["agreeA"] / na),
+        ("agent", "heard==-right(agent-bearing) [INVERTED]", agg["agreeB"] / na),
+        ("world", "heard==right(world-bearing)", agg["agreeWA"] / nw),
+        ("world", "heard==-right(world-bearing) [INVERTED]", agg["agreeWB"] / nw),
+    ]
+    best_frame, best_sign, frame = max(combos, key=lambda c: c[2])
     if frame < min_frame:
         return ("FRAME-BROKEN",
-                f"heard-sign agreement {frame:.0%} ~ chance (< {min_frame:.0%}) under both "
-                f"conventions — lateral_sign (render frame) vs candidate bearing (agent frame) "
-                f"mis-aligned; re-render the RIR grid with recorded listener yaw (S1b)")
-    sep = agg["sep_opposite"] / max(agg["sep_eligible"], 1)
+                f"heard-sign agreement {frame:.0%} ~ chance (< {min_frame:.0%}) under BOTH the world "
+                f"(identity-render) and agent frame x both signs — the offline RIR cannot supply a "
+                f"usable source bearing here; re-render with recorded listener yaw + re-certify "
+                f"lateral-sign under varied yaw (S1b), else the head is a structural honest-negative")
+    sep_count = agg["sep_opp_world"] if best_frame == "world" else agg["sep_opp_agent"]
+    sep = sep_count / max(agg["sep_eligible"], 1)
     if sep < min_sep:
         return ("CO-LINEAR",
-                f"correct/wrong instances on opposite sides in only {sep:.0%} of eligible fires "
-                f"(< {min_sep:.0%}) — a left/right DOA cue cannot separate same-side instances")
+                f"frame OK ({best_frame} frame, {best_sign}, {frame:.0%}) but correct/wrong instances "
+                f"on opposite sides in only {sep:.0%} of fires (< {min_sep:.0%}) — a left/right DOA cue "
+                f"cannot separate same-side instances")
     return ("GO",
-            f"presence {presence:.0%}, frame-agree {frame:.0%} ({sign_hyp}), separation {sep:.0%} "
-            f"— build the S2 audio-DOA head with this sign convention")
+            f"presence {presence:.0%}, frame-agree {frame:.0%} in the {best_frame.upper()} frame "
+            f"({best_sign}), separation {sep:.0%} — build the S2 head using the {best_frame} frame "
+            f"and this sign convention")
 
 
 def _load_run_dirs(patterns: List[str]) -> List[Dict[str, Any]]:
@@ -268,19 +294,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     if agg["fire_decisions"]:
         print(f"  recall presence : {agg['correct_present']}/{agg['fire_decisions']} "
               f"= {agg['correct_present'] / agg['fire_decisions']:.0%}")
-    if agg["frame_steps"]:
-        print(f"  frame agreement : A(heard==right) {agg['agreeA']}/{agg['frame_steps']} "
-              f"= {agg['agreeA'] / agg['frame_steps']:.0%}  |  "
-              f"B(inverted) {agg['agreeB']}/{agg['frame_steps']} "
-              f"= {agg['agreeB'] / agg['frame_steps']:.0%}")
+    if agg["frame_steps_agent"]:
+        na = agg["frame_steps_agent"]
+        print(f"  frame agree (AGENT, n={na}): A {agg['agreeA']}/{na}={agg['agreeA']/na:.0%}  |  "
+              f"B(inv) {agg['agreeB']}/{na}={agg['agreeB']/na:.0%}")
         if agg["frame_lowdrift"] and agg["frame_highdrift"]:
-            print(f"    yaw-drift decay: <{DRIFT_SPLIT_DEG:.0f}deg "
+            print(f"    agent yaw-drift decay: <{DRIFT_SPLIT_DEG:.0f}deg "
                   f"{agg['agree_lowdrift'] / agg['frame_lowdrift']:.0%}  |  "
                   f">={DRIFT_SPLIT_DEG:.0f}deg "
                   f"{agg['agree_highdrift'] / agg['frame_highdrift']:.0%}")
+    if agg["frame_steps_world"]:
+        nw = agg["frame_steps_world"]
+        print(f"  frame agree (WORLD, n={nw}): A {agg['agreeWA']}/{nw}={agg['agreeWA']/nw:.0%}  |  "
+              f"B(inv) {agg['agreeWB']}/{nw}={agg['agreeWB']/nw:.0%}  "
+              f"<- audio is a world-frame cue (identity render)")
     if agg["sep_eligible"]:
-        print(f"  lateral separation: {agg['sep_opposite']}/{agg['sep_eligible']} "
-              f"= {agg['sep_opposite'] / agg['sep_eligible']:.0%}")
+        print(f"  lateral separation: agent {agg['sep_opp_agent']}/{agg['sep_eligible']}"
+              f"={agg['sep_opp_agent']/agg['sep_eligible']:.0%}  |  "
+              f"world {agg['sep_opp_world']}/{agg['sep_eligible']}"
+              f"={agg['sep_opp_world']/agg['sep_eligible']:.0%}")
     print(f"\nRECOMMEND: {verdict} — {reason}")
     return 0
 
