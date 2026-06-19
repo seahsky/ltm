@@ -34,6 +34,7 @@ from .episode_runner import EpisodeRunner
 from .frontier_planner import FrontierPlanner
 from .memory_bridge import EmbodiedMemoryBridge
 from .perception import CLIPKeyframeEncoder, SemanticCaptioner
+from . import audio_task
 from .remembr_backbone import ReMEmbRBuilder, ReMEmbRConfig, ReMEmbRPlanner
 
 
@@ -134,7 +135,12 @@ def _build_source(args):
         task=getattr(args, "task", "objectnav"),
         rir_grid_path=getattr(args, "rir_grid", None),
         t_anom=getattr(args, "t_anom", 0),
-        anomaly_clip_path=getattr(args, "anomaly_clip", None),
+        # Resolve the anomaly .wav: explicit --anomaly-clip > staged per-class
+        # ESC-50 clip (data/anomaly_audio/<class>.wav) > synthetic burst.
+        anomaly_clip_path=audio_task.resolve_anomaly_clip(
+            getattr(args, "anomaly_class", None),
+            getattr(args, "anomaly_clip", None),
+            getattr(args, "anomaly_clip_dir", audio_task._ANOMALY_CLIP_DIR_DEFAULT)),
     )
 
 
@@ -304,7 +310,10 @@ def main(argv: Optional[list] = None) -> int:
                         help="audiogoal: anomaly class for the single-episode smoke "
                              "(M2 writes per-episode classes into episode.info).")
     parser.add_argument("--anomaly-clip", type=str, default=None,
-                        help="audiogoal: FSD50K .wav to render (default: synthetic burst).")
+                        help="audiogoal: explicit .wav to render (overrides the staged per-class clip).")
+    parser.add_argument("--anomaly-clip-dir", type=str, default=audio_task._ANOMALY_CLIP_DIR_DEFAULT,
+                        help="audiogoal: dir of staged per-class clips <class>.wav "
+                             "(fetch_anomaly_clips.py); used when --anomaly-clip is unset.")
     parser.add_argument("--t-anom", type=int, default=30,
                         help="audiogoal: step index the anomaly begins (silence before).")
     parser.add_argument("--audio-onset-rms", type=float, default=0.05,

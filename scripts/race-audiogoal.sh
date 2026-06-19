@@ -26,7 +26,7 @@ MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodie
 
 SCENE="TEEsavR23oF"; CLASS="alarm"; CATEGORY="bed"
 NWARM=3; SETTINGS="1 3"; TAG="audiogoal"; OUT_TAG=""; T_ANOM_WARM=30; SOURCE_OVERRIDE=""; REUSE_DS=""
-ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""
+ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; FETCH_AUDIO=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scene) SCENE="$2"; shift 2 ;;
@@ -48,6 +48,10 @@ while [ $# -gt 0 ]; do
     # (the step-130 finding). --onset-rms pins an explicit value and skips calib.
     --onset-target-dist) ONSET_TARGET_DIST="$2"; shift 2 ;;
     --onset-rms) ONSET_RMS_OVERRIDE="$2"; shift 2 ;;
+    # Stage real ESC-50 anomaly audio (data/anomaly_audio/<class>.wav) before the
+    # run, instead of the synthetic burst. Auto-resolved by run_hm3d_pol; passed
+    # to the onset calibration too so the energy scale matches.
+    --fetch-audio) FETCH_AUDIO=1; shift ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
@@ -141,6 +145,22 @@ if [ "$rc" -ne 0 ] || [ ! -f "$GRID" ]; then
   exit 1
 fi
 
+# Anomaly audio: prefer the staged real ESC-50 clip data/anomaly_audio/<class>.wav
+# (run_hm3d_pol auto-resolves the same path; we pass it explicitly so the onset
+# calibration uses the SAME clip energy scale). --fetch-audio stages it first.
+ANOMALY_CLIP="data/anomaly_audio/${CLASS}.wav"
+if [ -n "$FETCH_AUDIO" ] && [ ! -f "$ANOMALY_CLIP" ]; then
+  banner "[stage] fetch ESC-50 anomaly clip ($CLASS)"
+  python embodied_memory/scripts/fetch_anomaly_clips.py --classes "$CLASS" \
+    || echo "WARN: ESC-50 fetch failed; falling back to synthetic burst"
+fi
+if [ -f "$ANOMALY_CLIP" ]; then
+  echo "  anomaly audio: REAL ESC-50 clip -> $ANOMALY_CLIP"
+else
+  echo "  anomaly audio: SYNTHETIC burst (no $ANOMALY_CLIP; pass --fetch-audio to stage real ESC-50 audio)"
+  ANOMALY_CLIP=""
+fi
+
 # Onset calibration: set --audio-onset-rms so the anomaly is first audible at
 # ~ONSET_TARGET_DIST m (across a room) rather than point-blank — the step-130
 # finding (default onset_rms=0.05 < far-cell energy ~0.046, so onset only fired
@@ -152,7 +172,8 @@ else
   banner "[5b/7] onset calibration (diagnose_onset_calib, target ${ONSET_TARGET_DIST} m)"
   CALIB_LOG="${DS_DIR}/onset_calib.log"
   python embodied_memory/scripts/diagnose_onset_calib.py \
-      --grid "$GRID" --target-dist "$ONSET_TARGET_DIST" 2>&1 | tee "$CALIB_LOG"
+      --grid "$GRID" --target-dist "$ONSET_TARGET_DIST" \
+      ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} 2>&1 | tee "$CALIB_LOG"
   ONSET_RMS="$(grep -oE 'RECOMMEND_ONSET_RMS=[0-9.]+' "$CALIB_LOG" | tail -1 | cut -d= -f2)"
   [ -n "$ONSET_RMS" ] || { echo "WARN: no RECOMMEND_ONSET_RMS; falling back to default 0.05"; ONSET_RMS="0.05"; }
   echo "  onset_rms (calibrated for ${ONSET_TARGET_DIST} m audible radius) = $ONSET_RMS"
@@ -173,7 +194,7 @@ for S in $SETTINGS; do
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --task audiogoal \
       --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
-      --audio-onset-rms "$ONSET_RMS" \
+      --audio-onset-rms "$ONSET_RMS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
       --episodes-path "$DS" --scene "$SCENE" --target any \
       --n-episodes "$N_EPISODES" --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
   rc=${PIPESTATUS[0]}

@@ -134,3 +134,7 @@ tmp/
 # Tool caches (Serena MCP project cache, scheduler lock)
 .serena/
 .claude/scheduled_tasks.lock
+
+
+# Real ESC-50 anomaly clips (CC BY-NC) — staged via fetch_anomaly_clips.py, not committed
+data/anomaly_audio/

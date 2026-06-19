@@ -389,6 +389,20 @@ def case_build_anomaly_clip_deterministic_and_normed():
     print("  case build_anomaly_clip_deterministic_and_normed: OK")
 
 
+def case_resolve_anomaly_clip():
+    import os
+    import tempfile
+    # explicit --anomaly-clip wins even over a (nonexistent) clip dir
+    assert at.resolve_anomaly_clip("baby_cry", explicit_path="x.wav", clip_dir="/nope") == "x.wav"
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "alarm.wav")
+        open(p, "wb").close()
+        assert at.resolve_anomaly_clip("alarm", clip_dir=d) == p          # staged class clip
+        assert at.resolve_anomaly_clip("glass_break", clip_dir=d) is None  # not staged -> burst
+        assert at.resolve_anomaly_clip(None, clip_dir=d) is None
+    print("  case resolve_anomaly_clip: OK")
+
+
 def case_onset_gate_suppresses_pre_onset():
     # flag on + not detected -> None (zero memory injection until heard)
     assert at.gate_retrieval_target("bed", onset_gate=True, detected=False) is None
@@ -440,6 +454,7 @@ def main() -> int:
         case_habitat_make_step_audio_gated,
         case_habitat_objectnav_make_step_no_audio,
         case_build_anomaly_clip_deterministic_and_normed,
+        case_resolve_anomaly_clip,
         case_onset_gate_suppresses_pre_onset,
         case_onset_gate_passes_after_onset,
         case_onset_gate_off_byte_identical,

@@ -82,6 +82,26 @@ def resolve_t_anom(ep_info, default: int) -> int:
     return int(default)
 
 
+_ANOMALY_CLIP_DIR_DEFAULT = "data/anomaly_audio"
+
+
+def resolve_anomaly_clip(anomaly_class: Optional[str], explicit_path: Optional[str] = None,
+                         clip_dir: str = _ANOMALY_CLIP_DIR_DEFAULT) -> Optional[str]:
+    """Resolve which anomaly .wav to render: an explicit ``--anomaly-clip`` wins;
+    else the staged per-class clip ``<clip_dir>/<class>.wav`` if present (real
+    ESC-50 audio from ``fetch_anomaly_clips.py``); else ``None`` so the loader
+    falls back to the deterministic synthetic burst. Pure path logic — no I/O
+    beyond an ``isfile`` check, so it's safe to call before audio is wired."""
+    import os
+    if explicit_path:
+        return explicit_path
+    if anomaly_class:
+        cand = os.path.join(clip_dir, f"{anomaly_class}.wav")
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
 def build_anomaly_clip(path: Optional[str], grid_sr: int,
                        target_norm_rms_db: float = -20.0) -> np.ndarray:
     """Mono, RMS-normalized anomaly clip at ``grid_sr``: a real FSD50K .wav when
