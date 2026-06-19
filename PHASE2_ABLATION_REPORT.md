@@ -2845,3 +2845,117 @@ LTM *recall* mechanism, not an added head.
 | `embodied_memory/scripts/analyze_revisit.py` | `_compare_verdict` + `_VERDICT_TIE_BAND` (floor-artifact fix) |
 | `embodied_memory/scripts/test_analyze_revisit.py` | +4 verdict-tie-band TDD cases (33 total) |
 | `runs/m3t-{TEEsavR23oF,wcojb4TFT35}-{baby_cry,alarm,glass_break}-s3` | the 6 temporal-on S3 cells (RACE-only) |
+
+
+# L3 — OWLv2 detector on GPU: VRAM fixed via a planner swap; the detector is an honest negative (noise floor + localization-bound); one real snap-gate bug found and fixed (RACE, 2026-06-19)
+
+**Motivation.** Binary SPL@0.1 m has been *localization-bound* since Run 11/12: the c7/c9
+arc closed detector-OFF because the Qwen2-VL **caption-grounding** detector picked the wrong
+*instance* ~half the time — a bbox-*source* quality ceiling. L3's hypothesis: a **trained
+open-vocab detector (OWLv2)** has a different error mode and may localize the right instance.
+The blocker was VRAM — the ReMEmbR backbone (Qwen2-VL-2B captioner + **Qwen2.5-7B planner ~15
+GB**) already sits at ~21–23 GB of the L4's 24, so OWLv2-on-cuda's +3 GB OOM'd, and the
+detector was forced to slow CPU (bb8a298). This milestone (a) freed the VRAM so OWLv2 runs on
+GPU, and (b) measured the detector — which closed as an honest negative.
+
+## Part A — the VRAM fix (planner swap): SUCCEEDED
+
+Swap the 7B planner for a smaller instruction-tuned model **in the L3 process only**, keeping
+the 2B captioner (load-bearing for the discriminative captions). All config/driver-level — no
+Python loader change (the `REMEMBR_PLANNER_MODEL` / `DETECTOR_OWL_DEVICE` env seams already
+existed). `race-owlv2-detector.sh` gained `--planner` (default `microsoft/Phi-3.5-mini-instruct`,
+exported **before** `source race-setup.sh` so the swap is process-local — L1/L2 and the
+published 7B arc untouched), `export DETECTOR_OWL_DEVICE=cuda` (with an `--owl-cpu` hatch), and
+later an `--owl-model` passthrough. Also committed the previously-untracked **planner fit-smoke
+gate** (`race-planner-fit-smoke.sh` + `check_planner_fit.py`, 9 TDD). Commits: planner swap +
+fit-smoke `lifelong 3bf09b5 / main bdd91d1`; `--owl-model` flag `193cf50 / 88eea45`.
+
+**Planner gate GREEN first try** (`race-planner-fit-smoke.sh --planner microsoft/Phi-3.5-mini-instruct`,
+L4): FIT 2/2 no-OOM, NAVIGATE warm 249 steps, LTM fires (213 candidates / 110 chosen), PARSEABLE
+21 goto. No fallback to Qwen2.5-3B / Llama-3.2-3B needed. A 4-lens adversarial check flagged that
+the warm NAVIGATE pass is a **249-step thrash artifact** (the floor only excludes the 9-step 3B
+stall), so viability rests on FIT + PARSEABLE + the *clean cold episode* (27 steps, voluntary STOP,
+soft-SPL 0.158). Phi grounds ~10 % of ANSWERs vs the 7B's ~34 % — materially weaker — **but the
+det-vs-nodet A/B stays internally valid because memory injection is planner-independent**
+(`propose_memory_candidates` reads only the SBERT goal query; warm `n_memory_chosen=110` while
+`n_remembr_chosen=0`). **Verified: OWLv2-base AND owlv2-large both run on `cuda` co-resident with
+Phi + Qwen2-VL, preflight completes 1/1, no OOM.** The plan's objective is banked.
+
+*Caveat for the paper:* L3's absolute SPL is on the Phi-3.5-mini planner, **not** the Qwen2.5-7B
+arc that earned +0.171 (M3) / +0.24 (Phase-C). Quote only the within-run det−nodet delta; never
+cross-pool L3 absolute SPL with the published headline.
+
+## Part B — the detector: noise floor, one real snap-gate bug, honest negative
+
+The preflight gates the whole matrix on the **single near-goal frame** where the agent STOPs
+(`n_detector_called=1`, the cold-seed-at-viewpoint frame; caption "well-lit dining area with
+wooden furniture" — names no chair). Four preflights:
+
+| run | model | thresh | max box score | reason | gist |
+|---|---|---|---|---|---|
+| owlv2-gpu1 | base-patch16 | 0.05 | **0.031** | `owl_below_threshold` | base = noise floor |
+| owlv2-large1 | large-patch14 | 0.10 | **0.058** | `owl_below_threshold` | large ~1.9× base, still < 0.10 |
+| owlv2-large2 | large-patch14 | 0.05 | 0.058 | **`snap_too_far`** | cleared score gate, failed geometry |
+
+The score field was **verified correct** against transformers 4.57.6 source (sigmoid of the max
+class logit via `post_process_grounded_object_detection`, recommended `"a photo of a {cat}"`
+prompt) — the low absolute scores are genuine OWLv2 behavior on out-of-distribution sim renders,
+not a bug. Large nearly doubled base but never cleared 0.10 on this hard frame.
+
+**The `snap_too_far` was decisive and reconciled two facts** (4-agent geometry workflow):
+1. **This frame is a *correct* reject.** `snap_dist=0.784 m` is ~96 % **vertical**: the box
+   back-projected to `world_pt y=−0.76`, which is **0.76 m BELOW the navmesh floor** (snapped
+   `y=−0.005`). A chair surface is *above* the floor — so this is **depth-overshoot** (a marginal
+   0.058 box whose center pierced past the chair underground), not an elevated surface. (The
+   horizontal offset was only 0.21 m, which is what made it superficially look like a correct
+   detection rejected by a too-tight gate — it is not.)
+2. **The gate's *metric* was nonetheless a real bug.** `snap_dist` was a 3D norm, but every
+   downstream consumer uses only `(x,z)` — `_detector_candidate` builds `world_xy=[pt[0],pt[2]]`;
+   `_approach_arrived` / `_detector_memory_agrees` are floor-plane only; the snapped `y` is never
+   read for navigation. So a *genuinely* elevated correct detection (point **above** floor, small
+   horizontal offset) would have been wrongly rejected too.
+
+**Fix (`goal_detector.py`, commit `3307f19 / 7fbf370`):** gate on the **floor-plane (xz)** distance
+at the existing 0.5 m bound — *tighter*, not looser (a 0.7 m-horizontal noise box still fails, where
+raising the 3D bound to 1.0 m would have admitted it) — **plus a below-floor pre-filter** (reject
+`world_pt.y < floor − DETECTOR_SNAP_FLOOR_EPS`, default 0.30) so the horizontal gate cannot rescue
+the depth-overshoot. Logs `snap_dist` (now horizontal) + `snap_dist_3d` + a new `snap_below_floor`
+reason. Only affects `--detector` runs; the default path is byte-identical. **+3 TDD** (elevated
+furniture now PASSES; below-floor overshoot still REJECTS where the old 3D gate at 0.44 m would have
+passed; horizontal mis-localization still REJECTS); **33/33 green**.
+
+## Verdict — accept the honest negative
+
+The detector axis is an **honest negative, localization-bound** — and it **reconfirms the c7/c9
+detector-OFF dominance with a *real trained* detector (OWLv2) on GPU**, which was exactly the L3
+hypothesis: tested and answered.
+
+- OWLv2 base (0.031) and large (0.058) are in the **noise floor** on HM3D sim renders at the
+  cold-STOP frame; the lone gate-clearing box was a depth-overshoot, correctly rejected.
+- The snap fix does **not** unblock this preflight — the frame stays a true reject (now
+  `snap_below_floor`).
+- Binary SPL@0.1 m stays **localization-bound regardless** of detector quality: the success ring
+  is geodesic-to-nearest-**view_point** (a viewing pose ~0.5–1.5 m from the object), but a detector
+  snaps to the **object floor** — displaced from the view_point by construction. M3's +0.139 at
+  0.1 m came from *recalling a view_point* (the cold seed starts at the highest-iou view_point),
+  which a detector steering to the object competes with, not amplifies. If ever pursued, a real
+  detector plausibly helps at **1.0 m** (right-instance steering, closing the documented
+  `alarm:toilet` −0.113 wrong-instance over-fire) and is neutral at 0.1 m — a *refine-not-retract*
+  of the localization-bound finding.
+
+**Durable wins:** the VRAM fix (OWLv2-on-GPU, no OOM — the original deliverable) + the snap-gate
+correctness fix (a real bug that would have wrongly rejected legitimate elevated-furniture
+detections). **Cap escalation here** — a custom/fine-tuned detector (GroundingDINO / Detic) is a
+separate, larger project; the genuinely different remaining lever stays a better
+instance-discriminating embedding, not more detector tuning. Three diagnosis workflows informed
+this milestone (planner-gate viability / owlv2 low-confidence / owlv2 snap-too-far geometry).
+
+## File index (L3)
+
+| Path | Purpose |
+|---|---|
+| `scripts/race-owlv2-detector.sh` | `--planner` swap + `DETECTOR_OWL_DEVICE=cuda` + `--owl-cpu` + `--owl-model`; provenance echo |
+| `scripts/race-planner-fit-smoke.sh` + `embodied_memory/scripts/check_planner_fit.py` | the cheap GREEN/RED planner-viability gate (FIT / NAVIGATE / LTM-fires / PARSEABLE), 9 TDD |
+| `embodied_memory/goal_detector.py` | snap gate = horizontal-only (xz) + below-floor pre-filter (`DETECTOR_SNAP_FLOOR_EPS`) |
+| `embodied_memory/scripts/test_goal_detector.py` | +3 snap TDD (elevated passes / below-floor rejects / horizontal-far rejects); 33 total |
+| `runs/owlv2-{gpu1,large1,large2}-preflight` | the 4 preflight aborts (noise-floor → snap-too-far); RACE-only |

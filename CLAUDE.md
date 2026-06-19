@@ -141,6 +141,32 @@ verdict line (`analyze_revisit._compare_verdict` + `_VERDICT_TIE_BAND`=0.005 →
 reports "tie at the floor"; 4 TDD cases, 33 total). Paper value: pre-empts the "did you try
 recency weighting?" reviewer question and sharpens the M3 story.
 
+**L3 OWLv2-on-GPU detector outcome (2026-06-19 — see `PHASE2_ABLATION_REPORT.md` → "L3").** The
+detector lever for binary SPL: a **trained open-vocab detector (OWLv2)** has a different error mode
+than the caption-grounding detector that closed c7/c9 (wrong-instance), so the L3 hypothesis is it
+localizes the right instance. It OOM'd on the L4 (forced to CPU by bb8a298), so first the **VRAM was
+freed by swapping the 7B planner for `microsoft/Phi-3.5-mini-instruct` in the L3 process only** (config/
+driver-level, `--planner`/`--owl-model`/`DETECTOR_OWL_DEVICE=cuda` in `race-owlv2-detector.sh`; 2B
+captioner kept; planner gate GREEN; OWLv2 base+large both run on cuda co-resident, no OOM — **the VRAM
+fix SUCCEEDED, the original deliverable**). Then the detector measured: **honest negative, localization-
+bound — reconfirming c7/c9 detector-OFF dominance now with a *real trained* detector on GPU.** OWLv2
+base (max box score 0.031) and large (0.058) are in the **noise floor** on HM3D sim renders at the
+cold-STOP frame; the lone box that cleared a relaxed 0.05 score gate was a **depth-overshoot** (back-
+projected 0.76 m *below* the navmesh) **correctly rejected** by the snap gate. **One real bug found+fixed
+on the way (`goal_detector.py`, commit `3307f19`/`7fbf370`): the snap gate used a 3D distance but every
+consumer uses only (x,z) → it would wrongly reject genuinely-elevated correct detections. Fix = floor-
+plane (xz) gate at the existing 0.5 m + a below-floor pre-filter (`DETECTOR_SNAP_FLOOR_EPS`); +3 TDD,
+33/33; `--detector`-only, default path byte-identical.** Binary SPL@0.1 m stays localization-bound
+regardless of detector quality (success ring = geodesic-to-**view_point** ~0.5–1.5 m from the object;
+a detector snaps to the **object floor**, displaced from the view_point — M3's +0.139 came from
+*recalling a view_point*, which a detector competes with not amplifies). **Verdict (user: accept +
+document): the detector arc CLOSES as an honest negative; durable wins are the VRAM fix + the snap-gate
+correctness fix; cap escalation (no GroundingDINO/Detic — a separate project); a detector plausibly
+helps only at 1.0 m (right-instance steering, closing the documented `alarm:toilet` −0.113 over-fire).
+Caveat: L3 absolute SPL is on the Phi planner, NOT cross-quotable to the +0.171/+0.24 7B arc (the det−
+nodet A/B is internally valid — memory injection is planner-independent).** Three diagnosis workflows
+(planner-gate / owlv2-low-confidence / owlv2-snap) informed the milestone.
+
 ## Audit caveats (2026-06-08)
 
 A read-only fact-check (the "diagnose-first" program; full version in
