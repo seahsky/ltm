@@ -11,7 +11,9 @@
 #
 #   L1  caption-rerank A/B   -> scripts/race-audiogoal-matrix.sh --caption-rerank
 #   L2  changed-world        -> scripts/race-changed-world.sh
-#   L3  OWLv2 detector       -> scripts/race-owlv2-detector.sh
+#   L3  OWLv2 detector       -> scripts/race-owlv2-detector.sh  (swaps to a small
+#       planner internally + runs OWLv2 on cuda; --owl-planner overrides the model.
+#       L1/L2 stay on the published 7B — they source race-setup.sh fresh.)
 #
 # git pull FIRST (this is a new file; the child drivers self-pull at their step 1).
 #
@@ -19,6 +21,7 @@
 #   nrun bash scripts/race-all-levers.sh --tag r3 --owl-thresh 0.05
 #   nrun bash scripts/race-all-levers.sh --skip-l3                    # just L1 + L2
 #   nrun bash scripts/race-all-levers.sh --only-l2                    # one lever
+#   nrun bash scripts/race-all-levers.sh --only-l3 --owl-planner Qwen/Qwen2.5-3B-Instruct
 #
 # Runtime: L1 is the long pole (~4-5 h, S3-only over 6 cells, REUSES the cached
 # baseline m3-* matrix — that must exist); L2 ~30 m; L3 a few minutes.
@@ -31,21 +34,23 @@ cd "$REPO_ROOT" || { echo "FATAL: cannot cd to repo root"; exit 1; }
 
 TAG="r3"
 OWL_THRESH="0.1"          # DETECTOR_OWL_SCORE_THRESH for L3; drop to 0.05 if OWLv2 localizes 0x
+OWL_PLANNER=""            # optional: override L3's planner (--planner passthrough); "" => L3 default (small)
 CELLS="baby_cry:bed alarm:toilet glass_break:chair"   # L1 cells (match the cached m3-* baseline)
 RUN_L1=1; RUN_L2=1; RUN_L3=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tag)        TAG="$2"; shift 2 ;;
-    --owl-thresh) OWL_THRESH="$2"; shift 2 ;;
-    --cells)      CELLS="$2"; shift 2 ;;
-    --skip-l1)    RUN_L1=0; shift ;;
-    --skip-l2)    RUN_L2=0; shift ;;
-    --skip-l3)    RUN_L3=0; shift ;;
-    --only-l1)    RUN_L1=1; RUN_L2=0; RUN_L3=0; shift ;;
-    --only-l2)    RUN_L1=0; RUN_L2=1; RUN_L3=0; shift ;;
-    --only-l3)    RUN_L1=0; RUN_L2=0; RUN_L3=1; shift ;;
-    -h|--help)    sed -n '1,30p' "$0"; exit 0 ;;
+    --tag)         TAG="$2"; shift 2 ;;
+    --owl-thresh)  OWL_THRESH="$2"; shift 2 ;;
+    --owl-planner) OWL_PLANNER="$2"; shift 2 ;;
+    --cells)       CELLS="$2"; shift 2 ;;
+    --skip-l1)     RUN_L1=0; shift ;;
+    --skip-l2)     RUN_L2=0; shift ;;
+    --skip-l3)     RUN_L3=0; shift ;;
+    --only-l1)     RUN_L1=1; RUN_L2=0; RUN_L3=0; shift ;;
+    --only-l2)     RUN_L1=0; RUN_L2=1; RUN_L3=0; shift ;;
+    --only-l3)     RUN_L1=0; RUN_L2=0; RUN_L3=1; shift ;;
+    -h|--help)     sed -n '1,30p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -74,8 +79,18 @@ run_lever() {   # $1=label  $2..=command (with args)
   bash scripts/race-audiogoal-matrix.sh --caption-rerank --cells "$CELLS"
 [ "$RUN_L2" -eq 1 ] && run_lever "L2-changed-world" \
   bash scripts/race-changed-world.sh --tag "cw-${TAG}"
-[ "$RUN_L3" -eq 1 ] && run_lever "L3-owlv2-detector" \
-  bash scripts/race-owlv2-detector.sh --tag "owlv2-${TAG}" --owl-thresh "$OWL_THRESH"
+# L3 swaps to a small planner internally (frees VRAM for OWLv2 on cuda); --owl-planner
+# overrides that. L1/L2 are untouched — they source race-setup.sh fresh => 7B default.
+# Explicit if/else (not an empty array passthrough) to stay safe under `set -u`.
+if [ "$RUN_L3" -eq 1 ]; then
+  if [ -n "$OWL_PLANNER" ]; then
+    run_lever "L3-owlv2-detector" \
+      bash scripts/race-owlv2-detector.sh --tag "owlv2-${TAG}" --owl-thresh "$OWL_THRESH" --planner "$OWL_PLANNER"
+  else
+    run_lever "L3-owlv2-detector" \
+      bash scripts/race-owlv2-detector.sh --tag "owlv2-${TAG}" --owl-thresh "$OWL_THRESH"
+  fi
+fi
 
 banner "ALL-LEVERS SUMMARY"
 [ "${#NAMES[@]}" -eq 0 ] && { echo "  (no levers selected)"; exit 0; }
