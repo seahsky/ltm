@@ -49,6 +49,7 @@ done
 OUT_TAG="${OUT_TAG:-$TAG}"
 [[ "$OUT_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --out-tag must be alnum/dash/underscore"; exit 1; }
 [ -n "${LTM_TEMPORAL_CONTEXT:-}" ] && echo "  [temporal] LTM_TEMPORAL_CONTEXT=$LTM_TEMPORAL_CONTEXT (weight=${LTM_TEMPORAL_WEIGHT:-0.05}) — M4 temporal-context head ON for this run"
+[ -n "${LTM_AUDIO_DOA:-}" ] && echo "  [audio-doa] LTM_AUDIO_DOA=$LTM_AUDIO_DOA — S1 onset-gate ON (suppress memory injection until the anomaly is heard → audio causally necessary)"
 
 VALMINI="data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content"
 DS_DIR="data/hm3d/datasets/objectnav/hm3d/v1/audiogoal_${TAG}"
@@ -201,5 +202,18 @@ else
   echo "  (no S3 summary at $S3_SUM)"
 fi
 echo
+
+# S0 audio-DOA pre-flight gate: measure (on THIS run's instrumented logs) whether
+# the S2 audio-DOA disambiguation head can help at all — recall presence, heard-
+# sign vs source-bearing frame agreement, lateral separation → RECOMMEND verdict
+# (GO / RECALL-GAP / FRAME-BROKEN / CO-LINEAR / INSUFFICIENT-DATA). GT source/goal
+# positions are OFFLINE labels here only; the live head uses agent-estimable cues.
+banner "[S0] audio-DOA calibration gate (diagnose_audio_doa_calib)"
+# shellcheck disable=SC2086
+python embodied_memory/scripts/diagnose_audio_doa_calib.py $OUT_DIRS 2>&1 \
+  | tee "runs/${OUT_TAG}-${CLASS}-audiodoa-calib.log" || true
+echo
+
 echo "DONE. AudioGoal warm S1-vs-S3 for ($SCENE,$CLASS). Cold-silent (t_anom high)"
 echo "seeds the LTM; warm episodes fire the anomaly. Onset lines: grep '\\[audio\\]' the run logs."
+[ -n "${LTM_AUDIO_DOA:-}" ] && echo "S1 onset-gate was ON (LTM_AUDIO_DOA=$LTM_AUDIO_DOA): memory injection suppressed until the anomaly was heard."
