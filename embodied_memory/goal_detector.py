@@ -351,14 +351,42 @@ class GoalDetector:
                 world_pt=[float(x) for x in world_pt],
             )
             return None
-        snap_dist = float(np.linalg.norm(snapped - world_pt))
+        # A back-projected point BELOW the floor is DEPTH-OVERSHOOT (a marginal
+        # box whose center pierced past the object to a point underground), NOT a
+        # real surface — reject it first so the horizontal gate below can't
+        # rescue an underground overshoot. (Observed on RACE: a 0.058 OWLv2-large
+        # box back-projected 0.76 m BELOW the navmesh with only 0.21 m horizontal
+        # offset; the 3D snap caught it but for the wrong reason — see below.)
+        floor_y = float(snapped[1])
+        floor_eps = float(os.environ.get("DETECTOR_SNAP_FLOOR_EPS", "0.30"))
+        if float(world_pt[1]) < floor_y - floor_eps:
+            self._debug_log(
+                "snap_below_floor",
+                decoded=text, goal_category=goal_category,
+                world_pt=[float(x) for x in world_pt],
+                snapped=[float(x) for x in snapped],
+                below_floor_m=floor_y - float(world_pt[1]),
+            )
+            return None
+        # Gate on the FLOOR-PLANE (xz) distance, NOT the 3D distance. Furniture
+        # sits ABOVE the floor; pathfinder.snap_point drops the back-projected
+        # surface point onto the navmesh, so a CORRECT localization of an elevated
+        # object (chair seat ~0.5 m up) shows a large VERTICAL jump with a small
+        # horizontal offset. Navigation only ever uses (x,z) — episode_runner's
+        # _detector_candidate/_approach_arrived/_detector_memory_agrees never read
+        # the snapped y — so the vertical drop is expected and harmless; gating on
+        # it (the old 3D norm) wrongly rejected correctly-localized tall objects.
+        snap_dist = float(np.hypot(snapped[0] - world_pt[0], snapped[2] - world_pt[2]))
+        snap_dist_3d = float(np.linalg.norm(snapped - world_pt))
         if snap_dist > self.max_snap_dist:
             self._debug_log(
                 "snap_too_far",
                 decoded=text, goal_category=goal_category,
                 world_pt=[float(x) for x in world_pt],
                 snapped=[float(x) for x in snapped],
-                snap_dist=snap_dist, max_snap_dist=self.max_snap_dist,
+                snap_dist=snap_dist,            # now HORIZONTAL (xz); cf. snap_dist_3d
+                snap_dist_3d=snap_dist_3d,
+                max_snap_dist=self.max_snap_dist,
             )
             return None
         return snapped
