@@ -82,6 +82,36 @@ def resolve_t_anom(ep_info, default: int) -> int:
     return int(default)
 
 
+def build_anomaly_clip(path: Optional[str], grid_sr: int,
+                       target_norm_rms_db: float = -20.0) -> np.ndarray:
+    """Mono, RMS-normalized anomaly clip at ``grid_sr``: a real FSD50K .wav when
+    ``path`` exists, else a DETERMINISTIC synthetic broadband burst (seed 0). The
+    SINGLE source of truth for both the live render (``habitat_env``) and the
+    onset-calibration diagnostic, so their energy scales cannot drift."""
+    import os
+    if path and os.path.isfile(path):
+        from scipy.io import wavfile
+        sr, data = wavfile.read(path)
+        data = np.asarray(data, dtype=np.float32)
+        if np.issubdtype(np.asarray(data).dtype, np.integer):
+            data = data / 32768.0
+        if data.ndim == 2:
+            data = data.mean(axis=1)
+        data = data.reshape(-1).astype(np.float32)
+        if int(sr) != int(grid_sr):
+            from math import gcd
+            from scipy.signal import resample_poly
+            g = gcd(int(sr), int(grid_sr))
+            data = resample_poly(data, int(grid_sr) // g, int(sr) // g).astype(np.float32)
+        return normalize_clip(data, target_norm_rms_db)
+
+    rng = np.random.default_rng(0)
+    n = int(int(grid_sr) * 0.5)
+    envlp = np.minimum(1.0, np.linspace(0.0, 4.0, n))
+    burst = (rng.standard_normal(n).astype(np.float32) * envlp).astype(np.float32)
+    return normalize_clip(burst, target_norm_rms_db)
+
+
 def normalize_clip(clip, target_db: float = -20.0) -> np.ndarray:
     """Mono float32, RMS-normalized to ``target_db`` (dBFS). Done ONCE per run so
     per-cell convolution does not saturate or vanish across the grid. Silence
