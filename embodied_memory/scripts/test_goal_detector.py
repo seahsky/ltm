@@ -266,6 +266,67 @@ def case_locate_returns_none_when_snap_too_far():
     print("  case_locate_returns_none_when_snap_too_far: OK")
 
 
+def case_locate_passes_when_snap_horizontal_ok_but_vertical_far():
+    """Elevated-furniture regression: a CORRECT localization of a tall object
+    (chair seat) back-projects ABOVE the floor; snap_point drops it onto the
+    navmesh, giving a large VERTICAL jump but a small horizontal offset. The old
+    3D snap gate wrongly rejected this; the floor-plane (xz) gate must accept it.
+    Mirrors the live RACE magnitudes (~0.76 m vertical, ~0.21 m horizontal) but
+    with world_pt ABOVE the floor (the correct sign for real furniture)."""
+    proc = _MockProcessor("<|box_start|>120,120,160,160<|box_end|>")
+    # world_pt ~ (0.094, -0.094, 2.0). Floor snapped 0.756 m BELOW it (surface
+    # above floor), 0.21 m away in z. 3D dist ~0.78 (> 0.5, old gate REJECTS);
+    # horizontal dist ~0.21 (< 0.5, new gate ACCEPTS); world_pt is ABOVE the
+    # floor so the below-floor pre-filter does not fire.
+    snap = np.array([0.094, -0.85, 2.21], dtype=np.float32)
+    det = gd.GoalDetector(_MockModel(), proc, _MockPathfinder(snap_target=snap),
+                          max_snap_dist=0.5)
+    out = det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                     depth=np.full((256, 256), 2.0, dtype=np.float32),
+                     goal_category="chair", agent_pose=np.eye(4, dtype=np.float32),
+                     intrinsics=_intrinsics())
+    assert out is not None, "elevated-furniture localization wrongly rejected"
+    assert np.allclose(out, snap, atol=1e-5), out
+    print("  case_locate_passes_when_snap_horizontal_ok_but_vertical_far: OK")
+
+
+def case_locate_rejects_below_floor_overshoot():
+    """Depth-overshoot guard: a box whose back-projected point lands BELOW the
+    floor (a marginal box that pierced past the object) must be rejected even
+    when its HORIZONTAL offset is small — the floor-plane gate alone would let it
+    through. Here the 3D distance (~0.44) is UNDER the old 0.5 gate, so only the
+    new below-floor pre-filter catches it. Reproduces the live snap_below_floor."""
+    proc = _MockProcessor("<|box_start|>120,120,160,160<|box_end|>")
+    # world_pt ~ (0.094, -0.094, 2.0); snapped floor 0.444 m ABOVE it (world_pt
+    # is underground), same xz. below_floor 0.444 > eps 0.30 -> reject. The old
+    # 3D gate (0.444 < 0.5) AND a horizontal-only gate (0 < 0.5) would both PASS.
+    snap = np.array([0.094, 0.35, 2.0], dtype=np.float32)
+    det = gd.GoalDetector(_MockModel(), proc, _MockPathfinder(snap_target=snap),
+                          max_snap_dist=0.5)
+    out = det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                     depth=np.full((256, 256), 2.0, dtype=np.float32),
+                     goal_category="chair", agent_pose=np.eye(4, dtype=np.float32),
+                     intrinsics=_intrinsics())
+    assert out is None, "below-floor depth-overshoot wrongly accepted"
+    print("  case_locate_rejects_below_floor_overshoot: OK")
+
+
+def case_locate_returns_none_when_snap_horizontal_too_far():
+    """Genuine horizontal mis-localization is still rejected (the gate's real
+    job). y matched (not below floor) so the pre-filter passes; the box is 1.0 m
+    off in z -> horizontal dist > 0.5 -> snap_too_far."""
+    proc = _MockProcessor("<|box_start|>120,120,160,160<|box_end|>")
+    snap = np.array([0.094, -0.094, 3.0], dtype=np.float32)   # 1.0 m off in z
+    det = gd.GoalDetector(_MockModel(), proc, _MockPathfinder(snap_target=snap),
+                          max_snap_dist=0.5)
+    out = det.locate(rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+                     depth=np.full((256, 256), 2.0, dtype=np.float32),
+                     goal_category="chair", agent_pose=np.eye(4, dtype=np.float32),
+                     intrinsics=_intrinsics())
+    assert out is None
+    print("  case_locate_returns_none_when_snap_horizontal_too_far: OK")
+
+
 def case_debug_log_records_empty_parse_with_decoded_text():
     """On the c1/c2/c3 RACE runs, 17/17 locate() calls returned None because
     Qwen2-VL-Instruct refused the task ("I'm sorry, but as an AI language
@@ -723,6 +784,9 @@ def main() -> int:
     case_locate_returns_none_when_no_bbox_in_output()
     case_locate_returns_none_when_depth_invalid_at_center()
     case_locate_returns_none_when_snap_too_far()
+    case_locate_passes_when_snap_horizontal_ok_but_vertical_far()
+    case_locate_rejects_below_floor_overshoot()
+    case_locate_returns_none_when_snap_horizontal_too_far()
     case_locate_picks_lowest_depth_bbox_among_multiple()
     case_debug_log_records_empty_parse_with_decoded_text()
     case_debug_log_disabled_when_path_none()
