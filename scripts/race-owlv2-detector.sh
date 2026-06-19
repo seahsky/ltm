@@ -40,6 +40,8 @@
 #   bash scripts/race-owlv2-detector.sh --tag owlv2-d1 --owl-thresh 0.05   # looser
 #   bash scripts/race-owlv2-detector.sh --tag owlv2-d1 \
 #       --planner Qwen/Qwen2.5-3B-Instruct        # alternate validated planner
+#   bash scripts/race-owlv2-detector.sh --tag owlv2-large1 \
+#       --owl-model google/owlv2-large-patch14-ensemble --owl-thresh 0.10  # stronger detector
 #   bash scripts/race-owlv2-detector.sh --tag owlv2-cpu --owl-cpu   # OWLv2 back on CPU
 #
 # A bare invocation reproduces the c7/c9 matrix scenes/cats with OWLv2 as the
@@ -77,6 +79,14 @@ OWL_THRESH="0.1"   # DETECTOR_OWL_SCORE_THRESH; the scout flagged calibration ri
 # scripts/race-planner-fit-smoke.sh --planner <model> before trusting it here.
 PLANNER="microsoft/Phi-3.5-mini-instruct"
 OWL_DEVICE="cuda"  # OWLv2 on GPU (the point of this driver); --owl-cpu => default cpu
+# OWLv2 model id. "" => goal_detector default (google/owlv2-base-patch16-ensemble).
+# Pass --owl-model google/owlv2-large-patch14-ensemble for the stronger detector
+# (owlv2-base was a confidence NOISE FLOOR on sim renders — max box ~0.031; large
+# fits the VRAM the planner swap freed). Setting it via this flag (vs a bare
+# `export`) keeps it OUT of your shell session so it can't leak into a later
+# base/qwen run, AND it works under `nrun` (which an inline `env VAR=… nrun …`
+# can't, since nrun is a shell function) and is recorded in the run-log echo below.
+OWL_MODEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -87,6 +97,7 @@ while [[ $# -gt 0 ]]; do
     --n-episodes) N_EPISODES="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
     --owl-thresh) OWL_THRESH="$2"; shift 2 ;;
+    --owl-model) OWL_MODEL="$2"; shift 2 ;;
     --planner) PLANNER="$2"; shift 2 ;;
     --owl-cpu) OWL_DEVICE=""; shift ;;   # escape hatch: omit DETECTOR_OWL_DEVICE => cpu
     -h|--help) sed -n '1,60p' "$0"; exit 0 ;;
@@ -167,8 +178,11 @@ export DETECTOR_OWL_SCORE_THRESH="$OWL_THRESH"
 # reads DETECTOR_OWL_DEVICE per-call (default 'cpu'); --owl-cpu omits it to revert.
 # expandable_segments reduces GPU fragmentation (recommended by the OOM message).
 [ -n "$OWL_DEVICE" ] && export DETECTOR_OWL_DEVICE="$OWL_DEVICE"
+# --owl-model overrides DETECTOR_OWL_MODEL (goal_detector._ensure_owlv2 reads it,
+# default google/owlv2-base-patch16-ensemble). "" => keep that default.
+[ -n "$OWL_MODEL" ] && export DETECTOR_OWL_MODEL="$OWL_MODEL"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-echo "  [owlv2] DETECTOR_BACKEND=owlv2  DETECTOR_OWL_SCORE_THRESH=$OWL_THRESH  DETECTOR_OWL_DEVICE=${DETECTOR_OWL_DEVICE:-cpu}  REMEMBR_PLANNER_MODEL=$REMEMBR_PLANNER_MODEL  PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
+echo "  [owlv2] DETECTOR_BACKEND=owlv2  DETECTOR_OWL_SCORE_THRESH=$OWL_THRESH  DETECTOR_OWL_MODEL=${DETECTOR_OWL_MODEL:-google/owlv2-base-patch16-ensemble (default)}  DETECTOR_OWL_DEVICE=${DETECTOR_OWL_DEVICE:-cpu}  REMEMBR_PLANNER_MODEL=$REMEMBR_PLANNER_MODEL  PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
 
 # --- 4. build revisit dataset (same as race-revisit.sh) ---
 banner "[4/7] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR"
