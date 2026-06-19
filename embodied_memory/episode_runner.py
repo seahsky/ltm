@@ -1285,6 +1285,9 @@ class EpisodeRunner:
                         target_category=_retrieval_target,
                         planner_world_xys=[c.world_xy for c in cands],
                         top_k=3,
+                        # S2 audio-DOA head inputs (None for non-audio → head inert).
+                        audio_lateral_sign=(step.info.get("audio_lateral_sign") if step.info else None),
+                        audio_energy=(step.info.get("audio_energy") if step.info else None),
                     )
                     # Assign fresh, non-clashing ids before merging.
                     for i, mc in enumerate(mem_cands):

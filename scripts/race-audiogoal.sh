@@ -56,6 +56,7 @@ OUT_TAG="${OUT_TAG:-$TAG}"
 [[ "$OUT_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --out-tag must be alnum/dash/underscore"; exit 1; }
 [ -n "${LTM_TEMPORAL_CONTEXT:-}" ] && echo "  [temporal] LTM_TEMPORAL_CONTEXT=$LTM_TEMPORAL_CONTEXT (weight=${LTM_TEMPORAL_WEIGHT:-0.05}) — M4 temporal-context head ON for this run"
 [ -n "${LTM_AUDIO_DOA:-}" ] && echo "  [audio-doa] LTM_AUDIO_DOA=$LTM_AUDIO_DOA — S1 onset-gate ON (suppress memory injection until the anomaly is heard → audio causally necessary)"
+[ -n "${LTM_AUDIO_DOA_HEAD:-}" ] && echo "  [audio-doa] LTM_AUDIO_DOA_HEAD=$LTM_AUDIO_DOA_HEAD — S2 head ON (weight=${LTM_AUDIO_DOA_WEIGHT:-0.05}): boost the same-category memory candidate whose WORLD direction matches the heard ILD sign (world frame, INVERTED convention)"
 
 VALMINI="data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content"
 DS_DIR="data/hm3d/datasets/objectnav/hm3d/v1/audiogoal_${TAG}"

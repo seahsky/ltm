@@ -19,6 +19,7 @@ The ``dialogue_memory/`` modules are imported as-is — we never modify them.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -161,6 +162,60 @@ def _temporal_recency_bonus(step_indices: List[Any], weight: float) -> List[floa
         else:
             out.append(weight * (float(int(s)) - lo) / span)
     return out
+
+
+# ----------------------------------------------------------------------
+# S2 audio-DOA head (env-gated LTM_AUDIO_DOA_HEAD, DEFAULT-OFF). Boost the
+# same-category memory candidate whose WORLD direction agrees with the heard ILD
+# lateral sign — the audio instance-disambiguation cue. The RIR grid is rendered
+# at IDENTITY listener orientation (render_rir_grid sets st.position only), so
+# lateral_sign is a WORLD-frame left/right; the convention was pinned empirically
+# (diagnose_audio_doa_calib on the audiodoa2 smoke: GO, world frame, INVERTED →
+# heard == -world_right_sign). Zero-sum + read-side, so it RE-ORDERS the recalled
+# same-category set without inflating memory-vs-frontier mass (the over-fire trap
+# that killed every importance head). A/B-ablated; off → byte-identical.
+# ----------------------------------------------------------------------
+_AUDIO_DOA_WEIGHT = float(os.environ.get("LTM_AUDIO_DOA_WEIGHT", "0.05"))
+_AUDIO_DOA_ENERGY_REF = float(os.environ.get("LTM_AUDIO_DOA_ENERGY_REF", "0.20"))
+
+
+def _world_right_sign(dx: float, dz: float) -> int:
+    """+1 if ``(dx, dz)`` is on the agent's WORLD-right, -1 left, 0 ~abeam —
+    mirrors ``diagnose_audio_doa_calib.right_sign_from_bearing(atan2(dx, dz))``:
+    ``sin(atan2(dx, dz)) = dx/hypot`` and the project convention is RIGHT ⇔
+    ``sin < 0`` ⇔ ``dx < 0``."""
+    h = math.hypot(dx, dz)
+    if h < 1e-9:
+        return 0
+    s = dx / h
+    if abs(s) < 1e-3:
+        return 0
+    return 1 if s < 0 else -1
+
+
+def _audio_doa_bonus(world_xys: List[Any], ax: float, az: float,
+                     lateral_sign: Any, energy: Any,
+                     weight: float, energy_ref: float) -> List[float]:
+    """Zero-sum DOA bonus per same-category memory candidate. Each candidate's
+    INFERRED heard-side is ``-_world_right_sign`` (the pinned INVERTED convention);
+    a candidate whose inferred side matches the heard ``lateral_sign`` scores +1,
+    a mismatch -1, abeam 0; scaled by an energy confidence ``g ∈ [0,1]`` and
+    CENTERED so the bonuses sum to ~0 (cannot inflate the candidate set). Returns
+    all-zeros when the heard sign is absent/0 or ``weight <= 0`` — a strict no-op."""
+    n = len(world_xys)
+    heard = 1 if (lateral_sign is not None and lateral_sign > 0) else (
+        -1 if (lateral_sign is not None and lateral_sign < 0) else 0)
+    if heard == 0 or n == 0 or weight <= 0.0:
+        return [0.0] * n
+    g = 1.0
+    if energy is not None and energy_ref > 0:
+        g = max(0.0, min(1.0, float(energy) / float(energy_ref)))
+    raw: List[float] = []
+    for xy in world_xys:
+        side = -_world_right_sign(float(xy[0]) - ax, float(xy[1]) - az)
+        raw.append(0.0 if side == 0 else (1.0 if side == heard else -1.0))
+    mean = sum(raw) / n
+    return [weight * g * (r - mean) for r in raw]
 
 
 # ----------------------------------------------------------------------
@@ -902,6 +957,8 @@ class EmbodiedMemoryBridge:
         min_cosine: float = 0.23,
         dedup_radius_m: float = 1.5,
         max_distance_m: float = 30.0,
+        audio_lateral_sign: Optional[Any] = None,
+        audio_energy: Optional[Any] = None,
     ) -> List[FrontierCandidate]:
         """Option-2: turn LTM hits into extra frontier candidates.
 
@@ -1052,6 +1109,21 @@ class EmbodiedMemoryBridge:
                 if b:
                     c.raw_score = float(c.raw_score) + b
                     c.metadata["temporal_bonus"] = float(b)
+
+        # S2 audio-DOA head (default-OFF). Re-order the recalled same-category
+        # candidates toward the one whose WORLD direction matches the heard ILD
+        # lateral sign (audio instance disambiguation; world frame + INVERTED
+        # convention pinned by diagnose_audio_doa_calib). Read-side + zero-sum →
+        # cannot inflate memory-vs-frontier mass. Off / no clear heard sign →
+        # raw_score untouched → byte-identical to every non-audio run.
+        if (out and os.environ.get("LTM_AUDIO_DOA_HEAD")
+                and audio_lateral_sign not in (None, 0)):
+            for c, b in zip(out, _audio_doa_bonus([c.world_xy for c in out], ax, az,
+                                                  audio_lateral_sign, audio_energy,
+                                                  _AUDIO_DOA_WEIGHT, _AUDIO_DOA_ENERGY_REF)):
+                if b:
+                    c.raw_score = max(float(c.raw_score) + b, 0.0)
+                    c.metadata["audio_doa_bonus"] = float(b)
 
         _dbg["emitted"] = len(out)
         if os.environ.get("LTM_PROPOSE_DEBUG"):
