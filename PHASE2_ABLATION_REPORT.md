@@ -2959,3 +2959,100 @@ this milestone (planner-gate viability / owlv2 low-confidence / owlv2 snap-too-f
 | `embodied_memory/goal_detector.py` | snap gate = horizontal-only (xz) + below-floor pre-filter (`DETECTOR_SNAP_FLOOR_EPS`) |
 | `embodied_memory/scripts/test_goal_detector.py` | +3 snap TDD (elevated passes / below-floor rejects / horizontal-far rejects); 33 total |
 | `runs/owlv2-{gpu1,large1,large2}-preflight` | the 4 preflight aborts (noise-floor → snap-too-far); RACE-only |
+
+
+# Audio-visual fusion (S0–S2) — making audio load-bearing, then the audio-DOA instance-disambiguation head: a CODE-PROVEN structural honest negative (RACE, 2026-06-19)
+
+**Why.** Through M4 the audio was a *no-op for retrieval*: `make_audiogoal_smoke` sets
+`anomaly_object == target_category == goal`, so `audio_target_for_retrieval` returns the same string
+detected-or-not — the LTM queried `"there is a {goal}"` from step 0 regardless of the sound, and the
+M3 +0.171 was pure *visual* revisit recall with audio as inert scenario dressing. A 14-agent research
+workflow converged on one mechanism to make audio genuinely contribute: a read-side, zero-sum,
+**audio-DOA rerank head** that uses the heard ILD lateral sign to disambiguate which same-category
+*instance* the LTM steers to — the one cue (sound = one physical location) the SBERT caption embedding
+structurally lacks. Built as a staged, diagnose-first program (S0 gate → S1 onset-gate → S2 head).
+
+## What LANDED (durable wins, independent of the head)
+- **S1 onset-gate (`LTM_AUDIO_DOA`).** `audio_task.gate_retrieval_target` suppresses memory injection
+  until the anomaly is heard → audio is **causally necessary** for warm recall (turn it off → no onset
+  → no recall). RACE-verified: onset fires, memory then injects (`n_memory_chosen>0`), default path
+  byte-identical.
+- **Onset calibration (`diagnose_onset_calib.py`).** The first run fired onset at step **130**
+  (point-blank) because `onset_rms=0.05` < far-cell render energy ~0.046. Calibrating to a ~4 m audible
+  radius (`onset_rms` → 0.065) moved onset to **step 101** and gave memory ~29 more steps of runway. A
+  shared `build_anomaly_clip` keeps the live render and the calibration on one energy scale.
+- **Real ESC-50 audio (`fetch_anomaly_clips.py` + `resolve_anomaly_clip`).** Replaced the synthetic
+  noise burst (which CLAP classified arbitrarily) with real recordings — baby_cry→crying_baby,
+  alarm→clock_alarm, glass_break→glass_breaking (CC BY-NC). CLAP now classifies the *real* clip
+  (`class=glass_break`/`alarm`), making the class→object step meaningful for the first time.
+- **S0 gate (`diagnose_audio_doa_calib.py`) + the world-frame fix.** The gate measures recall-presence
+  / heard-sign-vs-source-bearing agreement / lateral separation → `GO|RECALL-GAP|FRAME-BROKEN|
+  CO-LINEAR`. It first returned **FRAME-BROKEN** (heard-sign agreement 50% = chance) — which the gate
+  itself then resolved: `render_rir_grid` renders every cell at **identity listener orientation** (sets
+  `st.position` only), so `lateral_sign` is a **world-frame** cue, and comparing it in the agent frame
+  (subtracting `agent_yaw`) was the wrong frame. Testing both frames flipped the verdict to **GO,
+  world frame, `heard==-right(world-bearing)`** — a *free* fix, no RIR re-render. The instrumentation
+  (per-decision `agent_pos`/`agent_yaw`/`audio_lateral_sign` in `decisions[]`) is itself durable.
+
+## The S2 head: BUILT, S0-GO, convention-pinned — then byte-identical A/B
+`memory_bridge._audio_doa_bonus` (read-side, after the M4 block): per same-category memory candidate,
+infer its heard-side as `-_world_right_sign(world_xy − agent_pos)` (the pinned inverted convention),
+score `+1` if it matches the heard `lateral_sign` / `-1` mismatch / `0` abeam, scale by an energy gate
+`g∈[0,1]`, and **CENTER so the bonuses sum to ~0** (so it re-orders the recalled set without inflating
+memory-vs-frontier mass — the over-fire trap). Env-gated `LTM_AUDIO_DOA_HEAD` (default-OFF), weight
+`LTM_AUDIO_DOA_WEIGHT`=0.05. The dataset-controlled A/B (arm A head-off `audiodoa3-s3` vs arm B head-on
+`audiodoa3h-s3`, paired n=3, real audio, calibrated onset):
+
+> **warm soft-SPL B−A = +0.0000, binary +0.0000 — byte-identical to 16 digits** (warm soft_spl 0.2633
+> both; episode-2 soft_spl `0.5087535118960671` both; `mem_chosen` 2 both; `steps` 156.3 both).
+
+## Why byte-identical — a CODE PROOF (not a tuning issue), verified by a 4-agent triage
+The head **fired** (gate passed: candidates emitted, flag on, `lateral_sign` non-zero at the 2 firing
+decisions) but **every per-candidate bonus was exactly `0.0`**, so the `if b:` guard skipped the
+`raw_score` mutation. The cause is the **zero-sum centering on a single-instance candidate set**:
+`bonus_i = W·g·(r_i − mean(r))`; the episode is `alarm:bed` — a *single goal instance*, so the warm
+agent recalls sightings of **one** bed that cluster at one location and (after `top_k=3` + dedup) all
+land on **one agent-relative side** → `r` is uniform → `r_i − mean(r) = 0` for every candidate →
+**bonus exactly 0 for any weight or g**. Two corrections from the adversarial review:
+1. **Magnitude was never the limiter.** The `FrontierPhysicsScorer` renormalizes cosine through a
+   narrow 0.30→0.42 window that *amplifies* even a 0.017 raw bonus to a ~0.11 score swing ≫ the 0.047
+   SBERT instance gap. A non-zero bonus *would* flip the winner — so a weight-boost re-run is
+   **provably futile** (0×weight = 0 on a uniform-side set), not worth a RACE matrix.
+2. **The S0 "lateral separation 100%" does not contradict this** — it is a GT-target-anchored *offline*
+   diagnostic (`opposite_side_present` uses `ep.target_position`), a different quantity than the live
+   agent-relative re-order, which has no goal anchor; the separating distractor it counts was not in
+   the live top-3 emitted set.
+
+## Verdict — close as a STRUCTURAL honest negative (user decision, 2026-06-19)
+The audio-DOA head is **built, correct (S0 GO, convention empirically pinned), provably conservative
+(zero over-fire, byte-identical), and structurally inert *by construction of the eval*** — its purpose
+is instance disambiguation, but the revisit eval is single-goal-per-episode → one recalled instance →
+uniform side → the zero-sum centering nulls. This is the *sharpest* form of the recurring project
+finding ("single-goal eval doesn't reward recall") and the same built-correct-but-inert family as the
+coarse-affordance head (never chosen at rerank weight), the trained R/U importance heads (over-fire),
+and the M4 temporal head (re-attribution). The head's **design regime** — episodes with multiple
+laterally-separated same-category instances (mixed-side recalled sets) — is *absent* from this eval;
+demonstrating its value (and testing the over-fire direction: does a side-correct pick hit the correct
+instance, or steer to a side-correct WRONG one per the documented `alarm:toilet` −0.113?) requires a
+new multi-instance harness — deferred as a separate build. Default stays **OFF**; the head is kept
+env-tunable for that future regime. **The genuinely net-new mechanism the audio arc promised is built
+and verified-correct but undemonstrable in this eval by design.**
+
+**Caveat — arm-A is not a step up.** Arm A (head-off) warm S3−S1 = **+0.107, p=0.037 (n=3)** is a
+*single-cell re-confirmation* of the warm-LTM thesis (now significant in this calibrated cell), **NOT**
+a measured gain over the prior +0.085 (the mean moved only +0.022; p tightened from more consistent
+paired deltas; n=3, single scene/class, episode idx2 carries it, leave-one-out straddles zero), and
+**not** a paper-grade independent reproduction. The plausible drivers are upstream of the head
+(earlier onset → more recall runway; real audio/CLAP), none isolated.
+
+## File index (audio-visual fusion)
+| Path | Purpose |
+|---|---|
+| `embodied_memory/audio_task.py` | `gate_retrieval_target` (S1 onset-gate), `build_anomaly_clip`, `resolve_anomaly_clip` |
+| `embodied_memory/memory_bridge.py` | `_world_right_sign` + `_audio_doa_bonus` (S2 head, zero-sum); head block in `propose_memory_candidates` |
+| `embodied_memory/scripts/diagnose_audio_doa_calib.py` | S0 gate (recall/frame/separation; agent+world frames) + TDD (10 cases) |
+| `embodied_memory/scripts/diagnose_onset_calib.py` | onset_rms calibration for a target audible distance + TDD (6) |
+| `embodied_memory/scripts/fetch_anomaly_clips.py` | stage real ESC-50 clips per class + TDD (4) |
+| `embodied_memory/scripts/test_audio_doa_head.py` | head TDD incl. the positive convention guard (5) |
+| `scripts/race-audiogoal.sh` | onset-calib `[5b]` + `[S0]` gate + `--fetch-audio` + head flags |
+| `runs/audiodoa{2,3,3h}-*` | the S0/S1 + head A/B runs; RACE-only |
