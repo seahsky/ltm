@@ -1445,6 +1445,17 @@ class EpisodeRunner:
                     ep_log["decisions"].append({
                         "step_idx": int(step.step_idx),
                         "trigger": propose_trigger,
+                        # S0 audio-DOA diagnostic fields: agent pose + heard ILD
+                        # sign AT this decision step. `step` here is the current,
+                        # audio-processed step (process_audio_step stamped step.info
+                        # above, before the source.step() reassignment), and
+                        # decisions[] is logged at every propose step (unlike the
+                        # sparse keyframe-only steps[]), so the diagnostic reads
+                        # everything it needs from one entry. None for non-audio.
+                        "agent_pos": step.agent_state.position.tolist(),
+                        "agent_yaw": float(step.agent_state.rotation_yaw),
+                        "audio_lateral_sign": (step.info.get("audio_lateral_sign") if step.info else None),
+                        "audio_energy": (step.info.get("audio_energy") if step.info else None),
                         "raw_top1_id": int(raw_top1.candidate_id),
                         "raw_top1_world_xy": raw_top1.world_xy.tolist(),
                         "raw_top1_score": float(raw_top1.raw_score),
