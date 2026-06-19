@@ -26,6 +26,7 @@ MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodie
 
 SCENE="TEEsavR23oF"; CLASS="alarm"; CATEGORY="bed"
 NWARM=3; SETTINGS="1 3"; TAG="audiogoal"; OUT_TAG=""; T_ANOM_WARM=30; SOURCE_OVERRIDE=""; REUSE_DS=""
+ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scene) SCENE="$2"; shift 2 ;;
@@ -42,6 +43,11 @@ while [ $# -gt 0 ]; do
     --t-anom) T_ANOM_WARM="$2"; shift 2 ;;
     --source) SOURCE_OVERRIDE="$2"; shift 2 ;;
     --reuse-dataset) REUSE_DS=1; shift ;;
+    # Onset calibration: auto-set --audio-onset-rms so the anomaly is audible at
+    # ~ONSET_TARGET_DIST m (default 4 m, across a room) instead of point-blank
+    # (the step-130 finding). --onset-rms pins an explicit value and skips calib.
+    --onset-target-dist) ONSET_TARGET_DIST="$2"; shift 2 ;;
+    --onset-rms) ONSET_RMS_OVERRIDE="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
@@ -134,6 +140,23 @@ if [ "$rc" -ne 0 ] || [ ! -f "$GRID" ]; then
   exit 1
 fi
 
+# Onset calibration: set --audio-onset-rms so the anomaly is first audible at
+# ~ONSET_TARGET_DIST m (across a room) rather than point-blank — the step-130
+# finding (default onset_rms=0.05 < far-cell energy ~0.046, so onset only fired
+# when the agent was on top of the source). $0; reads the rendered grid.
+if [ -n "$ONSET_RMS_OVERRIDE" ]; then
+  ONSET_RMS="$ONSET_RMS_OVERRIDE"
+  echo "  onset_rms pinned (override) = $ONSET_RMS"
+else
+  banner "[5b/7] onset calibration (diagnose_onset_calib, target ${ONSET_TARGET_DIST} m)"
+  CALIB_LOG="${DS_DIR}/onset_calib.log"
+  python embodied_memory/scripts/diagnose_onset_calib.py \
+      --grid "$GRID" --target-dist "$ONSET_TARGET_DIST" 2>&1 | tee "$CALIB_LOG"
+  ONSET_RMS="$(grep -oE 'RECOMMEND_ONSET_RMS=[0-9.]+' "$CALIB_LOG" | tail -1 | cut -d= -f2)"
+  [ -n "$ONSET_RMS" ] || { echo "WARN: no RECOMMEND_ONSET_RMS; falling back to default 0.05"; ONSET_RMS="0.05"; }
+  echo "  onset_rms (calibrated for ${ONSET_TARGET_DIST} m audible radius) = $ONSET_RMS"
+fi
+
 N_EPISODES="$(python -c "import gzip,json,glob,sys; print(sum(len(json.load(gzip.open(f))['episodes']) for f in sorted(glob.glob(sys.argv[1]))))" "${DS_DIR}/content/*.json.gz")" || N_EPISODES=0
 [ "$N_EPISODES" -gt 0 ] 2>/dev/null || { echo "FATAL: episode count '$N_EPISODES' <= 0"; exit 1; }
 echo "  n-episodes = $N_EPISODES"
@@ -149,6 +172,7 @@ for S in $SETTINGS; do
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --task audiogoal \
       --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
+      --audio-onset-rms "$ONSET_RMS" \
       --episodes-path "$DS" --scene "$SCENE" --target any \
       --n-episodes "$N_EPISODES" --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
   rc=${PIPESTATUS[0]}

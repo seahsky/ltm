@@ -531,33 +531,13 @@ class HabitatObjectNavSource(EpisodeSource):
         )
 
     def _load_anomaly_clip(self) -> np.ndarray:
-        """Load + RMS-normalize the anomaly clip at the grid's sample rate. A
-        real FSD50K .wav if ``anomaly_clip_path`` is set, else a synthetic
-        broadband burst (so M1 wiring does not block on FSD50K being staged)."""
-        from .audio_task import normalize_clip
-
+        """Load + RMS-normalize the anomaly clip at the grid's sample rate. A real
+        FSD50K .wav if ``anomaly_clip_path`` is set, else a deterministic synthetic
+        broadband burst. Delegates to ``audio_task.build_anomaly_clip`` so the live
+        render and the onset-calibration diagnostic share one energy scale."""
+        from .audio_task import build_anomaly_clip
         grid_sr = int(self._rir_grid.sample_rate) if self._rir_grid is not None else 48000
-        if self._anomaly_clip_path and os.path.isfile(self._anomaly_clip_path):
-            from scipy.io import wavfile
-            sr, data = wavfile.read(self._anomaly_clip_path)
-            data = np.asarray(data, dtype=np.float32)
-            if np.issubdtype(np.asarray(data).dtype, np.integer):
-                data = data / 32768.0
-            if data.ndim == 2:
-                data = data.mean(axis=1)
-            data = data.reshape(-1).astype(np.float32)
-            if int(sr) != grid_sr:
-                from math import gcd
-                from scipy.signal import resample_poly
-                g = gcd(int(sr), grid_sr)
-                data = resample_poly(data, grid_sr // g, int(sr) // g).astype(np.float32)
-            return normalize_clip(data, self._target_norm_rms_db)
-
-        rng = np.random.default_rng(0)
-        n = int(grid_sr * 0.5)
-        envlp = np.minimum(1.0, np.linspace(0.0, 4.0, n))
-        burst = (rng.standard_normal(n).astype(np.float32) * envlp).astype(np.float32)
-        return normalize_clip(burst, self._target_norm_rms_db)
+        return build_anomaly_clip(self._anomaly_clip_path, grid_sr, self._target_norm_rms_db)
 
     @staticmethod
     def _read_agent_state(env) -> AgentState:

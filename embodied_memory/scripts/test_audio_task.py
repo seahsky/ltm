@@ -377,6 +377,18 @@ def case_habitat_objectnav_make_step_no_audio():
 # ----------------------------------------------------------------------
 
 
+def case_build_anomaly_clip_deterministic_and_normed():
+    # the synthetic burst (no clip path) must be deterministic (seed 0) and
+    # RMS-normalized to -20 dBFS (~0.1 linear) — the shared clip both habitat_env
+    # and the onset-calibration diagnostic rely on for a matching energy scale.
+    a = at.build_anomaly_clip(None, 48000)
+    b = at.build_anomaly_clip(None, 48000)
+    assert a.shape == b.shape and np.allclose(a, b), "synthetic burst must be deterministic"
+    assert a.shape[0] == int(48000 * 0.5), a.shape
+    assert abs(at.rms(a) - 0.1) < 0.02, at.rms(a)
+    print("  case build_anomaly_clip_deterministic_and_normed: OK")
+
+
 def case_onset_gate_suppresses_pre_onset():
     # flag on + not detected -> None (zero memory injection until heard)
     assert at.gate_retrieval_target("bed", onset_gate=True, detected=False) is None
@@ -427,6 +439,7 @@ def main() -> int:
         case_habitat_default_objectnav,
         case_habitat_make_step_audio_gated,
         case_habitat_objectnav_make_step_no_audio,
+        case_build_anomaly_clip_deterministic_and_normed,
         case_onset_gate_suppresses_pre_onset,
         case_onset_gate_passes_after_onset,
         case_onset_gate_off_byte_identical,
