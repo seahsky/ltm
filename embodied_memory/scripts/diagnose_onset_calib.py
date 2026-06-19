@@ -98,7 +98,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     from embodied_memory.audio import RIRGrid
     from embodied_memory.audio_task import build_anomaly_clip
 
-    grid = RIRGrid.from_npz(args.grid)
+    grid = RIRGrid.load(args.grid)
     clip = build_anomaly_clip(args.anomaly_clip, int(grid.sample_rate), args.target_norm_rms_db)
     samples = cell_energy_vs_distance(grid, clip)
     rec = recommend_onset_rms(samples, args.target_dist, current_rms=args.current_onset_rms)
