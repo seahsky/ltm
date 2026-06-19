@@ -175,6 +175,24 @@ def audio_target_for_retrieval(state: AudioEpisodeState, fallback_category: str)
     return fallback_category
 
 
+def gate_retrieval_target(
+    resolved_target: Optional[str], *, onset_gate: bool, detected: bool
+) -> Optional[str]:
+    """S1 onset-gate (env-gated ``LTM_AUDIO_DOA``): when ``onset_gate`` is on,
+    SUPPRESS memory retrieval (return ``None``) until the anomaly is ``detected``,
+    so the audio onset is causally NECESSARY for warm recall — turn the audio off
+    and there is no onset, no target, hence no injected memory candidate. When
+    ``onset_gate`` is off, returns ``resolved_target`` VERBATIM, so the default
+    objectnav/revisit/multion path is byte-identical.
+
+    ``propose_memory_candidates`` returns ``[]`` on a falsy target
+    (memory_bridge.py: ``not target_category``), so a ``None`` here yields zero
+    memory injection pre-onset with no caller guard."""
+    if onset_gate and not detected:
+        return None
+    return resolved_target
+
+
 def should_audio_stop(
     state: AudioEpisodeState,
     energy: float,

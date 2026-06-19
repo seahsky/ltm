@@ -372,6 +372,31 @@ def case_habitat_objectnav_make_step_no_audio():
     print("  case habitat_objectnav_make_step_no_audio: OK")
 
 
+# ----------------------------------------------------------------------
+# S1 onset-gate retrieval (LTM_AUDIO_DOA): make audio causally necessary
+# ----------------------------------------------------------------------
+
+
+def case_onset_gate_suppresses_pre_onset():
+    # flag on + not detected -> None (zero memory injection until heard)
+    assert at.gate_retrieval_target("bed", onset_gate=True, detected=False) is None
+    print("  case onset_gate_suppresses_pre_onset: OK")
+
+
+def case_onset_gate_passes_after_onset():
+    # flag on + detected -> resolved target flows through
+    assert at.gate_retrieval_target("bed", onset_gate=True, detected=True) == "bed"
+    print("  case onset_gate_passes_after_onset: OK")
+
+
+def case_onset_gate_off_byte_identical():
+    # flag OFF -> verbatim regardless of detection (default path unchanged)
+    assert at.gate_retrieval_target("bed", onset_gate=False, detected=False) == "bed"
+    assert at.gate_retrieval_target("bed", onset_gate=False, detected=True) == "bed"
+    assert at.gate_retrieval_target(None, onset_gate=False, detected=False) is None
+    print("  case onset_gate_off_byte_identical: OK")
+
+
 def main() -> int:
     cases = [
         case_normalize_clip_rms_target,
@@ -402,6 +427,9 @@ def main() -> int:
         case_habitat_default_objectnav,
         case_habitat_make_step_audio_gated,
         case_habitat_objectnav_make_step_no_audio,
+        case_onset_gate_suppresses_pre_onset,
+        case_onset_gate_passes_after_onset,
+        case_onset_gate_off_byte_identical,
     ]
     print(f"running {len(cases)} audio_task cases…")
     for c in cases:

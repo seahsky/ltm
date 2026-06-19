@@ -546,6 +546,12 @@ class EpisodeRunner:
         self.clap_encoder = clap_encoder
         self._audio_cfg = audio_cfg if audio_cfg is not None else AudioTaskConfig()
         self._audio_state = AudioEpisodeState()
+        # S1 onset-gate (env-gated LTM_AUDIO_DOA, default-OFF): when on, suppress
+        # memory retrieval until the anomaly is heard, so audio is causally
+        # NECESSARY for warm recall. Only meaningful for the audiogoal task; the
+        # default path is byte-identical (gate_retrieval_target returns verbatim).
+        self._audio_doa_onset_gate = bool(os.environ.get("LTM_AUDIO_DOA")) and (
+            self.task == "audiogoal")
         # Oracle backbone (Run-5 diagnostic): a ShortestPathFollower steers
         # straight to the episode goal, bypassing the candidate/scorer/memory
         # machinery. Lazily constructed per-episode in _init_oracle_follower.
@@ -918,6 +924,13 @@ class EpisodeRunner:
             "started_at": time.time(),
             "steps": [],
             "decisions": [],
+            # S0 instrumentation (OFFLINE GT labels for the audio-DOA diagnostic
+            # ONLY — never read by the agent at runtime): the anomaly source xyz
+            # and the GT goal position, so diagnose_audio_doa_calib.py can label
+            # which recalled candidate is the correct instance. None for non-audio.
+            "source_position": (((getattr(ep, "metadata", None) or {}).get("audio_config") or {}).get("source_position")),
+            "target_position": (ep.target_position.tolist()
+                                if getattr(ep, "target_position", None) is not None else None),
         }
 
         # Oracle with no goal would silently STOP at step 0; flag it loudly so
@@ -1259,6 +1272,13 @@ class EpisodeRunner:
                     _retrieval_target = audio_task.audio_target_for_retrieval(
                         self._audio_state,
                         active_category if multion else ep.target_category)
+                    # S1 onset-gate (LTM_AUDIO_DOA): make audio causally necessary
+                    # for warm recall — no memory injection until the anomaly is
+                    # heard. Default-OFF → byte-identical; only fires for audiogoal.
+                    _retrieval_target = audio_task.gate_retrieval_target(
+                        _retrieval_target,
+                        onset_gate=self._audio_doa_onset_gate,
+                        detected=self._audio_state.detected)
                     mem_cands = self.bridge.propose_memory_candidates(
                         agent_pos=step.agent_state.position,
                         agent_yaw=step.agent_state.rotation_yaw,
@@ -2438,6 +2458,12 @@ class EpisodeRunner:
             "agent_yaw": float(step.agent_state.rotation_yaw),
             "caption": keyframe.caption,
             "distance_to_goal": (float(_d2g) if _d2g is not None else None),
+            # S0 instrumentation: persist the heard ILD lateral sign / energy
+            # (set by process_audio_step into step.info) so the audio-DOA
+            # diagnostic can measure heard-sign-vs-candidate-bearing agreement.
+            # None for non-audio steps (default path metrics byte-identical).
+            "audio_lateral_sign": (step.info.get("audio_lateral_sign") if step.info else None),
+            "audio_energy": (step.info.get("audio_energy") if step.info else None),
         }
 
     @staticmethod
