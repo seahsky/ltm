@@ -284,3 +284,7 @@ echo
 echo "DONE. AudioGoal warm S1-vs-S3 for ($SCENE,$CLASS). Cold-silent (t_anom high)"
 echo "seeds the LTM; warm episodes fire the anomaly. Onset lines: grep '\\[audio\\]' the run logs."
 [ -n "${LTM_AUDIO_DOA:-}" ] && echo "S1 onset-gate was ON (LTM_AUDIO_DOA=$LTM_AUDIO_DOA): memory injection suppressed until the anomaly was heard."
+# Every real failure above is gated with an inline `exit 1`; reaching here = success.
+# Without this, the trailing `[ ... ] && echo` short-circuits to status 1 when
+# LTM_AUDIO_DOA is unset (set -uo pipefail, no set -e) -> spurious run-level exit 1.
+exit 0

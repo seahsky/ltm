@@ -827,6 +827,12 @@ class EpisodeRunner:
                     (ep_log.get("bridge_stats_after") or {}).get("n_audio_writes", 0)),
                 "n_audio_event_recalled": int(
                     (ep_log.get("bridge_stats_after") or {}).get("n_audio_event_recalled", 0)),
+                # Step-2 per-episode write-seam diagnosis (onset fired? write
+                # attempted? why skipped?) — turns a 0-write smoke into a one-row
+                # verdict (see the decision table).
+                "n_audio_onset_fired": int(ep_metrics.get("n_audio_onset_fired", 0)),
+                "n_audio_write_attempts": int(ep_metrics.get("n_audio_write_attempts", 0)),
+                "audio_write_skip_reason": ep_metrics.get("audio_write_skip_reason"),
                 "n_planner_proposals": int(ep_metrics.get("n_planner_proposals", 0)),
                 "n_planner_goto": int(ep_metrics.get("n_planner_goto", 0)),
                 "n_planner_explore": int(ep_metrics.get("n_planner_explore", 0)),
@@ -903,6 +909,9 @@ class EpisodeRunner:
         # runs since the default state is already cleared). Sample-rate threading
         # stays audiogoal-gated (reads the source's grid metadata).
         self._audio_state.reset()
+        # Step-2 write-once-per-episode latch (reset every episode so a per-episode
+        # audio write is allowed exactly once; see the detected-gated write seam).
+        self._audio_written = False
         if self.task == "audiogoal":
             _ac = (ep.metadata or {}).get("audio_config") or {}
             if _ac.get("sample_rate"):
@@ -1026,6 +1035,15 @@ class EpisodeRunner:
             "n_planner_budget_defer": 0,
             "n_planner_stop": 0,
             "n_planner_retrieve_calls": 0,
+            # AudioGoal Step-2 write-seam diagnostics: pinpoint WHY the audio→LTM
+            # write fired or not in a single smoke (0 for non-audio → objectnav
+            # rows unchanged). n_audio_onset_fired = steps where onset fired;
+            # n_audio_write_attempts = entered the write block (detected + env on
+            # + bridge); skip_reason one-shot = env-off / src-none / insert-none /
+            # ok. "no-onset" is implicit (n_audio_onset_fired==0, reason None).
+            "n_audio_onset_fired": 0,
+            "n_audio_write_attempts": 0,
+            "audio_write_skip_reason": None,
         }
         # Closest the agent ever gets to a goal viewpoint over the episode
         # (geodesic). success@0.1m is perception-bound with caption-only
@@ -1161,6 +1179,7 @@ class EpisodeRunner:
                     self._audio_state, self.clap_encoder)
                 step.info.update(_adiag)
                 if _adiag.get("onset_fired"):
+                    ep_metrics_counters["n_audio_onset_fired"] += 1
                     # Show BOTH the heard-class affordance (CLASS_TO_OBJECT, the
                     # 'heard->' field) AND the RESOLVED retrieval target that
                     # propose_memory_candidates actually queries. In onset-trigger
@@ -1174,21 +1193,35 @@ class EpisodeRunner:
                           f"heard->{_adiag.get('audio_target_override')} "
                           f"retrieval_target={_resolved_tgt} "
                           f"energy={_adiag.get('audio_energy', 0.0):.3f}", flush=True)
-                    # Step 2 (LTM_AUDIO_WRITE, default-OFF): persist the heard
-                    # anomaly as a fine-layer LTM item AT THE SOURCE location, so a
-                    # later/warm query for the object recalls a waypoint TO the
-                    # sound even when vision never mapped it. Insert-only + env-gated
-                    # → byte-identical when off; no-op for non-audiogoal.
-                    if os.environ.get("LTM_AUDIO_WRITE") and self.bridge is not None:
+                # Step 2 (LTM_AUDIO_WRITE, default-OFF): persist the heard anomaly
+                # as a fine-layer LTM item AT THE SOURCE, ONCE per episode. Gated on
+                # state.detected (stays True after onset), NOT the single
+                # onset_fired step, so a transient empty target/_src can't lose the
+                # write. Insert-only + env-gated → byte-identical when off; no-op
+                # for non-audiogoal. The skip_reason makes a non-write diagnosable.
+                if self._audio_state.detected and not self._audio_written:
+                    if not os.environ.get("LTM_AUDIO_WRITE"):
+                        if ep_metrics_counters["audio_write_skip_reason"] is None:
+                            ep_metrics_counters["audio_write_skip_reason"] = "env-off"
+                    elif self.bridge is not None:
+                        ep_metrics_counters["n_audio_write_attempts"] += 1
+                        _wtgt = audio_task.audio_target_for_retrieval(
+                            self._audio_state, ep.target_category)
                         _src = (((getattr(ep, "metadata", None) or {}).get("audio_config")
                                  or {}).get("source_position"))
-                        if _src is not None:
+                        if not _wtgt or _src is None:
+                            ep_metrics_counters["audio_write_skip_reason"] = "src-none"
+                        else:
                             _eid = self.bridge.write_audio_event(
-                                _resolved_tgt, _src, step.step_idx,
+                                _wtgt, _src, step.step_idx,
                                 anomaly_class=self._audio_state.anomaly_class)
-                            if _eid is not None:
+                            if _eid is None:
+                                ep_metrics_counters["audio_write_skip_reason"] = "insert-none"
+                            else:
+                                self._audio_written = True
+                                ep_metrics_counters["audio_write_skip_reason"] = "ok"
                                 print(f"[audio-write] step {step.step_idx}: wrote "
-                                      f"'{_resolved_tgt}' @ source={_src} -> fine LTM "
+                                      f"'{_wtgt}' @ source={_src} -> fine LTM "
                                       f"(id={_eid})", flush=True)
             if is_oracle:
                 # Oracle short-circuit: steer straight to the goal, bypassing
@@ -2090,6 +2123,9 @@ class EpisodeRunner:
             "coarse_room_hist": dict(coarse_room_hist),
             "n_remembr_chosen": n_remembr_chosen,
             "n_stop_signals": n_stop_signals,
+            "n_audio_onset_fired": int(ep_metrics_counters["n_audio_onset_fired"]),
+            "n_audio_write_attempts": int(ep_metrics_counters["n_audio_write_attempts"]),
+            "audio_write_skip_reason": ep_metrics_counters["audio_write_skip_reason"],
             "n_planner_proposals": int(ep_metrics_counters["n_planner_proposals"]),
             "n_planner_goto": int(ep_metrics_counters["n_planner_goto"]),
             "n_planner_explore": int(ep_metrics_counters["n_planner_explore"]),
