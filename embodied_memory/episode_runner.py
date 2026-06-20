@@ -1169,9 +1169,13 @@ class EpisodeRunner:
                         _src = (((getattr(ep, "metadata", None) or {}).get("audio_config")
                                  or {}).get("source_position"))
                         if _src is not None:
-                            self.bridge.write_audio_event(
+                            _eid = self.bridge.write_audio_event(
                                 _resolved_tgt, _src, step.step_idx,
                                 anomaly_class=self._audio_state.anomaly_class)
+                            if _eid is not None:
+                                print(f"[audio-write] step {step.step_idx}: wrote "
+                                      f"'{_resolved_tgt}' @ source={_src} -> fine LTM "
+                                      f"(id={_eid})", flush=True)
             if is_oracle:
                 # Oracle short-circuit: steer straight to the goal, bypassing
                 # candidate proposal, memory injection, and rerank entirely.
