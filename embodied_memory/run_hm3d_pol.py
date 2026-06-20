@@ -326,6 +326,16 @@ def main(argv: Optional[list] = None) -> int:
                         help="audiogoal: RMS threshold for the audio-energy STOP gate.")
     parser.add_argument("--audio-stop-distance", type=float, default=1.5,
                         help="audiogoal: only allow the energy STOP within this d2g (m).")
+    parser.add_argument("--audio-anomaly-gate", action="store_true",
+                        help="audiogoal Step 1: gate the onset on an open-set CLAP "
+                             "normal-vs-anomaly decision (also enabled via env "
+                             "LTM_AUDIO_ANOMALY_GATE). Default OFF => energy-only onset.")
+    parser.add_argument("--audio-anomaly-delta", type=float, default=0.0,
+                        help="Step 1: required margin (best-anomaly minus best-normal "
+                             "CLAP cosine) to fire the gate. Calibrate with "
+                             "diagnose_normal_anomaly_calib.py.")
+    parser.add_argument("--audio-anomaly-tau", type=float, default=0.0,
+                        help="Step 1: absolute floor on the best-anomaly CLAP cosine.")
 
     args = parser.parse_args(argv)
 
@@ -516,12 +526,20 @@ def main(argv: Optional[list] = None) -> int:
         from .perception import CLAPAudioEncoder
         from .audio_task import AudioTaskConfig
         clap_encoder = CLAPAudioEncoder(device=args.clip_device)
+        _anomaly_gate = bool(args.audio_anomaly_gate
+                             or os.environ.get("LTM_AUDIO_ANOMALY_GATE"))
         audio_cfg = AudioTaskConfig(
             enabled=True, t_anom=args.t_anom,
             onset_rms=args.audio_onset_rms,
             energy_stop_db_rms=args.audio_energy_stop_rms,
             stop_distance_m=args.audio_stop_distance,
+            anomaly_gate=_anomaly_gate,
+            anomaly_delta=args.audio_anomaly_delta,
+            anomaly_tau=args.audio_anomaly_tau,
         )
+        if _anomaly_gate:
+            print(f"[audiogoal] Step-1 anomaly gate ON "
+                  f"(delta={args.audio_anomaly_delta}, tau={args.audio_anomaly_tau})")
 
     runner = EpisodeRunner(
         source=source,

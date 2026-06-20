@@ -175,6 +175,77 @@ def case_process_clap_none_records_onset_no_class():
     print("  case process_clap_none_records_onset_no_class: OK")
 
 
+class _MarginCLAP:
+    """Controllable-cosine CLAP stand-in (audio embeds to e0; each text embeds to
+    a unit vector with first component = the desired cosine). Lets the gate cases
+    drive ``is_anomaly`` deterministically — anomaly-wins vs normal-wins."""
+
+    def __init__(self, text_cos):
+        self._text_cos = dict(text_cos)
+
+    def encode_audio(self, wav, sr):
+        v = np.zeros(8, dtype=np.float32)
+        v[0] = 1.0
+        return v
+
+    def encode_text(self, text):
+        import math
+        c = float(max(-1.0, min(1.0, self._text_cos.get(text, 0.0))))
+        v = np.zeros(8, dtype=np.float32)
+        v[0] = c
+        v[1] = math.sqrt(max(0.0, 1.0 - c * c))
+        return v
+
+
+def _anomaly_cos(alarm=0.1, normal=0.1, talking=None):
+    cos = {audio.CLASS_TO_CLAP_PROMPT[c]: 0.1 for c in audio.ANOMALY_CLASSES}
+    cos[audio.CLASS_TO_CLAP_PROMPT["alarm"]] = alarm
+    for p in audio.NORMAL_PROMPTS:
+        cos[p] = normal
+    if talking is not None:
+        cos["people talking"] = talking
+    return cos
+
+
+def case_process_gate_on_anomaly_fires():
+    st = at.AudioEpisodeState()
+    cfg = at.AudioTaskConfig(enabled=True, onset_rms=0.05, anomaly_gate=True)
+    enc = _MarginCLAP(_anomaly_cos(alarm=0.40, normal=0.10))  # margin +0.30
+    diag = at.process_audio_step(_binaural(0.3), 10, 16000, cfg, st, enc)
+    assert st.detected is True and diag["onset_fired"] is True
+    assert st.anomaly_class == "alarm" and st.target_override == audio.CLASS_TO_OBJECT["alarm"]
+    assert diag["audio_anomaly_fired"] is True and diag["audio_anomaly_margin"] > 0
+    print("  case process_gate_on_anomaly_fires: OK")
+
+
+def case_process_gate_on_benign_suppresses_onset():
+    st = at.AudioEpisodeState()
+    cfg = at.AudioTaskConfig(enabled=True, onset_rms=0.05, anomaly_gate=True)
+    # loud, but reads as "people talking" (normal side wins) → onset NOT consumed
+    enc = _MarginCLAP(_anomaly_cos(alarm=0.12, normal=0.10, talking=0.55))
+    d1 = at.process_audio_step(_binaural(0.3), 10, 16000, cfg, st, enc)
+    assert st.detected is False and d1["onset_fired"] is False
+    assert d1["audio_anomaly_fired"] is False and st.anomaly_class is None
+    # a LATER real anomaly can still fire (the once-per-episode onset wasn't spent)
+    enc2 = _MarginCLAP(_anomaly_cos(alarm=0.45, normal=0.10))
+    d2 = at.process_audio_step(_binaural(0.3), 20, 16000, cfg, st, enc2)
+    assert st.detected is True and d2["onset_fired"] is True and st.anomaly_class == "alarm"
+    print("  case process_gate_on_benign_suppresses_onset: OK")
+
+
+def case_process_gate_off_byte_identical():
+    # Gate OFF (default): the SAME benign-reading sound still fires on energy
+    # alone, exactly as before Step 1 — the gate is opt-in.
+    st_off = at.AudioEpisodeState()
+    cfg_off = at.AudioTaskConfig(enabled=True, onset_rms=0.05)  # anomaly_gate defaults False
+    enc = FakeCLAP("baby_cry")
+    diag = at.process_audio_step(_binaural(0.3), 10, 16000, cfg_off, st_off, enc)
+    assert st_off.detected is True and diag["onset_fired"] is True
+    assert st_off.anomaly_class == "baby_cry"  # forced argmax, unchanged
+    assert "audio_anomaly_fired" not in diag  # gate never ran
+    print("  case process_gate_off_byte_identical: OK")
+
+
 def case_process_lateral_and_energy_in_diag():
     st = at.AudioEpisodeState()
     b = _binaural(0.3, lateral=+1)
@@ -434,6 +505,9 @@ def main() -> int:
         case_process_onset_fires_once,
         case_process_sets_target_override,
         case_process_clap_none_records_onset_no_class,
+        case_process_gate_on_anomaly_fires,
+        case_process_gate_on_benign_suppresses_onset,
+        case_process_gate_off_byte_identical,
         case_process_lateral_and_energy_in_diag,
         case_target_fallback_when_undetected,
         case_target_override_when_detected,
