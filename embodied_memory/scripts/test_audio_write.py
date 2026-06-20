@@ -128,6 +128,40 @@ def case_bad_inputs_return_none():
     print("  case bad_inputs_return_none: OK")
 
 
+def case_n_audio_writes_counter_and_stats():
+    # the decisive smoke instrumentation: n_audio_writes in stats()/summary.json
+    b = _mk_bridge()
+    b.begin_episode("ep-S", scene_id="S")
+    assert b._n_audio_writes == 0 and b.stats()["n_audio_writes"] == 0
+    b.write_audio_event("bed", [1.0, 0.0, 2.0], 30, anomaly_class="alarm")
+    assert b.stats()["n_audio_writes"] == 1
+    b.write_audio_event("bed", [9.0, 0.0, -3.0], 40, anomaly_class="glass_break")
+    assert b.stats()["n_audio_writes"] == 2
+    # guard-rejected calls must NOT increment (so nonzero == proof it really fired)
+    b.write_audio_event("", [1.0, 0.0, 2.0], 1)
+    b.write_audio_event("bed", None, 1)
+    assert b.stats()["n_audio_writes"] == 2
+    print("  case n_audio_writes_counter_and_stats: OK")
+
+
+def case_n_audio_event_recalled_counter():
+    # write fires AND surfaces as an emitted candidate -> recalled counter ticks
+    b = _mk_bridge()
+    b.begin_episode("ep-S", scene_id="S")
+    b.write_audio_event("bed", [1.0, 0.0, 2.0], 30, anomaly_class="alarm")
+    assert b.stats()["n_audio_event_recalled"] == 0  # not queried yet
+    out = _propose(b, cat="bed", agent=(5.0, 0.0, 5.0))
+    assert len(out) == 1 and b.stats()["n_audio_event_recalled"] == 1
+    # deduped (agent frontier ON the source) -> write fired but NOT recalled
+    b2 = _mk_bridge()
+    b2.begin_episode("ep-S", scene_id="S")
+    b2.write_audio_event("bed", [10.0, 0.0, 10.0], 30, anomaly_class="alarm")
+    out2 = _propose(b2, cat="bed", agent=(0.0, 0.0, 0.0), planner_xys=[np.array([10.0, 10.0])])
+    assert out2 == [] and b2.stats()["n_audio_writes"] == 1
+    assert b2.stats()["n_audio_event_recalled"] == 0  # fired but deduped (the redundancy signature)
+    print("  case n_audio_event_recalled_counter: OK")
+
+
 def case_caption_matches_object_not_class():
     # a write for object 'bed' must be recalled by the 'bed' query and NOT by 'chair'
     b = _mk_bridge()
@@ -147,6 +181,8 @@ def main() -> int:
         case_self_dedup_avoided_but_planner_dedup_holds,
         case_disable_ltm_returns_none,
         case_bad_inputs_return_none,
+        case_n_audio_writes_counter_and_stats,
+        case_n_audio_event_recalled_counter,
         case_caption_matches_object_not_class,
     ]
     print(f"running {len(cases)} write_audio_event cases…")

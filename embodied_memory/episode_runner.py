@@ -93,6 +93,8 @@ class RunSummary:
     n_detector_approach_success: int = 0
     n_arrival_stop: int = 0
     n_keyframes_observed: int = 0
+    n_audio_writes: int = 0
+    n_audio_event_recalled: int = 0
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
     ablation: Dict[str, Any] = field(default_factory=dict)
     pass_conditions: Dict[str, bool] = field(default_factory=dict)
@@ -134,6 +136,8 @@ class RunSummary:
             "n_detector_approach_success": self.n_detector_approach_success,
             "n_arrival_stop": self.n_arrival_stop,
             "n_keyframes_observed": self.n_keyframes_observed,
+            "n_audio_writes": self.n_audio_writes,
+            "n_audio_event_recalled": self.n_audio_event_recalled,
             "modules_invoked": self.modules_invoked,
             "ablation": self.ablation,
             "pass_conditions": self.pass_conditions,
@@ -815,6 +819,14 @@ class EpisodeRunner:
                 "coarse_top_cos_max": float(ep_metrics.get("coarse_top_cos_max", float("nan"))),
                 "n_remembr_chosen": int(ep_metrics.get("n_remembr_chosen", 0)),
                 "n_stop_signals": int(ep_metrics.get("n_stop_signals", 0)),
+                # Step-2 cumulative bridge counters snapshotted per episode (cold
+                # row = 0 if the write never fired during seeding; warm row >= 1
+                # the moment it fires). Run-level summary.n_audio_writes is the
+                # decisive top-line number.
+                "n_audio_writes": int(
+                    (ep_log.get("bridge_stats_after") or {}).get("n_audio_writes", 0)),
+                "n_audio_event_recalled": int(
+                    (ep_log.get("bridge_stats_after") or {}).get("n_audio_event_recalled", 0)),
                 "n_planner_proposals": int(ep_metrics.get("n_planner_proposals", 0)),
                 "n_planner_goto": int(ep_metrics.get("n_planner_goto", 0)),
                 "n_planner_explore": int(ep_metrics.get("n_planner_explore", 0)),
@@ -867,6 +879,8 @@ class EpisodeRunner:
         summary.ltm_counts_final = bridge_stats.get("ltm_counts", {})
         summary.modules_invoked = bridge_stats.get("modules_invoked", {})
         summary.n_keyframes_observed = int(bridge_stats.get("n_keyframes_observed", 0))
+        summary.n_audio_writes = int(bridge_stats.get("n_audio_writes", 0))
+        summary.n_audio_event_recalled = int(bridge_stats.get("n_audio_event_recalled", 0))
         summary.ablation = {
             **bridge_stats.get("ablation", {}),
             **{k: v for k, v in self.run_config.items() if k not in {"setting"}},

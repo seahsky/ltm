@@ -579,6 +579,13 @@ class EmbodiedMemoryBridge:
         # measures cross-environment recall without injecting an invalid
         # cross-scene waypoint.
         self._n_cross_scene_recall = 0
+        # Step-2 instrumentation: cumulative audio→LTM writes (proof in
+        # summary.json that write_audio_event fired, vs a grep of a truncated
+        # stdout tail) and audio_event items that surfaced as recalled candidates
+        # (n_audio_writes>0 but n_audio_event_recalled==0 ⇒ the write fires but is
+        # deduped/out-competed at retrieval — the redundancy signature).
+        self._n_audio_writes = 0
+        self._n_audio_event_recalled = 0
 
         # Tracking which modules have been invoked (for criterion 4 logging).
         self.modules_invoked: Dict[str, bool] = {
@@ -919,6 +926,7 @@ class EmbodiedMemoryBridge:
             "type": "audio_event",                         # Step-2 attribution tag
         }
         eid = self.ltm.insert(level="fine", embedding=emb, content=cap, metadata=meta)
+        self._n_audio_writes += 1
         self.modules_invoked["ltm_audio_write"] = True
         return eid
 
@@ -1101,6 +1109,13 @@ class EmbodiedMemoryBridge:
                 rel -= 2.0 * math.pi
             while rel < -math.pi:
                 rel += 2.0 * math.pi
+
+            # Step-2: this entry passed every gate (cosine, scene, position,
+            # dedup, distance) and is being emitted as a usable candidate. If it
+            # is an audio-written event, count it — n_audio_event_recalled lets a
+            # smoke distinguish "write never fired" from "fired but deduped".
+            if entry.metadata.get("type") == "audio_event":
+                self._n_audio_event_recalled += 1
 
             # raw_score = raw CLIP cosine. The source-aware physics scorer
             # (FrontierPhysicsScorer) interprets it differently for memory
@@ -1599,6 +1614,8 @@ class EmbodiedMemoryBridge:
             "successful_episodes_seen": self._successful_episodes_seen,
             "n_keyframes_observed": self._n_keyframes_observed,
             "n_cross_scene_recall": self._n_cross_scene_recall,
+            "n_audio_writes": self._n_audio_writes,
+            "n_audio_event_recalled": self._n_audio_event_recalled,
             "modules_invoked": dict(self.modules_invoked),
             "ablation": {
                 "disable_stm": self.disable_stm,
