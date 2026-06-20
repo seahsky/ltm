@@ -207,6 +207,10 @@ def main(argv: Optional[list] = None) -> int:
              "ffmpeg backend is unavailable).")
     parser.add_argument("--video-fps", type=int, default=8,
         help="Frames per second for --save-video (default 8).")
+    parser.add_argument("--no-overlay", action="store_true",
+        help="Save raw frames without the informative HUD overlay "
+             "(task/goal, memory activity, audio state). Default: overlay ON "
+             "when --save-video.")
     parser.add_argument("--keyframe-every", type=int, default=5)
     parser.add_argument("--decision-period", type=int, default=10)
     parser.add_argument("--n-candidates", type=int, default=4)
@@ -560,6 +564,7 @@ def main(argv: Optional[list] = None) -> int:
         found_radius=args.found_radius,
         save_video=args.save_video,
         video_fps=args.video_fps,
+        overlay=not args.no_overlay,
         task=args.task,
         clap_encoder=clap_encoder,
         audio_cfg=audio_cfg,
