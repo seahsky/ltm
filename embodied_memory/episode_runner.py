@@ -496,6 +496,7 @@ class EpisodeRunner:
         found_radius: float = 1.0,
         save_video: bool = False,
         video_fps: int = 8,
+        overlay: bool = True,
         task: str = "objectnav",
         clap_encoder: Optional[Any] = None,
         audio_cfg: Optional[Any] = None,
@@ -528,6 +529,11 @@ class EpisodeRunner:
         # buffered, zero overhead.
         self.save_video = bool(save_video)
         self.video_fps = int(video_fps)
+        # Draw an informative HUD (task/goal, memory activity, audio state) onto
+        # each saved frame. On by default when --save-video; --no-overlay opts out.
+        # Only ever runs inside the save_video guard, so the no-video and
+        # objectnav-non-video paths stay byte-identical regardless.
+        self.overlay = bool(overlay)
         self._video_frames: List[np.ndarray] = []
         self.keyframe_every_m = keyframe_every_m
         self.max_steps_per_episode = max_steps_per_episode
@@ -1123,7 +1129,11 @@ class EpisodeRunner:
             self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
             stm_captions.append(keyframe.caption)
             ep_log["steps"].append(self._serialize_step(step, keyframe))
-            self._record_frame(step)
+            self._record_frame(step, self._build_hud(
+                step, action=None, current_candidate=None, keyframe=keyframe,
+                n_memory_chosen=n_memory_chosen,
+                n_memory_candidates=n_memory_candidates, ep=ep,
+                active_category=active_category))
 
         # Loop.
         for t in range(1, self.max_steps_per_episode):
@@ -1857,7 +1867,11 @@ class EpisodeRunner:
                 )
                 stm_captions.append(keyframe.caption)
                 ep_log["steps"].append(self._serialize_step(step, keyframe))
-                self._record_frame(step)
+                self._record_frame(step, self._build_hud(
+                    step, action=action, current_candidate=current_candidate,
+                    keyframe=keyframe, n_memory_chosen=n_memory_chosen,
+                    n_memory_candidates=n_memory_candidates, ep=ep,
+                    active_category=active_category))
                 # Periodic within-episode consolidation (extension seam, OFF
                 # by default — event-boundary consolidation at sub-goal
                 # advance is the multion default).
@@ -2452,10 +2466,72 @@ class EpisodeRunner:
                 return i
         return 0
 
-    def _record_frame(self, step: Step) -> None:
-        """Buffer this step's first-person RGB for --save-video (no-op when off)."""
+    def _record_frame(self, step: Step, hud: Optional[Dict[str, Any]] = None) -> None:
+        """Buffer this step's first-person RGB for --save-video (no-op when off).
+
+        When ``self.overlay`` and a ``hud`` dict are present, the frame is
+        annotated with an informative HUD first (``video_overlay.draw_overlay``
+        is pure + never-raises, so a missing Pillow can't break the run).
+        """
         if self.save_video and getattr(step, "rgb", None) is not None:
-            self._video_frames.append(np.ascontiguousarray(step.rgb))
+            frame = np.ascontiguousarray(step.rgb)
+            if self.overlay and hud is not None:
+                from . import video_overlay
+                frame = video_overlay.draw_overlay(frame, hud)
+            self._video_frames.append(np.ascontiguousarray(frame))
+
+    def _build_hud(
+        self,
+        step: Step,
+        *,
+        action: Optional[int] = None,
+        current_candidate: Optional[Any] = None,
+        keyframe: Optional[Keyframe] = None,
+        n_memory_chosen: int = 0,
+        n_memory_candidates: int = 0,
+        ep: Optional[Any] = None,
+        active_category: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Assemble the video HUD from in-scope runtime state at a frame site.
+
+        Returns ``None`` immediately when video is off (keeps the no-video path
+        zero-overhead + byte-identical). All fields are null-guarded; ``action``
+        is mapped to a label here so ``video_overlay`` stays dependency-free.
+        """
+        if not self.save_video:
+            return None
+        info = getattr(step, "info", None) or {}
+        amap = {ACTION_STOP: "STOP", ACTION_FORWARD: "FWD",
+                ACTION_TURN_LEFT: "<TURN", ACTION_TURN_RIGHT: "TURN>"}
+        action_str = "start" if action is None else amap.get(action, str(action))
+        goal = active_category or getattr(ep, "target_category", None) or self.target_category
+        hud: Dict[str, Any] = {
+            "step": getattr(step, "step_idx", None),
+            "task": self.task,
+            "backbone": self.backbone,
+            "goal": goal,
+            "action": action_str,
+            "d2g": info.get("distance_to_goal"),
+            "n_mem_chosen": n_memory_chosen,
+            "n_mem_inj": n_memory_candidates,
+            "wp_source": getattr(current_candidate, "source", None) if current_candidate is not None else None,
+            "wp_dist": getattr(current_candidate, "distance_m", None) if current_candidate is not None else None,
+            "caption": getattr(keyframe, "caption", None) if keyframe is not None else None,
+            "is_stop": action == ACTION_STOP,
+        }
+        if self.task == "audiogoal":
+            ast = getattr(self, "_audio_state", None)
+            hud["audio"] = {
+                "detected": bool(getattr(ast, "detected", False)),
+                "klass": getattr(ast, "anomaly_class", None),
+                "lateral": info.get("audio_lateral_sign"),
+                "energy": info.get("audio_energy"),
+                "onset_fired": bool(info.get("onset_fired")),
+                "onset_step": getattr(ast, "onset_step", None),
+                "target": (getattr(ast, "target_override", None)
+                           or getattr(ast, "anomaly_object_override", None)),
+            }
+        return hud
 
     @staticmethod
     def _serialize_step(step: Step, keyframe: Keyframe) -> Dict[str, Any]:
