@@ -28,6 +28,7 @@ from .audio import (
     CLASS_TO_OBJECT,
     RIRGrid,
     classify_anomaly,
+    is_anomaly,
     lateral_sign,
     render_at_pose,
     rms,
@@ -44,6 +45,15 @@ class AudioTaskConfig:
     stop_distance_m: float = 1.5        # only allow the energy STOP within this d2g
     target_norm_rms_db: float = -20.0   # clip pre-normalization target (RMS dBFS)
     sample_rate: int = 48000            # of the rendered audio (threaded to classify)
+    # Step 1 open-set normal-vs-anomaly gate (env LTM_AUDIO_ANOMALY_GATE). When
+    # ON, the energy onset only FIRES if CLAP separates the sound from the
+    # normal/background prompt bank (best anomaly cosine beats best normal cosine
+    # by >= anomaly_delta AND clears anomaly_tau). A merely-loud benign sound
+    # (people talking, footsteps) is heard but does NOT consume the once-per-
+    # episode onset. OFF (default) => onset is energy-only, byte-identical.
+    anomaly_gate: bool = False
+    anomaly_delta: float = 0.0
+    anomaly_tau: float = 0.0
 
 
 @dataclass
@@ -201,13 +211,32 @@ def process_audio_step(
     diag["audio_lateral_sign"] = lat
 
     if not state.detected and energy >= cfg.onset_rms:
-        state.detected = True
-        state.onset_step = int(step_idx)
-        diag["onset_fired"] = True
-        if clap_encoder is not None:
-            cls, _scores = classify_anomaly(audio_obs, sample_rate, clap_encoder)
-            state.anomaly_class = cls
-            state.target_override = CLASS_TO_OBJECT.get(cls)
+        # Step 1 open-set gate: a loud sound is only an ANOMALY onset if CLAP
+        # separates it from the normal/background prompt bank. When the gate is
+        # OFF (default) this is byte-identical to energy-only onset + a forced
+        # 3-way classify. When ON and the sound reads as benign, we do NOT mark
+        # detected (no onset consumed) so the agent keeps listening.
+        fire_onset = True
+        gate_class: Optional[str] = None
+        if cfg.anomaly_gate and clap_encoder is not None:
+            ok, gate_class, ascores = is_anomaly(
+                audio_obs, sample_rate, clap_encoder,
+                delta=cfg.anomaly_delta, tau_abs=cfg.anomaly_tau)
+            diag["audio_anomaly_margin"] = float(ascores.get("margin", 0.0))
+            diag["audio_anomaly_fired"] = bool(ok)
+            fire_onset = bool(ok)
+        if fire_onset:
+            state.detected = True
+            state.onset_step = int(step_idx)
+            diag["onset_fired"] = True
+            if gate_class is not None:
+                # reuse the gate's argmax class — no second CLAP pass.
+                state.anomaly_class = gate_class
+                state.target_override = CLASS_TO_OBJECT.get(gate_class)
+            elif clap_encoder is not None:
+                cls, _scores = classify_anomaly(audio_obs, sample_rate, clap_encoder)
+                state.anomaly_class = cls
+                state.target_override = CLASS_TO_OBJECT.get(cls)
 
     diag["audio_class"] = state.anomaly_class
     diag["audio_target_override"] = state.target_override

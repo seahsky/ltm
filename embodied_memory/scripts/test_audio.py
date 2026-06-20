@@ -283,6 +283,81 @@ def case_classify_anomaly_argmax():
     print("  case classify_anomaly_argmax: OK")
 
 
+class _FakeCLAPScores:
+    """CLAP stand-in whose audio↔text cosine is fully controllable: the audio
+    embeds to ``e0`` and each text embeds to a UNIT vector whose first component
+    is the desired cosine, so ``cos(audio, text) == text_cos[text]`` exactly."""
+
+    def __init__(self, text_cos):
+        self._text_cos = dict(text_cos)
+
+    def encode_audio(self, waveform, sample_rate):
+        v = np.zeros(8, dtype=np.float32)
+        v[0] = 1.0
+        return v
+
+    def encode_text(self, text):
+        c = float(max(-1.0, min(1.0, self._text_cos.get(text, 0.0))))
+        v = np.zeros(8, dtype=np.float32)
+        v[0] = c
+        v[1] = math.sqrt(max(0.0, 1.0 - c * c))
+        return v
+
+
+def _cos_map(anom_alarm=0.1, anom_baby=0.1, anom_glass=0.1, normal=0.1):
+    cos = {
+        audio.CLASS_TO_CLAP_PROMPT["alarm"]: anom_alarm,
+        audio.CLASS_TO_CLAP_PROMPT["baby_cry"]: anom_baby,
+        audio.CLASS_TO_CLAP_PROMPT["glass_break"]: anom_glass,
+    }
+    for p in audio.NORMAL_PROMPTS:
+        cos[p] = normal
+    return cos
+
+
+def case_is_anomaly_fires_on_anomaly():
+    enc = _FakeCLAPScores(_cos_map(anom_alarm=0.40, normal=0.10))
+    fired, cls, scores = audio.is_anomaly(np.zeros(8000, np.float32), _SR, enc)
+    assert fired and cls == "alarm", (fired, cls)
+    assert abs(scores["s_anom"] - 0.40) < 1e-5 and abs(scores["s_norm"] - 0.10) < 1e-5
+    assert abs(scores["margin"] - 0.30) < 1e-5
+    print("  case is_anomaly_fires_on_anomaly: OK")
+
+
+def case_is_anomaly_rejects_normal():
+    # a benign sound: every anomaly prompt scores low, "people talking" high
+    cos = _cos_map(anom_alarm=0.15, anom_baby=0.12, anom_glass=0.12, normal=0.10)
+    cos["people talking"] = 0.50
+    enc = _FakeCLAPScores(cos)
+    fired, cls, scores = audio.is_anomaly(np.zeros(8000, np.float32), _SR, enc)
+    assert not fired, (fired, scores)
+    assert scores["margin"] < 0.0  # normal side wins
+    print("  case is_anomaly_rejects_normal: OK")
+
+
+def case_is_anomaly_delta_threshold():
+    enc = _FakeCLAPScores(_cos_map(anom_alarm=0.30, normal=0.25))  # margin = 0.05
+    assert audio.is_anomaly(np.zeros(8, np.float32), _SR, enc, delta=0.0)[0] is True
+    assert audio.is_anomaly(np.zeros(8, np.float32), _SR, enc, delta=0.10)[0] is False
+    print("  case is_anomaly_delta_threshold: OK")
+
+
+def case_is_anomaly_tau_floor():
+    # anomaly side wins (margin +0.05) but the absolute cosine is tiny
+    enc = _FakeCLAPScores(_cos_map(anom_alarm=0.05, normal=0.00))
+    assert audio.is_anomaly(np.zeros(8, np.float32), _SR, enc, tau_abs=0.0)[0] is True
+    assert audio.is_anomaly(np.zeros(8, np.float32), _SR, enc, tau_abs=0.20)[0] is False
+    print("  case is_anomaly_tau_floor: OK")
+
+
+def case_is_anomaly_scores_keys():
+    enc = _FakeCLAPScores(_cos_map())
+    _, _, scores = audio.is_anomaly(np.zeros(8, np.float32), _SR, enc)
+    for k in ("s_anom", "s_norm", "margin", *audio.ANOMALY_CLASSES):
+        assert k in scores, k
+    print("  case is_anomaly_scores_keys: OK")
+
+
 def case_class_maps_present_and_consistent():
     assert audio.ANOMALY_CLASSES == ("baby_cry", "alarm", "glass_break")
     for c in audio.ANOMALY_CLASSES:
@@ -309,6 +384,11 @@ def main() -> int:
         case_doa_ild_overrides_subresolution_itd,
         case_lateral_sign_helper,
         case_classify_anomaly_argmax,
+        case_is_anomaly_fires_on_anomaly,
+        case_is_anomaly_rejects_normal,
+        case_is_anomaly_delta_threshold,
+        case_is_anomaly_tau_floor,
+        case_is_anomaly_scores_keys,
         case_class_maps_present_and_consistent,
     ]
     print(f"running {len(cases)} audio.py cases…")

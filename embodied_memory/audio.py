@@ -60,6 +60,20 @@ CLASS_TO_CLAP_PROMPT: Dict[str, str] = {
     "glass_break": "the sound of breaking glass",
 }
 
+# Normal/background prompt bank for the open-set normal-vs-anomaly gate (Step 1).
+# These are NOT anomaly classes — they are the "routine, ignore it" reference set.
+# ``is_anomaly`` fires only when the best ANOMALY-prompt cosine beats the best
+# NORMAL-prompt cosine by a margin, so a sound that is merely loud (people
+# talking, footsteps) does not trigger an anomaly response. Calibrate the margin
+# with ``scripts/diagnose_normal_anomaly_calib.py``.
+NORMAL_PROMPTS: Tuple[str, ...] = (
+    "people talking",
+    "a quiet room",
+    "footsteps",
+    "background noise",
+    "an appliance humming",
+)
+
 
 # ----------------------------------------------------------------------
 # RIR grid
@@ -334,3 +348,48 @@ def classify_anomaly(
         scores[c] = float(np.dot(a, t))
     best = max(scores, key=scores.get)
     return best, scores
+
+
+def is_anomaly(
+    waveform,
+    sample_rate: int,
+    encoder,
+    *,
+    classes: Sequence[str] = ANOMALY_CLASSES,
+    normal_prompts: Sequence[str] = NORMAL_PROMPTS,
+    delta: float = 0.0,
+    tau_abs: float = 0.0,
+) -> Tuple[bool, str, Dict[str, float]]:
+    """Open-set normal-vs-anomaly gate on top of CLAP zero-shot.
+
+    Unlike :func:`classify_anomaly` (a forced 3-way argmax that can NEVER say
+    "normal"), this scores the audio against BOTH the anomaly-class prompts and a
+    bank of normal/background prompts (:data:`NORMAL_PROMPTS`). It fires
+    (``True``) iff the best anomaly cosine beats the best normal cosine by at
+    least ``delta`` AND clears the absolute floor ``tau_abs``. The defaults
+    ``(0.0, 0.0)`` reduce to "the anomaly side wins outright" — calibrate ``delta``
+    / ``tau_abs`` with ``scripts/diagnose_normal_anomaly_calib.py``.
+
+    ``encoder`` is the same object :func:`classify_anomaly` uses (``encode_audio``
+    + ``encode_text``). Returns ``(fired, best_class, scores)`` where ``scores``
+    carries every per-class anomaly cosine PLUS the summary keys ``s_anom`` /
+    ``s_norm`` / ``margin``. ``best_class`` is the argmax anomaly class regardless
+    of the gate decision, so the caller can log what it WOULD have classified.
+    """
+    a = np.asarray(encoder.encode_audio(waveform, sample_rate), dtype=np.float32)
+    a = a / (np.linalg.norm(a) + 1e-8)
+
+    def _cos(text: str) -> float:
+        t = np.asarray(encoder.encode_text(text), dtype=np.float32)
+        t = t / (np.linalg.norm(t) + 1e-8)
+        return float(np.dot(a, t))
+
+    anom = {c: _cos(CLASS_TO_CLAP_PROMPT[c]) for c in classes}
+    s_norm = max((_cos(p) for p in normal_prompts), default=0.0)
+    best_class = max(anom, key=anom.get)
+    s_anom = anom[best_class]
+    margin = s_anom - s_norm
+    fired = bool(margin >= float(delta) and s_anom >= float(tau_abs))
+    scores: Dict[str, float] = dict(anom)
+    scores.update({"s_anom": s_anom, "s_norm": s_norm, "margin": margin})
+    return fired, best_class, scores
