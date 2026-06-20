@@ -1160,6 +1160,18 @@ class EpisodeRunner:
                           f"heard->{_adiag.get('audio_target_override')} "
                           f"retrieval_target={_resolved_tgt} "
                           f"energy={_adiag.get('audio_energy', 0.0):.3f}", flush=True)
+                    # Step 2 (LTM_AUDIO_WRITE, default-OFF): persist the heard
+                    # anomaly as a fine-layer LTM item AT THE SOURCE location, so a
+                    # later/warm query for the object recalls a waypoint TO the
+                    # sound even when vision never mapped it. Insert-only + env-gated
+                    # → byte-identical when off; no-op for non-audiogoal.
+                    if os.environ.get("LTM_AUDIO_WRITE") and self.bridge is not None:
+                        _src = (((getattr(ep, "metadata", None) or {}).get("audio_config")
+                                 or {}).get("source_position"))
+                        if _src is not None:
+                            self.bridge.write_audio_event(
+                                _resolved_tgt, _src, step.step_idx,
+                                anomaly_class=self._audio_state.anomaly_class)
             if is_oracle:
                 # Oracle short-circuit: steer straight to the goal, bypassing
                 # candidate proposal, memory injection, and rerank entirely.

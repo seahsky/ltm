@@ -881,6 +881,47 @@ class EmbodiedMemoryBridge:
         if len(self.ltm.coarse):
             self.modules_invoked["ltm_coarse"] = True
 
+    def write_audio_event(self, target_category, source_world_xyz, step_idx,
+                          anomaly_class=None):
+        """Step 2: persist a heard audio anomaly as a recallable FINE-layer LTM item.
+
+        Encoded with ``self._ltm_encode_text`` — the SAME encoder
+        ``propose_memory_candidates`` queries with — and phrased with the
+        ``_GOAL_QUERY_TEMPLATE`` prefix on ``target_category`` (the OBJECT the warm
+        agent queries for, e.g. ``"bed"``, NOT the sound class), so the write is
+        cosine-comparable to the goal query and clears the ``min_cosine`` gate.
+        ``agent_position`` is stamped to the SOURCE xyz (the sound location), NOT
+        the agent's current pose, so the recalled waypoint routes the agent TO the
+        source — and so it does not self-dedup against where it was standing when
+        it heard the sound.
+
+        Env-gated at the call site (``LTM_AUDIO_WRITE``). Returns the inserted
+        entry id, or ``None`` when LTM is off / inputs are missing. Insert-only —
+        it never touches the read path, so the flag-off pipeline is byte-identical.
+        """
+        if self.disable_ltm or self._ltm_encode_text is None or not target_category:
+            return None
+        if source_world_xyz is None or len(source_world_xyz) < 3:
+            return None
+        base = _GOAL_QUERY_TEMPLATE.format(target_category)
+        cap = f"{base}; heard {anomaly_class or 'an anomaly'} here"
+        emb = self._ltm_encode_text(cap).astype(np.float32)
+        p = [float(source_world_xyz[0]), float(source_world_xyz[1]),
+             float(source_world_xyz[2])]
+        meta: Dict[str, Any] = {
+            "scene_id": self._current_scene_id,            # gate 2 (scene match)
+            "agent_position": p,                           # gate 3 (len>=3) -> world_xy=[p0,p2]
+            "agent_yaw": 0.0,
+            "episode_id": getattr(self, "_current_episode_id", None),
+            "step_idx": int(step_idx),
+            "episode_success": False,
+            "anomaly_class": anomaly_class,
+            "type": "audio_event",                         # Step-2 attribution tag
+        }
+        eid = self.ltm.insert(level="fine", embedding=emb, content=cap, metadata=meta)
+        self.modules_invoked["ltm_audio_write"] = True
+        return eid
+
     @staticmethod
     def build_affordance_table(
         run_dirs: List[str],
