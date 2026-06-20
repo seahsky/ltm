@@ -134,6 +134,9 @@ print(','.join('%.6f'%v for v in hit[0]['source_position']))
 echo "  source for ($SCENE,$CLASS) = $SRC_XYZ"
 
 banner "[5/7] render RIR grid at the manifest source ($SS_ENV)"
+if [ -n "$REUSE_DS" ] && [ -f "$GRID" ]; then
+  echo "  REUSE existing grid: $GRID (A/B arm B reuses arm A's grid — skip render + soundspaces env)"
+else
 GLB="$(find data/hm3d -name "${SCENE}.basis.glb" 2>/dev/null | head -1)"
 [ -n "$GLB" ] || GLB="$(find data/hm3d -name "*${SCENE}*.glb" 2>/dev/null | grep -v semantic | head -1)"
 [ -n "$GLB" ] || { echo "FATAL: no .glb for $SCENE"; exit 1; }
@@ -160,6 +163,7 @@ if [ "$rc" -ne 0 ] || [ ! -f "$GRID" ]; then
   fi
   exit 1
 fi
+fi  # end render-or-reuse-grid
 
 # Anomaly audio: prefer the staged real ESC-50 clip data/anomaly_audio/<class>.wav
 # (run_hm3d_pol auto-resolves the same path; we pass it explicitly so the onset
