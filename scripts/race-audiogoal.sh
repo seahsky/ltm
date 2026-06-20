@@ -26,7 +26,7 @@ MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodie
 
 SCENE="TEEsavR23oF"; CLASS="alarm"; CATEGORY="bed"
 NWARM=3; SETTINGS="1 3"; TAG="audiogoal"; OUT_TAG=""; T_ANOM_WARM=30; SOURCE_OVERRIDE=""; REUSE_DS=""
-ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; FETCH_AUDIO=""
+ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; FETCH_AUDIO=""; AUDIO_WRITE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scene) SCENE="$2"; shift 2 ;;
@@ -52,12 +52,22 @@ while [ $# -gt 0 ]; do
     # run, instead of the synthetic burst. Auto-resolved by run_hm3d_pol; passed
     # to the onset calibration too so the energy scale matches.
     --fetch-audio) FETCH_AUDIO=1; shift ;;
+    # Step 2 (audio→LTM write): export LTM_AUDIO_WRITE=1 INSIDE the driver so it
+    # reaches `python -m embodied_memory.run_hm3d_pol` WITHOUT relying on ambient
+    # env inheritance through `nrun` (the documented robust pattern — see
+    # race-cross-env.sh: an ambient prefix once mis-fired as rc=127; exporting is
+    # robust). episode_runner.py:1168 reads os.environ.get("LTM_AUDIO_WRITE").
+    --audio-write) AUDIO_WRITE=1; shift ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
 [[ "$TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --tag must be alnum/dash/underscore"; exit 1; }
 OUT_TAG="${OUT_TAG:-$TAG}"
 [[ "$OUT_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --out-tag must be alnum/dash/underscore"; exit 1; }
+# --audio-write: thread the Step-2 lever as a first-class flag (export INSIDE the
+# driver, so it never depends on ambient inheritance through nrun). The env-var
+# form (export LTM_AUDIO_WRITE=1 before nrun) still works and is honoured below.
+[ -n "$AUDIO_WRITE" ] && export LTM_AUDIO_WRITE=1
 [ -n "${LTM_TEMPORAL_CONTEXT:-}" ] && echo "  [temporal] LTM_TEMPORAL_CONTEXT=$LTM_TEMPORAL_CONTEXT (weight=${LTM_TEMPORAL_WEIGHT:-0.05}) — M4 temporal-context head ON for this run"
 [ -n "${LTM_AUDIO_DOA:-}" ] && echo "  [audio-doa] LTM_AUDIO_DOA=$LTM_AUDIO_DOA — S1 onset-gate ON (suppress memory injection until the anomaly is heard → audio causally necessary)"
 [ -n "${LTM_AUDIO_DOA_HEAD:-}" ] && echo "  [audio-doa] LTM_AUDIO_DOA_HEAD=$LTM_AUDIO_DOA_HEAD — S2 head ON (weight=${LTM_AUDIO_DOA_WEIGHT:-0.05}): boost the same-category memory candidate whose WORLD direction matches the heard ILD sign (world frame, INVERTED convention)"
@@ -218,8 +228,18 @@ except Exception:
 done
 
 banner "[7/7] Gate-A verdict (warm paired soft-SPL S3-S1 + S2 decomposition)"
-# shellcheck disable=SC2086
-python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS 2>&1 | tee "runs/${OUT_TAG}-${CLASS}-analysis.log"
+# The Gate-A analyzer is a CROSS-SETTING paired delta (S3-S1) and REQUIRES >=2 run
+# dirs (analyze_ablation.py:410 -> parser.error, nonzero exit). A single-setting
+# smoke (e.g. --settings 3, for plumbing checks like LTM_AUDIO_WRITE) has only one
+# run dir, so skip the analyzer and exit 0 — the per-setting run already completed
+# (gated above). Multi-setting behaviour is byte-identical.
+N_RUN_DIRS=$(set -- $OUT_DIRS; echo $#)
+if [ "$N_RUN_DIRS" -lt 2 ]; then
+  echo "  [gate-A] skipped: need >=2 settings, got $N_RUN_DIRS (single-setting smoke -> no cross-setting paired delta)"
+else
+  # shellcheck disable=SC2086
+  python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS 2>&1 | tee "runs/${OUT_TAG}-${CLASS}-analysis.log"
+fi
 echo
 
 # Planner-decision census (S3): WHY the LLM planner's own pick never wins the
