@@ -194,6 +194,66 @@ def case_write_dataset_roundtrip_preserves_audio_info():
     print("  case write_dataset_roundtrip_preserves_audio_info: OK")
 
 
+def _seed(out):
+    return [e for e in out["episodes"] if "-cold-" in e["episode_id"]]
+
+
+def _recall(out):
+    return [e for e in out["episodes"] if "-warm-" in e["episode_id"]]
+
+
+def case_lifelong_polarity_inverted():
+    src = _src_content()
+    out = mk2.build_lifelong_dataset(src, ["bed"], n_warm=2, anomaly_class="alarm")
+    assert _seed(out)[0]["info"]["t_anom"] == mk2._T_ANOM_SEED_DEFAULT == 1, "seed must FIRE"
+    for r in _recall(out):
+        assert r["info"]["t_anom"] == mk2._T_ANOM_RECALL_DEFAULT == 10000, "recall must be SILENT"
+    print("  case lifelong_polarity_inverted: OK")
+
+
+def case_lifelong_recall_far_from_source():
+    src = _src_content()
+    out = mk2.build_lifelong_dataset(src, ["bed"], n_warm=2, anomaly_class="alarm",
+                                     min_dist=4.0)
+    src_xyz = _recall(out)[0]["info"]["source_position"]
+    for r in _recall(out):
+        d = mk2._xz_dist(r["start_position"], src_xyz)
+        assert d is not None and d >= 4.0, f"recall start only {d}m from source"
+    print("  case lifelong_recall_far_from_source: OK")
+
+
+def case_lifelong_construction_flags_redundancy_not_fail():
+    # the default build seeds at the goal view_point (~0.5m from source) -> the
+    # checker must WARN (redundancy-risk) but NOT FAIL.
+    src = _src_content()
+    out = mk2.build_lifelong_dataset(src, ["bed"], n_warm=2, anomaly_class="alarm")
+    issues = mk2.lifelong_construction_issues(out)
+    assert any(i.startswith("REDUNDANCY-RISK") for i in issues), issues
+    assert not any(i.startswith("FAIL") for i in issues), issues
+    print("  case lifelong_construction_flags_redundancy_not_fail: OK")
+
+
+def case_lifelong_construction_fails_on_close_recall():
+    src = _src_content()
+    out = mk2.build_lifelong_dataset(src, ["bed"], n_warm=2, anomaly_class="alarm")
+    # move a recall start ONTO the source -> must FAIL (deduped / re-mapped).
+    src_xyz = _recall(out)[0]["info"]["source_position"]
+    _recall(out)[0]["start_position"] = list(src_xyz)
+    issues = mk2.lifelong_construction_issues(out)
+    assert any(i.startswith("FAIL") and "recall" in i for i in issues), issues
+    print("  case lifelong_construction_fails_on_close_recall: OK")
+
+
+def case_lifelong_construction_fails_on_silent_seed():
+    src = _src_content()
+    # seed that does NOT fire (high t_anom) -> FAIL
+    out = mk2.build_lifelong_dataset(src, ["bed"], n_warm=2, anomaly_class="alarm",
+                                     t_anom_seed=10000)
+    issues = mk2.lifelong_construction_issues(out)
+    assert any(i.startswith("FAIL") and "seed" in i and "FIRES" in i for i in issues), issues
+    print("  case lifelong_construction_fails_on_silent_seed: OK")
+
+
 def main() -> int:
     cases = [
         case_reuses_revisit_pure_fns,
@@ -208,6 +268,11 @@ def main() -> int:
         case_source_override_applies_all,
         case_collect_source_manifest,
         case_write_dataset_roundtrip_preserves_audio_info,
+        case_lifelong_polarity_inverted,
+        case_lifelong_recall_far_from_source,
+        case_lifelong_construction_flags_redundancy_not_fail,
+        case_lifelong_construction_fails_on_close_recall,
+        case_lifelong_construction_fails_on_silent_seed,
     ]
     print(f"running {len(cases)} make_audiogoal_smoke cases…")
     for c in cases:

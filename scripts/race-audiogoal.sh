@@ -26,9 +26,13 @@ MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodie
 
 SCENE="TEEsavR23oF"; CLASS="alarm"; CATEGORY="bed"
 NWARM=3; SETTINGS="1 3"; TAG="audiogoal"; OUT_TAG=""; T_ANOM_WARM=30; SOURCE_OVERRIDE=""; REUSE_DS=""
-ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; FETCH_AUDIO=""; AUDIO_WRITE=""
+ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; FETCH_AUDIO=""; AUDIO_WRITE=""; LIFELONG=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    # Lifelong cross-visit (oracle upper bound): build the dataset with INVERTED
+    # t_anom polarity (seed FIRES + writes, recall SILENT + far). The builder runs
+    # its $0 construction gate and refuses to build on a FAIL.
+    --lifelong) LIFELONG=1; shift ;;
     --scene) SCENE="$2"; shift 2 ;;
     --class) CLASS="$2"; shift 2 ;;
     --category) CATEGORY="$2"; shift 2 ;;
@@ -109,11 +113,12 @@ else
   # commas, so they don't match argparse's negative-number regex; passed with a
   # space, argparse mistakes the value for an option flag ("expected one argument").
   SRC_ARG=""; [ -n "$SOURCE_OVERRIDE" ] && SRC_ARG="--source-position=$SOURCE_OVERRIDE"
+  LIFELONG_ARG=""; [ -n "$LIFELONG" ] && LIFELONG_ARG="--lifelong"
   # shellcheck disable=SC2086
   python embodied_memory/scripts/make_audiogoal_smoke.py \
       --src "$SRC" --scene "$SCENE" --categories "$CATEGORY" --n-warm "$NWARM" \
       --anomaly-class "$CLASS" --name "$NAME" --t-anom-warm "$T_ANOM_WARM" \
-      --out-dir "$DS_DIR" --source-manifest "$MANIFEST" $SRC_ARG \
+      --out-dir "$DS_DIR" --source-manifest "$MANIFEST" $SRC_ARG $LIFELONG_ARG \
     || { echo "FATAL: dataset build failed."; exit 1; }
 fi
 [ -f "$DS" ] && [ -f "$MANIFEST" ] || { echo "FATAL: dataset or manifest missing"; exit 1; }

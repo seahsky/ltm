@@ -55,6 +55,13 @@ _load_gz = mk._load_gz
 
 _T_ANOM_COLD_DEFAULT = 10000   # >> max_steps → the cold pass never fires (silent)
 _T_ANOM_WARM_DEFAULT = 30
+# Lifelong cross-visit (oracle-source upper bound): INVERT the M3 polarity. The
+# SEED (cold slot) FIRES the anomaly from step 1 so the audio→LTM write seeds the
+# source in visit-1; the RECALL episodes (warm slots) are SILENT (high t_anom) +
+# start FAR, so visit-2 navigation is driven by the LTM write, not re-heard audio.
+_T_ANOM_SEED_DEFAULT = 1
+_T_ANOM_RECALL_DEFAULT = 10000
+_LIFELONG_MIN_DIST_DEFAULT = 4.0   # recall starts >= this from the source (> dedup 1.5)
 
 
 def pick_source_position(cold_goal_vp_pos: List[float], *, offset_m: float = 0.5) -> List[float]:
@@ -179,6 +186,101 @@ def build_dataset(
     }
 
 
+def build_lifelong_dataset(
+    src_content: Dict[str, Any],
+    categories: List[str],
+    n_warm: int,
+    *,
+    anomaly_class: str,
+    source_position: Optional[List[float]] = None,
+    offset_m: float = 0.5,
+    min_dist: float = _LIFELONG_MIN_DIST_DEFAULT,
+    instance_keyed: bool = False,
+    t_anom_seed: int = _T_ANOM_SEED_DEFAULT,
+    t_anom_recall: int = _T_ANOM_RECALL_DEFAULT,
+) -> Dict[str, Any]:
+    """Lifelong cross-visit AudioGoal (oracle-source upper bound). Mechanically this
+    is :func:`build_dataset` with the t_anom polarity INVERTED — the SEED (cold
+    slot) fires (``t_anom_seed``) and writes the source to the LTM, the RECALL
+    episodes (warm slots) are silent (``t_anom_recall``) and start ``>= min_dist``
+    away so visit-2 is driven by the LTM write, not re-heard audio.
+
+    KNOWN CAVEAT (the ``$0`` checker flags it): the seed start is the goal
+    view_point (``pick_cold_pose``), which is line-of-sight to the source, so the
+    seed VISUALLY maps the source — the oracle audio write is then redundant with
+    that visual sighting (write-ON == write-OFF). ``lifelong_construction_issues``
+    surfaces this as a REDUNDANCY-RISK; a cheap write-OFF recall probe MEASURES it
+    before any paid matrix. A non-redundant build needs an audible-but-not-LOS seed
+    (a follow-up sub-build)."""
+    return build_dataset(
+        src_content, categories, n_warm, min_dist=min_dist,
+        instance_keyed=instance_keyed, anomaly_class=anomaly_class,
+        source_position=source_position, offset_m=offset_m,
+        t_anom_cold=t_anom_seed, t_anom_warm=t_anom_recall)
+
+
+def _xz_dist(a: Optional[List[float]], b: Optional[List[float]]) -> Optional[float]:
+    """Floor-plane (x,z) distance — matches the propose-time dedup metric."""
+    if not a or not b or len(a) < 3 or len(b) < 3:
+        return None
+    return float(((float(a[0]) - float(b[0])) ** 2 + (float(a[2]) - float(b[2])) ** 2) ** 0.5)
+
+
+def lifelong_construction_issues(
+    content: Dict[str, Any],
+    *,
+    audible_radius_m: float = 4.0,
+    min_recall_dist_m: float = _LIFELONG_MIN_DIST_DEFAULT,
+    dedup_radius_m: float = 1.5,
+    seed_los_warn_m: float = 2.0,
+) -> List[str]:
+    """``$0`` construction gate for a lifelong AudioGoal dataset. Returns a list of
+    issue strings (empty ⇒ OK to run); ``FAIL:`` = the write can never fire / never
+    recall, ``REDUNDANCY-RISK:`` = the seed likely visually maps the source so the
+    oracle write is redundant. Pure — operates on the built ``content`` dict, no sim.
+    """
+    issues: List[str] = []
+    eps = content.get("episodes") or []
+    seeds = [e for e in eps if "-cold-" in str(e.get("episode_id", ""))]
+    recalls = [e for e in eps if "-warm-" in str(e.get("episode_id", ""))]
+    if not seeds:
+        issues.append("FAIL: no seed (cold) episode — nothing fires/writes")
+    if not recalls:
+        issues.append("FAIL: no recall (warm) episodes — nothing to measure")
+    for e in eps:
+        eid = e.get("episode_id")
+        info = e.get("info") or {}
+        src = info.get("source_position")
+        if not src or len(src) < 3:
+            issues.append(f"FAIL: {eid} source_position not 3D ({src})")
+            continue
+        if info.get("anomaly_object") != e.get("object_category"):
+            issues.append(f"FAIL: {eid} anomaly_object {info.get('anomaly_object')} != "
+                          f"object_category {e.get('object_category')} (recall query won't "
+                          "match the written caption)")
+        d = _xz_dist(e.get("start_position"), src)
+        t = info.get("t_anom")
+        is_seed = "-cold-" in str(eid)
+        if is_seed:
+            if t is None or t > 100:
+                issues.append(f"FAIL: seed {eid} t_anom={t} must be small so it FIRES")
+            if d is not None and d > audible_radius_m:
+                issues.append(f"FAIL: seed {eid} start {d:.2f}m from source > audible "
+                              f"radius {audible_radius_m}m → onset won't fire")
+            if d is not None and d < seed_los_warn_m:
+                issues.append(f"REDUNDANCY-RISK: seed {eid} start {d:.2f}m from source "
+                              f"< {seed_los_warn_m}m → likely line-of-sight → seed visually "
+                              "maps the source → oracle write redundant (write-ON==write-OFF)")
+        else:
+            if t is not None and t <= 100:
+                issues.append(f"FAIL: recall {eid} t_anom={t} must be high so it's SILENT")
+            far = max(min_recall_dist_m, dedup_radius_m)
+            if d is not None and d < far:
+                issues.append(f"FAIL: recall {eid} start {d:.2f}m from source < {far}m → "
+                              "recalled waypoint deduped / source re-mapped by vision")
+    return issues
+
+
 def collect_source_manifest(content: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Read the anomaly sources back out of the built episodes (single source of
     truth = episode.info), deduped by (scene_id, object_category, anomaly_class),
@@ -229,6 +331,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="cold-pass onset step (high → silent mapping)")
     parser.add_argument("--t-anom-warm", type=int, default=_T_ANOM_WARM_DEFAULT,
                         help="warm-pass onset step (anomaly fires)")
+    parser.add_argument("--lifelong", action="store_true",
+                        help="Lifelong cross-visit (oracle-source upper bound): INVERT "
+                             "the t_anom polarity — seed (cold) FIRES + writes, recall "
+                             "(warm) is SILENT + starts far. Sets t_anom_cold=1, "
+                             "t_anom_warm=10000, min_dist=4.0 unless overridden; runs the "
+                             "$0 construction check and refuses to build on a FAIL.")
     parser.add_argument("--source-manifest", default=None,
                         help="Where to write the source manifest JSON "
                              "(default <out-dir>/source_manifest.json)")
@@ -241,11 +349,35 @@ def main(argv: Optional[List[str]] = None) -> int:
             parser.error("--source-position must be 'x,y,z'")
 
     src = _load_gz(args.src)
-    content = build_dataset(
-        src, args.categories, args.n_warm, min_dist=args.min_dist,
-        instance_keyed=args.instance_keyed, anomaly_class=args.anomaly_class,
-        source_position=src_pos, offset_m=args.offset_m,
-        t_anom_cold=args.t_anom_cold, t_anom_warm=args.t_anom_warm)
+    if args.lifelong:
+        # Invert the t_anom polarity + far recall unless explicitly overridden.
+        t_seed = (args.t_anom_cold if args.t_anom_cold != _T_ANOM_COLD_DEFAULT
+                  else _T_ANOM_SEED_DEFAULT)
+        t_recall = (args.t_anom_warm if args.t_anom_warm != _T_ANOM_WARM_DEFAULT
+                    else _T_ANOM_RECALL_DEFAULT)
+        min_dist = args.min_dist if args.min_dist != 2.0 else _LIFELONG_MIN_DIST_DEFAULT
+        content = build_lifelong_dataset(
+            src, args.categories, args.n_warm, anomaly_class=args.anomaly_class,
+            source_position=src_pos, offset_m=args.offset_m, min_dist=min_dist,
+            instance_keyed=args.instance_keyed, t_anom_seed=t_seed, t_anom_recall=t_recall)
+        # $0 construction gate: refuse to build on a FAIL; surface redundancy-risk.
+        issues = lifelong_construction_issues(content, min_recall_dist_m=min_dist)
+        for i in issues:
+            print(f"  [lifelong-check] {i}")
+        fails = [i for i in issues if i.startswith("FAIL")]
+        if fails:
+            print(f"RED: lifelong construction has {len(fails)} FAIL(s) — not writing dataset")
+            return 1
+        print("  [lifelong-check] "
+              + ("WARN: redundancy-risk present (above) — a write-OFF recall probe must "
+                 "measure whether the oracle write is redundant before any paid matrix"
+                 if issues else "GREEN: construction OK"))
+    else:
+        content = build_dataset(
+            src, args.categories, args.n_warm, min_dist=args.min_dist,
+            instance_keyed=args.instance_keyed, anomaly_class=args.anomaly_class,
+            source_position=src_pos, offset_m=args.offset_m,
+            t_anom_cold=args.t_anom_cold, t_anom_warm=args.t_anom_warm)
     if not content["episodes"]:
         print(f"RED: no episodes built for categories {args.categories} in {args.scene}")
         return 1
