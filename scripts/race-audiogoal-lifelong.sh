@@ -30,13 +30,20 @@ LTM_ENV="ltm-embodied"
 CELLS_DEFAULT="wcojb4TFT35:glass_break:chair wcojb4TFT35:alarm:bed TEEsavR23oF:glass_break:chair TEEsavR23oF:alarm:bed"
 CELLS="${CELLS:-$CELLS_DEFAULT}"
 NWARM="${NWARM:-6}"
+CONSUME_SG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --cells) CELLS="$2"; shift 2 ;;
     --n-warm) NWARM="$2"; shift 2 ;;
+    # Over-fire fix confirmation: ungate the reached-memory consumption +
+    # anti-thrash filters for single-goal AudioGoal (export INSIDE the driver so
+    # it reaches python without ambient nrun inheritance). Expect the write-ON
+    # over-fire to damp -> B-A moves from -0.170 toward ~0 (REDUNDANT).
+    --consume-singlegoal) CONSUME_SG=1; shift ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
+[ -n "$CONSUME_SG" ] && export REMEMBR_CONSUME_SINGLEGOAL=1
 
 banner() { printf '\n========== %s ==========\n' "$1"; }
 N_CELLS=$(set -- $CELLS; echo $#)
@@ -54,6 +61,7 @@ for t in test_make_audiogoal_smoke test_audio_write test_audio_task \
 done
 echo "  cells ($N_CELLS): $CELLS"
 echo "  n-warm (recall episodes/cell) = $NWARM  → ~$((N_CELLS * 2 * (1 + NWARM))) episodes total"
+[ -n "$CONSUME_SG" ] && echo "  [over-fire fix] REMEMBR_CONSUME_SINGLEGOAL=1 — single-goal AudioGoal memory consumption ON (expect write-ON over-fire to damp → B−A → ~0)"
 
 # race-audiogoal.sh self-pulls at step 1; we already pulled once → skip its pull.
 export RACE_SKIP_PULL=1

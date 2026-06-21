@@ -345,6 +345,14 @@ def _farthest_from_points(cands: List[FrontierCandidate], points):
     return best
 
 
+def _consume_memory_applies(multion: bool, task: str, consume_singlegoal: bool) -> bool:
+    """Whether the reached-memory consumption + anti-thrash candidate filters run
+    this episode. Always for MultiON (K>1 sub-goals). For single-goal AudioGoal
+    only when ``REMEMBR_CONSUME_SINGLEGOAL`` is set (default-OFF → the guards stay
+    ``multion``-only → byte-identical for objectnav/revisit/multion/audiogoal)."""
+    return bool(multion or (task == "audiogoal" and consume_singlegoal))
+
+
 def _filter_candidates_near_points(
     cands: List[FrontierCandidate],
     points,
@@ -702,6 +710,14 @@ class EpisodeRunner:
         self.consume_reached_mem: bool = (
             os.environ.get("REMEMBR_CONSUME_REACHED_MEM", "1") != "0"
         )
+        # The reached-memory consumption + anti-thrash filters were MultiON-gated
+        # (multion = K>1 sub-goals). Single-goal AudioGoal hit the IDENTICAL
+        # un-consumed recall-attractor (lifelong oracle-write A/B: the single
+        # GT-source waypoint re-chosen 176x, replan_stuck 147, never STOPs ->
+        # 0.750 visual recall dragged to 0.467). REMEMBR_CONSUME_SINGLEGOAL=1
+        # ungates the SAME consumption/filter machinery for single-goal audiogoal
+        # (default-OFF -> every guard byte-identical; only audiogoal is affected).
+        self._consume_singlegoal: bool = bool(os.environ.get("REMEMBR_CONSUME_SINGLEGOAL"))
         # Windowed no-progress escape (full2 ep4, forward-into-wall): when
         # >= MIN of the last WINDOW ticks were no-progress forwards, blacklist
         # the committed waypoint, drop it, and force a re-propose. The
@@ -1282,7 +1298,7 @@ class EpisodeRunner:
                     ep_metrics_counters["n_propose_reached"] += 1
                     last_reached_propose_step = int(step.step_idx)
                     if (
-                        multion
+                        _consume_memory_applies(multion, self.task, self._consume_singlegoal)
                         and self.consume_reached_mem
                         and current_candidate is not None
                         and current_candidate.source == "memory"
@@ -1436,7 +1452,7 @@ class EpisodeRunner:
                                 else max(coarse_top_cos_max, _tc))
                         for _rm, _cnt in (_cdiag.get("room_hist") or {}).items():
                             coarse_room_hist[_rm] = coarse_room_hist.get(_rm, 0) + int(_cnt)
-                    if multion:
+                    if _consume_memory_applies(multion, self.task, self._consume_singlegoal):
                         # Reached-thrash escape: drop already-reached
                         # waypoints from the pool — applied once after the
                         # memory merge so frontier + remembr + memory are
@@ -1673,7 +1689,7 @@ class EpisodeRunner:
                     if _outcome == "reached":
                         consecutive_unreachable = 0
                         if (
-                            multion
+                            _consume_memory_applies(multion, self.task, self._consume_singlegoal)
                             and self.consume_reached_mem
                             and current_candidate is not None
                             and current_candidate.source == "memory"
