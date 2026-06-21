@@ -371,11 +371,82 @@ def case_class_maps_present_and_consistent():
 # ----------------------------------------------------------------------
 
 
+def case_rirgrid_cell_geodesics_optional():
+    # a grid built without geodesics exposes None (back-compat for legacy grids)
+    cells = np.array([[0.0, 1.5, 0.0], [2.0, 1.5, 0.0]], dtype=np.float32)
+    irs = np.stack([_binaural_for_azimuth(0.0) for _ in range(2)], axis=0)
+    g = audio.RIRGrid(cells, np.zeros(3, np.float32), irs, _SR, "s")
+    assert g.cell_geodesics is None
+    # wrong-length geodesics must raise
+    try:
+        audio.RIRGrid(cells, np.zeros(3, np.float32), irs, _SR, "s",
+                      cell_geodesics=[1.0])
+        assert False, "expected length mismatch to raise"
+    except ValueError:
+        pass
+    print("  case rirgrid_cell_geodesics_optional: OK")
+
+
+def case_rirgrid_cell_energies_from_irs():
+    cells = np.array([[0.0, 1.5, 0.0], [2.0, 1.5, 0.0]], dtype=np.float32)
+    irs = np.zeros((2, 2, 4), dtype=np.float32)
+    irs[0, 0, 0] = 1.0          # energy 1.0
+    irs[1, 0, 0] = 2.0          # energy 4.0
+    g = audio.RIRGrid(cells, np.zeros(3, np.float32), irs, _SR, "s")
+    e = g.cell_energies
+    assert e.shape == (2,), e.shape
+    assert abs(e[0] - 1.0) < 1e-9 and abs(e[1] - 4.0) < 1e-9, e
+    print("  case rirgrid_cell_energies_from_irs: OK")
+
+
+def case_grid_save_load_geodesics_roundtrip():
+    cells = np.array([[0.0, 1.5, 0.0], [2.0, 1.5, 0.0]], dtype=np.float32)
+    irs = np.stack([_binaural_for_azimuth(0.2), _binaural_for_azimuth(-0.2)], axis=0)
+    geo = np.array([1.2, 3.4], dtype=np.float32)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "g.npz")
+        audio.save_rir_grid(path, cell_positions=cells,
+                            source_position=np.zeros(3, np.float32), irs=irs,
+                            sample_rate=_SR, scene_id="s", cell_geodesics=geo)
+        raw = np.load(path)
+        assert "cell_geodesics" in raw.files
+        g2 = audio.RIRGrid.load(path)
+    assert g2.cell_geodesics is not None and np.allclose(g2.cell_geodesics, geo)
+    # length-mismatched geodesics at save time must raise
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            audio.save_rir_grid(os.path.join(td, "g.npz"), cell_positions=cells,
+                                source_position=np.zeros(3, np.float32), irs=irs,
+                                sample_rate=_SR, scene_id="s", cell_geodesics=[1.0])
+        assert False, "expected save length mismatch to raise"
+    except ValueError:
+        pass
+    print("  case grid_save_load_geodesics_roundtrip: OK")
+
+
+def case_grid_load_legacy_without_geodesics():
+    # a grid saved WITHOUT geodesics still loads → cell_geodesics is None
+    cells = np.array([[0.0, 1.5, 0.0]], dtype=np.float32)
+    irs = np.stack([_binaural_for_azimuth(0.0)], axis=0)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "g.npz")
+        audio.save_rir_grid(path, cell_positions=cells,
+                            source_position=np.zeros(3, np.float32), irs=irs,
+                            sample_rate=_SR, scene_id="s")
+        g2 = audio.RIRGrid.load(path)
+    assert g2.cell_geodesics is None
+    print("  case grid_load_legacy_without_geodesics: OK")
+
+
 def main() -> int:
     cases = [
         case_grid_nearest_lookup,
         case_grid_save_load_roundtrip,
         case_grid_save_variable_length_pads,
+        case_rirgrid_cell_geodesics_optional,
+        case_rirgrid_cell_energies_from_irs,
+        case_grid_save_load_geodesics_roundtrip,
+        case_grid_load_legacy_without_geodesics,
         case_render_shape_and_convolution,
         case_render_rms_monotone_with_distance,
         case_doa_recovers_right_and_left,

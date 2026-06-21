@@ -7,6 +7,7 @@ TDD for analyze_lifelong_ab pure helpers (no filesystem). Loaded standalone.
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
@@ -76,6 +77,53 @@ def case_verdict_redundant_helps_hurts():
     print("  case verdict_redundant_helps_hurts: OK")
 
 
+def case_bootstrap_ci_brackets_mean():
+    st = ll.bootstrap_stats([0.1, 0.2, 0.3, 0.2, 0.15], iters=500, seed=1)
+    assert st["n"] == 5
+    assert st["lo"] <= st["mean"] <= st["hi"], st
+    print("  case bootstrap_ci_brackets_mean: OK")
+
+
+def case_bootstrap_deterministic():
+    a = ll.bootstrap_stats([0.1, -0.2, 0.3, 0.0], iters=500, seed=7)
+    b = ll.bootstrap_stats([0.1, -0.2, 0.3, 0.0], iters=500, seed=7)
+    assert a == b, (a, b)
+    print("  case bootstrap_deterministic: OK")
+
+
+def case_bootstrap_all_positive_excludes_zero():
+    st = ll.bootstrap_stats([0.2, 0.25, 0.3, 0.22, 0.28, 0.26], iters=1000, seed=3)
+    assert st["lo"] > 0.0, st          # CI excludes 0
+    assert st["p"] < 0.10, st          # significant two-sided
+    print("  case bootstrap_all_positive_excludes_zero: OK")
+
+
+def case_bootstrap_symmetric_straddles_zero():
+    st = ll.bootstrap_stats([-0.3, -0.2, -0.1, 0.1, 0.2, 0.3], iters=1000, seed=3)
+    assert st["lo"] < 0.0 < st["hi"], st
+    print("  case bootstrap_symmetric_straddles_zero: OK")
+
+
+def case_bootstrap_empty_and_singleton():
+    e = ll.bootstrap_stats([], iters=10)
+    assert e["n"] == 0 and math.isnan(e["mean"])
+    s = ll.bootstrap_stats([0.4], iters=10)
+    assert s["n"] == 1 and s["lo"] == s["hi"] == 0.4
+    print("  case bootstrap_empty_and_singleton: OK")
+
+
+def case_leave_one_cell_out_range():
+    # two flat cells + one big cell: dropping the big cell pulls the pooled mean to 0
+    band = ll.leave_one_cell_out([[0.0, 0.0], [0.0, 0.0], [0.6, 0.6]])
+    lo, hi = band
+    assert abs(lo - 0.0) < 1e-9, band     # drop the big cell -> 0
+    assert abs(hi - 0.3) < 1e-9, band     # drop a flat cell -> (0,0,0.6,0.6)/4
+    # <2 cells with pairs -> nan band
+    one = ll.leave_one_cell_out([[0.1, 0.2]])
+    assert math.isnan(one[0]) and math.isnan(one[1])
+    print("  case leave_one_cell_out_range: OK")
+
+
 def main() -> int:
     cases = [
         case_split_seed_recall,
@@ -84,6 +132,12 @@ def main() -> int:
         case_verdict_no_write,
         case_verdict_not_recalled,
         case_verdict_redundant_helps_hurts,
+        case_bootstrap_ci_brackets_mean,
+        case_bootstrap_deterministic,
+        case_bootstrap_all_positive_excludes_zero,
+        case_bootstrap_symmetric_straddles_zero,
+        case_bootstrap_empty_and_singleton,
+        case_leave_one_cell_out_range,
     ]
     print(f"running {len(cases)} analyze_lifelong_ab cases…")
     for c in cases:

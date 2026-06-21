@@ -217,6 +217,7 @@ def main() -> int:
         return 1
 
     cell_positions = [candidates[i] for i in chosen_idx]
+    cell_geo_sel = [float(geo[i]) for i in chosen_idx]   # geodesic-to-source per kept cell
     print(f"  source={np.round(source_pt, 2).tolist()} "
           f"cells={len(cell_positions)} (target {args.n_cells})")
 
@@ -237,8 +238,9 @@ def main() -> int:
 
     valid_cells: List[np.ndarray] = []
     valid_irs: List[np.ndarray] = []
+    valid_geos: List[float] = []
     n_zero = 0
-    for cell in cell_positions:
+    for k, cell in enumerate(cell_positions):
         st = agent.get_state()
         st.position = np.asarray(cell, dtype=np.float32)
         agent.set_state(st)
@@ -254,6 +256,7 @@ def main() -> int:
             continue
         valid_cells.append(np.asarray(cell, dtype=np.float32))
         valid_irs.append(ir)
+        valid_geos.append(cell_geo_sel[k])
     sim.close()
 
     if len(valid_cells) < args.min_cells:
@@ -268,6 +271,7 @@ def main() -> int:
         irs=valid_irs,
         sample_rate=args.sample_rate,
         scene_id=scene_id,
+        cell_geodesics=np.asarray(valid_geos, dtype=np.float32),
     )
     energies = [float(np.sum(np.square(ir, dtype=np.float64))) for ir in valid_irs]
     print(f"GREEN: rendered {len(valid_cells)} cells (dropped {n_zero}) "

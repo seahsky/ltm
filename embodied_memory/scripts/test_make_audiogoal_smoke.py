@@ -254,6 +254,127 @@ def case_lifelong_construction_fails_on_silent_seed():
     print("  case lifelong_construction_fails_on_silent_seed: OK")
 
 
+# ---- G. non-LOS seed (redundancy-removing build) --------------------------
+
+def case_pick_non_los_seed_prefers_max_detour():
+    src = [0.0, 0.0, 0.0]
+    cells = [[3.0, 0.0, 0.0],    # euclid 3, straight shot (detour 1.0) — rejected
+             [0.0, 0.0, 3.0],    # euclid 3, geodesic 6 → detour 2.0  ← most occluded
+             [2.0, 0.0, 2.0]]    # euclid 2.83, geodesic 5 → detour 1.77
+    geo = [3.0, 6.0, 5.0]
+    energy = [1.0, 1.0, 1.0]
+    seed = mk2.pick_non_los_seed(cells, src, geo, energy,
+                                 detour_ratio=1.3, min_geo_m=2.0, energy_floor=0.5)
+    assert seed["cell_idx"] == 1, seed
+    assert seed["detour"] >= 1.3
+    assert seed["position"] == [0.0, 0.0, 3.0]
+    assert len(seed["rotation"]) == 4
+    print("  case pick_non_los_seed_prefers_max_detour: OK")
+
+
+def case_pick_non_los_seed_rejects_inaudible():
+    try:
+        mk2.pick_non_los_seed([[0.0, 0.0, 3.0]], [0.0, 0.0, 0.0], [6.0], [0.01],
+                              energy_floor=0.5)
+        assert False, "inaudible cell must leave no qualifier → raise"
+    except ValueError:
+        pass
+    print("  case pick_non_los_seed_rejects_inaudible: OK")
+
+
+def case_pick_non_los_seed_rejects_too_close():
+    try:
+        mk2.pick_non_los_seed([[0.0, 0.0, 1.0]], [0.0, 0.0, 0.0], [1.5], [1.0],
+                              min_geo_m=2.0)
+        assert False, "geodesic < min_geo must leave no qualifier → raise"
+    except ValueError:
+        pass
+    print("  case pick_non_los_seed_rejects_too_close: OK")
+
+
+def case_pick_non_los_seed_raises_when_all_los():
+    # every cell is a straight shot (detour ~1.0) → no qualifier
+    try:
+        mk2.pick_non_los_seed([[3.0, 0.0, 0.0], [0.0, 0.0, 4.0]], [0.0, 0.0, 0.0],
+                              [3.0, 4.0], [1.0, 1.0], detour_ratio=1.3)
+        assert False, "all-LOS grid must raise (gate RED)"
+    except ValueError:
+        pass
+    print("  case pick_non_los_seed_raises_when_all_los: OK")
+
+
+def case_build_dataset_cold_override_used():
+    src = _src_content()
+    override = {"position": [5.0, 0.0, 5.0], "rotation": [0, 0, 0, 1]}
+    out = mk2.build_dataset(src, ["bed"], n_warm=1, anomaly_class="alarm",
+                            source_position=[2.5, 0.0, 2.0], cold_pose_override=override)
+    cold = [e for e in out["episodes"] if "-cold-" in e["episode_id"]][0]
+    assert cold["start_position"] == [5.0, 0.0, 5.0], cold["start_position"]
+    # warm starts + source are unchanged by the override
+    for ep in out["episodes"]:
+        assert ep["info"]["source_position"] == [2.5, 0.0, 2.0], ep["info"]
+    print("  case build_dataset_cold_override_used: OK")
+
+
+def case_lifelong_nonlos_promotes_redundancy_to_fail():
+    # the DEFAULT build seeds at the goal view_point (~0.5m, LOS). With
+    # non_los_seed=True the checker must FAIL (not just warn).
+    src = _src_content()
+    out = mk2.build_lifelong_dataset(src, ["bed"], n_warm=2, anomaly_class="alarm")
+    issues = mk2.lifelong_construction_issues(out, non_los_seed=True)
+    assert any(i.startswith("FAIL") and "non-LOS seed" in i for i in issues), issues
+    assert not any(i.startswith("REDUNDANCY-RISK") for i in issues), issues
+    print("  case lifelong_nonlos_promotes_redundancy_to_fail: OK")
+
+
+def case_lifelong_nonlos_greens_valid_build():
+    src = _src_content()
+    source_position = [2.5, 0.0, 2.0]      # near the goal object
+    cells = [[2.5, 0.0, 5.5],              # 3.5m from source (audible), detour 1.43
+             [8.0, 0.0, 8.0]]              # far (inaudible-range) + straight (detour ~1.1)
+    geo = [5.0, 9.0]
+    energy = [1.0, 1.0]
+    out = mk2.build_lifelong_dataset(
+        src, ["bed"], n_warm=2, anomaly_class="alarm",
+        source_position=source_position, non_los_seed=True,
+        rir_cell_positions=cells, rir_cell_geodesics=geo, rir_cell_energies=energy,
+        detour_ratio=1.3, min_geo_m=2.0, energy_floor=0.5)
+    seed = [e for e in out["episodes"] if "-cold-" in e["episode_id"]][0]
+    assert seed["start_position"] == [2.5, 0.0, 5.5], seed["start_position"]
+    d = mk2._xz_dist(seed["start_position"], source_position)
+    assert d is not None and 2.0 <= d <= 4.0, d   # non-LOS AND audible
+    issues = mk2.lifelong_construction_issues(out, non_los_seed=True)
+    assert not any(i.startswith("FAIL") for i in issues), issues
+    print("  case lifelong_nonlos_greens_valid_build: OK")
+
+
+def case_lifelong_nonlos_requires_grid_and_source():
+    src = _src_content()
+    try:
+        mk2.build_lifelong_dataset(src, ["bed"], n_warm=1, anomaly_class="alarm",
+                                   non_los_seed=True, source_position=None)
+        assert False, "non_los_seed without source must raise"
+    except ValueError:
+        pass
+    try:
+        mk2.build_lifelong_dataset(src, ["bed"], n_warm=1, anomaly_class="alarm",
+                                   non_los_seed=True, source_position=[1.0, 0.0, 1.0])
+        assert False, "non_los_seed without grid arrays must raise"
+    except ValueError:
+        pass
+    print("  case lifelong_nonlos_requires_grid_and_source: OK")
+
+
+def case_legacy_los_path_unchanged_by_new_param():
+    # the default (LOS) path must be byte-identical with/without the new flag
+    src = _src_content()
+    a = mk2.build_lifelong_dataset(src, ["bed"], n_warm=2, anomaly_class="alarm")
+    b = mk2.build_lifelong_dataset(src, ["bed"], n_warm=2, anomaly_class="alarm",
+                                   non_los_seed=False)
+    assert a == b, "non_los_seed=False must not change the build"
+    print("  case legacy_los_path_unchanged_by_new_param: OK")
+
+
 def main() -> int:
     cases = [
         case_reuses_revisit_pure_fns,
@@ -273,6 +394,15 @@ def main() -> int:
         case_lifelong_construction_flags_redundancy_not_fail,
         case_lifelong_construction_fails_on_close_recall,
         case_lifelong_construction_fails_on_silent_seed,
+        case_pick_non_los_seed_prefers_max_detour,
+        case_pick_non_los_seed_rejects_inaudible,
+        case_pick_non_los_seed_rejects_too_close,
+        case_pick_non_los_seed_raises_when_all_los,
+        case_build_dataset_cold_override_used,
+        case_lifelong_nonlos_promotes_redundancy_to_fail,
+        case_lifelong_nonlos_greens_valid_build,
+        case_lifelong_nonlos_requires_grid_and_source,
+        case_legacy_los_path_unchanged_by_new_param,
     ]
     print(f"running {len(cases)} make_audiogoal_smoke cases…")
     for c in cases:
