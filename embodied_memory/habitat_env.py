@@ -302,6 +302,18 @@ class HabitatObjectNavSource(EpisodeSource):
             "source": "habitat_live", "max_steps": self.max_steps,
         }
 
+        # The episode's authored start pose (renumbering-invariant: habitat
+        # overwrites episode_id with str(index) on load, but start_position is the
+        # geometry from the dataset). Surfaced so a caption/seed run can HARD-assert
+        # which pose was actually captioned — the non-LOS Tier-3 gate compares this
+        # against the seed start_xyz instead of trusting episode_id ordering.
+        ep_start = getattr(env.current_episode, "start_position", None)
+        if ep_start is not None:
+            try:
+                metadata["start_position"] = [float(v) for v in ep_start]
+            except Exception:
+                metadata["start_position"] = None
+
         ep_info = getattr(env.current_episode, "info", None)
 
         # AudioGoal: lazy-load the scene-matched RIR grid + normalized clip ONCE.
