@@ -98,19 +98,31 @@ def pick_non_los_seed(
 
     A cell qualifies iff (geodesic / straight-line xz distance to the source)
     ``>= detour_ratio`` (a wall/detour, not a straight shot), geodesic
-    ``>= min_geo_m``, and energy ``>= energy_floor`` (the source is audible there).
-    Among qualifiers returns the one with the LARGEST detour ratio (most occluded)
-    as a pose ``{position, rotation, cell_idx, detour}`` facing AWAY from the
-    source. Raises ``ValueError`` if no cell qualifies — that is the gate going RED
-    (re-render the grid with the source tucked behind a doorway, or relax the
-    ratio). Pure (no sim/numpy); the captioner check (``check_seed_not_los``) is
-    the decisive adjudicator since a detour ratio is only a proxy for occlusion."""
+    ``>= min_geo_m``, and the cell is AUDIBLE. Audibility requires a
+    strictly-positive IR energy AND ``energy >= energy_floor``; with the default
+    ``energy_floor=0.0`` this collapses to ``energy > 0`` (a SILENT cell can never
+    clear the runtime onset gate, so it must never qualify — ``e < floor`` would
+    have let an exactly-zero cell through). Among qualifiers returns the one with
+    the LARGEST detour ratio (most occluded) as a pose
+    ``{position, rotation, cell_idx, detour, energy}`` facing AWAY from the source.
+    The chosen cell's ``energy`` is carried out so the construction gate can assert
+    runtime audibility on the actual selected seed (the picker's argmax(detour)
+    objective biases toward the LEAST-audible qualifier, so a downstream
+    audibility floor on the WINNER is the real guard — see
+    ``lifelong_construction_issues``). Raises ``ValueError`` if no cell qualifies —
+    that is the gate going RED (re-render the grid with the source tucked behind a
+    doorway, or relax the ratio). Pure (no sim/numpy); the captioner check
+    (``check_seed_not_los``) is the decisive adjudicator since a detour ratio is
+    only a proxy for occlusion."""
     sx, sz = float(source_position[0]), float(source_position[2])
-    best: Optional[tuple] = None   # (detour, idx)
+    best: Optional[tuple] = None   # (detour, idx, energy)
     for i, p in enumerate(cell_positions):
         g = float(cell_geodesics[i])
         e = float(cell_energies[i])
-        if not math.isfinite(g) or g < min_geo_m or e < energy_floor:
+        # Audible = strictly-positive energy AND >= the (possibly 0.0) floor.
+        # `e <= energy_floor` (not `<`) rejects an exactly-floor/zero cell that
+        # could never fire onset at runtime.
+        if not math.isfinite(g) or g < min_geo_m or e <= 0.0 or e <= energy_floor:
             continue
         euclid = math.hypot(float(p[0]) - sx, float(p[2]) - sz)
         if euclid <= 1e-6:
@@ -119,15 +131,15 @@ def pick_non_los_seed(
         if detour < detour_ratio:
             continue
         if best is None or detour > best[0]:
-            best = (detour, i)
+            best = (detour, i, e)
     if best is None:
         raise ValueError(
             f"no non-LOS audible cell among {len(cell_positions)}: need "
-            f"detour>={detour_ratio}, geo>={min_geo_m}m, energy>={energy_floor}")
+            f"detour>={detour_ratio}, geo>={min_geo_m}m, energy>{energy_floor}")
     idx = best[1]
     pos = [float(v) for v in cell_positions[idx]]
     return {"position": pos, "rotation": _yaw_away_from(pos, source_position),
-            "cell_idx": idx, "detour": float(best[0])}
+            "cell_idx": idx, "detour": float(best[0]), "energy": float(best[2])}
 
 
 def build_category_episodes(
@@ -165,6 +177,18 @@ def build_category_episodes(
         info["anomaly_object"] = obj
         info["source_position"] = src
         info["t_anom"] = t_anom_cold if is_cold else t_anom_warm
+        # Carry the non-LOS picker's geometry/audibility onto the SEED episode so
+        # the construction gate can adjudicate off the SAME quantities the picker
+        # used (geodesic detour + the chosen cell's IR energy), not a conflicting
+        # xz-euclid proxy. Only present when the cold pose came from
+        # pick_non_los_seed (a {…, cell_idx, detour, energy} override).
+        if is_cold:
+            if pose.get("detour") is not None:
+                info["seed_detour"] = float(pose["detour"])
+            if pose.get("energy") is not None:
+                info["seed_energy"] = float(pose["energy"])
+            if pose.get("cell_idx") is not None:
+                info["seed_cell_idx"] = int(pose["cell_idx"])
         return ep
 
     out.append(_clone(cold_pose, f"{category}-{anomaly_class}-cold-0", True))
@@ -328,16 +352,26 @@ def lifelong_construction_issues(
     dedup_radius_m: float = 1.5,
     seed_los_warn_m: float = 2.0,
     non_los_seed: bool = False,
+    detour_ratio: float = 1.3,
+    energy_floor: float = 0.0,
 ) -> List[str]:
     """``$0`` construction gate for a lifelong AudioGoal dataset. Returns a list of
     issue strings (empty ⇒ OK to run); ``FAIL:`` = the write can never fire / never
     recall, ``REDUNDANCY-RISK:`` = the seed likely visually maps the source so the
     oracle write is redundant. Pure — operates on the built ``content`` dict, no sim.
 
-    ``non_los_seed=True`` (the redundancy-removing build) PROMOTES the LOS proximity
-    warning to a hard ``FAIL``: a non-LOS build whose seed is still within
-    ``seed_los_warn_m`` of the source means the seed picker failed to move it
-    off-LOS, which defeats the whole point — so it must block, not just warn.
+    ``non_los_seed=True`` (the redundancy-removing build) adjudicates the SEED off
+    the SAME geometry the picker used, carried onto the seed episode's ``info`` as
+    ``seed_detour`` / ``seed_energy`` (the geodesic detour ratio + the chosen RIR
+    cell's IR energy). It is a hard ``FAIL`` if either is missing, if the detour is
+    ``< detour_ratio`` (the picker did not move the seed off-LOS → defeats the
+    non-LOS build), or if the seed's measured energy is ``<= energy_floor`` (the
+    seed is inaudible → onset never fires → zero writes). The default-build's
+    xz-euclid ``seed_los_warn_m`` / ``audible_radius_m`` proximity checks are
+    SKIPPED for non-LOS seeds, because they are in a different metric than the
+    picker's geodesic/detour and would hard-FAIL the IDEAL around-a-corner case
+    (low xz-euclid + high detour). Those xz checks still apply to the default
+    (LOS) build where they surface the redundancy risk.
     """
     issues: List[str] = []
     eps = content.get("episodes") or []
@@ -364,15 +398,31 @@ def lifelong_construction_issues(
         if is_seed:
             if t is None or t > 100:
                 issues.append(f"FAIL: seed {eid} t_anom={t} must be small so it FIRES")
-            if d is not None and d > audible_radius_m:
-                issues.append(f"FAIL: seed {eid} start {d:.2f}m from source > audible "
-                              f"radius {audible_radius_m}m → onset won't fire")
-            if d is not None and d < seed_los_warn_m:
-                if non_los_seed:
-                    issues.append(f"FAIL: non-LOS seed {eid} start {d:.2f}m from source "
-                                  f"< {seed_los_warn_m}m → still line-of-sight (seed picker "
-                                  "did not move it off-LOS) → defeats the non-LOS build")
-                else:
+            if non_los_seed:
+                # Adjudicate off the picker's OWN geometry (carried into info),
+                # NOT the conflicting xz-euclid proxy: detour for occlusion,
+                # measured cell energy for audibility.
+                seed_detour = info.get("seed_detour")
+                seed_energy = info.get("seed_energy")
+                if seed_detour is None:
+                    issues.append(f"FAIL: non-LOS seed {eid} has no seed_detour in info "
+                                  "(picker geometry not carried) → cannot verify off-LOS")
+                elif float(seed_detour) < detour_ratio:
+                    issues.append(f"FAIL: non-LOS seed {eid} detour {float(seed_detour):.2f} "
+                                  f"< {detour_ratio} → still line-of-sight (seed picker did "
+                                  "not move it off-LOS) → defeats the non-LOS build")
+                if seed_energy is None:
+                    issues.append(f"FAIL: non-LOS seed {eid} has no seed_energy in info "
+                                  "(picker audibility not carried) → cannot verify it fires")
+                elif float(seed_energy) <= energy_floor:
+                    issues.append(f"FAIL: non-LOS seed {eid} energy {float(seed_energy):.4g} "
+                                  f"<= floor {energy_floor} → inaudible → onset never fires "
+                                  "→ zero writes (would waste the GPU A/B)")
+            else:
+                if d is not None and d > audible_radius_m:
+                    issues.append(f"FAIL: seed {eid} start {d:.2f}m from source > audible "
+                                  f"radius {audible_radius_m}m → onset won't fire")
+                if d is not None and d < seed_los_warn_m:
                     issues.append(f"REDUNDANCY-RISK: seed {eid} start {d:.2f}m from source "
                                   f"< {seed_los_warn_m}m → likely line-of-sight → seed visually "
                                   "maps the source → oracle write redundant (write-ON==write-OFF)")
@@ -513,8 +563,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             instance_keyed=args.instance_keyed, t_anom_seed=t_seed, t_anom_recall=t_recall,
             **rir_kwargs)
         # $0 construction gate: refuse to build on a FAIL; surface redundancy-risk.
-        issues = lifelong_construction_issues(content, min_recall_dist_m=min_dist,
-                                              non_los_seed=args.non_los_seed)
+        issues = lifelong_construction_issues(
+            content, min_recall_dist_m=min_dist, non_los_seed=args.non_los_seed,
+            detour_ratio=args.detour_ratio, energy_floor=args.energy_floor)
         for i in issues:
             print(f"  [lifelong-check] {i}")
         fails = [i for i in issues if i.startswith("FAIL")]
@@ -529,9 +580,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             seed_eps = [e for e in content["episodes"] if "-cold-" in str(e.get("episode_id"))]
             for s in seed_eps:
                 sp = ",".join(f"{v:.4f}" for v in s["start_position"])
+                sr = ",".join(f"{v:.6f}" for v in s["start_rotation"])
+                sinfo = s.get("info") or {}
+                det = sinfo.get("seed_detour")
+                en = sinfo.get("seed_energy")
+                det_s = f"{det:.2f}" if det is not None else "n/a"
+                en_s = f"{en:.4g}" if en is not None else "n/a"
+                # Print the FULL away-facing pose (position AND rotation): Tier-3 must
+                # caption at this exact heading — the agent faces AWAY from the source,
+                # so captioning a default/forward heading would measure the wrong view.
                 print(f"NONLOS_SEED episode={s['episode_id']} goal={s['object_category']} "
-                      f"start_xyz={sp}  → caption HERE then run check_seed_not_los.py "
-                      f"(Tier-3): vision must NOT name '{s['object_category']}'")
+                      f"start_xyz={sp} start_rot={sr} detour={det_s} energy={en_s}  "
+                      f"→ caption HERE at start_rot (agent faces AWAY) then run "
+                      f"check_seed_not_los.py (Tier-3): vision must NOT name "
+                      f"'{s['object_category']}'")
     else:
         content = build_dataset(
             src, args.categories, args.n_warm, min_dist=args.min_dist,
