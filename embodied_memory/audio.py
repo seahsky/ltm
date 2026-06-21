@@ -90,9 +90,14 @@ class RIRGrid:
     irs : (N, 2, T) float32           per-cell binaural [left, right] IR
     sample_rate : int
     scene_id : str
+    cell_geodesics : (N,) float32 | None   per-cell GEODESIC distance to the
+        source (``None`` on legacy grids saved before this field existed). Lets
+        the non-LOS seed picker detect "around-a-corner" cells (geodesic ≫ the
+        straight-line distance) without re-opening the sim.
     """
 
-    def __init__(self, cell_positions, source_position, irs, sample_rate, scene_id):
+    def __init__(self, cell_positions, source_position, irs, sample_rate, scene_id,
+                 cell_geodesics=None):
         self.cell_positions = np.asarray(cell_positions, dtype=np.float32).reshape(-1, 3)
         self.source_position = np.asarray(source_position, dtype=np.float32).reshape(3)
         self.irs = np.asarray(irs, dtype=np.float32)
@@ -104,9 +109,24 @@ class RIRGrid:
                 f"vs {self.irs.shape[0]} irs")
         self.sample_rate = int(sample_rate)
         self.scene_id = str(scene_id)
+        if cell_geodesics is None:
+            self.cell_geodesics = None
+        else:
+            cg = np.asarray(cell_geodesics, dtype=np.float32).reshape(-1)
+            if cg.shape[0] != self.cell_positions.shape[0]:
+                raise ValueError(
+                    f"cell_geodesics length {cg.shape[0]} != "
+                    f"{self.cell_positions.shape[0]} cells")
+            self.cell_geodesics = cg
 
     def __len__(self) -> int:
         return int(self.cell_positions.shape[0])
+
+    @property
+    def cell_energies(self) -> np.ndarray:
+        """(N,) float64 per-cell total IR energy ``sum(ir**2)`` over ``[2, T]`` —
+        a monotone proxy for "how audible the source is" at each cell."""
+        return np.sum(np.square(self.irs, dtype=np.float64), axis=(1, 2))
 
     def nearest(self, agent_pos) -> Tuple[np.ndarray, int, float]:
         """Nearest cell to ``agent_pos`` by 2-D (x, z) distance — y is ignored
@@ -125,12 +145,14 @@ class RIRGrid:
     @classmethod
     def load(cls, path: str) -> "RIRGrid":
         raw = np.load(path)  # plain arrays only → no allow_pickle
+        cg = raw["cell_geodesics"] if "cell_geodesics" in raw.files else None
         return cls(
             cell_positions=raw["cell_positions"],
             source_position=raw["source_position"],
             irs=raw["irs"],
             sample_rate=int(raw["sample_rate"]),
             scene_id=str(raw["scene_id"]),
+            cell_geodesics=cg,
         )
 
 
@@ -142,6 +164,7 @@ def save_rir_grid(
     irs: Union[np.ndarray, Sequence[np.ndarray]],
     sample_rate: int,
     scene_id: str,
+    cell_geodesics=None,
 ) -> None:
     """Serialize an RIR grid to a plain ``.npz`` (no object arrays).
 
@@ -149,6 +172,10 @@ def save_rir_grid(
     varying length (the renderer can emit slightly different tail lengths per
     cell); variable-length IRs are zero-padded to the common max T so the stored
     array is a plain float32 tensor.
+
+    ``cell_geodesics`` (optional ``(N,)``) persists each cell's geodesic-to-source
+    distance for the non-LOS seed picker; omitting it keeps the legacy on-disk
+    format (``RIRGrid.load`` reads ``cell_geodesics`` as ``None`` when absent).
     """
     cell_positions = np.asarray(cell_positions, dtype=np.float32).reshape(-1, 3)
     source_position = np.asarray(source_position, dtype=np.float32).reshape(3)
@@ -168,6 +195,15 @@ def save_rir_grid(
         raise ValueError(
             f"cell/ir count mismatch: {cell_positions.shape[0]} vs {irs_arr.shape[0]}")
 
+    extra = {}
+    if cell_geodesics is not None:
+        cg = np.asarray(cell_geodesics, dtype=np.float32).reshape(-1)
+        if cg.shape[0] != cell_positions.shape[0]:
+            raise ValueError(
+                f"cell_geodesics length {cg.shape[0]} != "
+                f"{cell_positions.shape[0]} cells")
+        extra["cell_geodesics"] = cg
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     np.savez_compressed(
         path,
@@ -176,6 +212,7 @@ def save_rir_grid(
         irs=irs_arr,
         sample_rate=np.int64(int(sample_rate)),
         scene_id=np.str_(str(scene_id)),
+        **extra,
     )
 
 

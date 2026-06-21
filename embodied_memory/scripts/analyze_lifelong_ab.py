@@ -22,6 +22,7 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -97,6 +98,73 @@ def redundancy_verdict(seed_writes: int, recall_recalled: int, dsoft: List[float
     return f"REDUNDANT — write fires + recalled but B−A={m:+.3f} ≈ 0 (seed's visual sighting already suffices → needs a non-LOS seed)"
 
 
+def _percentile(xs_sorted: List[float], q: float) -> float:
+    """Linear-interpolated percentile of a pre-sorted list (q in [0, 1])."""
+    if not xs_sorted:
+        return float("nan")
+    if len(xs_sorted) == 1:
+        return xs_sorted[0]
+    pos = (len(xs_sorted) - 1) * q
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return xs_sorted[lo]
+    frac = pos - lo
+    return xs_sorted[lo] * (1.0 - frac) + xs_sorted[hi] * frac
+
+
+def bootstrap_stats(deltas: List[float], *, iters: int = 2000, alpha: float = 0.10,
+                    seed: int = 12345) -> Dict[str, float]:
+    """Paired bootstrap over per-pair B−A deltas. Returns ``{n, mean, lo, hi, p}``
+    where ``[lo, hi]`` is the ``1-alpha`` percentile CI of the mean and ``p`` is a
+    two-sided percentile-bootstrap p-value (fraction of resample means on the null
+    side, doubled, capped at 1). Deterministic for a fixed ``seed``; pure-Python so
+    this lightweight analyzer keeps its stdlib-only footprint. A CI-excludes-0
+    claim (the thing the pooled mean alone could not support) is ``lo > 0`` or
+    ``hi < 0``."""
+    ds = [d for d in deltas
+          if d is not None and not (isinstance(d, float) and math.isnan(d))]
+    n = len(ds)
+    if n == 0:
+        return {"n": 0, "mean": float("nan"), "lo": float("nan"),
+                "hi": float("nan"), "p": float("nan")}
+    mean = sum(ds) / n
+    if n == 1:
+        return {"n": 1, "mean": mean, "lo": mean, "hi": mean, "p": float("nan")}
+    rng = random.Random(seed)
+    means: List[float] = []
+    for _ in range(iters):
+        s = 0.0
+        for _ in range(n):
+            s += ds[rng.randrange(n)]
+        means.append(s / n)
+    means.sort()
+    lo = _percentile(means, alpha / 2.0)
+    hi = _percentile(means, 1.0 - alpha / 2.0)
+    n_le = sum(1 for m in means if m <= 0.0)
+    n_ge = sum(1 for m in means if m >= 0.0)
+    p = min(1.0, 2.0 * min(n_le, n_ge) / iters)
+    return {"n": n, "mean": mean, "lo": lo, "hi": hi, "p": p}
+
+
+def leave_one_cell_out(cell_deltas: List[List[float]]) -> Tuple[float, float]:
+    """Robustness band: ``(min, max)`` of the POOLED B−A mean when each cell in
+    turn is dropped. A positive result whose band stays positive is "not driven by
+    one cell". Cells contributing no pairs are ignored; ``(nan, nan)`` if <2 cells
+    have pairs."""
+    cells = [c for c in cell_deltas if c]
+    if len(cells) <= 1:
+        return (float("nan"), float("nan"))
+    means: List[float] = []
+    for i in range(len(cells)):
+        pool = [d for j, c in enumerate(cells) if j != i for d in c]
+        if pool:
+            means.append(sum(pool) / len(pool))
+    if not means:
+        return (float("nan"), float("nan"))
+    return (min(means), max(means))
+
+
 def _load_summary(run_dir: str) -> Optional[Dict[str, Any]]:
     p = os.path.join(run_dir, "summary.json")
     if not os.path.isfile(p):
@@ -123,6 +191,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("  " + "-" * 104)
     pooled_dsoft: List[float] = []
     pooled_dsucc: List[float] = []
+    per_cell_dsoft: List[List[float]] = []
     n_cells = 0
     for adir, bdir in zip(args.a, args.b):
         asum, bsum = _load_summary(adir), _load_summary(bdir)
@@ -135,6 +204,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         dsoft, dsucc = paired_recall_delta(asum.get("episodes") or [], bsum.get("episodes") or [])
         pooled_dsoft += dsoft
         pooled_dsucc += dsucc
+        per_cell_dsoft.append(dsoft)
         v = redundancy_verdict(b["seed_writes"], b["recall_recalled"], dsoft)
         print(f"  {os.path.basename(bdir):38.38s} {b['seed_writes']:>5} {b['recall_recalled']:>4} "
               f"{a['recall_soft_spl']:>7.3f} {b['recall_soft_spl']:>7.3f} {_mean(dsoft):>7.3f}  {v}")
@@ -148,6 +218,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  POOLED recall pairs n={len(pooled_dsoft)} over {n_cells} cell(s): "
               f"soft-SPL B−A mean={m:+.4f} (pos {pos}/{len(pooled_dsoft)}), "
               f"succ@1m B−A mean={_mean(pooled_dsucc):+.4f}")
+        # Paired bootstrap 90% CI + two-sided p — turns the bare pooled mean into a
+        # CI-excludes-0 claim (or not). The old report had no CI at all.
+        st = bootstrap_stats(pooled_dsoft, alpha=0.10)
+        excl = "EXCLUDES 0" if (st["lo"] > 0 or st["hi"] < 0) else "straddles 0"
+        print(f"  POOLED soft-SPL B−A 90% CI [{st['lo']:+.4f}, {st['hi']:+.4f}] "
+              f"p={st['p']:.3f} ({excl})")
+        if n_cells > 1:
+            lo_loo, hi_loo = leave_one_cell_out(per_cell_dsoft)
+            print(f"  LEAVE-ONE-CELL-OUT pooled mean range "
+                  f"[{lo_loo:+.4f}, {hi_loo:+.4f}] "
+                  f"({'robust' if (lo_loo > 0 or hi_loo < 0) else 'sign flips → driven by one cell'})")
         print(f"  POOLED verdict: {redundancy_verdict(1, 1, pooled_dsoft)}")
     else:
         print("  POOLED: no paired recall episodes across any cell")

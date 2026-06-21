@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 import sys
 from typing import Any, Dict, List, Optional
@@ -71,6 +72,62 @@ def pick_source_position(cold_goal_vp_pos: List[float], *, offset_m: float = 0.5
     here)."""
     p = list(cold_goal_vp_pos)
     return [float(p[0]) + float(offset_m), float(p[1]), float(p[2])]
+
+
+def _yaw_away_from(cell_pos: List[float], source_pos: List[float]) -> List[float]:
+    """A y-axis quaternion ``[x, y, z, w]`` orienting the agent's forward (-Z) to
+    point AWAY from the source — so at the seed start the agent must turn/move to
+    approach, and vision does not map the source at t=0."""
+    dx = float(cell_pos[0]) - float(source_pos[0])
+    dz = float(cell_pos[2]) - float(source_pos[2])
+    theta = math.atan2(-dx, -dz)   # forward' = (-sinθ, 0, -cosθ) == (dx, 0, dz) dir
+    return [0.0, math.sin(theta / 2.0), 0.0, math.cos(theta / 2.0)]
+
+
+def pick_non_los_seed(
+    cell_positions: List[List[float]],
+    source_position: List[float],
+    cell_geodesics: List[float],
+    cell_energies: List[float],
+    *,
+    detour_ratio: float = 1.3,
+    min_geo_m: float = 2.0,
+    energy_floor: float = 0.0,
+) -> Dict[str, Any]:
+    """Pick the most-OCCLUDED AUDIBLE RIR-grid cell as a NON-line-of-sight seed.
+
+    A cell qualifies iff (geodesic / straight-line xz distance to the source)
+    ``>= detour_ratio`` (a wall/detour, not a straight shot), geodesic
+    ``>= min_geo_m``, and energy ``>= energy_floor`` (the source is audible there).
+    Among qualifiers returns the one with the LARGEST detour ratio (most occluded)
+    as a pose ``{position, rotation, cell_idx, detour}`` facing AWAY from the
+    source. Raises ``ValueError`` if no cell qualifies — that is the gate going RED
+    (re-render the grid with the source tucked behind a doorway, or relax the
+    ratio). Pure (no sim/numpy); the captioner check (``check_seed_not_los``) is
+    the decisive adjudicator since a detour ratio is only a proxy for occlusion."""
+    sx, sz = float(source_position[0]), float(source_position[2])
+    best: Optional[tuple] = None   # (detour, idx)
+    for i, p in enumerate(cell_positions):
+        g = float(cell_geodesics[i])
+        e = float(cell_energies[i])
+        if not math.isfinite(g) or g < min_geo_m or e < energy_floor:
+            continue
+        euclid = math.hypot(float(p[0]) - sx, float(p[2]) - sz)
+        if euclid <= 1e-6:
+            continue
+        detour = g / euclid
+        if detour < detour_ratio:
+            continue
+        if best is None or detour > best[0]:
+            best = (detour, i)
+    if best is None:
+        raise ValueError(
+            f"no non-LOS audible cell among {len(cell_positions)}: need "
+            f"detour>={detour_ratio}, geo>={min_geo_m}m, energy>={energy_floor}")
+    idx = best[1]
+    pos = [float(v) for v in cell_positions[idx]]
+    return {"position": pos, "rotation": _yaw_away_from(pos, source_position),
+            "cell_idx": idx, "detour": float(best[0])}
 
 
 def build_category_episodes(
@@ -128,12 +185,20 @@ def build_dataset(
     offset_m: float = 0.5,
     t_anom_cold: int = _T_ANOM_COLD_DEFAULT,
     t_anom_warm: int = _T_ANOM_WARM_DEFAULT,
+    cold_pose_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble the content dict. With ``anomaly_class=None`` this is exactly
     ``make_revisit_smoke.build_dataset``. With a class set, each category also
     gets an anomaly source (the explicit ``source_position`` for all, else a
     per-category offset from that category's cold goal view_point) written into
-    every episode's ``info``."""
+    every episode's ``info``.
+
+    ``cold_pose_override`` (a ``{position, rotation}`` pose) replaces the cold/SEED
+    start for every category (MVP: callers pass a single category) — used by the
+    non-LOS lifelong build to move the seed off line-of-sight. The goal view_points
+    (and hence warm far-starts + the default source offset) are unchanged, so an
+    explicit ``source_position`` is required alongside an override (the source must
+    stay near the goal object, not the relocated seed)."""
     if anomaly_class is None:
         return mk.build_dataset(src_content, categories, n_warm, min_dist=min_dist,
                                 instance_keyed=instance_keyed)
@@ -168,6 +233,8 @@ def build_dataset(
         else:
             cold_pose = pick_cold_pose(goal_instances)
             goal_vps = _goal_view_point_positions(goal_instances)
+        if cold_pose_override is not None:
+            cold_pose = dict(cold_pose_override)   # relocate the SEED start (non-LOS)
         warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps, n=n_warm, min_dist=min_dist)
 
         src_xyz = (list(source_position) if source_position is not None
@@ -198,6 +265,13 @@ def build_lifelong_dataset(
     instance_keyed: bool = False,
     t_anom_seed: int = _T_ANOM_SEED_DEFAULT,
     t_anom_recall: int = _T_ANOM_RECALL_DEFAULT,
+    non_los_seed: bool = False,
+    rir_cell_positions: Optional[List[List[float]]] = None,
+    rir_cell_geodesics: Optional[List[float]] = None,
+    rir_cell_energies: Optional[List[float]] = None,
+    detour_ratio: float = 1.3,
+    min_geo_m: float = 2.0,
+    energy_floor: float = 0.0,
 ) -> Dict[str, Any]:
     """Lifelong cross-visit AudioGoal (oracle-source upper bound). Mechanically this
     is :func:`build_dataset` with the t_anom polarity INVERTED — the SEED (cold
@@ -205,18 +279,38 @@ def build_lifelong_dataset(
     episodes (warm slots) are silent (``t_anom_recall``) and start ``>= min_dist``
     away so visit-2 is driven by the LTM write, not re-heard audio.
 
-    KNOWN CAVEAT (the ``$0`` checker flags it): the seed start is the goal
+    DEFAULT (LOS) CAVEAT (the ``$0`` checker flags it): the seed start is the goal
     view_point (``pick_cold_pose``), which is line-of-sight to the source, so the
     seed VISUALLY maps the source — the oracle audio write is then redundant with
     that visual sighting (write-ON == write-OFF). ``lifelong_construction_issues``
-    surfaces this as a REDUNDANCY-RISK; a cheap write-OFF recall probe MEASURES it
-    before any paid matrix. A non-redundant build needs an audible-but-not-LOS seed
-    (a follow-up sub-build)."""
+    surfaces this as a REDUNDANCY-RISK.
+
+    ``non_los_seed=True`` (the redundancy-removing build): relocate the SEED to the
+    most-occluded AUDIBLE RIR-grid cell via :func:`pick_non_los_seed`, so vision
+    cannot map the source from the seed and the audio write has a unique job.
+    Requires the RIR grid arrays (``rir_cell_positions/geodesics/energies``, from
+    ``audio.RIRGrid``) AND an explicit ``source_position`` (the grid's source). The
+    captioner gate (``check_seed_not_los``) is the decisive feasibility check — a
+    detour ratio is only a proxy for true occlusion."""
+    cold_pose_override = None
+    if non_los_seed:
+        if source_position is None:
+            raise ValueError(
+                "non_los_seed requires an explicit source_position (the RIR grid source)")
+        if (rir_cell_positions is None or rir_cell_geodesics is None
+                or rir_cell_energies is None):
+            raise ValueError(
+                "non_los_seed requires rir_cell_positions/geodesics/energies "
+                "(load the RIR grid via audio.RIRGrid.load)")
+        cold_pose_override = pick_non_los_seed(
+            rir_cell_positions, source_position, rir_cell_geodesics, rir_cell_energies,
+            detour_ratio=detour_ratio, min_geo_m=min_geo_m, energy_floor=energy_floor)
     return build_dataset(
         src_content, categories, n_warm, min_dist=min_dist,
         instance_keyed=instance_keyed, anomaly_class=anomaly_class,
         source_position=source_position, offset_m=offset_m,
-        t_anom_cold=t_anom_seed, t_anom_warm=t_anom_recall)
+        t_anom_cold=t_anom_seed, t_anom_warm=t_anom_recall,
+        cold_pose_override=cold_pose_override)
 
 
 def _xz_dist(a: Optional[List[float]], b: Optional[List[float]]) -> Optional[float]:
@@ -233,11 +327,17 @@ def lifelong_construction_issues(
     min_recall_dist_m: float = _LIFELONG_MIN_DIST_DEFAULT,
     dedup_radius_m: float = 1.5,
     seed_los_warn_m: float = 2.0,
+    non_los_seed: bool = False,
 ) -> List[str]:
     """``$0`` construction gate for a lifelong AudioGoal dataset. Returns a list of
     issue strings (empty ⇒ OK to run); ``FAIL:`` = the write can never fire / never
     recall, ``REDUNDANCY-RISK:`` = the seed likely visually maps the source so the
     oracle write is redundant. Pure — operates on the built ``content`` dict, no sim.
+
+    ``non_los_seed=True`` (the redundancy-removing build) PROMOTES the LOS proximity
+    warning to a hard ``FAIL``: a non-LOS build whose seed is still within
+    ``seed_los_warn_m`` of the source means the seed picker failed to move it
+    off-LOS, which defeats the whole point — so it must block, not just warn.
     """
     issues: List[str] = []
     eps = content.get("episodes") or []
@@ -268,9 +368,14 @@ def lifelong_construction_issues(
                 issues.append(f"FAIL: seed {eid} start {d:.2f}m from source > audible "
                               f"radius {audible_radius_m}m → onset won't fire")
             if d is not None and d < seed_los_warn_m:
-                issues.append(f"REDUNDANCY-RISK: seed {eid} start {d:.2f}m from source "
-                              f"< {seed_los_warn_m}m → likely line-of-sight → seed visually "
-                              "maps the source → oracle write redundant (write-ON==write-OFF)")
+                if non_los_seed:
+                    issues.append(f"FAIL: non-LOS seed {eid} start {d:.2f}m from source "
+                                  f"< {seed_los_warn_m}m → still line-of-sight (seed picker "
+                                  "did not move it off-LOS) → defeats the non-LOS build")
+                else:
+                    issues.append(f"REDUNDANCY-RISK: seed {eid} start {d:.2f}m from source "
+                                  f"< {seed_los_warn_m}m → likely line-of-sight → seed visually "
+                                  "maps the source → oracle write redundant (write-ON==write-OFF)")
         else:
             if t is not None and t <= 100:
                 issues.append(f"FAIL: recall {eid} t_anom={t} must be high so it's SILENT")
@@ -309,6 +414,19 @@ def collect_source_manifest(content: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _load_rir_grid(path: str):
+    """Load an ``audio.RIRGrid`` WITHOUT importing the embodied_memory package
+    ``__init__`` (which pulls faiss). Mirrors render_rir_grid._load_audio: audio.py
+    imports only numpy at module load, so a direct file load is self-sufficient."""
+    import importlib.util
+    audio_path = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "audio.py"))
+    spec = importlib.util.spec_from_file_location("_audiogoal_audio_mk", audio_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.RIRGrid.load(path)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="AudioGoal warm-episode dataset builder")
     parser.add_argument("--src", required=True,
@@ -337,6 +455,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "(warm) is SILENT + starts far. Sets t_anom_cold=1, "
                              "t_anom_warm=10000, min_dist=4.0 unless overridden; runs the "
                              "$0 construction check and refuses to build on a FAIL.")
+    parser.add_argument("--non-los-seed", action="store_true",
+                        help="(lifelong only) relocate the SEED to the most-occluded "
+                             "AUDIBLE RIR-grid cell so vision can't map the source — the "
+                             "redundancy-removing build. Requires --rir-grid; the "
+                             "construction check promotes any residual LOS to a FAIL.")
+    parser.add_argument("--rir-grid", default=None,
+                        help="Path to the rendered RIR grid .npz (carries cell_geodesics) "
+                             "— required for --non-los-seed; the grid's source overrides "
+                             "--source-position unless that is given explicitly.")
+    parser.add_argument("--detour-ratio", type=float, default=1.3,
+                        help="non-LOS: min geodesic/straight-line ratio (occlusion proxy)")
+    parser.add_argument("--min-geo-m", type=float, default=2.0,
+                        help="non-LOS: min geodesic-to-source (m) for the seed cell")
+    parser.add_argument("--energy-floor", type=float, default=0.0,
+                        help="non-LOS: min cell IR energy (audible) for the seed cell")
     parser.add_argument("--source-manifest", default=None,
                         help="Where to write the source manifest JSON "
                              "(default <out-dir>/source_manifest.json)")
@@ -356,12 +489,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         t_recall = (args.t_anom_warm if args.t_anom_warm != _T_ANOM_WARM_DEFAULT
                     else _T_ANOM_RECALL_DEFAULT)
         min_dist = args.min_dist if args.min_dist != 2.0 else _LIFELONG_MIN_DIST_DEFAULT
+        rir_kwargs: Dict[str, Any] = {}
+        if args.non_los_seed:
+            if not args.rir_grid:
+                parser.error("--non-los-seed requires --rir-grid <rendered .npz>")
+            grid = _load_rir_grid(args.rir_grid)
+            if src_pos is None:
+                src_pos = [float(v) for v in grid.source_position]
+                print(f"  [non-los] source from grid = {src_pos}")
+            if grid.cell_geodesics is None:
+                parser.error(f"--rir-grid {args.rir_grid} has no cell_geodesics "
+                             "(re-render with the updated render_rir_grid.py)")
+            rir_kwargs = dict(
+                non_los_seed=True,
+                rir_cell_positions=[[float(v) for v in p] for p in grid.cell_positions],
+                rir_cell_geodesics=[float(v) for v in grid.cell_geodesics],
+                rir_cell_energies=[float(v) for v in grid.cell_energies],
+                detour_ratio=args.detour_ratio, min_geo_m=args.min_geo_m,
+                energy_floor=args.energy_floor)
         content = build_lifelong_dataset(
             src, args.categories, args.n_warm, anomaly_class=args.anomaly_class,
             source_position=src_pos, offset_m=args.offset_m, min_dist=min_dist,
-            instance_keyed=args.instance_keyed, t_anom_seed=t_seed, t_anom_recall=t_recall)
+            instance_keyed=args.instance_keyed, t_anom_seed=t_seed, t_anom_recall=t_recall,
+            **rir_kwargs)
         # $0 construction gate: refuse to build on a FAIL; surface redundancy-risk.
-        issues = lifelong_construction_issues(content, min_recall_dist_m=min_dist)
+        issues = lifelong_construction_issues(content, min_recall_dist_m=min_dist,
+                                              non_los_seed=args.non_los_seed)
         for i in issues:
             print(f"  [lifelong-check] {i}")
         fails = [i for i in issues if i.startswith("FAIL")]
@@ -372,6 +525,13 @@ def main(argv: Optional[List[str]] = None) -> int:
               + ("WARN: redundancy-risk present (above) — a write-OFF recall probe must "
                  "measure whether the oracle write is redundant before any paid matrix"
                  if issues else "GREEN: construction OK"))
+        if args.non_los_seed:
+            seed_eps = [e for e in content["episodes"] if "-cold-" in str(e.get("episode_id"))]
+            for s in seed_eps:
+                sp = ",".join(f"{v:.4f}" for v in s["start_position"])
+                print(f"NONLOS_SEED episode={s['episode_id']} goal={s['object_category']} "
+                      f"start_xyz={sp}  → caption HERE then run check_seed_not_los.py "
+                      f"(Tier-3): vision must NOT name '{s['object_category']}'")
     else:
         content = build_dataset(
             src, args.categories, args.n_warm, min_dist=args.min_dist,
