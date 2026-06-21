@@ -57,6 +57,32 @@ export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 [ -f "$EPISODES" ] || { echo "RED: --episodes-path $EPISODES not found — run the \$0 gate first (race-nonlos-seed-gate.sh) to build the non-LOS dataset, or rebuild it."; exit 1; }
 [ -f "$RIR_GRID" ] || { echo "RED: --rir-grid $RIR_GRID not found — re-render it (race-rerender-grid.sh)."; exit 1; }
 
+# Preflight (cheap, no GPU): the content file resolved from --episodes-path must
+# exist AND contain a *-cold-* SEED with a start_position. If the gate built the
+# dataset somewhere Habitat can't resolve (or the non-LOS build regressed), find
+# out for $0 before spending the 7B+2B load. Prints the seed start_position so the
+# operator can eyeball the expected away-facing seed (≈0.7821,-0.0051,-5.1784).
+banner "[1.5/3] preflight — seed exists in the content for $SCENE"
+mkdir -p "$OUT_DIR"
+python embodied_memory/scripts/check_seed_pose.py \
+    --episodes-path "$EPISODES" --scene "$SCENE" --anomaly-class "$CLASS" \
+    --check-seed-exists 2>"$OUT_DIR/.preflight.err" || {
+      echo "RED: no resolvable non-LOS SEED for scene=$SCENE class=$CLASS from"
+      echo "  --episodes-path $EPISODES. Either the content file isn't where Habitat"
+      echo "  resolves it (<dir-of-episodes-path>/content/$SCENE.json.gz) or the"
+      echo "  non-LOS build regressed (no *-cold-* episode / no start_position)."
+      cat "$OUT_DIR/.preflight.err" 2>/dev/null
+      echo "  Rebuild under the standard root, e.g.:"
+      echo "    python embodied_memory/scripts/make_audiogoal_smoke.py \\"
+      echo "      --src data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content/$SCENE.json.gz \\"
+      echo "      --scene $SCENE --categories $CATEGORY --anomaly-class $CLASS \\"
+      echo "      --lifelong --non-los-seed --rir-grid $RIR_GRID \\"
+      echo "      --out-dir data/hm3d/datasets/objectnav/hm3d/v1/nonlos-$SCENE"
+      echo "    then re-run with --episodes-path data/.../nonlos-$SCENE/audiogoal.json.gz"
+      exit 1
+    }
+echo "  preflight OK — content resolves and a non-LOS seed is present."
+
 banner "[2/3] caption the non-LOS SEED pose (1 step, real captioner)"
 mkdir -p "$OUT_DIR"
 CAP_LOG="$OUT_DIR/caption_run.log"
@@ -77,6 +103,32 @@ if [ ! -f "$OUT_DIR/summary.json" ]; then
   echo "  expected soft pass-fail). Tail of the log:"; tail -n 25 "$CAP_LOG"; exit 1
 fi
 
+# ── HARD seed-pose gate (renumbering-invariant) ───────────────────────────────
+# habitat overwrites episode_id with str(load_index) and its iterator default is
+# shuffle=True, so a 1-step run can caption a RANDOM (warm) episode, not the cold
+# seed at index 0. We do NOT trust episode_id ordering: instead we compare the
+# captioned pose's start_position (now in summary.json) against the SEED's authored
+# start_position read straight from the gate-built content file. Mismatch ⇒ a
+# different episode was captioned ⇒ HARD-ABORT RED-INVALID (the verdict is garbage).
+banner "[2.5/3] HARD seed-pose check (captioned pose == non-LOS seed?)"
+SEED_EPS="0.05"
+python embodied_memory/scripts/check_seed_pose.py \
+    --episodes-path "$EPISODES" --scene "$SCENE" \
+    --anomaly-class "$CLASS" --summary "$OUT_DIR/summary.json" --eps "$SEED_EPS"
+POSE_RC=$?
+if [ "$POSE_RC" -ne 0 ]; then
+  echo
+  echo "RED-INVALID: the captioned pose is NOT the non-LOS seed (check_seed_pose rc=$POSE_RC)."
+  echo "  The Tier-3 caption ran against the WRONG episode (habitat shuffle/renumber),"
+  echo "  so any GREEN/RED verdict below would be meaningless. ABORTING before the gate."
+  echo "  Fix: ensure the episode iterator is pinned (shuffle=False — episode_order"
+  echo "  must target config.habitat.environment.iterator_options) so index 0 = the"
+  echo "  cold seed is captioned, then re-run this driver. If summary.json lacks"
+  echo "  episodes[0].start_position, the runner is stale — git pull on RACE."
+  exit 1
+fi
+echo "  seed-pose check PASSED — the captioned pose IS the non-LOS seed."
+
 # Extract the SEED's caption (raw, to stdout); diagnostics to stderr; non-zero on
 # stub / missing so we never feed a garbage caption to the decisive gate.
 CAP="$(python - "$OUT_DIR/summary.json" <<'PY'
@@ -89,9 +141,8 @@ eps = d.get("episodes") or []
 if not eps:
     sys.stderr.write("summary.json has no episodes\n"); sys.exit(2)
 e = eps[0]
-sys.stderr.write("  episode_id=%s  stub=%s\n" % (e.get("episode_id"), bool(e.get("remembr_stub_mode"))))
-if "cold-0" not in str(e.get("episode_id", "")):
-    sys.stderr.write("  WARN: episode 0 is not the *-cold-0 SEED — caption may be the wrong pose\n")
+sys.stderr.write("  episode_id=%s  start_position=%s  stub=%s\n" % (
+    e.get("episode_id"), e.get("start_position"), bool(e.get("remembr_stub_mode"))))
 if e.get("remembr_stub_mode"):
     sys.stderr.write("STUB caption — captioner did not load (REMEMBR_STRICT should have crashed). ABORT.\n"); sys.exit(3)
 c = e.get("remembr_sample_caption")

@@ -893,6 +893,11 @@ class EpisodeRunner:
                     ep_metrics.get("n_candidates_filtered_consumed", 0)),
                 "remembr_stub_mode": ep_metrics.get("remembr_stub_mode"),
                 "remembr_sample_caption": ep_metrics.get("remembr_sample_caption"),
+                # Authored start pose (renumbering-invariant) so a seed/caption run
+                # can HARD-assert WHICH pose was captioned. See the non-LOS Tier-3
+                # gate (race-nonlos-tier3.sh): it aborts RED-INVALID if this != the
+                # seed start_xyz.
+                "start_position": ep_log.get("start_position"),
             })
 
         # Finalize summary. The oracle backbone runs without a memory bridge,
@@ -966,6 +971,11 @@ class EpisodeRunner:
             "episode_id": ep.episode_id,
             "scene_id": ep.scene_id,
             "target_category": ep.target_category,
+            # The episode's authored start pose (from habitat_env via metadata).
+            # Renumbering-invariant — used by the non-LOS Tier-3 gate to HARD-assert
+            # the captioned pose IS the seed (episode_id is overwritten with the
+            # load index, so it can't identify a pose). None when unavailable.
+            "start_position": (ep.metadata or {}).get("start_position"),
             "started_at": time.time(),
             "steps": [],
             "decisions": [],

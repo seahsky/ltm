@@ -25,18 +25,49 @@ sim; the caller (``habitat_env._build_env``) invokes it inside ``read_write``.
 from __future__ import annotations
 
 
-def pin_episode_order(config) -> bool:
-    """Pin ``episode_iterator_options`` for cold-before-warm ordering: set
-    ``shuffle = False`` and ``group_by_scene = True``.
+def _iterator_options(config):
+    """Return the live iterator-options object habitat will read, or None.
 
-    Returns True if both options were set, False if the config lacks the
-    ``episode_iterator_options`` key (an older/newer habitat layout) — the caller
-    treats False as a harmless no-op, never an error. Must be called inside a
-    ``read_write(config)`` block when the config is a frozen omegaconf object.
+    The REAL key on current habitat-lab is
+    ``config.habitat.environment.iterator_options`` — that is where
+    ``habitat.Env`` reads the options (``config.environment.iterator_options.items()``)
+    and its ``IteratorOptionsConfig.shuffle`` default is True. An earlier version
+    of this helper targeted ``config.habitat.dataset.episode_iterator_options``,
+    which does NOT exist on ``DatasetConfig`` — so the pin was a silent no-op and
+    ``shuffle`` stayed True on every real run. We prefer the real environment key
+    and keep the legacy dataset key as a graceful fallback for alternate layouts.
     """
+    # Preferred (real) location.
+    try:
+        opts = config.habitat.environment.iterator_options
+        if opts is not None:
+            return opts
+    except Exception:
+        pass
+    # Legacy / fictional fallback (kept so an alternate habitat layout still pins).
     try:
         opts = config.habitat.dataset.episode_iterator_options
+        if opts is not None:
+            return opts
     except Exception:
+        pass
+    return None
+
+
+def pin_episode_order(config) -> bool:
+    """Pin the episode iterator for cold-before-warm ordering: set
+    ``shuffle = False`` and ``group_by_scene = True``.
+
+    Targets the REAL habitat key ``config.habitat.environment.iterator_options``
+    (falling back to the legacy ``config.habitat.dataset.episode_iterator_options``
+    if only that is present). Returns True if both options were set, False if the
+    config exposes neither iterator-options key (an older/newer habitat layout) —
+    the caller treats False as a harmless no-op, never an error. Must be called
+    inside a ``read_write(config)`` block when the config is a frozen omegaconf
+    object.
+    """
+    opts = _iterator_options(config)
+    if opts is None:
         return False
     try:
         opts.shuffle = False
