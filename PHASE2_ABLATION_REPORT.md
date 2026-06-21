@@ -3056,3 +3056,109 @@ paired deltas; n=3, single scene/class, episode idx2 carries it, leave-one-out s
 | `embodied_memory/scripts/test_audio_doa_head.py` | head TDD incl. the positive convention guard (5) |
 | `scripts/race-audiogoal.sh` | onset-calib `[5b]` + `[S0]` gate + `--fetch-audio` + head flags |
 | `runs/audiodoa{2,3,3h}-*` | the S0/S1 + head A/B runs; RACE-only |
+
+# AudioGoal Step 2 — audio anomaly → LTM write (lifelong cross-visit): MECHANISM-VERIFIED, REDUNDANT-WITH-VISION (2026-06-21)
+
+The on-thesis step the user asked for ("audio anomalies should go INTO the LTM so the robot learns; then
+go to the place and check around"). Unlike the S2 audio-DOA head (a read-side rerank), this is the first
+**write-side** lever: on anomaly onset, persist a recallable fine-layer LTM item AT the source so a later
+visit recalls a waypoint to the sound. **Verdict: the write mechanism is built + verified end-to-end, but
+it is REDUNDANT with visual recall on this single-goal harness (and HURTS until an over-fire confound is
+fixed). A positive result (HELPS) is unreachable **by construction** on this harness (argued from three
+premises below — LOS seed, single instance, static world — not a measured null). Step 2 CLOSES as an honest negative;
+the durable wins are Step 1 (anomaly detection) + the onset-gate + the lifelong harness.**
+
+## What was built
+- **`MemoryBridge.write_audio_event`** (`memory_bridge.py`): SBERT-encodes a goal-query-template caption
+  (`"there is a {object}; heard {class} here"`) and `ltm.insert(level="fine", …)` at the **source xyz**
+  (not the agent pose, so it routes TO the sound and does not self-dedup). Env-gated `LTM_AUDIO_WRITE`,
+  default-OFF, insert-only → flag-off + objectnav byte-identical. 10 TDD cases (`test_audio_write.py`).
+- Decisive **summary counters**: `n_audio_writes` (proof the write fired), `n_audio_event_recalled`
+  (recalled from a distance), and a write-seam triage triple (`n_audio_onset_fired`,
+  `n_audio_write_attempts`, `audio_write_skip_reason` ∈ {env-off, src-none, insert-none, ok}).
+- **Lifelong builder** (`make_audiogoal_smoke.build_lifelong_dataset`): inverts M3's `t_anom` polarity —
+  the SEED (visit-1) FIRES the anomaly + writes; the RECALL episodes (visit-2) are SILENT and start FAR
+  (≥ `min_dist` 4.0 m), so visit-2 is driven by the LTM write, not re-heard audio. `lifelong_construction_issues`
+  is a `$0` gate (FAILs + a REDUNDANCY-RISK warning when the seed is line-of-sight to the source). 5 TDD.
+- **Overnight A/B harness** (`scripts/race-audiogoal-lifelong.sh` + `analyze_lifelong_ab.py`): per-cell
+  write-ON vs write-OFF on a shared dataset; resilient; reports seed-write / recall / paired B−A + verdict.
+  6 TDD.
+
+## The plumbing chase (the write took 4 RACE runs to fire)
+On the **M3** harness the cold/seeding pass is SILENT by construction (`t_anom=10000` → render returns
+`None` → no onset → the write seam is never entered), so `n_audio_writes=0`. The `n_audio_onset_fired` /
+`audio_write_skip_reason` counters made this a one-row diagnosis (onset never fires), and the **lifelong**
+t_anom inversion (seed fires at `t_anom=1` next to the source) finally fired the write:
+seed `n_audio_writes=1`, `audio_write_skip_reason="ok"`, `modules_invoked.ltm_audio_write=true`, recalled
+from a distance in visit-2 (`n_audio_event_recalled` up to 57 per recall pass). **Onset→write→recall is
+verified live.** (Also fixed a spurious driver exit-1 — a trailing `[ -n LTM_AUDIO_DOA ] && echo` short-
+circuiting to status 1 under `set -uo pipefail` — and a single-setting Gate-A guard.)
+
+## The A/B result: HURTS → (over-fire fix) → REDUNDANT
+Lifelong write-ON(B) vs write-OFF(A), both S3, shared dataset, 2 val_mini cells
+({glass_break:chair, alarm:bed}), `--n-warm` 6. **The data is FRAGILE** — only TEEsavR23oF:alarm:bed
+recalled the write (wcojb glass_break was WRITE-NOT-RECALLED, a deduped TIE 0.000), and 2 cells failed to
+build (off-navmesh source / no instance), so n=5 recall pairs over effectively one informative cell.
+
+| run | TEEsav:alarm dB−A | pooled B−A (n=5) | write-ON `mem_chosen` | `replan_stuck` (249-ep) | verdict |
+|---|---|---|---|---|---|
+| baseline (no consume) | **−0.283** | **−0.170** (0/5 pos) | 188 | 147 | **HURTS** |
+| `--consume-singlegoal` | **−0.020** | **−0.012** (succ@1m B−A 0.000) | 20 | 0 | **REDUNDANT** |
+
+**The HURTS decomposes into two layers (3-agent + adversarial diagnosis, code-grounded):**
+1. **Over-fire = the realized loss (FIXABLE).** The single saturating-cosine GT-source waypoint dominated
+   the rerank (memory won 188 vs frontier 10) and was an **un-consumed recall attractor** — re-chosen
+   176×, `replan_stuck=147`, never STOPs → drops 0.750→0.467 (on TEEsav:alarm:bed — **the one cell that
+   recalled the write**; wcojb glass_break was WRITE-NOT-RECALLED, so the entire HURTS rests on this single
+   cell, and the 188 / 176× / 147 figures are one-cell run-level counts, not pooled). Root cause: the MultiON memory-consumption
+   + anti-thrash filters that tame this exact attractor are gated on `multion` (`n_subgoals>1`), which is
+   `False` for single-goal AudioGoal → the escape never fired. **Fix:** `_consume_memory_applies` +
+   `REMEMBR_CONSUME_SINGLEGOAL=1` ungates the SAME machinery for single-goal audiogoal (default-OFF →
+   byte-identical; `_consume_memory_applies` returns `False` for every non-audiogoal task, so
+   objectnav/revisit/multion are code-guaranteed unaffected). The confirmation run damped it exactly as
+   predicted: `mem_chosen` 188→20, `n_memory_consumed=1`/ep, `replan_stuck` 147→0, recall recovered
+   0.467→0.730, **B−A −0.170 → −0.012**. **Caveat — this is a *cross-run, single-cell* comparison:** the
+   driver exports `REMEMBR_CONSUME_SINGLEGOAL=1` to BOTH arms across two separate runs, so the −0.170→−0.012
+   flip is two A/B runs, not one held-fixed arm. The arm-B-specific over-fire collapse (`mem_chosen` 188→20,
+   `replan_stuck` 147→0) is the *direct* mechanism evidence; the flip is its consequence.
+2. **Redundancy = the ceiling (STRUCTURAL).** The seed starts ~0.5 m from the source with the goal IN
+   FRAME (line-of-sight: `pick_cold_pose` = highest-iou goal view_point), so it VISUALLY captions the
+   source into the fine LTM at its pose → write-OFF recall already routes there = **0.750 soft-SPL**. The
+   oracle audio write is a duplicate entry at the same xyz/category → adds zero navigation info vision
+   lacks → best case is a TIE at 0.750, **never a win**. Confirmed: damping over-fire yields REDUNDANT
+   (≈0), not HELPS.
+
+## Why HELPS is unreachable on this harness, and the honest line
+Every axis removes the one thing audio could add over vision: **LOS seed** (vision saw the source),
+**single goal instance** (nothing to disambiguate — the same wall the S2-DOA head hit), **static world**
+(no stale-vs-fresh signal). A HELPS needs a **non-line-of-sight-but-audible seed** (the seed hears the
+alarm through a wall but never captions the source; ~80-LOC dataset build with a navmesh-detour occlusion
+proxy) AND the over-fire damped — a multi-day build with sub-even odds against a 0.750 visual baseline.
+**Deferred unless the paper specifically needs a positive audio-write result.** Additional caveats: the
+write stamps the **GT source xyz (privileged/oracle)** — the agent's audio gives only an ITD-weak lateral
+sign, so even a HELPS here is an "oracle-source upper bound" until the write uses a DOA-derived estimate;
+and the result is n=5 / one-cell / 2-build-failures fragile.
+
+**Step 2 is the same family as every prior LTM lever (coarse / R-U / M4 / S2-DOA: inert-or-redundant in
+the single-goal revisit eval + SBERT instance-ceiling over-fire), now sharper — it HURTS rather than being
+inert, because it stores a second goal-ish entry where vision already won with the over-fire escape
+disabled. The positive thesis still rests ENTIRELY on the M3 *visual* +0.171 decomposition.**
+
+## Durable wins (consolidated)
+Step 1 **anomaly detection** (open-set CLAP normal-vs-anomaly gate `audio.is_anomaly`; `$0` calibration
+gate ran **GO** — perfect separation, EER 0.00, RECOMMEND_DELTA 0.137); the **S1 onset-gate** (audio
+causally necessary for warm recall); real ESC-50 audio; `write_audio_event` **mechanism-verified** (fires
+→ recalls from distance); the lifelong harness + the decisive write-seam counters + the
+`REMEMBR_CONSUME_SINGLEGOAL` single-goal anti-thrash fix; the informative video-overlay HUD.
+
+## File index (Step 2)
+| Path | Purpose |
+|---|---|
+| `embodied_memory/memory_bridge.py` | `write_audio_event`; `n_audio_writes`/`n_audio_event_recalled` counters |
+| `embodied_memory/episode_runner.py` | write seam (detected-latch) + triage counters; `_consume_memory_applies` (single-goal consumption gate) |
+| `embodied_memory/audio.py` | `is_anomaly` (Step-1 normal-vs-anomaly gate) + `NORMAL_PROMPTS` |
+| `embodied_memory/scripts/make_audiogoal_smoke.py` | `build_lifelong_dataset` (t_anom inversion) + `lifelong_construction_issues` ($0 gate) |
+| `embodied_memory/scripts/analyze_lifelong_ab.py` | write-ON/OFF A/B summary + verdict (6 TDD) |
+| `embodied_memory/scripts/diagnose_normal_anomaly_calib.py` | Step-1 $0 GO/STOP gate (Youden/EER) |
+| `scripts/race-audiogoal-lifelong.sh` | overnight A/B matrix (`--consume-singlegoal`, `--lifelong`) |
+| `runs/ll{A,B}-*` | the lifelong write-OFF/ON A/B runs; RACE-only |
