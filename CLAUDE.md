@@ -199,6 +199,40 @@ NOT a step up over +0.085 and NOT a paper-grade reproduction; plausible drivers 
 audio) are upstream of the head. Built+pushed both branches; ESC-50 clips gitignored (fetched). Three
 workflows informed it (env-compare / fusion-research / head-inert-triage).
 
+**AudioGoal Step 2 — audio anomaly → LTM write (lifelong cross-visit) CLOSED as MECHANISM-VERIFIED,
+REDUNDANT-WITH-VISION (2026-06-21 — see `PHASE2_ABLATION_REPORT.md` → "AudioGoal Step 2").** The user's
+on-thesis "anomalies go INTO the LTM so the robot learns" step — the first **write-side** lever
+(`MemoryBridge.write_audio_event`: on onset, insert a fine-layer item at the source xyz so a later visit
+recalls a waypoint TO the sound; env `LTM_AUDIO_WRITE`, default-OFF, 10 TDD). Also landed: a Step-1
+**open-set CLAP normal-vs-anomaly gate** (`audio.is_anomaly`; `$0` calib gate ran **GO** — perfect
+separation, EER 0.00); decisive summary counters (`n_audio_writes`/`n_audio_event_recalled` + a write-seam
+triage triple); the **lifelong builder** (`build_lifelong_dataset` inverts the M3 t_anom polarity — seed
+FIRES+writes / recall SILENT+far — since M3's cold seeding is silent so the write could never fire there;
+4 RACE runs to first fire); the overnight A/B harness (`race-audiogoal-lifelong.sh` + `analyze_lifelong_ab.py`).
+**Result (fragile: n=5 recall pairs, ~1 informative cell TEEsav:alarm:bed, 2 cells failed to build):
+baseline write-ON vs write-OFF B−A = −0.170 (HURTS); the over-fire fix flips it to −0.012 (REDUNDANT).**
+3-agent+adversarial diagnosis decomposed it: (1) **over-fire = fixable** — the single saturating-cosine
+GT-source waypoint was an un-consumed recall attractor (re-chosen 176×, replan_stuck 147, never STOPs)
+because the MultiON memory-consumption/anti-thrash filters are gated on `multion` (False for single-goal
+audiogoal); fix = `_consume_memory_applies` + `REMEMBR_CONSUME_SINGLEGOAL=1` ungates the SAME machinery for
+single-goal audiogoal (default-OFF, byte-identical, code-guaranteed for non-audiogoal) → confirmation run damped it
+(mem_chosen 188→20, replan_stuck 147→0, B−A −0.170→−0.012; CAVEAT = cross-run, single-cell: the flag is exported to
+BOTH arms across two runs, so the flip is two A/B runs not one held-fixed arm — the arm-B over-fire collapse is the
+direct evidence, the flip its consequence). (2) **redundancy = structural ceiling** — the seed is line-of-sight
+(~0.5m, `pick_cold_pose`=goal view_point) so it VISUALLY maps the source → write-OFF already routes there =
+**0.750 soft-SPL**; the oracle audio write is a duplicate at the same xyz → best case TIE, never a win.
+**HELPS is unreachable by construction on this harness (argued, not measured)** (LOS seed + single instance +
+static world each removes the only thing audio adds over vision); it needs a non-LOS-but-audible seed (~80 LOC, navmesh-detour proxy)
++ over-fire damping — deferred (multi-day, sub-even odds vs the 0.750 visual baseline). **Caveats:** the write
+stamps the **GT source xyz (oracle/privileged)** — audio gives only an ITD-weak lateral sign — so any HELPS
+would be an "oracle upper bound" until a DOA-derived write; the positive thesis still rests ENTIRELY on the
+M3 *visual* +0.171. **Same family as every prior LTM lever (coarse/R-U/M4/S2-DOA — inert-or-redundant in
+single-goal revisit), now sharper (HURTS until over-fire damped).** Durable wins consolidated: Step-1 anomaly
+detection (GO), the onset-gate (audio causally necessary), real ESC-50 audio, write_audio_event mechanism-
+verified, the lifelong harness + counters + the single-goal anti-thrash fix, the video-overlay HUD. Five
+workflows informed the arc (anomaly-research / step2-eval-design / smoke-triage / rootcause-regime /
+hurts-diagnosis).
+
 ## Audit caveats (2026-06-08)
 
 A read-only fact-check (the "diagnose-first" program; full version in
