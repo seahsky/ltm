@@ -303,6 +303,97 @@ def case_pick_non_los_seed_raises_when_all_los():
     print("  case pick_non_los_seed_raises_when_all_los: OK")
 
 
+def case_pick_non_los_seed_rejects_zero_energy_at_default_floor():
+    # FINDING 1: at the default energy_floor=0.0 a cell with energy EXACTLY 0.0
+    # must NOT pass (a silent cell can never clear the runtime onset gate). The
+    # guard must require strictly-positive audibility, not `e < floor` (0<0=False).
+    try:
+        mk2.pick_non_los_seed([[0.0, 0.0, 3.0]], [0.0, 0.0, 0.0], [6.0], [0.0])
+        assert False, "zero-energy cell must be rejected at the default floor"
+    except ValueError:
+        pass
+    print("  case pick_non_los_seed_rejects_zero_energy_at_default_floor: OK")
+
+
+def case_pick_non_los_seed_carries_energy():
+    # FINDING 1/6: the picker must carry the chosen cell's energy out so the
+    # construction gate can assert audibility on the actual selected seed.
+    cells = [[0.0, 0.0, 3.0], [0.0, 0.0, 4.0]]
+    geo = [6.0, 9.0]            # detours 2.0, 2.25 → argmax picks idx 1
+    energy = [0.7, 0.3]
+    seed = mk2.pick_non_los_seed(cells, [0.0, 0.0, 0.0], geo, energy,
+                                 detour_ratio=1.3, min_geo_m=2.0, energy_floor=0.1)
+    assert seed["cell_idx"] == 1, seed
+    assert "energy" in seed and abs(seed["energy"] - 0.3) < 1e-9, seed
+    print("  case pick_non_los_seed_carries_energy: OK")
+
+
+def case_nonlos_seed_episode_info_has_detour_and_energy():
+    # FINDING 2/6: the chosen seed's detour + energy must reach the seed episode's
+    # info so the construction check can gate on the SAME geometry the picker used.
+    src = _src_content()
+    source_position = [2.5, 0.0, 2.0]
+    cells = [[2.5, 0.0, 5.5]]   # 3.5m straight, geodesic 9.0 → detour ~2.57
+    geo = [9.0]
+    energy = [0.8]
+    out = mk2.build_lifelong_dataset(
+        src, ["bed"], n_warm=2, anomaly_class="alarm",
+        source_position=source_position, non_los_seed=True,
+        rir_cell_positions=cells, rir_cell_geodesics=geo, rir_cell_energies=energy,
+        detour_ratio=1.3, min_geo_m=2.0, energy_floor=0.1)
+    seed = [e for e in out["episodes"] if "-cold-" in e["episode_id"]][0]
+    info = seed["info"]
+    assert "seed_detour" in info and info["seed_detour"] >= 1.3, info
+    assert "seed_energy" in info and abs(info["seed_energy"] - 0.8) < 1e-9, info
+    print("  case nonlos_seed_episode_info_has_detour_and_energy: OK")
+
+
+def case_nonlos_around_corner_seed_greens_not_los_fail():
+    # FINDING 2 (the BUG): an IDEAL around-a-corner seed — small xz-euclid to the
+    # source (1.0m) but high detour (geodesic 2.5m) — is the BEST non-LOS case and
+    # must GREEN. The old xz `seed_los_warn_m` check hard-FAILed it as "still
+    # line-of-sight" (backwards). The non-LOS gate must drive off the detour the
+    # picker used, not the conflicting xz distance.
+    content = {
+        "episodes": [
+            {"episode_id": "bed-alarm-cold-0", "object_category": "bed",
+             "start_position": [1.0, 0.0, 0.0],   # xz 1.0m from source (round a corner)
+             "info": {"anomaly_object": "bed", "source_position": [0.0, 0.0, 0.0],
+                      "t_anom": 1, "seed_detour": 2.5, "seed_energy": 0.8}},
+            {"episode_id": "bed-alarm-warm-1", "object_category": "bed",
+             "start_position": [6.0, 0.0, 0.0],
+             "info": {"anomaly_object": "bed", "source_position": [0.0, 0.0, 0.0],
+                      "t_anom": 10000}},
+        ]
+    }
+    issues = mk2.lifelong_construction_issues(content, non_los_seed=True,
+                                              detour_ratio=1.3)
+    assert not any(i.startswith("FAIL") for i in issues), issues
+    print("  case nonlos_around_corner_seed_greens_not_los_fail: OK")
+
+
+def case_nonlos_low_detour_seed_still_fails():
+    # The detour-based gate must STILL FAIL a genuinely-LOS seed: a seed whose
+    # carried detour is below detour_ratio means the picker did not move it
+    # off-LOS → hard FAIL (the non-LOS build is defeated).
+    content = {
+        "episodes": [
+            {"episode_id": "bed-alarm-cold-0", "object_category": "bed",
+             "start_position": [0.5, 0.0, 0.0],
+             "info": {"anomaly_object": "bed", "source_position": [0.0, 0.0, 0.0],
+                      "t_anom": 1, "seed_detour": 1.05, "seed_energy": 0.8}},
+            {"episode_id": "bed-alarm-warm-1", "object_category": "bed",
+             "start_position": [6.0, 0.0, 0.0],
+             "info": {"anomaly_object": "bed", "source_position": [0.0, 0.0, 0.0],
+                      "t_anom": 10000}},
+        ]
+    }
+    issues = mk2.lifelong_construction_issues(content, non_los_seed=True,
+                                              detour_ratio=1.3)
+    assert any(i.startswith("FAIL") and "detour" in i for i in issues), issues
+    print("  case nonlos_low_detour_seed_still_fails: OK")
+
+
 def case_build_dataset_cold_override_used():
     src = _src_content()
     override = {"position": [5.0, 0.0, 5.0], "rotation": [0, 0, 0, 1]}
@@ -398,6 +489,11 @@ def main() -> int:
         case_pick_non_los_seed_rejects_inaudible,
         case_pick_non_los_seed_rejects_too_close,
         case_pick_non_los_seed_raises_when_all_los,
+        case_pick_non_los_seed_rejects_zero_energy_at_default_floor,
+        case_pick_non_los_seed_carries_energy,
+        case_nonlos_seed_episode_info_has_detour_and_energy,
+        case_nonlos_around_corner_seed_greens_not_los_fail,
+        case_nonlos_low_detour_seed_still_fails,
         case_build_dataset_cold_override_used,
         case_lifelong_nonlos_promotes_redundancy_to_fail,
         case_lifelong_nonlos_greens_valid_build,
