@@ -558,8 +558,24 @@ def case_snap_once_then_blacklist():
     print("  case_snap_once_then_blacklist: OK")
 
 
+def case_consume_applies_helper():
+    # The gate that ungates consumption for single-goal AudioGoal
+    # (REMEMBR_CONSUME_SINGLEGOAL). Default-OFF must be byte-identical.
+    f = er._consume_memory_applies
+    assert f(True, "multion", False) is True            # multion always
+    assert f(True, "objectnav", False) is True
+    assert f(False, "audiogoal", False) is False        # single-goal OFF by default
+    assert f(False, "objectnav", False) is False
+    assert f(False, "revisit", False) is False
+    assert f(False, "audiogoal", True) is True          # flag ungates audiogoal only
+    assert f(False, "objectnav", True) is False         # NOT objectnav/revisit
+    assert f(False, "revisit", True) is False
+    print("  case_consume_applies_helper: OK")
+
+
 def main() -> int:
     print("memory-consumption sanity tests")
+    case_consume_applies_helper()
     case_follower_reached_memory_consumed()
     case_distance_trigger_memory_consumed()
     case_consume_disabled_keeps_legacy_thrash()
