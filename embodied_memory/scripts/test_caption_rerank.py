@@ -60,6 +60,8 @@ def _bootstrap():
     sys.modules["embodied_memory.room_resolver"] = rr
     te = types.ModuleType("embodied_memory.text_encode_util")
     te.cosine_sim = lambda a, b: 0.0
+    # Stage-1 query-expansion is default-OFF in these tests; identity stub.
+    te.expand_query = lambda q_cat, hit_embeddings=None, **kw: q_cat
     sys.modules["embodied_memory.text_encode_util"] = te
 
     spec = importlib.util.spec_from_file_location(
