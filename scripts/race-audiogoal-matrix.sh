@@ -45,7 +45,7 @@ SCENES="TEEsavR23oF wcojb4TFT35"
 # present in both default val_mini scenes; the class->category mapping is for
 # trigger diversity (onset-trigger framing — class is decorative for retrieval).
 CELLS="baby_cry:bed alarm:sofa glass_break:chair"
-NWARM=16; SETTINGS="1 2 3"; PREFIX="m3"; TEMPORAL=""; CAPTION=""; QUEREXP=""
+NWARM=16; SETTINGS="1 2 3"; PREFIX="m3"; TEMPORAL=""; CAPTION=""; QUEREXP=""; CONSUME=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenes) SCENES="$2"; shift 2 ;;
@@ -69,9 +69,20 @@ while [ $# -gt 0 ]; do
     #       more aggressive pure-centroid query. The $0 diagnostic
     #       (diagnose_sbert_cosines.py query_template_ab) must clear the bar first
     #       (it did: bare -0.039 -> caption +0.051 on chair+bed).
+    #   --consume → the VERIFIED navigation/termination bottleneck fix: turn ON
+    #       single-goal memory CONSUMPTION (REMEMBR_CONSUME_SINGLEGOAL=1, out
+    #       <prefix>k-*). Default-OFF leaves a reached memory candidate un-consumed
+    #       so it is re-chosen every step (n_memory_consumed=0) and the agent
+    #       oscillates at the waypoint instead of stopping cleanly -> soft-SPL
+    #       dragged down (the 0.97-recall -> 0.611-succ@1m gap; alarm cells
+    #       mem_chosen 133/137 + worst soft-SPL = the smoking gun). NOT a memory
+    #       HEAD — a runtime consumption gate; episode_runner reads the env at
+    #       construction, no Python change. Expect alarm mem_chosen to collapse +
+    #       soft-SPL to recover.
     --temporal) TEMPORAL=1; shift ;;
     --caption-rerank) CAPTION=1; shift ;;
     --query-expansion) QUEREXP="$2"; shift 2 ;;
+    --consume) CONSUME=1; shift ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
@@ -80,7 +91,8 @@ _nvar=0
 [ -n "$TEMPORAL" ] && _nvar=$((_nvar+1))
 [ -n "$CAPTION" ] && _nvar=$((_nvar+1))
 [ -n "$QUEREXP" ] && _nvar=$((_nvar+1))
-[ "$_nvar" -gt 1 ] && { echo "FATAL: pass at most one A/B variant (--temporal | --caption-rerank | --query-expansion)"; exit 1; }
+[ -n "$CONSUME" ] && _nvar=$((_nvar+1))
+[ "$_nvar" -gt 1 ] && { echo "FATAL: pass at most one A/B variant (--temporal | --caption-rerank | --query-expansion | --consume)"; exit 1; }
 
 # A/B-variant setup: force S3-only, turn the chosen head on for every child run,
 # and write to a distinct out-prefix so the baseline S3 dirs are never clobbered.
@@ -95,6 +107,8 @@ elif [ -n "$QUEREXP" ]; then
     *) echo "FATAL: --query-expansion mode must be 'prf' or 'caption' (got '$QUEREXP')"; exit 1 ;;
   esac
   VARIANT_ON=1; VARIANT_LABEL="query-expansion-${QUEREXP}"; OUT_PREFIX="${PREFIX}q"; export LTM_QUERY_EXPANSION="$QUEREXP"
+elif [ -n "$CONSUME" ]; then
+  VARIANT_ON=1; VARIANT_LABEL="consume"; OUT_PREFIX="${PREFIX}k"; export REMEMBR_CONSUME_SINGLEGOAL=1
 fi
 if [ -n "$VARIANT_ON" ]; then
   SETTINGS="3"
