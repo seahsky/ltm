@@ -247,6 +247,47 @@ def recommend(agg: Dict[str, Any], min_presence: float = MIN_PRESENCE,
 
 
 # ----------------------------------------------------------------------
+# wrong-instance recall (Part B analyzer readout)
+# ----------------------------------------------------------------------
+
+
+def _allegiance(world_xy, target_center, distractor_centers):
+    """(tag, dist) — is ``world_xy`` xz-nearer the TARGET instance or a DISTRACTOR?
+    Purely geometric (candidates carry no object_id) — 'xz nearer', never 'IS'."""
+    dt = _dist_xz(world_xy, target_center)
+    dd = min(_dist_xz(world_xy, dc) for dc in distractor_centers)
+    return ("target", dt) if dt <= dd else ("distractor", dd)
+
+
+def wrong_instance_recall_rate(episodes: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Fraction of memory-firing decisions whose MOST-CONFIDENT recalled candidate
+    (the one xz-nearest ANY same-category instance) is nearer a DISTRACTOR than the
+    keyed TARGET — a wrong-instance recall — using the offline ``instance_labels``
+    the instance-keyed (Part B) build logs. ``None`` if no episode carries labels
+    (single-goal runs), so the readout is silent unless the harness is multi-instance.
+    """
+    fires = wrong = 0
+    for ep in episodes:
+        labels = ep.get("instance_labels") or {}
+        target = labels.get("target_center")
+        distractors = labels.get("distractor_centers") or []
+        if target is None or not distractors:
+            continue
+        for d in ep.get("decisions", []):
+            cands = _memory_cands(d)
+            if not cands:
+                continue
+            fires += 1
+            tagged = [_allegiance(c["world_xy"], target, distractors) for c in cands]
+            tag, _ = min(tagged, key=lambda t: t[1])   # nearest-to-any-instance candidate
+            if tag == "distractor":
+                wrong += 1
+    if fires == 0:
+        return None
+    return {"fires": fires, "wrong": wrong, "rate": wrong / fires}
+
+
+# ----------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------
 
@@ -314,6 +355,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"  [warn] {scene}:{cat} cold-instance cross-check DISAGREES "
                           f"(argmax-iou {cold.get('object_id')} vs nearest-to-cold-start "
                           f"{nb.get('object_id')}) — treat this cell's presence with caution")
+    # Part B readout: only fires when the run is instance-keyed (instance_labels
+    # present). Silent for single-goal runs.
+    wi = wrong_instance_recall_rate(episodes)
+    if wi is not None:
+        print(f"\n  [instance-keyed run] scoring is cold-instance-keyed (success counts only the "
+              f"cold-sighted instance).")
+        print(f"  wrong-instance recall rate: {wi['wrong']}/{wi['fires']} = {wi['rate']:.0%}  "
+              f"(most-confident recalled candidate xz-nearer a DISTRACTOR than the target)")
     print(f"\nRECOMMEND: {verdict} — {reason}")
     return 0
 

@@ -308,6 +308,46 @@ def case_build_dataset_instance_keyed_roundtrip_survives_gzip():
     print("  case build_dataset_instance_keyed_roundtrip_survives_gzip: OK")
 
 
+def case_build_dataset_instance_keyed_records_distractor_labels():
+    # Part B: every instance-keyed episode carries offline disambiguation labels
+    # (the TARGET centroid + the DISTRACTOR centroids), read by the analyzer's
+    # wrong-instance-recall readout. Query stays category-level.
+    src = _multi_instance_src()
+    ik = mk.build_dataset(src, categories=["chair"], n_warm=1, instance_keyed=True)
+    for ep in ik["episodes"]:
+        lab = ep["info"]["instance_labels"]
+        assert lab["target_center"] == [1.0, 0.0, 1.0], lab          # target vp centroid
+        assert lab["distractor_centers"] == [[19.0, 0.0, 19.0]], lab  # the other instance
+        assert "target_object_id" in lab, lab
+    # category-level path adds NO labels (byte-identical regression)
+    cat = mk.build_dataset(src, categories=["chair"], n_warm=1, instance_keyed=False)
+    assert all("instance_labels" not in (ep.get("info") or {}) for ep in cat["episodes"])
+    print("  case build_dataset_instance_keyed_records_distractor_labels: OK")
+
+
+def case_build_dataset_instance_keyed_warm_starts_reachability_biased():
+    # With two valid (>= min_dist from target) warm candidates, the instance-keyed
+    # build now orders NEAREST-to-target first (reachability bias, caveat-A fix),
+    # the opposite of the farthest-first category path.
+    glb = "wcojb4TFT35.basis.glb"
+    src = {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {f"{glb}_chair": [
+            _goal([0, 0, 0], [_vp([0, 0, 0], iou=1.8)]),       # TARGET at origin
+            _goal([30, 0, 30], [_vp([30, 0, 30], iou=0.5)]),   # distractor far away
+        ]},
+        "episodes": [
+            {**_template("chair", "1"), "start_position": [5, 0, 5]},    # ~7.07m from target
+            {**_template("chair", "2"), "start_position": [12, 0, 12]},  # ~16.97m from target
+        ],
+    }
+    ik = mk.build_dataset(src, categories=["chair"], n_warm=2, instance_keyed=True)
+    warm = [e["start_position"] for e in ik["episodes"][1:]]
+    assert warm == [[5, 0, 5], [12, 0, 12]], warm   # nearest-to-target first
+    print("  case build_dataset_instance_keyed_warm_starts_reachability_biased: OK")
+
+
 # ----------------------------------------------------------------------
 # write_dataset — gzip round-trip in habitat layout
 # ----------------------------------------------------------------------
@@ -710,6 +750,8 @@ def main() -> int:
     case_build_dataset_instance_keyed_restricts_goals()
     case_build_dataset_instance_keyed_warm_far_from_target_instance()
     case_build_dataset_instance_keyed_roundtrip_survives_gzip()
+    case_build_dataset_instance_keyed_records_distractor_labels()
+    case_build_dataset_instance_keyed_warm_starts_reachability_biased()
     case_write_dataset_roundtrip()
     case_two_builds_into_one_dir_are_additive()
     case_cross_env_cold_home_warm_away()

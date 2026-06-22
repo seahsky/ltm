@@ -119,6 +119,25 @@ def _instance_centroid(inst: Dict[str, Any]) -> Optional[List[float]]:
     return [sum(v[i] for v in vps) / n for i in range(len(vps[0]))]
 
 
+def _instance_labels(target_inst: Dict[str, Any],
+                     all_instances: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Offline disambiguation labels for the instance-keyed (Part B) build: the
+    keyed TARGET instance's object_id + centroid, and the centroids of every OTHER
+    same-category instance (the DISTRACTORS the warm agent must not mistake for the
+    goal). The retrieval query stays category-level ("there is a {cat}"); these
+    labels are read only by the analyzer's wrong-instance-recall readout."""
+    distractors: List[List[float]] = []
+    for inst in all_instances:
+        if inst is target_inst:
+            continue
+        c = _instance_centroid(inst)
+        if c is not None:
+            distractors.append(c)
+    return {"target_object_id": target_inst.get("object_id"),
+            "target_center": _instance_centroid(target_inst),
+            "distractor_centers": distractors}
+
+
 def pick_warm_instance(
     goal_instances: List[Dict[str, Any]],
     cold_instance: Dict[str, Any],
@@ -336,18 +355,38 @@ def build_dataset(
 
         goal_instances = goals_by_category[gkey]
         if instance_keyed:
-            # restrict the goal set (and the warm-distance reference) to the
+            # Multi-instance disambiguation (Part B): restrict success to the
             # single cold-sighted instance — reaching any OTHER same-category
-            # instance no longer succeeds / reduces distance-to-goal.
+            # instance no longer succeeds / reduces distance-to-goal. Warm starts
+            # are REACHABILITY-biased (the caveat-A NaN-collapse fix the
+            # changed-world build already uses): draw from the TARGET instance's
+            # own view_point poses (proven navmesh-connected — the cold episode
+            # starts there) + the category source starts, ranked NEAREST-to-target
+            # (the farthest-first pick_warm_poses grabbed disconnected-island
+            # starts → Infinity geodesic → NaN soft_SPL). Plus offline distractor
+            # labels for the analyzer's wrong-instance-recall readout.
             target_inst = pick_cold_instance(goal_instances)
             cold_pose = pick_cold_pose([target_inst])
             goal_vps = _goal_view_point_positions([target_inst])
             out_goals[gkey] = [target_inst]
+            a_reachable_poses = [
+                {"position": list(vp), "rotation": list(cold_pose["rotation"])}
+                for vp in goal_vps
+            ]
+            warm_poses = pick_warm_poses_changed_world(
+                cat_candidate_poses, a_reachable_poses, goal_vps,
+                n=n_warm, min_dist=min_dist)
+            eps = build_category_episodes(template, cold_pose, warm_poses, cat)
+            labels = _instance_labels(target_inst, goal_instances)
+            for ep in eps:
+                ep.setdefault("info", {})["instance_labels"] = labels
+            out_eps.extend(eps)
         else:
             cold_pose = pick_cold_pose(goal_instances)
             goal_vps = _goal_view_point_positions(goal_instances)
-        warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps, n=n_warm, min_dist=min_dist)
-        out_eps.extend(build_category_episodes(template, cold_pose, warm_poses, cat))
+            warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps,
+                                         n=n_warm, min_dist=min_dist)
+            out_eps.extend(build_category_episodes(template, cold_pose, warm_poses, cat))
 
     return {
         "category_to_task_category_id": src_content.get("category_to_task_category_id", {}),
