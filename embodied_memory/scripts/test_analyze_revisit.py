@@ -633,6 +633,79 @@ def case_matrix_report_pools_cells_for_warm_delta():
     print("  case_matrix_report_pools_cells_for_warm_delta: OK")
 
 
+# ----------------------------------------------------------------------
+# rliable-style power accounting (opt-in --power; IQM + P(improve) + MDES)
+# ----------------------------------------------------------------------
+
+
+def case_iqm_drops_tails():
+    # IQM = mean of the central 50%; a single outlier should not move it.
+    assert abs(ar._iqm([0, 0, 0, 0, 0, 0, 0, 100]) - 0.0) < 1e-9, ar._iqm([0] * 7 + [100])
+    # n<4 degenerates to the plain mean (the middle-50% selection drops nothing).
+    assert abs(ar._iqm([1.0, 2.0]) - 1.5) < 1e-9, ar._iqm([1.0, 2.0])
+    assert abs(ar._iqm([1.0, 2.0, 3.0]) - 2.0) < 1e-9, ar._iqm([1.0, 2.0, 3.0])
+    # n==4: central two values.
+    assert abs(ar._iqm([1.0, 2.0, 3.0, 100.0]) - 2.5) < 1e-9, ar._iqm([1.0, 2.0, 3.0, 100.0])
+    print("  case_iqm_drops_tails: OK")
+
+
+def case_prob_improvement_counts():
+    # +1,+1 -> 1 each; -1 -> 0; 0 (tie) -> 0.5. (1+1+0+0.5)/4 = 0.625.
+    assert abs(ar._prob_improvement([1.0, 1.0, -1.0, 0.0]) - 0.625) < 1e-9
+    assert abs(ar._prob_improvement([1.0, 2.0, 3.0]) - 1.0) < 1e-9
+    assert abs(ar._prob_improvement([-1.0, -2.0]) - 0.0) < 1e-9
+    print("  case_prob_improvement_counts: OK")
+
+
+def case_power_note_mdes():
+    import math as _m
+    deltas = [-2.0, -1.0, 0.0, 1.0, 2.0]  # n=5, sample sd = sqrt(2.5)
+    note = ar._power_note(deltas)
+    sd = _m.sqrt(2.5)
+    assert abs(note["sd"] - sd) < 1e-9, note
+    assert abs(note["n"] - 5) < 1e-9, note
+    exp_mde = 1.6449 * sd / _m.sqrt(5)
+    exp_mdes = (1.6449 + 0.8416) * sd / _m.sqrt(5)
+    assert abs(note["mde_05"] - exp_mde) < 1e-3, note
+    assert abs(note["mdes_80"] - exp_mdes) < 1e-3, note
+    # mean 0 < MDES → not adequately powered for this (null) effect.
+    assert note["adequately_powered"] is False, note
+    print("  case_power_note_mdes: OK")
+
+
+def case_bootstrap_stat_seed_reproducible():
+    deltas = [0.1, 0.5, -0.2, 0.9, 0.3, 0.0, 0.7, -0.1]
+    a = ar._bootstrap_stat(deltas, ar._iqm, n_resamples=300, ci=0.9, seed=0)
+    b = ar._bootstrap_stat(deltas, ar._iqm, n_resamples=300, ci=0.9, seed=0)
+    assert a == b, (a, b)
+    point, lo, hi = a
+    assert lo <= point <= hi, a
+    print("  case_bootstrap_stat_seed_reproducible: OK")
+
+
+def case_power_block_opt_in():
+    # The power block must be OFF by default (byte-identical report) and ON
+    # only when print_report is asked for it.
+    s1 = _run(1, [_ep("A", 1, "bed", 0, soft=0.1), _ep("A", 2, "bed", 1, soft=0.1)])
+    s3 = _run(3, [_ep("A", 1, "bed", 0, soft=0.1),
+                  _ep("A", 2, "bed", 1, soft=0.9, n_mem_chosen=1)])
+    buf_off = io.StringIO()
+    with contextlib.redirect_stdout(buf_off):
+        ar.print_report([s1, s3], n_bootstrap=300)
+    off = buf_off.getvalue()
+    assert "IQM" not in off and "P(improve)" not in off, off
+
+    s1b = _run(1, [_ep("A", 1, "bed", 0, soft=0.1), _ep("A", 2, "bed", 1, soft=0.1)])
+    s3b = _run(3, [_ep("A", 1, "bed", 0, soft=0.1),
+                   _ep("A", 2, "bed", 1, soft=0.9, n_mem_chosen=1)])
+    buf_on = io.StringIO()
+    with contextlib.redirect_stdout(buf_on):
+        ar.print_report([s1b, s3b], n_bootstrap=300, power=True)
+    on = buf_on.getvalue()
+    assert "IQM" in on and "P(improve)" in on and "MDES" in on, on
+    print("  case_power_block_opt_in: OK")
+
+
 def main() -> int:
     print("Phase-A revisit analyzer sanity tests")
     case_pools_multiple_dirs_per_setting()
@@ -670,6 +743,11 @@ def main() -> int:
     case_load_reads_episode_files()
     case_load_infers_setting_from_name()
     case_binary_spl_block_printed_when_runs_have_spl()
+    case_iqm_drops_tails()
+    case_prob_improvement_counts()
+    case_power_note_mdes()
+    case_bootstrap_stat_seed_reproducible()
+    case_power_block_opt_in()
     print("All cases passed.")
     return 0
 

@@ -45,6 +45,7 @@ import glob
 import json
 import math
 import os
+import random
 import re
 import sys
 from dataclasses import dataclass, field
@@ -544,7 +545,166 @@ def pool_dirs(paths: List[str], label: str) -> "RevisitRun":
     return RevisitRun(name=label, path="", setting=setting, episodes=eps)
 
 
-def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
+# ----------------------------------------------------------------------
+# rliable-style robust statistics + power accounting (opt-in --power)
+# ----------------------------------------------------------------------
+#
+# In the spirit of Agarwal et al., "Deep RL at the Edge of the Statistical
+# Precipice" (rliable, NeurIPS 2021): report robust interval estimates rather
+# than bare point means on a small sample. Two of rliable's four ideas transfer
+# to our PAIRED single-task setting and are computed here on the per-pair delta
+# list that ``_paired_delta`` already returns:
+#   * IQM       — interquartile mean (mean of the central 50% of the deltas),
+#                 insensitive to a few outlier pairs.
+#   * P(improve)— probability of improvement P(S3>S1): fraction of warm pairs
+#                 with a positive delta (ties 0.5). The single-task PAIRED
+#                 specialization of rliable's across-task P(X>Y).
+# Stratified-across-task bootstrap CIs and performance profiles do NOT apply
+# (one task; the paired pairing IS the right stratification) — we say so rather
+# than fake them. All stdlib (the analyzer deliberately avoids the faiss-pulling
+# package __init__); no rliable/numpy dependency.
+
+_Z_05 = 1.6449   # one-sided z at alpha=0.05
+_Z_20 = 0.8416   # z at beta=0.20 (i.e. 80% power)
+
+
+def _iqm(vals: List[float]) -> float:
+    """Interquartile mean: mean of the central 50% of ``vals``.
+
+    Drops ``n//4`` from each end of the sorted list. For ``n < 4`` the quartile
+    is 0, so this degenerates to the plain mean (nothing to trim) — annotate
+    that at the call site so the IQM column is not mistaken for independent
+    signal at tiny n.
+    """
+    n = len(vals)
+    if n == 0:
+        return float("nan")
+    s = sorted(vals)
+    lo = n // 4
+    hi = n - lo
+    central = s[lo:hi] if hi > lo else s
+    return sum(central) / len(central)
+
+
+def _prob_improvement(deltas: List[float]) -> float:
+    """P(S3>S1): fraction of pairs with delta>0 (ties counted 0.5)."""
+    n = len(deltas)
+    if n == 0:
+        return float("nan")
+    return sum(1.0 if d > 0 else 0.5 if d == 0 else 0.0 for d in deltas) / n
+
+
+def _bootstrap_stat(deltas, stat_fn, n_resamples: int = 5000,
+                    ci: float = 0.9, seed: int = 0):
+    """``(point, lo, hi)`` of a percentile bootstrap of ``stat_fn`` over
+    resampled deltas. Mirrors ``analyze_ablation.paired_bootstrap_mean_diff``
+    exactly (same seeded RNG, same percentile-index arithmetic) so the new CIs
+    are consistent with the existing mean CIs. ``point`` is ``stat_fn`` on the
+    full sample; ``lo/hi`` are NaN for ``n < 2``.
+    """
+    n = len(deltas)
+    if n == 0:
+        nan = float("nan")
+        return nan, nan, nan
+    point = stat_fn(deltas)
+    if n < 2:
+        return point, float("nan"), float("nan")
+    rng = random.Random(seed)
+    stats: List[float] = []
+    for _ in range(n_resamples):
+        sample = [deltas[rng.randrange(n)] for _ in range(n)]
+        stats.append(stat_fn(sample))
+    stats.sort()
+    alpha = (1.0 - ci) / 2.0
+    lo = stats[int(alpha * n_resamples)]
+    hi = stats[int((1.0 - alpha) * n_resamples) - 1]
+    return point, lo, hi
+
+
+def _sample_sd(vals: List[float]) -> float:
+    n = len(vals)
+    if n < 2:
+        return float("nan")
+    m = sum(vals) / n
+    var = sum((v - m) ** 2 for v in vals) / (n - 1)
+    return math.sqrt(var)
+
+
+def _power_note(deltas: List[float]) -> Dict[str, Any]:
+    """Normal-approximation power accounting on the paired-delta sample.
+
+    Returns the realized sample SD, the minimum effect detectable at one-sided
+    p<0.05 (``mde_05 = z_.05 * sd / sqrt(n)``), the effect detectable with 80%
+    power (``mdes_80 = (z_.05 + z_.20) * sd / sqrt(n)``), and whether the
+    observed mean clears ``mdes_80``. This is a PLANNING HEURISTIC — the
+    reported p-values come from the paired bootstrap, not this approximation,
+    and the SD is itself estimated from the same small sample.
+    """
+    n = len(deltas)
+    mean = sum(deltas) / n if n else float("nan")
+    sd = _sample_sd(deltas)
+    if n < 2 or not math.isfinite(sd):
+        return {"n": n, "mean": mean, "sd": sd,
+                "mde_05": float("nan"), "mdes_80": float("nan"),
+                "adequately_powered": False}
+    rootn = math.sqrt(n)
+    mde_05 = _Z_05 * sd / rootn
+    mdes_80 = (_Z_05 + _Z_20) * sd / rootn
+    # Zero variance (every pair identical, e.g. an inert cold control at exactly
+    # 0.000) is degenerate, not "powered" — the normal approximation says nothing.
+    powered = bool(sd > 0.0 and math.isfinite(mean) and abs(mean) >= mdes_80)
+    return {"n": n, "mean": mean, "sd": sd, "mde_05": mde_05, "mdes_80": mdes_80,
+            "degenerate": sd == 0.0, "adequately_powered": powered}
+
+
+def _fmt_ci(point: float, lo: float, hi: float) -> str:
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return f"{point:+.4f} [CI n/a, n<2]"
+    return f"{point:+.4f} [90% CI {lo:+.4f}, {hi:+.4f}]"
+
+
+def print_power_block(warm: Dict[str, Any], cold: Dict[str, Any],
+                      n_bootstrap: int) -> None:
+    """rliable-style robustness + power readout on the warm/cold soft-SPL
+    deltas. Opt-in (``analyze_revisit --power``); prints nothing on the default
+    path so existing output stays byte-identical.
+    """
+    print("=== rliable-style robustness + power (soft-SPL S3-S1) ===")
+    for tag, res in (("WARM", warm), ("COLD", cold)):
+        deltas = list(res.get("deltas", []))
+        n = len(deltas)
+        if n == 0:
+            print(f"  [{tag}] no paired deltas")
+            continue
+        iqm_pt, iqm_lo, iqm_hi = _bootstrap_stat(deltas, _iqm, n_resamples=n_bootstrap)
+        pi_pt, pi_lo, pi_hi = _bootstrap_stat(deltas, _prob_improvement,
+                                              n_resamples=n_bootstrap)
+        note = _power_note(deltas)
+        mean = res.get("mean", note["mean"])
+        print(f"  [{tag}] n={n}  mean={mean:+.4f}")
+        iqm_tail = "  (IQM==mean for n<4)" if n < 4 else ""
+        print(f"    IQM        = {_fmt_ci(iqm_pt, iqm_lo, iqm_hi)}{iqm_tail}")
+        print(f"    P(improve) = {_fmt_ci(pi_pt, pi_lo, pi_hi)}   (P(S3>S1), ties=0.5)")
+        if note.get("degenerate"):
+            print("    power: zero variance (all paired deltas identical) — "
+                  "MDES undefined")
+        elif math.isfinite(note["mdes_80"]):
+            verdict = ("adequately powered" if note["adequately_powered"]
+                       else "UNDERPOWERED for an effect this size")
+            rel = ">=" if note["adequately_powered"] else "<"
+            print(f"    power: sd={note['sd']:.4f}  MDE(p<.05)={note['mde_05']:.4f}  "
+                  f"MDES(80%)={note['mdes_80']:.4f}  -> |mean| {rel} MDES ({verdict})")
+        else:
+            print("    power: n<2 — cannot estimate SD/MDES")
+    print("  NOTE: IQM + P(improve) are rliable-style robust stats on the paired")
+    print("  delta sample; performance profiles / across-task stratified CIs do")
+    print("  NOT apply (single task). MDES is a normal-approx planning heuristic;")
+    print("  the reported p-values come from the paired bootstrap, not this approx.")
+    print()
+
+
+def print_report(runs: List[RevisitRun], n_bootstrap: int,
+                 power: bool = False) -> str:
     """Print the full Phase-A report and return the Gate A classification."""
     for r in runs:
         assign_visit_order(r.episodes)
@@ -586,6 +746,10 @@ def print_report(runs: List[RevisitRun], n_bootstrap: int) -> str:
         _print_delta("WARM S3 - S2 (LTM-specific: consolidation+LTM+rerank)", warm_s3_s2)
     _print_delta("COLD S3 - S1 (control, expect ~0)", cold)
     print()
+
+    # rliable-style robustness + power (opt-in --power; default path unchanged).
+    if power:
+        print_power_block(warm, cold, n_bootstrap)
 
     # --- paired binary SPL block (precision-bound metric) ---
     warm_b = paired_warm_delta(s1.episodes, s3.episodes,
@@ -646,6 +810,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Visit-order (revisit) ablation analysis")
     parser.add_argument("run_dirs", nargs="*", help="Run directories (>=2; need S1 and S3).")
     parser.add_argument("--bootstrap", type=int, default=5000)
+    parser.add_argument("--power", action="store_true",
+                        help="Append an rliable-style robustness + power block "
+                             "(IQM, probability-of-improvement P(S3>S1), and an "
+                             "MDES/power note) to the S1/S2/S3 report. Opt-in; the "
+                             "default output is byte-identical without it.")
     parser.add_argument("--compare", action="store_true",
                         help="Head-to-head paired B - A delta between exactly two "
                              "same-setting runs (e.g. heuristic-R vs trained-R S3), "
@@ -679,7 +848,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     runs = [load_revisit_run(p) for p in args.run_dirs]
-    print_report(runs, args.bootstrap)
+    print_report(runs, args.bootstrap, power=args.power)
     return 0
 
 
