@@ -358,6 +358,14 @@ class HabitatObjectNavSource(EpisodeSource):
         if isinstance(ep_info, dict) and ep_info.get("instance_labels"):
             metadata["instance_labels"] = ep_info["instance_labels"]
 
+        # seed-distractors build: surface the seed_only flag (written into
+        # episode.info by make_revisit_smoke's --seed-distractors path) so the
+        # runner can log it and the analyzer can EXCLUDE the episode from cold/warm
+        # pairing — it only SEEDS the LTM, never scored. Habitat overwrites
+        # episode_id with the load index, so the flag (not the id) is the carrier.
+        if isinstance(ep_info, dict) and ep_info.get("seed_only"):
+            metadata["seed_only"] = True
+
         # AudioGoal: surface the anomaly config (source_position / anomaly_class /
         # anomaly_object / per-episode t_anom written by the M2 dataset builder
         # into episode.info) for the runner + analysis.

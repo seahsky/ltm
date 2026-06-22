@@ -119,6 +119,39 @@ def _instance_centroid(inst: Dict[str, Any]) -> Optional[List[float]]:
     return [sum(v[i] for v in vps) / n for i in range(len(vps[0]))]
 
 
+def pick_distractor_instances(
+    target_inst: Dict[str, Any],
+    all_instances: List[Dict[str, Any]],
+    n: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Return the same-category DISTRACTOR instances (every instance != target
+    that owns a view_point), ordered NEAREST-to-target first.
+
+    Used by the ``seed_distractors`` build to emit one seed-only cold episode per
+    distractor: the agent starts at the distractor's view_point, captions it, and
+    consolidation seeds it into the LTM — so the warm visit's retrieval faces
+    MULTIPLE same-category sightings and must rank the RIGHT one (a retrieval-level
+    disambiguation test, not just navigation-level steering past a nearer
+    distractor). NEAREST-first because the closest same-category instances are the
+    genuine confusers (and the cap ``n`` keeps the seed-episode count — and run
+    cost — modest on categories like chair with 9-12 instances). ``n=None`` seeds
+    all distractors. Returns ``[]`` for a single-instance category.
+    """
+    ct = _instance_centroid(target_inst)
+    scored: List["tuple[float, Dict[str, Any]]"] = []
+    for inst in all_instances:
+        if inst is target_inst:
+            continue
+        c = _instance_centroid(inst)
+        if c is None:
+            continue
+        d = _dist(ct, c) if ct is not None else math.inf
+        scored.append((d, inst))
+    scored.sort(key=lambda t: t[0])
+    insts = [inst for _, inst in scored]
+    return insts if n is None else insts[: max(0, n)]
+
+
 def _instance_labels(target_inst: Dict[str, Any],
                      all_instances: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Offline disambiguation labels for the instance-keyed (Part B) build: the
@@ -274,22 +307,41 @@ def build_category_episodes(
     cold_pose: Dict[str, Any],
     warm_poses: List[Dict[str, Any]],
     category: str,
+    seed_poses: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Clone ``template`` into [cold, warm_1, ..., warm_k], overriding start
-    pose + episode_id. The template supplies valid ``goals`` / ``info`` /
-    ``scene_id``; it is not mutated.
+    """Clone ``template`` into [cold, seed_0..seed_m, warm_1, ..., warm_k],
+    overriding start pose + episode_id. The template supplies valid ``goals`` /
+    ``info`` / ``scene_id``; it is not mutated.
+
+    ``seed_poses`` (distractor view_point poses) are emitted as ``{cat}-seed-{k}``
+    episodes ORDERED BETWEEN the cold visit and the warm visits, each flagged
+    ``info['seed_only']=True``. They run a full episode from the distractor
+    view_point so the agent captions it and episode-end consolidation seeds it
+    into the LTM — populating the LTM with same-category DISTRACTOR sightings
+    BEFORE the warm visit (so warm retrieval must rank the right instance). The
+    ``seed_only`` flag is the analyzer's exclusion key (it is NOT a scored/paired
+    visit). Ordering relies on ``pin_episode_order`` (shuffle=False), so dataset
+    order == run order == ``episode_idx`` order: cold(0) seeds(1..m) warm(m+1..).
     """
     out: List[Dict[str, Any]] = []
 
-    def _clone(pose: Dict[str, Any], eid: str) -> Dict[str, Any]:
+    def _clone(pose: Dict[str, Any], eid: str,
+               seed_only: bool = False) -> Dict[str, Any]:
         ep = copy.deepcopy(template)
         ep["episode_id"] = eid
         ep["object_category"] = category
         ep["start_position"] = list(pose["position"])
         ep["start_rotation"] = list(pose["rotation"])
+        if seed_only:
+            # Habitat overwrites episode_id with the load index, so the analyzer
+            # CANNOT detect a seed via the id substring — the flag must ride
+            # episode.info -> metadata -> ep_log (same path as instance_labels).
+            ep.setdefault("info", {})["seed_only"] = True
         return ep
 
     out.append(_clone(cold_pose, f"{category}-cold-0"))
+    for k, pose in enumerate(seed_poses or []):
+        out.append(_clone(pose, f"{category}-seed-{k}", seed_only=True))
     for i, pose in enumerate(warm_poses):
         out.append(_clone(pose, f"{category}-warm-{i + 1}"))
     return out
@@ -309,6 +361,8 @@ def build_dataset(
     n_warm: int,
     min_dist: float = 2.0,
     instance_keyed: bool = False,
+    seed_distractors: bool = False,
+    n_distractors: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Assemble a content dict with, per category, one cold + ``n_warm`` warm
     episodes. Categories absent from the source are skipped. Warm-start
@@ -376,7 +430,19 @@ def build_dataset(
             warm_poses = pick_warm_poses_changed_world(
                 cat_candidate_poses, a_reachable_poses, goal_vps,
                 n=n_warm, min_dist=min_dist)
-            eps = build_category_episodes(template, cold_pose, warm_poses, cat)
+            # seed_distractors: ALSO start a seed-only cold episode at each
+            # same-category DISTRACTOR's view_point (between cold and warm), so
+            # consolidation seeds the distractor into the LTM and the warm visit's
+            # retrieval faces MULTIPLE same-category sightings (a retrieval-level
+            # disambiguation test). Faithful: the agent captions the distractor the
+            # same way it captions the target — no privileged direct LTM write.
+            seed_poses: List[Dict[str, Any]] = []
+            if seed_distractors:
+                for dist_inst in pick_distractor_instances(
+                        target_inst, goal_instances, n=n_distractors):
+                    seed_poses.append(pick_cold_pose([dist_inst]))
+            eps = build_category_episodes(template, cold_pose, warm_poses, cat,
+                                          seed_poses=seed_poses)
             labels = _instance_labels(target_inst, goal_instances)
             for ep in eps:
                 ep.setdefault("info", {})["instance_labels"] = labels
@@ -678,6 +744,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "cold-sighted (highest-iou) instance, so reaching a "
                              "different same-category instance no longer counts "
                              "(gives instance discrimination a metric target).")
+    parser.add_argument("--seed-distractors", action="store_true",
+                        help="With --instance-keyed: ALSO emit one seed-only cold "
+                             "episode per same-category DISTRACTOR (starting at its "
+                             "view_point so the agent captions+seeds it into the LTM, "
+                             "between cold and warm). The warm visit's retrieval then "
+                             "faces MULTIPLE same-category sightings and must rank the "
+                             "RIGHT one — a retrieval-level disambiguation test. Seed "
+                             "episodes carry info['seed_only']=True; the analyzer "
+                             "EXCLUDES them from cold/warm pairing (they only seed the "
+                             "LTM). Default OFF -> byte-identical.")
+    parser.add_argument("--n-distractors", type=int, default=2,
+                        help="--seed-distractors: cap the number of (nearest-first) "
+                             "distractor instances seeded per category, so chair "
+                             "(9-12 instances) does not balloon into a dozen extra "
+                             "episode runs. 0 disables seeding; <0 seeds ALL.")
     parser.add_argument("--changed-world", action="store_true",
                         help="Changed-world mode: cold starts AT instance A (seeds it) "
                              "but success is keyed to a DIFFERENT instance B, so the "
@@ -706,14 +787,20 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.instance_keyed and args.changed_world:
         parser.error("--instance-keyed and --changed-world are mutually exclusive")
+    if args.seed_distractors and not args.instance_keyed:
+        parser.error("--seed-distractors requires --instance-keyed (success must be "
+                     "keyed to the single target so a recalled DISTRACTOR mis-routes)")
 
     src = _load_gz(args.src)
     if args.changed_world:
         content = build_changed_world_dataset(src, args.categories, args.n_warm,
                                               args.min_dist, min_move=args.min_move)
     else:
+        _n_distract = None if args.n_distractors < 0 else args.n_distractors
         content = build_dataset(src, args.categories, args.n_warm, args.min_dist,
-                                instance_keyed=args.instance_keyed)
+                                instance_keyed=args.instance_keyed,
+                                seed_distractors=args.seed_distractors,
+                                n_distractors=_n_distract)
     if not content["episodes"]:
         print(f"ERROR: no episodes built for categories={args.categories} "
               f"({'need >=2 instances per category for --changed-world; ' if args.changed_world else ''}"

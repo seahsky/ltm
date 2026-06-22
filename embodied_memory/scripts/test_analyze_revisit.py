@@ -257,6 +257,81 @@ def case_load_reads_episode_files():
     print("  case load_reads_episode_files (decisions/idx/d2g fallback): OK")
 
 
+def case_load_drops_seed_only_episodes():
+    # seed-distractors build: seed_only episodes exist ONLY to caption + seed a
+    # distractor into the LTM; load_revisit_run -> _raw_to_episode must DROP them so
+    # visit_order stays cold(0)/warm(1..) and the paired set is unchanged.
+    with tempfile.TemporaryDirectory() as d:
+        cold = {"scene_id": "S", "episode_id": "0", "target_category": "chair",
+                "episode_idx": 0, "soft_spl": 0.1, "spl": 0.0, "success": False,
+                "n_steps": 5, "distance_to_goal": 4.0}
+        seed = {"scene_id": "S", "episode_id": "1", "target_category": "chair",
+                "episode_idx": 1, "soft_spl": 0.9, "spl": 1.0, "success": True,
+                "n_steps": 3, "distance_to_goal": 0.1, "seed_only": True}
+        warm = {"scene_id": "S", "episode_id": "2", "target_category": "chair",
+                "episode_idx": 2, "soft_spl": 0.5, "spl": 0.0, "success": False,
+                "n_steps": 20, "distance_to_goal": 0.5, "n_memory_chosen": 1}
+        for i, ep in enumerate((cold, seed, warm)):
+            with open(os.path.join(d, f"episode_{i:03d}.json"), "w") as f:
+                json.dump(ep, f)
+        with open(os.path.join(d, "summary.json"), "w") as f:
+            json.dump({"ablation": {"setting": 3}, "episodes": []}, f)
+        run = ar.load_revisit_run(d)
+    # the seed episode is gone (despite its big soft_spl=0.9 that would otherwise
+    # poison the warm strata); only cold + warm remain
+    assert len(run.episodes) == 2, [e.episode_id for e in run.episodes]
+    assert {e.episode_id for e in run.episodes} == {"0", "2"}
+    ar.assign_visit_order(run.episodes)
+    by_id = {e.episode_id: e for e in run.episodes}
+    # the surviving cold is visit_order 0, the warm is 1 (NOT 2 — the seed's idx
+    # does not shift the warm's order, because the seed never enters the group)
+    assert by_id["0"].visit_order == 0 and by_id["0"].is_cold
+    assert by_id["2"].visit_order == 1 and by_id["2"].is_warm
+    print("  case load_drops_seed_only_episodes: OK")
+
+
+def case_seed_only_does_not_change_paired_n():
+    # The seed episode must NOT change the paired warm n vs a non-seeded build:
+    # the same dataset (incl. the seed) runs for S1 and S3, the seed is dropped in
+    # BOTH, so pairing on (scene,category,visit_order) is identical to no-seed.
+    def _raw(eid, idx, soft, seed=False):
+        r = {"scene_id": "S", "episode_id": str(eid), "target_category": "chair",
+             "episode_idx": idx, "soft_spl": soft, "spl": 0.0, "success": False,
+             "n_steps": 10, "distance_to_goal": 2.0}
+        if seed:
+            r["seed_only"] = True
+        return r
+    # S1 and S3 each: cold(idx0), seed(idx1), warm(idx2) — seed dropped both sides
+    s1 = [e for e in (ar._raw_to_episode(_raw(0, 0, 0.1)),
+                      ar._raw_to_episode(_raw(1, 1, 0.0, seed=True)),
+                      ar._raw_to_episode(_raw(2, 2, 0.2))) if e]
+    s3 = [e for e in (ar._raw_to_episode(_raw(0, 0, 0.5)),
+                      ar._raw_to_episode(_raw(1, 1, 0.0, seed=True)),
+                      ar._raw_to_episode(_raw(2, 2, 0.6))) if e]
+    assert len(s1) == 2 and len(s3) == 2, (len(s1), len(s3))  # seed dropped both
+    ar.assign_visit_order(s1)
+    ar.assign_visit_order(s3)
+    res = ar.paired_warm_delta(s1, s3, n_bootstrap=1000)
+    assert res["n"] == 1, res["n"]                       # one warm pair, not two
+    assert abs(res["mean"] - 0.4) < 1e-9, res["mean"]    # 0.6 - 0.2
+    assert res["n_dropped"] == 0, res["n_dropped"]       # no structural mismatch
+    print("  case seed_only_does_not_change_paired_n: OK")
+
+
+def case_no_seed_only_field_is_unchanged():
+    # Regression guard: an episode WITHOUT a seed_only field is coerced exactly as
+    # before (the new drop is a no-op on the normal path).
+    raw = {"scene_id": "S", "episode_id": "7", "target_category": "bed",
+           "episode_idx": 4, "soft_spl": 0.3, "spl": 0.0, "success": False,
+           "n_steps": 12, "distance_to_goal": 1.5}
+    e = ar._raw_to_episode(raw)
+    assert e is not None and e.episode_id == "7" and e.soft_spl == 0.3
+    # explicit seed_only=False is also kept (only truthy drops)
+    raw2 = dict(raw, seed_only=False)
+    assert ar._raw_to_episode(raw2) is not None
+    print("  case no_seed_only_field_is_unchanged: OK")
+
+
 def case_load_infers_setting_from_name():
     with tempfile.TemporaryDirectory() as parent:
         d = os.path.join(parent, "revisit-smoke-chair-s1")
@@ -741,6 +816,9 @@ def main() -> int:
     case_compare_verdict_negligible_positive_is_tie()
     case_compare_verdict_real_positive_b_beats_a()
     case_load_reads_episode_files()
+    case_load_drops_seed_only_episodes()
+    case_seed_only_does_not_change_paired_n()
+    case_no_seed_only_field_is_unchanged()
     case_load_infers_setting_from_name()
     case_binary_spl_block_printed_when_runs_have_spl()
     case_iqm_drops_tails()

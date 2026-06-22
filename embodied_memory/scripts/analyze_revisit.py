@@ -131,6 +131,16 @@ def _infer_setting(path: str, summary: Dict[str, Any]) -> Optional[int]:
 
 
 def _raw_to_episode(raw: Dict[str, Any]) -> Optional[RevisitEpisode]:
+    # seed-distractors build: a seed-only episode exists ONLY to caption +
+    # consolidate a same-category distractor into the LTM (a retrieval-level
+    # disambiguation setup). It is NOT a cold/warm visit — drop it BEFORE
+    # assign_visit_order so visit_order stays cold(target)=0 / warm(>=1) and the
+    # paired n is identical to a non-seeded build (the seed only changes the LTM
+    # the warm visit recalls against, never the scored/paired set). The flag rides
+    # episode.info -> metadata -> ep_log (set by make_revisit_smoke; Habitat
+    # renumbers episode_id, so the flag, not an id substring, is the carrier).
+    if raw.get("seed_only"):
+        return None
     base = _coerce_episode(raw)
     if base is None:
         return None
