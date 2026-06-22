@@ -3182,41 +3182,58 @@ worst soft-SPL; glass/baby fire little, score high. In the over-firing alarm cel
 first-pass hits are wrong-instance same-category captions, so PRF pulls the query toward them
 -> more wrong fires, no added goal presence. Planner census S3: memory 33, frontier 15, LLM 1.
 
-**Recall-gap re-measure** (`diagnose_audio_doa_calib.py`, radius sweep FIXED this round; m3q,
-24 ep, 430 firing decisions). Distance from an emitted candidate's stored `world_xy` to the
-GT goal-object center: **<=1.5m 175/430=41% -> <=2.5m 46% -> <=3.5m 205/430=48%.** The correct
-instance IS recalled ~41% of the time; the view-point-vs-object-center offset is SMALL
-(~+7pp across radius; candidate `world_xy` = stored agent viewing pose, `memory_bridge.py`
-~1116-1120); genuine ~52% recall gap. **CORRECTION: the earlier "0-of-47" presence scare was
-ONE small unrepresentative cell (wcojb glass_break per-cell S0 gate), RETRACTED.** Caveat:
-41% is a LOWER bound for multi-instance categories -- `race-audiogoal.sh` omits
-`--instance-keyed`, so the diagnostic scores against `goals[0].position` (`habitat_env.py:287`),
-not the cold-sighted highest-IoU instance (`pick_cold_pose`).
+**Recall re-measure — CORRECTED (goal-anchored; `diagnose_goal_anchored_recall.py` on m3q,
+24 ep / 430 firing decisions).** The FIRST re-measure (`diagnose_audio_doa_calib`, radius sweep)
+anchored presence to `goals[0].position` = the object CENTER of an *arbitrary* instance and read
+41% at 1.5m / 48% at 3.5m -- but it flagged its own number as a LOWER bound (it scored against
+`goals[0]`, not the cold-sighted instance). The goal-anchored re-score fixes BOTH anchors: it
+measures presence to the nearest **cold-sighted-instance VIEW_POINT** (a stored candidate IS a
+caption-time viewing pose, and Habitat's success metric is geodesic-to-view_point too) and
+re-keys the correct instance to `pick_cold_instance`. **Result: recall is ~97% at 1.0m (91% at
+0.1m) -- present@view_point 97% vs present@center 44% at 1.0m, a +53pp anchor difference (the
+"~+7pp small offset" of the radius sweep was WRONG -- it conflated a legacy-anchor radius sweep
+with the fixed-radius view_point-vs-center difference). The 41%/30% were the wrong
+(object-center / `goals[0]`) anchor = a reference-frame artifact; the "0-of-47" was one
+unrepresentative cell. ALL RETRACTED.** So a near-RIGHT-instance candidate is EMITTED into the
+rerank pool on ~97% of fires: **recall is essentially SOLVED and is NOT the bottleneck.** (Caveat:
+present@view_point reads only EMITTED candidates and is min-over-top3-over-many-view_points, so it
+answers "was a near-cold-view_point candidate emitted", not "did the agent navigate to it"; the
+91%@0.1m-view_point vs 0%@0.1m-center reflects the vp->center 0.51m storage floor -- real geometry,
+why binary-SPL@0.1m stays localization-bound.)
 
-**Diagnostic fix (committed):** presence SWEEP at radii {1.5,2.5,3.5}m + a new **PRESENCE-OFFSET**
-verdict (fires when presence is low at 1.5m but high at 3.5m = view-point offset artifact, NOT
-absence); `RECALL-GAP` now requires sparsity EVEN at 3.5m; an n/a guard when GT labels are
-absent. The diagnostic reads only EMITTED candidates, so it cannot yet split write-missing vs
-ranked-out vs deduped (see the open write-side instrumentation lever). +4 TDD (12/12).
+**Root cause — CORRECTED (ranked, code-verified).** (a) **Single-goal eval is the binding
+constraint for DISAMBIGUATION** -- source == goal == target gives instance disambiguation nothing
+to do, so no query/retrieval fix can register a gain (the recurring ceiling that closed trained
+R/U, coarse, M4, audio-DOA; UNCHANGED, independent of the recall correction). (b) **PRIMARY
+navigation/termination cause of the 0.97-recall -> 0.611-succ@1m gap = consume-OFF re-pick
+thrash.** With `REMEMBR_CONSUME_SINGLEGOAL` default-OFF, `_consume_memory_applies`
+(`episode_runner.py:348-353`) + the anti-thrash near-filter are MultiON-gated and DO NOT run for
+single-goal audiogoal, so once the agent reaches the recalled view_point candidate it is
+re-proposed and re-chosen every step (`n_memory_consumed=0`); it oscillates at/near the waypoint
+and the final-distance-driven soft-SPL is dragged down. SMOKING GUN: the two ALARM cells over-fire
+(mem_chosen 133/137 = re-picks) AND have the WORST soft-SPL (0.05-0.14) while glass/baby fire
+little (9-36) and score HIGH (0.38-0.55) -- high fire-rate with LOW soft-SPL is the INVERSE of a
+recall-gap signature; it is re-pick thrash + SBERT wrong-instance SELECTION. Matches the lifelong
+A/B (a single waypoint re-chosen 176x, replan_stuck 147, dragged 0.750->0.467) and the
+`episode_runner.py:280-289` note ("navigation reaches the viewpoint in ~75% of warm episodes; only
+the STOP decision fails"). (c) **SBERT instance ceiling** drives wrong-instance SELECTION (distinct
+from recall) in the multi-instance alarm cells. **RETRACTED: "write-side under-seeding is the
+dominant cause."** Recall-into-pool at 97% proves the lone goal frame IS reliably stored AND
+retrieved; goal-agnostic top-5 consolidation is a MINOR factor relevant ONLY to the 0.1m ring
+(where the vp->center 0.51m storage floor, not write-gating, is the wall).
 
-**Root cause (ranked, code-verified).** (a) **Single-goal eval is the binding constraint** --
-source == goal == target gives instance disambiguation nothing to do, so no query/retrieval
-fix can register a gain (the recurring ceiling that closed trained R/U, coarse, M4, audio-DOA).
-(b) **Write-side under-seeding is the dominant structural half of the gap** -- the cold pass is
-SILENT (`make_audiogoal_smoke.py:57`, `t_anom_cold=10000`), the agent leaves the goal viewpoint
-after step 0, ~50 keyframes buffer, and per-episode consolidation keeps only **top-5 by a
-goal-AGNOSTIC importance heuristic** (`consolidation.py:177-196`: R = 0.4*caption-length +
-0.4*personal-keywords["like/love/my"...] + 0.2*question-words -- none encodes "is this the goal
-object"), so the lone goal frame is out-competed by ~45 exploration frames. (c) **SBERT instance
-ceiling** rank-collapses the multi-instance alarm cells. (d) An over-fire amplifier:
-`REMEMBR_CONSUME_SINGLEGOAL` default-OFF -> a reached memory candidate is re-chosen every step,
-so the alarm cells' mem_chosen 133/137 are re-picks, not distinct recalls.
+**Why a query fix can't win (corrected).** Recall is NOT the limiter (97%): a query tweak has no
+recall to improve, and its over-fire surfaces MORE re-pick / wrong-instance candidates
+(mem_chosen +36%, succ@1m 0.611->0.444) = null/over-fire. The binding constraint for
+disambiguation is the single-goal eval. **Verdict: query-expansion CLOSED as a correctly-reasoned
+negative; the 0.97->0.611 gap is now attributed to consume-OFF re-pick thrash, testable by a
+`REMEMBR_CONSUME_SINGLEGOAL=1` A/B. Headline +0.171/+0.23 (the OFF arm) intact.**
 
-**Why raising recall does NOT help (the decisive point).** soft-SPL needs no STOP and is
-dominated by the **single best** near-goal recall, so 41% presence is already sufficient -- high
-fire-rate co-occurs with LOW soft-SPL (alarm cells), the opposite of recall-gap-hurts. So the
-~52% gap is **eval-masked**, not the limiter. **Verdict: query-expansion CLOSED as a
-correctly-reasoned negative; the headline +0.171/+0.23 (the OFF arm) is intact.**
+**Diagnostic tooling (committed):** `diagnose_audio_doa_calib` got a presence SWEEP +
+PRESENCE-OFFSET verdict; the decisive fix is `diagnose_goal_anchored_recall.py` (re-anchor to the
+cold-instance view_point, re-key to `pick_cold_instance`, vp->center offset = storage headroom;
++9 TDD), which produced the 97% above. Plus `check_multi_instance_feasible.py` (the multi-instance
+harness feasibility gate; +8 TDD; GREEN on val_mini: 6 feasible cells).
 
 **Highest-EV next moves (both diagnose-first; do NOT pursue further single-goal query tuning).**
 (1) a **multi-instance revisit/changed-world harness** (>=2 reachable same-category instances per
