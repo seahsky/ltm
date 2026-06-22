@@ -325,6 +325,111 @@ def case_build_dataset_instance_keyed_records_distractor_labels():
     print("  case build_dataset_instance_keyed_records_distractor_labels: OK")
 
 
+def case_pick_distractor_instances_nearest_first_capped():
+    glb = "wcojb4TFT35.basis.glb"
+    insts = [
+        _goal([0, 0, 0], [_vp([0, 0, 0], iou=1.8)]),     # TARGET
+        _goal([2, 0, 0], [_vp([2, 0, 0], iou=0.6)]),     # nearest distractor
+        _goal([9, 0, 0], [_vp([9, 0, 0], iou=0.5)]),     # mid distractor
+        _goal([30, 0, 0], [_vp([30, 0, 0], iou=0.4)]),   # far distractor
+    ]
+    target = mk.pick_cold_instance(insts)
+    assert target["position"] == [0, 0, 0], target
+    # cap=2 -> the two NEAREST distractors, nearest first
+    d2 = mk.pick_distractor_instances(target, insts, n=2)
+    assert [d["position"] for d in d2] == [[2, 0, 0], [9, 0, 0]], d2
+    # n=None -> all distractors (still nearest-first)
+    all_d = mk.pick_distractor_instances(target, insts, n=None)
+    assert [d["position"] for d in all_d] == [[2, 0, 0], [9, 0, 0], [30, 0, 0]], all_d
+    # single-instance category -> no distractors
+    assert mk.pick_distractor_instances(insts[0], [insts[0]]) == []
+    print("  case pick_distractor_instances_nearest_first_capped: OK")
+
+
+def case_build_category_episodes_seed_between_cold_and_warm():
+    tmpl = _template("chair")
+    cold = {"position": [0, 0, 0], "rotation": [0, 0, 0, 1]}
+    warm = [{"position": [10, 0, 0], "rotation": [0, 0, 0, 1]}]
+    seeds = [{"position": [2, 0, 0], "rotation": [0, 0, 0, 1]},
+             {"position": [3, 0, 0], "rotation": [0, 0, 0, 1]}]
+    eps = mk.build_category_episodes(tmpl, cold, warm, "chair", seed_poses=seeds)
+    # order: cold, seed-0, seed-1, warm-1  (seeds BETWEEN cold and warm)
+    assert [e["episode_id"] for e in eps] == \
+        ["chair-cold-0", "chair-seed-0", "chair-seed-1", "chair-warm-1"], eps
+    assert [e["start_position"] for e in eps] == \
+        [[0, 0, 0], [2, 0, 0], [3, 0, 0], [10, 0, 0]]
+    # only the seed episodes carry info['seed_only']=True
+    assert eps[0]["info"].get("seed_only") is None
+    assert eps[1]["info"]["seed_only"] is True
+    assert eps[2]["info"]["seed_only"] is True
+    assert eps[3]["info"].get("seed_only") is None
+    # no seed_poses -> byte-identical to the old signature (regression guard)
+    plain = mk.build_category_episodes(tmpl, cold, warm, "chair")
+    assert [e["episode_id"] for e in plain] == ["chair-cold-0", "chair-warm-1"]
+    assert all("seed_only" not in (e.get("info") or {}) for e in plain)
+    print("  case build_category_episodes_seed_between_cold_and_warm: OK")
+
+
+def case_build_dataset_seed_distractors_emits_seed_episodes():
+    # End-to-end: instance-keyed + seed_distractors emits, per category,
+    # cold-0 + N seed-{k} (seed_only=True, target-keyed goals) + warm-*.
+    src = _multi_instance_src()  # chair: 1 target + 1 distractor
+    glb = "wcojb4TFT35.basis.glb"
+    gkey = f"{glb}_chair"
+    content = mk.build_dataset(src, categories=["chair"], n_warm=1,
+                               instance_keyed=True, seed_distractors=True)
+    ids = [e["episode_id"] for e in content["episodes"]]
+    # exactly one distractor in this fixture -> one seed episode, between cold/warm
+    assert ids == ["chair-cold-0", "chair-seed-0", "chair-warm-1"], ids
+    seed = next(e for e in content["episodes"] if "seed" in e["episode_id"])
+    # seed starts at the DISTRACTOR view_point [19,0,19] (it gets captioned+seeded)
+    assert seed["start_position"] == [19, 0, 19], seed["start_position"]
+    assert seed["info"]["seed_only"] is True
+    # success stays keyed to the TARGET only (a recalled distractor mis-routes)
+    assert len(content["goals_by_category"][gkey]) == 1
+    assert content["goals_by_category"][gkey][0]["position"] == [0, 0, 0]
+    # every episode keeps instance_labels (the analyzer's wrong-instance readout)
+    assert all("instance_labels" in e["info"] for e in content["episodes"])
+    print("  case build_dataset_seed_distractors_emits_seed_episodes: OK")
+
+
+def case_build_dataset_seed_distractors_off_is_byte_identical():
+    # Default (seed_distractors=False) is byte-identical to the plain instance-keyed
+    # build — the new path is fully opt-in.
+    src = _multi_instance_src()
+    base = mk.build_dataset(src, categories=["chair"], n_warm=2, instance_keyed=True)
+    same = mk.build_dataset(src, categories=["chair"], n_warm=2, instance_keyed=True,
+                            seed_distractors=False)
+    assert base == same, "seed_distractors=False must not change the dataset"
+    assert all("seed-" not in e["episode_id"] for e in base["episodes"])
+    assert all("seed_only" not in e["info"] for e in base["episodes"])
+    print("  case build_dataset_seed_distractors_off_is_byte_identical: OK")
+
+
+def case_build_dataset_seed_distractors_caps_count():
+    # n_distractors caps the seed-episode count (chair has many instances).
+    glb = "wcojb4TFT35.basis.glb"
+    src = {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {f"{glb}_chair": [
+            _goal([0, 0, 0], [_vp([0, 0, 0], iou=1.8)]),     # TARGET
+            _goal([2, 0, 0], [_vp([2, 0, 0], iou=0.6)]),
+            _goal([5, 0, 0], [_vp([5, 0, 0], iou=0.5)]),
+            _goal([9, 0, 0], [_vp([9, 0, 0], iou=0.4)]),
+        ]},
+        "episodes": [{**_template("chair", "1"), "start_position": [20, 0, 0]}],
+    }
+    content = mk.build_dataset(src, categories=["chair"], n_warm=1,
+                               instance_keyed=True, seed_distractors=True,
+                               n_distractors=2)
+    seeds = [e for e in content["episodes"] if "seed" in e["episode_id"]]
+    assert len(seeds) == 2, seeds                       # capped at 2 of 3 distractors
+    # nearest distractors seeded ([2,0,0] then [5,0,0]); farthest [9,0,0] dropped
+    assert [s["start_position"] for s in seeds] == [[2, 0, 0], [5, 0, 0]], seeds
+    print("  case build_dataset_seed_distractors_caps_count: OK")
+
+
 def case_build_dataset_instance_keyed_warm_starts_reachability_biased():
     # With two valid (>= min_dist from target) warm candidates, the instance-keyed
     # build now orders NEAREST-to-target first (reachability bias, caveat-A fix),
@@ -751,6 +856,11 @@ def main() -> int:
     case_build_dataset_instance_keyed_warm_far_from_target_instance()
     case_build_dataset_instance_keyed_roundtrip_survives_gzip()
     case_build_dataset_instance_keyed_records_distractor_labels()
+    case_pick_distractor_instances_nearest_first_capped()
+    case_build_category_episodes_seed_between_cold_and_warm()
+    case_build_dataset_seed_distractors_emits_seed_episodes()
+    case_build_dataset_seed_distractors_off_is_byte_identical()
+    case_build_dataset_seed_distractors_caps_count()
     case_build_dataset_instance_keyed_warm_starts_reachability_biased()
     case_write_dataset_roundtrip()
     case_two_builds_into_one_dir_are_additive()

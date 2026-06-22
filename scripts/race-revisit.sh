@@ -50,6 +50,11 @@ INSTANCE_KEYED=0  # --instance-keyed: Part B multi-instance DISAMBIGUATION harne
                   # the instance-keyed dataset (success keyed to the cold-sighted instance),
                   # run a HARD geodesic validity-gate pre-flight (abort if no cell forces
                   # disambiguation), then a wrong-instance-recall readout after analysis.
+SEED_DISTRACTORS=0  # --seed-distractors: ALSO seed the same-category DISTRACTOR instances into
+                  # the cold LTM (one seed-only episode each) so warm retrieval faces a REAL
+                  # multi-instance choice -> the genuine RETRIEVAL-level disambiguation test
+                  # (de-confounds the navigation-level +0.34). Requires --instance-keyed.
+N_DISTRACTORS=2   # --n-distractors: cap distractors seeded per category (nearest-first); 0=off.
 SETTINGS="1 2 3"  # --settings: which settings to run (e.g. "3" for a coarse-ON S3-only arm)
 REUSE_DS=""       # --reuse-dataset <DIR>: skip the build, run on an existing dataset dir
                   # (so a second arm pairs against the SAME episodes — e.g. an over-fire A/B)
@@ -67,6 +72,8 @@ while [ $# -gt 0 ]; do
     --target)            TARGET="$2"; shift 2 ;;
     --coarse)            COARSE=1; shift ;;
     --instance-keyed)    INSTANCE_KEYED=1; shift ;;
+    --seed-distractors)  SEED_DISTRACTORS=1; shift ;;
+    --n-distractors)     N_DISTRACTORS="$2"; shift 2 ;;
     --settings)          SETTINGS="$2"; shift 2 ;;
     --reuse-dataset)     REUSE_DS="$2"; shift 2 ;;
     --save-video)        SAVE_VIDEO=1; shift ;;
@@ -133,6 +140,10 @@ if [ -n "$REUSE_DS" ]; then
 else
   banner "[4/6] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR$([ "$INSTANCE_KEYED" = 1 ] && echo ' (instance-keyed)')"
   IK_BUILD_ARG=""; [ "$INSTANCE_KEYED" = 1 ] && IK_BUILD_ARG="--instance-keyed"
+  if [ "$SEED_DISTRACTORS" = 1 ]; then
+    [ "$INSTANCE_KEYED" = 1 ] || { echo "FATAL: --seed-distractors requires --instance-keyed"; exit 1; }
+    IK_BUILD_ARG="$IK_BUILD_ARG --seed-distractors --n-distractors $N_DISTRACTORS"
+  fi
   rm -rf "$DS_DIR"   # fresh build so a stale content/ from an earlier tag can't inflate n-episodes
   for SCENE in $SCENES; do
     SRC="${VALMINI}/${SCENE}.json.gz"

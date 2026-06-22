@@ -496,6 +496,7 @@ class EpisodeRunner:
         target_category: str = "chair",
         keyframe_every_m: int = 5,
         max_steps_per_episode: int = 250,
+        seed_max_steps: int = 5,
         run_config: Optional[Dict[str, Any]] = None,
         backbone: str = "frontier",
         remembr_builder: Optional[ReMEmbRBuilder] = None,
@@ -549,6 +550,12 @@ class EpisodeRunner:
         self._video_frames: List[np.ndarray] = []
         self.keyframe_every_m = keyframe_every_m
         self.max_steps_per_episode = max_steps_per_episode
+        # Seed-only (Part B seed-distractors) episodes: a tiny step cap so ONLY the
+        # step-0 distractor view_point caption is consolidated into the LTM. Running
+        # the full episode would let ~50 exploration keyframes evict that lone frame
+        # under the top-k consolidation gate, so the distractor would never be seeded
+        # and the seed-distractors test would be a no-op.
+        self.seed_max_steps = seed_max_steps
         self.run_config = dict(run_config or {})
         if backbone not in ("frontier", "remembr", "oracle"):
             raise ValueError(
@@ -816,6 +823,8 @@ class EpisodeRunner:
                 "episode_id": ep_log.get("episode_id"),
                 "scene_id": ep_log.get("scene_id"),
                 "target_category": ep_log.get("target_category"),
+                # seed-distractors marker (analyzer drops these from pairing).
+                "seed_only": bool(ep_log.get("seed_only", False)),
                 "success": bool(ep_metrics.get("success", False)),
                 "spl": float(ep_metrics.get("spl", 0.0)),
                 "soft_spl": float(ep_metrics.get("soft_spl", 0.0)),
@@ -980,6 +989,11 @@ class EpisodeRunner:
             # (target/distractor centroids) for the analyzer's wrong-instance-recall
             # readout; None for single-goal episodes. Never read by the agent.
             "instance_labels": (ep.metadata or {}).get("instance_labels"),
+            # seed-distractors build: a seed-only episode runs purely to CAPTION +
+            # consolidate a same-category distractor into the LTM; the analyzer
+            # drops it from cold/warm pairing (see analyze_revisit._raw_to_episode).
+            # Absent/False for every normal episode. Never read by the agent.
+            "seed_only": bool((ep.metadata or {}).get("seed_only", False)),
             "started_at": time.time(),
             "steps": [],
             "decisions": [],
@@ -1197,8 +1211,13 @@ class EpisodeRunner:
                 n_memory_candidates=n_memory_candidates, ep=ep,
                 active_category=active_category))
 
-        # Loop.
-        for t in range(1, self.max_steps_per_episode):
+        # Loop. Seed-only episodes (Part B) cap at seed_max_steps so only the
+        # distractor's step-0 view_point caption is captured + consolidated (it is
+        # never scored — analyze_revisit drops seed_only); a full run would evict it.
+        _ep_max_steps = (self.seed_max_steps
+                         if bool((ep.metadata or {}).get("seed_only", False))
+                         else self.max_steps_per_episode)
+        for t in range(1, _ep_max_steps):
             # AudioGoal: process THIS step's audio (onset → classify-once → object
             # override; energy/lateral diag into step.info) before any decision
             # below consumes it. Gated → no-op for objectnav/revisit/multion.
