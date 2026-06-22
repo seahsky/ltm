@@ -123,30 +123,73 @@ def records_from_content(content: Dict[str, Any],
 # ----------------------------------------------------------------------
 
 
-def _pathfinder_dist_fn(scene_dataset: Optional[str], scene_glob: Optional[str]):
-    """RACE-only: a geodesic dist_fn backed by habitat-sim's pathfinder. Imported
-    lazily so the default (Euclidean) path stays stdlib + local."""
+# Geodesic distances (RACE-only: habitat-sim navmesh). The classification +
+# record-building above are scene-independent and unit-tested locally; only the
+# navmesh load + pathfinder calls need habitat-sim, lazily imported below.
+
+DEFAULT_NAVMESH_ROOTS = ("data/scene_datasets/hm3d", "data/hm3d/scene_datasets/hm3d",
+                         "data/scene_datasets")
+
+
+def _find_navmesh(scene: str, roots) -> Optional[str]:
+    """First ``*<scene>*.navmesh`` under any of ``roots`` (recursive)."""
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        hits = sorted(glob.glob(os.path.join(root, "**", f"*{scene}*.navmesh"),
+                                recursive=True))
+        if hits:
+            return hits[0]
+    return None
+
+
+def make_geodesic_dist_fn(pathfinder, shortest_path_cls) -> Callable[..., Optional[float]]:
+    """``dist_fn(a, b) -> geodesic metres | None`` backed by a habitat-sim
+    PathFinder. Both endpoints are navmesh-snapped; an unreachable pair (no path)
+    or a non-finite geodesic returns None (-> classified UNREACHABLE). The
+    ``shortest_path_cls`` is injected so this wiring unit-tests without
+    habitat-sim."""
+    def dist_fn(a, b):
+        if a is None or b is None:
+            return None
+        sp = shortest_path_cls()
+        sp.requested_start = pathfinder.snap_point(a)
+        sp.requested_end = pathfinder.snap_point(b)
+        if not pathfinder.find_path(sp):
+            return None
+        try:
+            d = float(sp.geodesic_distance)
+        except (TypeError, ValueError):
+            return None
+        return d if math.isfinite(d) else None
+    return dist_fn
+
+
+def _load_pathfinder(navmesh_path: str):
+    """RACE-only: load a habitat-sim PathFinder from a ``.navmesh`` and return
+    ``(pathfinder, ShortestPath class)``. Lazy import keeps the default path
+    stdlib + local."""
     import habitat_sim  # noqa: F401 (RACE-only)
-    raise NotImplementedError(
-        "geodesic --use-pathfinder is RACE-only: load the scene's navmesh "
-        "(habitat_sim.PathFinder) and return snap_point+geodesic_distance; wire it "
-        "to the scene the content targets. The classification logic above is the "
-        "tested, scene-independent part.")
+    pf = habitat_sim.nav.PathFinder()
+    pf.load_nav_mesh(navmesh_path)
+    if not pf.is_loaded:
+        raise RuntimeError(f"navmesh failed to load: {navmesh_path}")
+    return pf, habitat_sim.ShortestPath
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Instance-keyed harness metric-validity gate")
     ap.add_argument("content_globs", nargs="+", help="built instance-keyed content .json.gz")
     ap.add_argument("--use-pathfinder", action="store_true",
-                    help="RACE-only: use true geodesics (habitat-sim) instead of the "
-                         "Euclidean proxy")
-    ap.add_argument("--scene-dataset", default=None, help="(with --use-pathfinder) scene cfg")
+                    help="RACE-only: use true geodesics (habitat-sim navmesh) instead of "
+                         "the Euclidean proxy")
+    ap.add_argument("--navmesh-root", default=None,
+                    help="(with --use-pathfinder) dir to search recursively for "
+                         "<scene>*.navmesh; defaults to the HM3D scene_datasets dirs")
     args = ap.parse_args(argv)
 
-    if args.use_pathfinder:
-        dist_fn = _pathfinder_dist_fn(args.scene_dataset, None)  # raises until wired on RACE
-    else:
-        dist_fn = euclidean_xz
+    roots = [args.navmesh_root] if args.navmesh_root else list(DEFAULT_NAVMESH_ROOTS)
+    if not args.use_pathfinder:
         print("NOTE: Euclidean-xz proxy (ignores walls). Re-run with --use-pathfinder on "
               "RACE for the true geodesic gate before any paid matrix.\n")
 
@@ -158,6 +201,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             except (OSError, ValueError):
                 print(f"  [warn] could not read {path}", file=sys.stderr)
                 continue
+            if args.use_pathfinder:
+                scene = os.path.basename(path).replace(".json.gz", "")
+                navmesh = _find_navmesh(scene, roots)
+                if navmesh is None:
+                    print(f"  [warn] no navmesh for scene {scene!r} under {roots} — skipping "
+                          f"(the geodesic gate needs it)", file=sys.stderr)
+                    continue
+                try:
+                    pf, shortest_path_cls = _load_pathfinder(navmesh)
+                except Exception as ex:  # noqa: BLE001 (RACE env issues -> skip, don't crash)
+                    print(f"  [warn] pathfinder load failed for {scene}: {ex}", file=sys.stderr)
+                    continue
+                dist_fn: Callable[..., Optional[float]] = make_geodesic_dist_fn(pf, shortest_path_cls)
+            else:
+                dist_fn = euclidean_xz
             for key, recs in records_from_content(content, dist_fn).items():
                 cells.setdefault(key, []).extend(recs)
     if not cells:

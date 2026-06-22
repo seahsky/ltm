@@ -19,12 +19,38 @@ from __future__ import annotations
 import math
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import check_instance_keyed_validity as iv  # noqa: E402
 
 INF = float("inf")
+
+
+# Mock habitat-sim PathFinder/ShortestPath so the geodesic WIRING unit-tests
+# without habitat-sim (the real load is RACE-only behind _load_pathfinder).
+class _MockShortestPath:
+    def __init__(self):
+        self.requested_start = None
+        self.requested_end = None
+        self.geodesic_distance = INF
+
+
+class _MockPathfinder:
+    """snap_point = identity; find_path returns the Euclidean distance, except a
+    point with x==999 (test sentinel) is 'unreachable' -> find_path False."""
+
+    def snap_point(self, p):
+        return p
+
+    def find_path(self, sp):
+        a, b = sp.requested_start, sp.requested_end
+        if a is None or b is None or a[0] == 999 or b[0] == 999:
+            sp.geodesic_distance = INF
+            return False
+        sp.geodesic_distance = math.dist(a, b)
+        return True
 
 
 def case_classify_warm_start():
@@ -96,6 +122,34 @@ def case_records_from_content_euclidean():
     print("  case_records_from_content_euclidean: OK")
 
 
+def case_geodesic_dist_fn_wiring():
+    # the geodesic dist_fn snaps -> ShortestPath -> find_path -> geodesic_distance,
+    # returning None for None inputs and for unreachable (find_path False) pairs.
+    df = iv.make_geodesic_dist_fn(_MockPathfinder(), _MockShortestPath)
+    assert abs(df([0, 0, 0], [3, 0, 4]) - 5.0) < 1e-6
+    assert df(None, [1, 0, 1]) is None
+    assert df([999, 0, 0], [0, 0, 0]) is None          # unreachable -> None
+    # and it composes with the classifier: a distractor nearer than target FORCES
+    target, distractor = [10, 0, 0], [1, 0, 0]
+    rec = {"geo_to_target": df([0, 0, 0], target),
+           "geo_to_distractors": [df([0, 0, 0], distractor)]}
+    assert iv.classify_warm_start(rec["geo_to_target"], rec["geo_to_distractors"]) \
+        == "FORCES-DISAMBIGUATION"
+    print("  case_geodesic_dist_fn_wiring: OK")
+
+
+def case_find_navmesh_glob():
+    with tempfile.TemporaryDirectory() as d:
+        scene_dir = os.path.join(d, "00800-wcojb4TFT35")
+        os.makedirs(scene_dir)
+        nav = os.path.join(scene_dir, "wcojb4TFT35.basis.navmesh")
+        open(nav, "w").close()
+        assert iv._find_navmesh("wcojb4TFT35", [d]) == nav
+        assert iv._find_navmesh("nonexistent", [d]) is None
+        assert iv._find_navmesh("wcojb4TFT35", ["/no/such/dir"]) is None
+    print("  case_find_navmesh_glob: OK")
+
+
 def main() -> int:
     print("check_instance_keyed_validity tests")
     case_classify_warm_start()
@@ -104,6 +158,8 @@ def main() -> int:
     case_classify_cell_unreachable()
     case_scan_cells_green_red()
     case_records_from_content_euclidean()
+    case_geodesic_dist_fn_wiring()
+    case_find_navmesh_glob()
     print("All cases passed.")
     return 0
 
