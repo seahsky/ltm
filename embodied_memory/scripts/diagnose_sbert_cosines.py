@@ -358,6 +358,208 @@ def caption_to_caption_rank_gap(
     return {"per_category": per_cat, "mean_rank_gap": float(np.mean(gaps)) if gaps else float("nan")}
 
 
+# ----------------------------------------------------------------------
+# query-construction A/B (Stage-0 query-fix selection)
+# ----------------------------------------------------------------------
+#
+# The instance signal EXISTS in the embedding (within-instance 0.628 vs
+# between-instance-same-category 0.535, sep +0.093) but the live query
+# ``"there is a {cat}"`` collapses it (VERDICT MIXED) — so the cheap, correct
+# lever is the QUERY, not a detector. This A/B scores several DEPLOYABLE
+# query-construction variants on the SAME instance corpus with ONE consistent
+# retrieval metric: a leave-one-out goal-vs-best-distractor rank gap. For each
+# category, each instance is treated as the goal in turn; one of its captions is
+# held out as the retrieval target; the query is built (per variant) from the
+# category word and/or the goal's OTHER (prior-sighting) captions — never the
+# held-out target — so a winning variant is realizable in
+# ``propose_memory_candidates`` (the agent has its own prior sightings in the
+# LTM), not an oracle. ``gap = cos(query, held-out goal caption) − max over
+# distractor instances of cos(query, distractor captions)``: how much the query
+# ranks the goal instance above the best same-category distractor. The bare
+# category query carries no instance preference (gap ≈ 0); a caption/PRF query
+# built from prior sightings should recover the embedding's instance gap.
+# ``recommend_query_variant`` declares a winner only if it clears a margin on
+# the POOLED gap AND on >=2 categories, so a single chair-driven win can't carry
+# a flat result.
+
+# Generic enrichment templates (NO instance-specific info) — test whether a
+# richer *generic* phrasing alone helps (it should not, much).
+_HYDE_TEMPLATES: Dict[str, str] = {
+    "chair": "a photo of a chair with a seat, backrest and legs in a room",
+    "bed": "a photo of a bed with a mattress, pillows and linens in a bedroom",
+    "sofa": "a photo of a sofa, a long upholstered couch with cushions",
+    "toilet": "a photo of a white porcelain toilet in a tiled bathroom",
+    "tv_monitor": "a photo of a television screen on a wall or stand",
+    "plant": "a photo of a potted plant with green leaves in a vase",
+}
+
+
+def _normalize(v: np.ndarray) -> np.ndarray:
+    n = float(np.linalg.norm(v))
+    return v if n == 0.0 else (v / n)
+
+
+def _query_builders() -> Dict[str, Callable]:
+    """variant name -> ``build(cat, qword, others, enc) -> query vector``.
+
+    ``others`` are the goal instance's prior-sighting captions available to
+    construct the query; every builder is deployable from prior sightings + the
+    category and none peeks at the held-out target caption.
+    """
+
+    def bare_category(cat, qword, others, enc):
+        return enc("there is a {}".format(qword))
+
+    def caption(cat, qword, others, enc):
+        # query with the most recent prior-sighting caption of the goal instance
+        return enc(others[0]) if others else enc("there is a {}".format(qword))
+
+    def prf_interp(cat, qword, others, enc, alpha=0.5, beta=0.5):
+        qv = _normalize(enc("there is a {}".format(qword)))
+        if not others:
+            return qv
+        mean_other = _normalize(
+            np.mean([_normalize(enc(c)) for c in others], axis=0)
+        )
+        return _normalize(alpha * qv + beta * mean_other)
+
+    def hyde(cat, qword, others, enc):
+        return enc(_HYDE_TEMPLATES.get(cat, "a photo of a {} in a room".format(qword)))
+
+    def attribute(cat, qword, others, enc):
+        return enc("a {} in a room with furniture and walls".format(qword))
+
+    return {"bare_category": bare_category, "caption": caption,
+            "prf_interp": prf_interp, "hyde": hyde, "attribute": attribute}
+
+
+def query_template_ab(
+    instance_corpus: Dict[str, List[List[str]]],
+    encode: Callable[[str], np.ndarray],
+    variants: Optional[Dict[str, Callable]] = None,
+) -> Dict[str, Any]:
+    """A/B query-construction variants on the instance corpus (see section doc).
+
+    Returns ``{variant_name: {"per_category": {cat: {"rank_gap", "n_samples"}},
+    "pooled_rank_gap": float}}``. A category needs >=2 instances (a distractor)
+    and a goal instance needs >=2 captions (a held-out target).
+    """
+    enc = _encode_cached(encode)
+    builders = variants or _query_builders()
+    results: Dict[str, Any] = {}
+    for name, build in builders.items():
+        per_cat: Dict[str, Any] = {}
+        pooled: List[float] = []
+        for cat, instances in instance_corpus.items():
+            qword = "television" if cat == "tv_monitor" else cat
+            cat_gaps: List[float] = []
+            for gi, goal_caps in enumerate(instances):
+                if len(goal_caps) < 2:
+                    continue
+                distractors = [instances[dj] for dj in range(len(instances))
+                               if dj != gi and instances[dj]]
+                if not distractors:
+                    continue
+                for hi in range(len(goal_caps)):
+                    held = goal_caps[hi]
+                    others = [goal_caps[k] for k in range(len(goal_caps)) if k != hi]
+                    q = build(cat, qword, others, enc)
+                    goal_score = _cos(q, enc(held))
+                    distractor_score = max(
+                        max(_cos(q, enc(c)) for c in d) for d in distractors
+                    )
+                    cat_gaps.append(goal_score - distractor_score)
+            gap = float(np.mean(cat_gaps)) if cat_gaps else float("nan")
+            per_cat[cat] = {"rank_gap": gap, "n_samples": len(cat_gaps)}
+            if cat_gaps:
+                pooled.append(gap)
+        results[name] = {
+            "per_category": per_cat,
+            "pooled_rank_gap": float(np.mean(pooled)) if pooled else float("nan"),
+        }
+    return results
+
+
+def recommend_query_variant(
+    ab_results: Dict[str, Any],
+    baseline: str = "bare_category",
+    pooled_margin: float = 0.02,
+    cat_margin: float = 0.02,
+    min_cats: int = 2,
+) -> Dict[str, Any]:
+    """Pick the best query variant that beats the baseline by ``pooled_margin``
+    on the pooled gap AND by ``cat_margin`` on at least ``min_cats`` categories;
+    else return an honest-negative verdict (winner ``None``).
+    """
+    base = ab_results.get(baseline, {})
+    base_pooled = base.get("pooled_rank_gap", float("nan"))
+    base_cat = {c: v["rank_gap"] for c, v in base.get("per_category", {}).items()}
+    cands: List[Any] = []
+    for name, res in ab_results.items():
+        if name == baseline:
+            continue
+        pooled = res.get("pooled_rank_gap", float("nan"))
+        if not (np.isfinite(pooled) and np.isfinite(base_pooled)):
+            continue
+        beats_pooled = pooled > base_pooled + pooled_margin
+        n_beat = 0
+        for c, v in res.get("per_category", {}).items():
+            g = v.get("rank_gap", float("nan"))
+            bg = base_cat.get(c, float("nan"))
+            if np.isfinite(g) and np.isfinite(bg) and g > bg + cat_margin:
+                n_beat += 1
+        if beats_pooled and n_beat >= min_cats:
+            cands.append((name, pooled, n_beat))
+    cands.sort(key=lambda t: t[1], reverse=True)
+    if not cands:
+        return {
+            "winner": None, "baseline_pooled": base_pooled,
+            "verdict": (
+                "HONEST NEGATIVE: no query variant beats the bare-category baseline "
+                f"by >{pooled_margin:.2f} on the pooled rank gap AND on >={min_cats} "
+                "categories -> do NOT spend a RACE run; the query-side lever does not "
+                "clear the bar on this corpus."
+            ),
+        }
+    name, pooled, n_beat = cands[0]
+    return {
+        "winner": name, "pooled": pooled, "baseline_pooled": base_pooled,
+        "n_cat_beat": n_beat,
+        "verdict": (
+            f"RECOMMEND query variant '{name}' (pooled rank gap {pooled:+.3f} vs "
+            f"baseline {base_pooled:+.3f}, beats baseline on {n_beat} categories) -> "
+            "wire it default-OFF in propose_memory_candidates and run ONE S3-only RACE "
+            "A/B against the cached baseline."
+        ),
+    }
+
+
+def query_ab_report(encode: Callable[[str], np.ndarray]) -> Dict[str, Any]:
+    """Print the query-construction A/B table + RECOMMEND line; return stats."""
+    enc = _encode_cached(encode)
+    ab = query_template_ab(INSTANCE_CORPUS, enc)
+    rec = recommend_query_variant(ab)
+    cats = list(INSTANCE_CORPUS.keys())
+    print("Query-construction A/B (Stage-0 query-fix selection) — leave-one-out")
+    print("goal-vs-best-distractor instance rank gap on INSTANCE_CORPUS "
+          "(all-MiniLM-L6-v2)")
+    print("  (bare_category = the live query; caption/prf_interp use the agent's")
+    print("   OWN prior sightings; hyde/attribute = generic enrichment)\n")
+    header = "  {:<14}".format("variant") + \
+        "".join(" {:>8}".format(c[:8]) for c in cats) + "   {:>8}".format("POOLED")
+    print(header)
+    for name in ab:
+        row = "  {:<14}".format(name)
+        for c in cats:
+            g = ab[name]["per_category"].get(c, {}).get("rank_gap", float("nan"))
+            row += " {:>8}".format(f"{g:+.3f}" if np.isfinite(g) else "n/a")
+        p = ab[name]["pooled_rank_gap"]
+        row += "   {:>8}".format(f"{p:+.3f}" if np.isfinite(p) else "n/a")
+        print(row)
+    print(f"\n  RECOMMEND: {rec['verdict']}\n")
+    return {"ab": ab, "recommend": rec}
+
+
 def instance_verdict(
     separation: float,
     rank_gap: float,
@@ -493,6 +695,15 @@ def main() -> int:
     # ------------------------------------------------------------------
     print("\n" + "=" * 70 + "\n")
     instance_report(encode)
+
+    # ------------------------------------------------------------------
+    # Stage-0 query-fix selection: A/B query-construction variants on the
+    # SAME instance corpus and RECOMMEND a winner (or honest negative). This
+    # is the $0 gate that must clear the bar BEFORE wiring a query-side fix in
+    # propose_memory_candidates and spending a RACE A/B run.
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 70 + "\n")
+    query_ab_report(encode)
     return 0
 
 

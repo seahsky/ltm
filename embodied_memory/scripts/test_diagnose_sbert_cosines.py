@@ -230,6 +230,89 @@ def case_verdict_inconclusive_on_nan():
     print("  case verdict_inconclusive_on_nan: OK")
 
 
+# ----------------------------------------------------------------------
+# query_template_ab + recommend_query_variant — Stage-0 query-fix selection
+# ----------------------------------------------------------------------
+
+
+def case_query_ab_returns_per_variant_gaps():
+    enc = _fake_encode({
+        "cA1": (1, 0, 0), "cA2": (1, 0, 0),
+        "cB1": (0, 1, 0), "cB2": (0, 1, 0),
+        "there is a chair": (1, 1, 0),
+    })
+    ab = ds.query_template_ab({"chair": [["cA1", "cA2"], ["cB1", "cB2"]]}, enc)
+    # every builder is present and reports a pooled + per-category gap
+    for name in ("bare_category", "caption", "prf_interp", "hyde", "attribute"):
+        assert name in ab, ab.keys()
+        assert "pooled_rank_gap" in ab[name], ab[name]
+        assert "chair" in ab[name]["per_category"], ab[name]
+    print("  case query_ab_returns_per_variant_gaps: OK")
+
+
+def case_query_ab_caption_beats_bare():
+    # Bare category query is equidistant from both instances (gap 0); querying
+    # with the goal's prior-sighting caption separates them (gap 1).
+    enc = _fake_encode({
+        "cA1": (1, 0, 0), "cA2": (1, 0, 0),
+        "cB1": (0, 1, 0), "cB2": (0, 1, 0),
+        "bA1": (1, 0, 0), "bA2": (1, 0, 0),
+        "bB1": (0, 1, 0), "bB2": (0, 1, 0),
+        "there is a chair": (1, 1, 0),
+        "there is a bed": (1, 1, 0),
+    })
+    corpus = {"chair": [["cA1", "cA2"], ["cB1", "cB2"]],
+              "bed": [["bA1", "bA2"], ["bB1", "bB2"]]}
+    ab = ds.query_template_ab(corpus, enc)
+    assert abs(ab["bare_category"]["pooled_rank_gap"] - 0.0) < 1e-6, ab["bare_category"]
+    assert ab["caption"]["pooled_rank_gap"] > 0.9, ab["caption"]
+    print("  case query_ab_caption_beats_bare: OK")
+
+
+def case_recommend_picks_caption_winner():
+    enc = _fake_encode({
+        "cA1": (1, 0, 0), "cA2": (1, 0, 0), "cB1": (0, 1, 0), "cB2": (0, 1, 0),
+        "bA1": (1, 0, 0), "bA2": (1, 0, 0), "bB1": (0, 1, 0), "bB2": (0, 1, 0),
+        "there is a chair": (1, 1, 0), "there is a bed": (1, 1, 0),
+    })
+    corpus = {"chair": [["cA1", "cA2"], ["cB1", "cB2"]],
+              "bed": [["bA1", "bA2"], ["bB1", "bB2"]]}
+    rec = ds.recommend_query_variant(ds.query_template_ab(corpus, enc))
+    assert rec["winner"] == "caption", rec
+    assert "RECOMMEND" in rec["verdict"], rec
+    print("  case recommend_picks_caption_winner: OK")
+
+
+def case_recommend_honest_negative_when_no_separation():
+    # all instances identical -> no variant beats the baseline -> honest negative
+    enc = _fake_encode({
+        "cA1": (1, 0, 0), "cA2": (1, 0, 0), "cB1": (1, 0, 0), "cB2": (1, 0, 0),
+        "bA1": (1, 0, 0), "bA2": (1, 0, 0), "bB1": (1, 0, 0), "bB2": (1, 0, 0),
+        "there is a chair": (1, 0, 0), "there is a bed": (1, 0, 0),
+    })
+    corpus = {"chair": [["cA1", "cA2"], ["cB1", "cB2"]],
+              "bed": [["bA1", "bA2"], ["bB1", "bB2"]]}
+    rec = ds.recommend_query_variant(ds.query_template_ab(corpus, enc))
+    assert rec["winner"] is None, rec
+    assert "HONEST NEGATIVE" in rec["verdict"], rec
+    print("  case recommend_honest_negative_when_no_separation: OK")
+
+
+def case_recommend_requires_two_categories():
+    # caption separates chair (gap 1) but bed instances are identical (gap 0) ->
+    # only ONE category beats the baseline -> below the >=2 bar -> no winner.
+    enc = _fake_encode({
+        "cA1": (1, 0, 0), "cA2": (1, 0, 0), "cB1": (0, 1, 0), "cB2": (0, 1, 0),
+        "bA1": (1, 0, 0), "bA2": (1, 0, 0), "bB1": (1, 0, 0), "bB2": (1, 0, 0),
+        "there is a chair": (1, 1, 0), "there is a bed": (1, 0, 0),
+    })
+    corpus = {"chair": [["cA1", "cA2"], ["cB1", "cB2"]],
+              "bed": [["bA1", "bA2"], ["bB1", "bB2"]]}
+    rec = ds.recommend_query_variant(ds.query_template_ab(corpus, enc), min_cats=2)
+    assert rec["winner"] is None, rec
+    print("  case recommend_requires_two_categories: OK")
+
+
 def main() -> int:
     print("instance-separability diagnostic sanity tests")
     case_pairwise_within_and_between()
@@ -246,6 +329,11 @@ def main() -> int:
     case_verdict_mixed_signal_exists_query_collapses()
     case_verdict_separated_no_bottleneck()
     case_verdict_inconclusive_on_nan()
+    case_query_ab_returns_per_variant_gaps()
+    case_query_ab_caption_beats_bare()
+    case_recommend_picks_caption_winner()
+    case_recommend_honest_negative_when_no_separation()
+    case_recommend_requires_two_categories()
     print("All cases passed.")
     return 0
 

@@ -405,6 +405,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="MultiON (sequential semantic ObjectNav) analysis: per-setting "
              "Progress/PPL, paired S3-S1 deltas, gap-by-sub-goal-index table "
              "(delegates to analyze_multion).")
+    parser.add_argument("--power", action="store_true",
+        help="With --revisit: append an rliable-style robustness + power block "
+             "(IQM, P(S3>S1), MDES). Opt-in; default output unchanged.")
     args = parser.parse_args(argv)
 
     if len(args.run_dirs) < 2:
@@ -424,7 +427,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # match the standalone analyze_revisit script.
         import analyze_revisit  # noqa: E402
         runs = [analyze_revisit.load_revisit_run(p) for p in args.run_dirs]
-        analyze_revisit.print_report(runs, args.bootstrap)
+        analyze_revisit.print_report(runs, args.bootstrap, power=args.power)
         return 0
 
     runs = [load_run(p) for p in args.run_dirs]
