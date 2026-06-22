@@ -340,7 +340,7 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"{agg['fire_decisions']} memory-firing decisions")
     print(f"  instrumented fields: source_position={agg['has_src_any']} "
           f"target_position={agg['has_tgt_any']} audio_lateral_sign={agg['has_audio_sign_any']}")
-    if agg["fire_decisions"]:
+    if agg["fire_decisions"] and agg["has_tgt_any"]:
         fd = agg["fire_decisions"]
         print(f"  recall presence : {agg['correct_present']}/{fd} "
               f"= {agg['correct_present'] / fd:.0%}   (<= {NEAR_M}m to OBJECT CENTER)")
@@ -351,6 +351,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("    the OBJECT CENTER for large objects -> presence rising with radius = OFFSET ARTIFACT,")
         print("    not an absent instance. Success metric (succ@1m) is geodesic-to-view_point (other anchor).")
         print("    Decisive re-measure: anchor presence to the nearest goal view_point.")
+    elif agg["fire_decisions"]:
+        # No GT labels in these logs: the presence/sweep counters are 0 by absence
+        # of a reference point, NOT because candidates are far — printing "0%" here
+        # would be misleading. Say so explicitly.
+        print(f"  recall presence : n/a ({agg['fire_decisions']} fires, but no source/target "
+              f"GT labels in these logs — presence is unmeasurable)")
+        print("    run on S0-instrumented logs (source_position/target_position present), e.g.")
+        print("    the query-expansion run dirs: diagnose_audio_doa_calib.py runs/m3q-*")
     if agg["frame_steps_agent"]:
         na = agg["frame_steps_agent"]
         print(f"  frame agree (AGENT, n={na}): A {agg['agreeA']}/{na}={agg['agreeA']/na:.0%}  |  "
