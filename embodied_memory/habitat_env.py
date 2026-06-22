@@ -350,6 +350,14 @@ class HabitatObjectNavSource(EpisodeSource):
                 str(c) for c in ep_info["object_categories"]
             ]
 
+        # Multi-instance (Part B): surface the offline disambiguation labels
+        # (target/distractor centroids, written by make_revisit_smoke's
+        # instance-keyed build into episode.info) so the runner can log them for
+        # the analyzer's wrong-instance-recall readout. These are OFFLINE GT labels
+        # only — never read by the agent. Absent the key -> single-goal, unchanged.
+        if isinstance(ep_info, dict) and ep_info.get("instance_labels"):
+            metadata["instance_labels"] = ep_info["instance_labels"]
+
         # AudioGoal: surface the anomaly config (source_position / anomaly_class /
         # anomaly_object / per-episode t_anom written by the M2 dataset builder
         # into episode.info) for the runner + analysis.

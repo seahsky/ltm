@@ -154,6 +154,44 @@ def case_insufficient_data():
     print("  case_insufficient_data: OK")
 
 
+def _ep_labeled(decisions, target_center, distractor_centers):
+    return {"scene_id": "S", "target_category": "chair", "decisions": decisions,
+            "instance_labels": {"target_object_id": "A", "target_center": list(target_center),
+                                "distractor_centers": [list(d) for d in distractor_centers]}}
+
+
+def case_wrong_instance_rate_all_target():
+    # every fire's nearest recalled candidate is at the TARGET -> wrong rate 0.0
+    eps = [_ep_labeled([_decision([(0.0, 0.0)]), _decision([(0.0, 0.0)])],
+                       target_center=[0, 0, 0], distractor_centers=[[10, 0, 10]])]
+    r = gr.wrong_instance_recall_rate(eps)
+    assert r["fires"] == 2 and r["wrong"] == 0 and r["rate"] == 0.0, r
+    print("  case_wrong_instance_rate_all_target: OK")
+
+
+def case_wrong_instance_rate_all_distractor():
+    eps = [_ep_labeled([_decision([(10.0, 10.0)]), _decision([(10.0, 10.0)])],
+                       target_center=[0, 0, 0], distractor_centers=[[10, 0, 10]])]
+    r = gr.wrong_instance_recall_rate(eps)
+    assert r["wrong"] == 2 and r["rate"] == 1.0, r
+    print("  case_wrong_instance_rate_all_distractor: OK")
+
+
+def case_wrong_instance_rate_mixed():
+    eps = [_ep_labeled([_decision([(0.0, 0.0)]), _decision([(10.0, 10.0)])],
+                       target_center=[0, 0, 0], distractor_centers=[[10, 0, 10]])]
+    r = gr.wrong_instance_recall_rate(eps)
+    assert r["fires"] == 2 and r["wrong"] == 1 and r["rate"] == 0.5, r
+    print("  case_wrong_instance_rate_mixed: OK")
+
+
+def case_wrong_instance_rate_none_without_labels():
+    # single-goal episodes (no instance_labels) -> None, no crash
+    ep = _ep("S", "chair", [_decision([(0.0, 0.0)])], target_position=[0, 0, 0])
+    assert gr.wrong_instance_recall_rate([ep]) is None
+    print("  case_wrong_instance_rate_none_without_labels: OK")
+
+
 def main() -> int:
     print("diagnose_goal_anchored_recall tests")
     case_cold_instance_is_highest_iou_not_list0()
@@ -165,6 +203,10 @@ def main() -> int:
     case_verdict_recall_gap_confirmed()
     case_verdict_recall_ok()
     case_insufficient_data()
+    case_wrong_instance_rate_all_target()
+    case_wrong_instance_rate_all_distractor()
+    case_wrong_instance_rate_mixed()
+    case_wrong_instance_rate_none_without_labels()
     print("All cases passed.")
     return 0
 

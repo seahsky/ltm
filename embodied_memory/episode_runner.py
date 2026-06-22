@@ -976,6 +976,10 @@ class EpisodeRunner:
             # the captioned pose IS the seed (episode_id is overwritten with the
             # load index, so it can't identify a pose). None when unavailable.
             "start_position": (ep.metadata or {}).get("start_position"),
+            # Multi-instance (Part B): offline disambiguation GT labels
+            # (target/distractor centroids) for the analyzer's wrong-instance-recall
+            # readout; None for single-goal episodes. Never read by the agent.
+            "instance_labels": (ep.metadata or {}).get("instance_labels"),
             "started_at": time.time(),
             "steps": [],
             "decisions": [],
