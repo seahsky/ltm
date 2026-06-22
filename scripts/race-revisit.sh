@@ -46,6 +46,10 @@ TAG="revisit-c1"
 N_EPISODES=""
 TARGET="any"
 COARSE=0          # --coarse: enable the step-4 coarse-affordance head (LTM_COARSE_AFFORDANCE)
+INSTANCE_KEYED=0  # --instance-keyed: Part B multi-instance DISAMBIGUATION harness — build
+                  # the instance-keyed dataset (success keyed to the cold-sighted instance),
+                  # run a HARD geodesic validity-gate pre-flight (abort if no cell forces
+                  # disambiguation), then a wrong-instance-recall readout after analysis.
 SETTINGS="1 2 3"  # --settings: which settings to run (e.g. "3" for a coarse-ON S3-only arm)
 REUSE_DS=""       # --reuse-dataset <DIR>: skip the build, run on an existing dataset dir
                   # (so a second arm pairs against the SAME episodes — e.g. an over-fire A/B)
@@ -62,6 +66,7 @@ while [ $# -gt 0 ]; do
     --n-episodes)        N_EPISODES="$2"; shift 2 ;;
     --target)            TARGET="$2"; shift 2 ;;
     --coarse)            COARSE=1; shift ;;
+    --instance-keyed)    INSTANCE_KEYED=1; shift ;;
     --settings)          SETTINGS="$2"; shift 2 ;;
     --reuse-dataset)     REUSE_DS="$2"; shift 2 ;;
     --save-video)        SAVE_VIDEO=1; shift ;;
@@ -126,7 +131,8 @@ if [ -n "$REUSE_DS" ]; then
   banner "[4/6] REUSE existing dataset (no rebuild): $DS_DIR"
   [ -f "$DS" ] || { echo "FATAL: --reuse-dataset given but top-level dataset missing: $DS"; exit 1; }
 else
-  banner "[4/6] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR"
+  banner "[4/6] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR$([ "$INSTANCE_KEYED" = 1 ] && echo ' (instance-keyed)')"
+  IK_BUILD_ARG=""; [ "$INSTANCE_KEYED" = 1 ] && IK_BUILD_ARG="--instance-keyed"
   rm -rf "$DS_DIR"   # fresh build so a stale content/ from an earlier tag can't inflate n-episodes
   for SCENE in $SCENES; do
     SRC="${VALMINI}/${SCENE}.json.gz"
@@ -134,10 +140,22 @@ else
     # shellcheck disable=SC2086
     python embodied_memory/scripts/make_revisit_smoke.py \
         --src "$SRC" --scene "$SCENE" --categories $CATS --n-warm "$NWARM" \
-        --out-dir "$DS_DIR" \
+        --out-dir "$DS_DIR" $IK_BUILD_ARG \
       || { echo "FATAL: dataset build failed for scene $SCENE."; exit 1; }
   done
   [ -f "$DS" ] || { echo "FATAL: expected top-level dataset not written: $DS"; exit 1; }
+fi
+
+# Part B: HARD geodesic validity gate — abort (no GPU) if no (scene,category) cell
+# geodesically FORCES disambiguation (a distractor must sit nearer the warm start
+# than the cold-sighted target, else "go-to-nearest" wins and the harness reproduces
+# the single-goal null). The Euclidean proxy is GREEN on 5/8 cells; this geodesic run
+# is the true arbiter (a wall can flip a Euclidean-VALID cell to UNREACHABLE).
+if [ "$INSTANCE_KEYED" = 1 ]; then
+  banner "[4.5/6] instance-keyed VALIDITY GATE (geodesic --use-pathfinder, HARD pre-flight)"
+  # shellcheck disable=SC2086
+  python embodied_memory/scripts/check_instance_keyed_validity.py "${DS_DIR}/content/"*.json.gz --use-pathfinder \
+    || { echo "FATAL: validity gate RED — no cell geodesically forces disambiguation. NOT spending GPU; the multi-instance harness is degenerate on these scenes (the honest fix is a 3rd scene, NOT adversarial warm-start placement)."; exit 1; }
 fi
 
 # --coarse: enable the step-4 coarse-affordance head (with its default-on CLIP room
@@ -206,4 +224,14 @@ if echo " $SETTINGS " | grep -q " 1 " && echo " $SETTINGS " | grep -q " 3 "; the
 else
   banner "[6/6] partial settings ($SETTINGS) — skipping built-in Gate-A pairing"
   echo "  out-dirs:$OUT_DIRS  (caller pairs these against a baseline)"
+fi
+
+# Part B: wrong-instance-recall readout — did the agent recall the RIGHT instance,
+# or the distractor? Fires only on instance-keyed runs (silent otherwise).
+if [ "$INSTANCE_KEYED" = 1 ]; then
+  banner "[6.5/6] instance-keyed recall readout (goal-anchored presence + wrong-instance rate)"
+  # shellcheck disable=SC2086
+  python embodied_memory/scripts/diagnose_goal_anchored_recall.py $OUT_DIRS \
+      --content-dir "${DS_DIR}/content" \
+    || echo "  (goal-anchored readout skipped — see above)"
 fi
