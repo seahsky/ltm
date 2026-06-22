@@ -3162,3 +3162,70 @@ causally necessary for warm recall); real ESC-50 audio; `write_audio_event` **me
 | `embodied_memory/scripts/diagnose_normal_anomaly_calib.py` | Step-1 $0 GO/STOP gate (Youden/EER) |
 | `scripts/race-audiogoal-lifelong.sh` | overnight A/B matrix (`--consume-singlegoal`, `--lifelong`) |
 | `runs/ll{A,B}-*` | the lifelong write-OFF/ON A/B runs; RACE-only |
+
+## Query-expansion lever + recall-gap re-measure (2026-06-22, honest negative)
+
+**Lever.** `LTM_QUERY_EXPANSION=prf` (default-OFF, `memory_bridge.py` `propose_memory_candidates`
++ `text_encode_util.expand_query`): pseudo-relevance feedback refines the bare
+`"there is a {cat}"` fine-layer query toward the centroid of the first-pass recalled caption
+embeddings, then re-queries. Motivated by the measured instance gap (within 0.628 /
+between-same-cat 0.535 / sep +0.093, collapsed to ~0.047 by the bare category query). A `$0`
+pre-screen (`diagnose_sbert_cosines.query_template_ab`) was GREEN: pooled goal-vs-distractor
+rank gap -0.039 -> +0.051 on chair+bed.
+
+**A/B result (m3q, real ReMEmbR, S3 query-exp ON vs M3 S3 OFF, n=18 warm pairs): NULL / OVER-FIRE.**
+soft-SPL B-A +0.036 (p=0.329, n.s.); binary SPL -0.036; succ@1m 0.611->0.444; mem_chosen
+271->368 (+36%); fire-rate 0.833->1.000. Per-cell (m3q S3, mean soft_spl / mem_chosen):
+TEEsav alarm 0.048/133, baby_cry 0.328/36, glass_break 0.553/9; wcojb alarm 0.142/137,
+baby_cry 0.215/20, glass_break 0.384/33. The two ALARM cells = 270 of ~290 mem_chosen AND
+worst soft-SPL; glass/baby fire little, score high. In the over-firing alarm cells the
+first-pass hits are wrong-instance same-category captions, so PRF pulls the query toward them
+-> more wrong fires, no added goal presence. Planner census S3: memory 33, frontier 15, LLM 1.
+
+**Recall-gap re-measure** (`diagnose_audio_doa_calib.py`, radius sweep FIXED this round; m3q,
+24 ep, 430 firing decisions). Distance from an emitted candidate's stored `world_xy` to the
+GT goal-object center: **<=1.5m 175/430=41% -> <=2.5m 46% -> <=3.5m 205/430=48%.** The correct
+instance IS recalled ~41% of the time; the view-point-vs-object-center offset is SMALL
+(~+7pp across radius; candidate `world_xy` = stored agent viewing pose, `memory_bridge.py`
+~1116-1120); genuine ~52% recall gap. **CORRECTION: the earlier "0-of-47" presence scare was
+ONE small unrepresentative cell (wcojb glass_break per-cell S0 gate), RETRACTED.** Caveat:
+41% is a LOWER bound for multi-instance categories -- `race-audiogoal.sh` omits
+`--instance-keyed`, so the diagnostic scores against `goals[0].position` (`habitat_env.py:287`),
+not the cold-sighted highest-IoU instance (`pick_cold_pose`).
+
+**Diagnostic fix (committed):** presence SWEEP at radii {1.5,2.5,3.5}m + a new **PRESENCE-OFFSET**
+verdict (fires when presence is low at 1.5m but high at 3.5m = view-point offset artifact, NOT
+absence); `RECALL-GAP` now requires sparsity EVEN at 3.5m; an n/a guard when GT labels are
+absent. The diagnostic reads only EMITTED candidates, so it cannot yet split write-missing vs
+ranked-out vs deduped (see the open write-side instrumentation lever). +4 TDD (12/12).
+
+**Root cause (ranked, code-verified).** (a) **Single-goal eval is the binding constraint** --
+source == goal == target gives instance disambiguation nothing to do, so no query/retrieval
+fix can register a gain (the recurring ceiling that closed trained R/U, coarse, M4, audio-DOA).
+(b) **Write-side under-seeding is the dominant structural half of the gap** -- the cold pass is
+SILENT (`make_audiogoal_smoke.py:57`, `t_anom_cold=10000`), the agent leaves the goal viewpoint
+after step 0, ~50 keyframes buffer, and per-episode consolidation keeps only **top-5 by a
+goal-AGNOSTIC importance heuristic** (`consolidation.py:177-196`: R = 0.4*caption-length +
+0.4*personal-keywords["like/love/my"...] + 0.2*question-words -- none encodes "is this the goal
+object"), so the lone goal frame is out-competed by ~45 exploration frames. (c) **SBERT instance
+ceiling** rank-collapses the multi-instance alarm cells. (d) An over-fire amplifier:
+`REMEMBR_CONSUME_SINGLEGOAL` default-OFF -> a reached memory candidate is re-chosen every step,
+so the alarm cells' mem_chosen 133/137 are re-picks, not distinct recalls.
+
+**Why raising recall does NOT help (the decisive point).** soft-SPL needs no STOP and is
+dominated by the **single best** near-goal recall, so 41% presence is already sufficient -- high
+fire-rate co-occurs with LOW soft-SPL (alarm cells), the opposite of recall-gap-hurts. So the
+~52% gap is **eval-masked**, not the limiter. **Verdict: query-expansion CLOSED as a
+correctly-reasoned negative; the headline +0.171/+0.23 (the OFF arm) is intact.**
+
+**Highest-EV next moves (both diagnose-first; do NOT pursue further single-goal query tuning).**
+(1) a **multi-instance revisit/changed-world harness** (>=2 reachable same-category instances per
+episode, instance-keyed against the cold-sighted instance) -- the ONLY move that gives every
+closed disambiguation lever a real job, and the honest precondition for claiming any retrieval
+fix works; (2) a **goal-anchored storage diagnostic** (free offline re-score of the m3q logs:
+swap the stored viewing pose for the back-projected object-center xy, and re-score against the
+cold-sighted instance not `goals[0]`) to bound the true recall rate and gate whether
+goal-anchored storage (which also addresses the localization-bound 0.1m ring) is worth building;
+(3) **write-side instrumentation** (dump `consolidate` scored-segments with the I-breakdown +
+caption + distance-to-goal; log all `fetch_k=8` raw hits) to convert the inferred write-vs-rank
+split into a measured one.
