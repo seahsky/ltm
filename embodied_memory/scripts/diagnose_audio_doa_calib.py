@@ -11,7 +11,17 @@ hold for that to ever work; this script measures all three signals and emits one
 RECOMMEND verdict:
 
   * RECALL-GAP   — the CORRECT instance is rarely in the recalled candidate set
-                   (a read-side reorderer cannot resurrect an absent instance).
+                   EVEN at a generous radius (genuinely absent; a read-side
+                   reorderer cannot resurrect it).
+  * PRESENCE-OFFSET — recalled candidates ARE near the goal but sit just outside
+                   the tight object-CENTER radius because a stored candidate is a
+                   navigable VIEW_POINT (the agent's caption-time pose), offset
+                   ~1.5-2m from the object center for large objects. This is a
+                   reference-frame artifact, NOT an absent instance — re-measure
+                   to the nearest goal view_point. A query/rerank fix is NOT
+                   excluded by this. (correct_present at NEAR_M is anchored to the
+                   OBJECT CENTER, whereas the success metric distance_to_goal is
+                   geodesic-to-VIEW_POINT — the two disagree by exactly this offset.)
   * FRAME-BROKEN — the heard lateral sign does not agree (under either sign
                    convention) with the bearing to the GT source better than
                    chance — the RIR grid stores no render yaw, so lateral_sign
@@ -48,8 +58,17 @@ from typing import Any, Dict, List, Optional, Tuple
 MIN_PRESENCE = 0.50   # correct instance must be recalled in >= this fraction of fires
 MIN_FRAME = 0.60      # heard-sign vs source-bearing agreement must beat ~chance
 MIN_SEP = 0.30        # correct/wrong on opposite sides in >= this fraction of eligible
-NEAR_M = 1.5          # a memory candidate within this of the GT goal = the correct instance
+NEAR_M = 1.5          # a memory candidate within this of the GT goal CENTER = "present" (object-center anchor)
 DRIFT_SPLIT_DEG = 45.0  # low- vs high-yaw-drift split for the frame-decay report
+# Presence SWEEP: a recalled candidate is a VIEW_POINT (caption-time agent pose),
+# offset ~1.5-2m from the OBJECT CENTER for large objects (bed/sofa). Measuring
+# presence to the object center at a single 1.5m radius therefore mislabels a
+# CORRECT view-pose recall as "absent". We report presence at several radii so a
+# rise with radius reveals the offset artifact, and gate the RECALL-GAP verdict on
+# the LARGEST radius (genuine absence = sparse even there).
+PRESENCE_RADII = (1.5, 2.5, 3.5)
+RADIUS_KEYS = {1.5: "cp_15", 2.5: "cp_25", 3.5: "cp_35"}
+_GATE_RADIUS = 3.5    # presence at this radius gates RECALL-GAP vs PRESENCE-OFFSET
 
 
 # ---- pure geometry helpers (unit-tested) ------------------------------------
@@ -139,7 +158,8 @@ def analyze_episode(ep: Dict[str, Any], near_m: float = NEAR_M) -> Dict[str, Any
     start_yaw = ep["steps"][0]["agent_yaw"] if ep.get("steps") else None
 
     a = {k: 0 for k in (
-        "fire_decisions", "correct_present", "sep_eligible", "sep_opp_agent", "sep_opp_world",
+        "fire_decisions", "correct_present", "cp_15", "cp_25", "cp_35",
+        "sep_eligible", "sep_opp_agent", "sep_opp_world",
         "frame_steps_agent", "frame_steps_world", "agreeA", "agreeB", "agreeWA", "agreeWB",
         "frame_lowdrift", "agree_lowdrift", "frame_highdrift", "agree_highdrift")}
     a.update({"has_src": src is not None, "has_tgt": tgt is not None, "has_audio_sign": False})
@@ -151,6 +171,16 @@ def analyze_episode(ep: Dict[str, Any], near_m: float = NEAR_M) -> Dict[str, Any
         pos, yaw, sign = decision_pose(d, steps_by_idx)
         if tgt_xz is not None and correct_present(d, tgt_xz, near_m):
             a["correct_present"] += 1
+        # Presence SWEEP: min candidate distance to the OBJECT CENTER, counted at
+        # several radii so a rise with radius exposes the view_point->center offset
+        # artifact (a correct view-pose recall sits ~1.5-2m out for large objects).
+        if tgt_xz is not None:
+            cands = _memory_cands(d)
+            if cands:
+                mind = min(_dist_xz(c["world_xy"], tgt_xz) for c in cands)
+                for r, k in RADIUS_KEYS.items():
+                    if mind <= r:
+                        a[k] += 1
         if tgt_xz is not None and pos is not None and yaw is not None:
             a["sep_eligible"] += 1
             # separation in the agent frame AND the world frame (render is identity-
@@ -191,7 +221,8 @@ def analyze_episode(ep: Dict[str, Any], near_m: float = NEAR_M) -> Dict[str, Any
 
 
 def aggregate(episodes: List[Dict[str, Any]], near_m: float = NEAR_M) -> Dict[str, Any]:
-    keys = ["fire_decisions", "correct_present", "sep_eligible", "sep_opp_agent", "sep_opp_world",
+    keys = ["fire_decisions", "correct_present", "cp_15", "cp_25", "cp_35",
+            "sep_eligible", "sep_opp_agent", "sep_opp_world",
             "frame_steps_agent", "frame_steps_world", "agreeA", "agreeB", "agreeWA", "agreeWB",
             "frame_lowdrift", "agree_lowdrift", "frame_highdrift", "agree_highdrift"]
     agg = {k: 0 for k in keys}
@@ -219,10 +250,28 @@ def recommend(agg: Dict[str, Any], *, min_presence: float = MIN_PRESENCE,
         return ("INSUFFICIENT-DATA",
                 "source_position/target_position absent — re-run a batch with the S0 instrumentation")
     presence = agg["correct_present"] / agg["fire_decisions"]
+    # Presence SWEEP gate: a recalled candidate is a VIEW_POINT offset from the
+    # OBJECT CENTER, so a low presence at the tight NEAR_M radius does NOT prove
+    # the instance is absent. Only declare RECALL-GAP when presence is low EVEN at
+    # the generous _GATE_RADIUS; otherwise the candidates are present-but-offset
+    # (a reference-frame artifact) -> PRESENCE-OFFSET, and a query/rerank fix is
+    # NOT excluded.
+    fd = agg["fire_decisions"]
+    presence_gate = agg.get("cp_35", 0) / fd if fd else 0.0
     if presence < min_presence:
+        if presence_gate >= min_presence:
+            return ("PRESENCE-OFFSET",
+                    f"presence at {NEAR_M}m-to-OBJECT-CENTER is only {presence:.0%}, but rises to "
+                    f"{presence_gate:.0%} at {_GATE_RADIUS}m — the recalled candidates are PRESENT "
+                    f"but OFFSET (they are view_points ~1.5-2m off the object center), NOT absent. "
+                    f"This is a reference-frame artifact (the success metric distance_to_goal is "
+                    f"geodesic-to-view_point, a different anchor). Re-measure presence to the nearest "
+                    f"goal view_point before concluding a recall gap; a query/rerank fix is NOT "
+                    f"excluded by this diagnostic.")
         return ("RECALL-GAP",
-                f"correct instance recalled in only {presence:.0%} of fires (< {min_presence:.0%}) "
-                f"— a read-side reorderer cannot resurrect an absent instance")
+                f"correct instance recalled in only {presence:.0%} of fires at {NEAR_M}m AND only "
+                f"{presence_gate:.0%} even at {_GATE_RADIUS}m (< {min_presence:.0%}) — genuinely sparse "
+                f"in the recalled set (a read-side reorderer cannot resurrect an absent instance)")
     if not agg["has_audio_sign_any"]:
         return ("INSUFFICIENT-DATA",
                 "audio_lateral_sign absent — re-run a batch with the S0 instrumentation")
@@ -292,8 +341,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  instrumented fields: source_position={agg['has_src_any']} "
           f"target_position={agg['has_tgt_any']} audio_lateral_sign={agg['has_audio_sign_any']}")
     if agg["fire_decisions"]:
-        print(f"  recall presence : {agg['correct_present']}/{agg['fire_decisions']} "
-              f"= {agg['correct_present'] / agg['fire_decisions']:.0%}")
+        fd = agg["fire_decisions"]
+        print(f"  recall presence : {agg['correct_present']}/{fd} "
+              f"= {agg['correct_present'] / fd:.0%}   (<= {NEAR_M}m to OBJECT CENTER)")
+        sweep = "  presence sweep  : " + "  ".join(
+            f"<={r}m {agg.get(k, 0)}/{fd}={agg.get(k, 0) / fd:.0%}" for r, k in RADIUS_KEYS.items())
+        print(sweep)
+        print("    NOTE: a recalled candidate is a VIEW_POINT (caption-time pose), offset ~1.5-2m from")
+        print("    the OBJECT CENTER for large objects -> presence rising with radius = OFFSET ARTIFACT,")
+        print("    not an absent instance. Success metric (succ@1m) is geodesic-to-view_point (other anchor).")
+        print("    Decisive re-measure: anchor presence to the nearest goal view_point.")
     if agg["frame_steps_agent"]:
         na = agg["frame_steps_agent"]
         print(f"  frame agree (AGENT, n={na}): A {agg['agreeA']}/{na}={agg['agreeA']/na:.0%}  |  "
