@@ -179,12 +179,46 @@ def case_insufficient_when_no_audio_sign():
     print("  case insufficient_when_no_audio_sign: OK")
 
 
+def case_presence_offset_not_recall_gap():
+    # Candidates sit ~2.0m from the OBJECT CENTER (a view_point offset): outside
+    # the 1.5m gate but well inside 3.5m. The OLD metric called this RECALL-GAP;
+    # the sweep must now call it PRESENCE-OFFSET (artifact, not absent).
+    tgt = [2.0, 0.0, 2.0]
+    src = [2.0, 0.0, 2.0]
+    steps = [_step(0)]
+    # candidate at (2.0, 0.0): dist to (2,2) center = 2.0m -> >1.5, <2.5,<3.5
+    decs = [_decision(0, [(2.0, 0.0)], pos=(0, 0, 0), yaw=0.0, sign=-1),
+            _decision(1, [(2.0, 0.0)], pos=(0, 0, 0), yaw=0.0, sign=-1)]
+    agg = dg.aggregate([_ep(decs, steps, src, tgt)])
+    assert agg["correct_present"] == 0, agg["correct_present"]        # 0 at 1.5m
+    assert agg["cp_25"] == 2 and agg["cp_35"] == 2, (agg["cp_25"], agg["cp_35"])
+    v, why = dg.recommend(agg)
+    assert v == "PRESENCE-OFFSET", (v, why)
+    print("  case presence_offset_not_recall_gap: OK")
+
+
+def case_recall_gap_requires_sparsity_at_large_radius():
+    # Genuinely far candidates (~10m) stay sparse at EVERY radius -> RECALL-GAP.
+    tgt = [2.0, 0.0, 2.0]
+    src = [2.0, 0.0, 2.0]
+    steps = [_step(0)]
+    decs = [_decision(0, [(-5.0, -5.0)], pos=(0, 0, 0), yaw=0.0, sign=-1),
+            _decision(1, [(-6.0, -6.0)], pos=(0, 0, 0), yaw=0.0, sign=-1)]
+    agg = dg.aggregate([_ep(decs, steps, src, tgt)])
+    assert agg["cp_35"] == 0, agg["cp_35"]
+    v, _ = dg.recommend(agg)
+    assert v == "RECALL-GAP", v
+    print("  case recall_gap_requires_sparsity_at_large_radius: OK")
+
+
 def main() -> int:
     cases = [
         case_right_sign_convention,
         case_correct_present_and_separation_helpers,
         case_go,
         case_recall_gap,
+        case_presence_offset_not_recall_gap,
+        case_recall_gap_requires_sparsity_at_large_radius,
         case_frame_broken,
         case_world_frame_recovers_when_agent_rotates,
         case_co_linear,
