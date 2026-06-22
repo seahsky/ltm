@@ -93,7 +93,7 @@ class EmbodiedMemorySimilarityScorer(Scorer):
 from .frontier_planner import FrontierCandidate
 from .perception import Keyframe
 from .room_resolver import preferred_room as _preferred_room_for, resolve_room
-from .text_encode_util import cosine_sim
+from .text_encode_util import cosine_sim, expand_query
 
 
 # ----------------------------------------------------------------------
@@ -124,6 +124,15 @@ class EmbodiedRecord:
 # was +0.177). Used for the fine-layer query, the rerank retrieval query, and
 # the coarse-layer category-prior seeds so seed and query share a phrasing.
 _GOAL_QUERY_TEMPLATE = "there is a {}"
+
+# Query-side instance fix (Stage-1, env-gated LTM_QUERY_EXPANSION, DEFAULT-OFF).
+# Pseudo-relevance feedback over the first-pass recalled captions; see
+# text_encode_util.expand_query. alpha/beta are the Rocchio interpolation weights
+# (prf mode keeps the category anchor at alpha), top_m the number of first-pass
+# hits folded into the centroid. All env-overridable; unused unless the gate is set.
+_QUERY_EXPANSION_ALPHA = float(os.environ.get("LTM_QUERY_EXPANSION_ALPHA", "0.6"))
+_QUERY_EXPANSION_BETA = float(os.environ.get("LTM_QUERY_EXPANSION_BETA", "0.4"))
+_QUERY_EXPANSION_TOPM = int(os.environ.get("LTM_QUERY_EXPANSION_TOPM", "3"))
 
 
 # ----------------------------------------------------------------------
@@ -586,6 +595,10 @@ class EmbodiedMemoryBridge:
         # deduped/out-competed at retrieval — the redundancy signature).
         self._n_audio_writes = 0
         self._n_audio_event_recalled = 0
+        # Query-side instance fix (Stage-1) instrumentation: how many proposals
+        # re-queried the fine layer with a prior-sighting/PRF-expanded query.
+        # 0 on the default-OFF path (LTM_QUERY_EXPANSION unset) → byte-identical.
+        self._n_query_expanded = 0
 
         # Tracking which modules have been invoked (for criterion 4 logging).
         self.modules_invoked: Dict[str, bool] = {
@@ -1045,6 +1058,23 @@ class EmbodiedMemoryBridge:
         # Over-fetch: we'll discard scene-mismatched and threshold-failing hits.
         fetch_k = max(top_k * 4, 8)
         hits = self.ltm.fine.search(query, fetch_k)
+
+        # Query-side instance fix (Stage-1, default-OFF). Pseudo-relevance
+        # feedback: refine the bare-category query toward the first-pass recalled
+        # captions (the agent's OWN prior sightings), recovering the instance gap
+        # the category query discards (diagnose_sbert_cosines.query_template_ab:
+        # bare goal-vs-distractor rank gap -0.039 -> prior-sighting query +0.051).
+        # Re-normalized (expand_query) so the FAISS cosine read stays valid, then
+        # re-query. Off / no hits -> query+hits unchanged -> byte-identical.
+        _qx_mode = os.environ.get("LTM_QUERY_EXPANSION")
+        if _qx_mode and hits:
+            query = expand_query(
+                query, [e.embedding for e, _ in hits], mode=_qx_mode,
+                alpha=_QUERY_EXPANSION_ALPHA, beta=_QUERY_EXPANSION_BETA,
+                top_m=_QUERY_EXPANSION_TOPM,
+            ).astype(np.float32)
+            hits = self.ltm.fine.search(query, fetch_k)
+            self._n_query_expanded += 1
 
         out: List[FrontierCandidate] = []
         out_embs: List[Any] = []  # parallel to `out`: each emitted entry's caption embedding (Lever-1 rerank)
@@ -1616,6 +1646,7 @@ class EmbodiedMemoryBridge:
             "n_cross_scene_recall": self._n_cross_scene_recall,
             "n_audio_writes": self._n_audio_writes,
             "n_audio_event_recalled": self._n_audio_event_recalled,
+            "n_query_expanded": self._n_query_expanded,
             "modules_invoked": dict(self.modules_invoked),
             "ablation": {
                 "disable_stm": self.disable_stm,

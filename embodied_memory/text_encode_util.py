@@ -45,3 +45,51 @@ def cosine_sim(a, b) -> float:
     if na < 1e-8 or nb < 1e-8:
         return 0.0
     return float(np.dot(a, b) / (na * nb))
+
+
+def _unit(v: "np.ndarray") -> "np.ndarray":
+    v = np.asarray(v, dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 1e-8 else v
+
+
+def expand_query(
+    q_cat,
+    hit_embeddings,
+    mode: str = "prf",
+    alpha: float = 0.6,
+    beta: float = 0.4,
+    top_m: int = 3,
+) -> "np.ndarray":
+    """Query-side instance fix (Stage-1): refine the bare-category query toward
+    the first-pass recalled caption embeddings (the agent's OWN prior sightings),
+    recovering the instance gap the category query discards.
+
+    This is reference-free pseudo-relevance feedback (Rocchio): the LTM's own
+    top-``top_m`` first-pass hits are the pseudo-relevant set, and the returned
+    ``q'`` is re-used to re-query the fine layer. Modes:
+
+    * ``prf`` — ``q' = unit(alpha * unit(q_cat) + beta * unit(mean(top_m hits)))``;
+      keeps the category anchor (conservative — cannot drift fully to a
+      distractor cluster), the safe default for a first live A/B.
+    * ``caption`` — ``q' = unit(mean(top_m hits))``; queries purely with the
+      recalled captions (the diagnostic's strongest variant, but more exposed to
+      a wrong-instance top-``top_m``).
+
+    Always returns a unit vector (the FAISS ``1 - L2^2/2`` cosine read requires
+    it). ``mode`` falsy/``off`` or an empty/all-zero hit set returns ``unit(q_cat)``
+    unchanged — so the default-OFF path is byte-identical.
+    """
+    qn = _unit(q_cat)
+    if mode in (None, "", "off") or hit_embeddings is None or len(hit_embeddings) == 0:
+        return qn
+    embs = [_unit(np.asarray(e, dtype=np.float32)) for e in list(hit_embeddings)[:top_m]]
+    embs = [e for e in embs if float(np.linalg.norm(e)) > 1e-8]
+    if not embs:
+        return qn
+    centroid = _unit(np.mean(embs, axis=0))
+    if mode == "caption":
+        qp = centroid
+    else:  # prf (default)
+        qp = alpha * qn + beta * centroid
+    return _unit(qp.astype(np.float32))

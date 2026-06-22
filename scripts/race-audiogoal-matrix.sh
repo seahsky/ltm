@@ -45,7 +45,7 @@ SCENES="TEEsavR23oF wcojb4TFT35"
 # present in both default val_mini scenes; the class->category mapping is for
 # trigger diversity (onset-trigger framing — class is decorative for retrieval).
 CELLS="baby_cry:bed alarm:sofa glass_break:chair"
-NWARM=16; SETTINGS="1 2 3"; PREFIX="m3"; TEMPORAL=""; CAPTION=""
+NWARM=16; SETTINGS="1 2 3"; PREFIX="m3"; TEMPORAL=""; CAPTION=""; QUEREXP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenes) SCENES="$2"; shift 2 ;;
@@ -61,13 +61,26 @@ while [ $# -gt 0 ]; do
     # (A). REQUIRES the baseline matrix (<prefix>-*) to have run first.
     #   --temporal       → M4 recency head  (LTM_TEMPORAL_CONTEXT, out <prefix>t-*)
     #   --caption-rerank → Lever-1 caption-to-caption head (LTM_CAPTION_RERANK, out <prefix>c-*)
+    #   --query-expansion <prf|caption> → Stage-1 query-side instance fix
+    #       (LTM_QUERY_EXPANSION; CHANGES the retrieval QUERY VECTOR, not a
+    #       read-side rerank — categorically different from --caption-rerank,
+    #       which is zero-sum/inert on a single recalled instance). out <prefix>q-*.
+    #       prf (default-recommended) keeps the category anchor; caption is the
+    #       more aggressive pure-centroid query. The $0 diagnostic
+    #       (diagnose_sbert_cosines.py query_template_ab) must clear the bar first
+    #       (it did: bare -0.039 -> caption +0.051 on chair+bed).
     --temporal) TEMPORAL=1; shift ;;
     --caption-rerank) CAPTION=1; shift ;;
+    --query-expansion) QUEREXP="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
 [[ "$PREFIX" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --tag-prefix must be alnum/dash/underscore"; exit 1; }
-[ -n "$TEMPORAL" ] && [ -n "$CAPTION" ] && { echo "FATAL: pass at most one A/B variant (--temporal XOR --caption-rerank)"; exit 1; }
+_nvar=0
+[ -n "$TEMPORAL" ] && _nvar=$((_nvar+1))
+[ -n "$CAPTION" ] && _nvar=$((_nvar+1))
+[ -n "$QUEREXP" ] && _nvar=$((_nvar+1))
+[ "$_nvar" -gt 1 ] && { echo "FATAL: pass at most one A/B variant (--temporal | --caption-rerank | --query-expansion)"; exit 1; }
 
 # A/B-variant setup: force S3-only, turn the chosen head on for every child run,
 # and write to a distinct out-prefix so the baseline S3 dirs are never clobbered.
@@ -76,6 +89,12 @@ if [ -n "$TEMPORAL" ]; then
   VARIANT_ON=1; VARIANT_LABEL="temporal"; OUT_PREFIX="${PREFIX}t"; export LTM_TEMPORAL_CONTEXT=1
 elif [ -n "$CAPTION" ]; then
   VARIANT_ON=1; VARIANT_LABEL="caption-rerank"; OUT_PREFIX="${PREFIX}c"; export LTM_CAPTION_RERANK=1
+elif [ -n "$QUEREXP" ]; then
+  case "$QUEREXP" in
+    prf|caption) : ;;
+    *) echo "FATAL: --query-expansion mode must be 'prf' or 'caption' (got '$QUEREXP')"; exit 1 ;;
+  esac
+  VARIANT_ON=1; VARIANT_LABEL="query-expansion-${QUEREXP}"; OUT_PREFIX="${PREFIX}q"; export LTM_QUERY_EXPANSION="$QUEREXP"
 fi
 if [ -n "$VARIANT_ON" ]; then
   SETTINGS="3"
