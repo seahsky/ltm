@@ -24,17 +24,25 @@
 # EXECUTE (do NOT source) — it switches conda envs in its own process.
 # Aborts before the paid LLM run if pull / setup / pre-tests / build / render fail.
 #
-# SHOWCASE-BY-DEFAULT: this driver defaults to a WARM visit (--warm 2) because a
-# COLD audiogoal episode starts the robot AT the goal view-point (pick_cold_pose)
-# → it barely moves → a ~2 s clip that ALSO ends before the onset step (so its
-# whole soundtrack is silence), AND the LTM recalls nothing (empty fine layer,
-# memory_bridge.py:1042). A WARM visit starts the robot FAR from the goal: it hears
-# the alarm, navigates in, and the LTM RECALLS the prior sighting — a longer clip
-# that actually shows memory working. The soundtrack is rendered on the LONGEST
-# episode THAT RAN PAST THE ONSET STEP (n_steps >= t_anom+3) — so a fast cold/seed
-# pass that ended before onset can NEVER become the (silent) demo. (n_steps is a
-# real per-episode-log field; n_audio_onset_fired is NOT — it lives only in the
-# summary.) The render step additionally REFUSES to mux a silent track.
+# SHOWCASE-BY-DEFAULT: this driver defaults to several WARM visits (--warm 4)
+# because a COLD audiogoal episode starts the robot AT the goal view-point
+# (pick_cold_pose) → it barely moves → a ~2 s clip that ALSO ends before the onset
+# step (so its whole soundtrack is silence), AND the LTM recalls nothing (empty fine
+# layer, memory_bridge.py:1042). A WARM visit starts the robot FAR from the goal: it
+# hears the alarm, navigates in, and the LTM RECALLS the prior sighting — a clip that
+# actually shows memory working. ACT 2 is picked (in the TESTED picker
+# make_two_act_demo.pick_two_acts) as the BEST warm RECALL episode — one that ARRIVED
+# (success_1m / distance_to_goal<1m) AND whose memory FIRED (n_memory_chosen>=1) AND
+# ended in a STOP — preferring the SHORTEST such (a crisp arrival), NOT the longest.
+# This fixes the old "longest-wins" bug where a 250-step timeout (the wander that
+# never found the bed) was chosen and "the video just stopped" mid-wander. Warm
+# arrival is ~0.67, so 4 tries make a clean arrival near-certain (P(all fail)~1.6%).
+# If NO warm episode arrives, ACT 2 falls back to the longest-past-onset episode
+# (so the soundtrack is non-silent) with a LOUD banner that the demo shows
+# exploration, not arrival. (Every field the picker reads — success_1m,
+# n_memory_chosen, n_arrival_stop, n_stop_signals, distance_to_goal, n_steps — is in
+# episode_NNN.json/ep_log; the dead n_audio_onset_fired summary-only field is gone.)
+# The render step additionally REFUSES to mux a silent track.
 # Force the literal cold (short) demo with --cold.
 # Length levers (defaults chosen so a 30-60 step episode is >=8-10s):
 #   --min-dist (default 5 m → robot starts ~2 rooms away so it actually travels)
@@ -62,8 +70,10 @@ SCENE="wcojb4TFT35"; CLASS="baby_cry"; CATEGORY="bed"
 TAG="demo-video"; VIDEO_FPS=4; T_ANOM_FIRE=5; SOURCE_OVERRIDE=""
 ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; KEYFRAME_EVERY=1; MIN_DIST="3.0"
 # DEFAULT = warm showcase (robot travels + recalls). --cold forces the short
-# at-the-goal cold demo.
-WARM=1; NWARM=2
+# at-the-goal cold demo. NWARM=4 (not 2): warm arrival rate is ~0.67, so with 4
+# tries P(no warm episode arrives) ≈ 0.33^4 ≈ 1.6% — the picker almost always has a
+# real recalled arrival to choose for ACT 2 (vs ~11% with 2 tries). Override --warm N.
+WARM=1; NWARM=4
 while [ $# -gt 0 ]; do
   case "$1" in
     --scene) SCENE="$2"; shift 2 ;;
@@ -80,10 +90,10 @@ while [ $# -gt 0 ]; do
     --source) SOURCE_OVERRIDE="$2"; shift 2 ;;
     --onset-target-dist) ONSET_TARGET_DIST="$2"; shift 2 ;;
     --onset-rms) ONSET_RMS_OVERRIDE="$2"; shift 2 ;;
-    # --warm: add N warm episodes (default 2) so the FINAL episode is a WARM
-    # visit where the LTM actually RECALLS the prior sighting — the recall story.
-    # The soundtrack is rendered on that last (warm) episode.
-    --warm) WARM=1; NWARM="${2:-2}"; shift 2 ;;
+    # --warm: build N warm episodes (default 4) so the picker has several chances
+    # at a WARM episode where the LTM actually RECALLS the prior sighting and the
+    # robot ARRIVES — ACT 2 is then chosen as the cleanest such recall story.
+    --warm) WARM=1; NWARM="${2:-4}"; shift 2 ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
@@ -262,54 +272,52 @@ banner "[7/7] post-hoc soundtrack + ffmpeg mux → demo video"
 # TWO-ACT path (default; NWARM>0). Stitch ONE story from two episodes of this run:
 #   ACT 1 = the COLD seed (smallest episode_idx with a video — idx 0; the robot is
 #           spawned at the bed, observes & memorizes it).
-#   ACT 2 = the LONGEST *other* episode that RAN PAST THE ONSET STEP
-#           (n_steps >= t_anom+3 — the alarm had time to fire; the warm travel+recall
-#           showcase). Both acts fire the alarm (driver passes t_anom to every
-#           episode) so both have audio → they concat cleanly into demo_two_act.mp4.
+#   ACT 2 = the BEST warm RECALL episode (TESTED picker pick_two_acts): one that
+#           ARRIVED (success_1m / distance_to_goal<1m) AND whose memory FIRED
+#           (n_memory_chosen>=1) AND ended in a STOP, preferring the SHORTEST such
+#           (crisp arrival) — NOT the longest (the old bug picked the 250-step
+#           timeout wander). Falls back to longest-past-onset only if no warm
+#           episode arrived (loud banner). Both acts fire the alarm (driver passes
+#           t_anom to every episode) so both have audio → concat into demo_two_act.mp4.
 # The single-clip path (below, NWARM==0 / --cold) is the fallback when there is no
 # warm episode to play ACT 2.
 # ============================================================================
 if [ "$NWARM" -gt 0 ] 2>/dev/null; then
-  # Pick ACT1 (cold seed, smallest idx w/ video) and ACT2 (longest OTHER ep past onset).
-  PICK2="$(python -c "
-import json,glob
-T_ANOM=int($T_ANOM_FIRE)
-vids=[]   # (episode_idx, n_steps, path)
-for f in sorted(glob.glob('$OUT_DIR/episode_*.json')):
-    if '_error' in f: continue
-    try: ep=json.load(open(f))
-    except Exception: continue
-    if not ep.get('video_path'): continue
-    idx=int(ep.get('episode_idx',0) or 0); n=int(ep.get('n_steps',0) or 0)
-    vids.append((idx,n,f))
-if not vids:
-    print('NONE\t\t'); raise SystemExit
-vids.sort(key=lambda c: c[0])             # by episode_idx
-act1=vids[0]                              # cold seed = smallest idx
-others=[v for v in vids if v[2]!=act1[2]] # every OTHER episode
-past=[v for v in others if v[1] >= T_ANOM + 3]
-pool=past if past else others
-if not pool:
-    # only one video total — degrade to single-clip
-    print('SOLO\t'+act1[2]+'\t'); raise SystemExit
-pool.sort(key=lambda c: c[1], reverse=True)  # longest other = ACT2
-act2=pool[0]
-status='OK' if past else 'NOFIRE'
-print(status+'\t'+act1[2]+'\t'+act2[2])
-")"
-  P2_STATUS="$(printf '%s' "$PICK2" | cut -f1)"
-  ACT1_EP="$(printf '%s' "$PICK2" | cut -f2)"
-  ACT2_EP="$(printf '%s' "$PICK2" | cut -f3)"
-  if [ "$P2_STATUS" = "NONE" ]; then
+  # Pick ACT1 (cold seed) and ACT2 (the BEST warm RECALL episode) via the TESTED
+  # picker in make_two_act_demo.py (`--pick`). It ranks ACT2 recall-story-first —
+  # ARRIVED (success_1m / d2g<1m) AND memory FIRED (n_memory_chosen>=1) AND ended in
+  # a STOP > merely ARRIVED > (last resort) longest-past-onset — then SHORTEST within
+  # a tier, so a clean arrival wins over a 250-step timeout (the old longest-wins
+  # picker's bug). It also prints a per-warm-episode diagnostic table (steps /
+  # success_1m / mem_chosen / remembr_chosen / min_d2g) so recall-fired-or-not is
+  # VISIBLE, and a loud banner when NO warm episode arrived. All fields read are in
+  # episode_NNN.json (ep_log) — no summary.json, no dead n_audio_onset_fired field.
+  PICK2_OUT="$(python embodied_memory/scripts/make_two_act_demo.py --pick \
+      --run-dir "$OUT_DIR" --t-anom "$T_ANOM_FIRE" 2>&1)"
+  # Echo the diagnostic table + any warning banner into the run log.
+  printf '%s\n' "$PICK2_OUT" | grep -v $'^PICK\t'
+  PICK2_LINE="$(printf '%s\n' "$PICK2_OUT" | grep $'^PICK\t' | tail -1)"
+  P2_STATUS="$(printf '%s' "$PICK2_LINE" | cut -f2)"
+  ACT1_EP="$(printf '%s' "$PICK2_LINE" | cut -f3)"
+  ACT2_EP="$(printf '%s' "$PICK2_LINE" | cut -f4)"
+  if [ -z "$P2_STATUS" ] || [ "$P2_STATUS" = "NONE" ]; then
     echo "FATAL: no episode_NNN.json with a video_path in $OUT_DIR — was --save-video honoured? See ${OUT_DIR}.log."; exit 1
   elif [ "$P2_STATUS" = "SOLO" ]; then
     echo "  ⚠ only ONE episode has a video — cannot build two acts; falling back to single-clip on it."
     LAST_EP="$ACT1_EP"; NWARM=0   # fall through to the single-clip path below
   else
+    # status ∈ {OK, ARRIVED, NOFIRE}; the picker already printed the per-warm
+    # diagnostic table above. OK = arrived + memory fired (the clean recall story);
+    # ARRIVED = arrived but recall didn't visibly drive it; NOFIRE = no warm episode
+    # reached the bed → best-effort exploration clip (loud honest banner).
     [ "$P2_STATUS" = "NOFIRE" ] && {
-      echo "  ⚠⚠ WARNING: no OTHER episode ran past onset (every warm ep < t_anom=$T_ANOM_FIRE + 3 steps)."
-      echo "     ACT 2 may be silent → make_two_act_demo REFUSES to mux silence (loud failure)."
-      echo "     LOWER --t-anom (try 3) and/or RAISE --min-dist so the warm episode runs longer."; }
+      echo "  ════════════════════════════════════════════════════════════════"
+      echo "  ⚠ no warm episode reached the bed (recall did not pay off in this"
+      echo "    cell) — ACT 2 shows EXPLORATION, not arrival. The demo still"
+      echo "    renders on the best-effort (longest-past-onset) episode so it is"
+      echo "    not silent, but it does NOT show a recalled arrival."
+      echo "    Try --warm 6 or a different --scene/--class/--category."
+      echo "  ════════════════════════════════════════════════════════════════"; }
     A1_STEPS="$(python -c "import json;print(json.load(open('$ACT1_EP')).get('n_steps',0))" 2>/dev/null || echo 0)"
     A2_STEPS="$(python -c "import json;print(json.load(open('$ACT2_EP')).get('n_steps',0))" 2>/dev/null || echo 0)"
     A1_DUR="$(python -c "print('%.1f' % ((($A1_STEPS/$KEYFRAME_EVERY)+1)/$VIDEO_FPS))" 2>/dev/null || echo '?')"

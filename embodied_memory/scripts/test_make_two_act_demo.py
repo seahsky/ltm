@@ -331,5 +331,200 @@ class TestMainOrchestration(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(d, "act2.mp4")))
 
 
+def _ep(idx, *, n_steps, video=True, success_1m=False, n_memory_chosen=0,
+        n_arrival_stop=0, n_stop_signals=0, distance_to_goal=None,
+        n_remembr_chosen=0, min_distance_to_goal=None):
+    """An episode_NNN.json-shaped dict (only the picker-relevant ep_log fields)."""
+    ep = {
+        "episode_idx": idx,
+        "n_steps": n_steps,
+        "success_1m": success_1m,
+        "n_memory_chosen": n_memory_chosen,
+        "n_arrival_stop": n_arrival_stop,
+        "n_stop_signals": n_stop_signals,
+        "n_remembr_chosen": n_remembr_chosen,
+        "distance_to_goal": distance_to_goal,
+        "min_distance_to_goal": min_distance_to_goal,
+        "_path": f"episode_{idx:03d}.json",
+    }
+    if video:
+        ep["video_path"] = f"video/episode_{idx:03d}.mp4"
+    return ep
+
+
+class TestPickTwoActs(unittest.TestCase):
+    def test_act1_is_smallest_idx_with_video(self):
+        eps = [_ep(2, n_steps=40, success_1m=True, n_memory_chosen=3,
+                   n_arrival_stop=1),
+               _ep(0, n_steps=22),
+               _ep(1, n_steps=120)]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["act1"]["episode_idx"], 0)  # cold seed = smallest idx
+
+    def test_arrived_and_memfired_beats_arrived_only(self):
+        # ep1: arrived only (no memory). ep2: arrived AND memory fired AND stop.
+        # The clean recall story (ep2) must win even though it is LONGER here.
+        eps = [
+            _ep(0, n_steps=22),
+            _ep(1, n_steps=18, success_1m=True, n_memory_chosen=0),
+            _ep(2, n_steps=40, success_1m=True, n_memory_chosen=3, n_arrival_stop=1),
+        ]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["status"], "OK")
+        self.assertEqual(res["act2"]["episode_idx"], 2)
+
+    def test_arrived_beats_longest_wander(self):
+        # ep1 = a 250-step timeout (longest, never arrived). ep2 = a short arrival.
+        # The OLD longest-wins picker took ep1; the new one must take the arrival.
+        eps = [
+            _ep(0, n_steps=22),
+            _ep(1, n_steps=250),  # wander / timeout — longest
+            _ep(2, n_steps=30, success_1m=True),  # arrived
+        ]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["status"], "ARRIVED")
+        self.assertEqual(res["act2"]["episode_idx"], 2)
+
+    def test_shortest_among_equal_tier(self):
+        # two clean recall stories → prefer the SHORTER (crisper) path.
+        eps = [
+            _ep(0, n_steps=22),
+            _ep(1, n_steps=45, success_1m=True, n_memory_chosen=2, n_stop_signals=1),
+            _ep(2, n_steps=20, success_1m=True, n_memory_chosen=4, n_arrival_stop=1),
+        ]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["status"], "OK")
+        self.assertEqual(res["act2"]["episode_idx"], 2)  # shorter clean recall
+
+    def test_distance_to_goal_under_1m_counts_as_arrived(self):
+        # no success_1m flag but final distance_to_goal < 1.0 → tier 1 (arrived).
+        eps = [
+            _ep(0, n_steps=22),
+            _ep(1, n_steps=250),  # wander
+            _ep(2, n_steps=33, distance_to_goal=0.6),  # arrived via d2g
+        ]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["status"], "ARRIVED")
+        self.assertEqual(res["act2"]["episode_idx"], 2)
+
+    def test_nofire_falls_back_to_longest_past_onset(self):
+        # NO warm episode arrived → NOFIRE; among non-arrivals prefer the LONGEST
+        # that ran past onset (so the soundtrack is non-silent), not a pre-onset stub.
+        eps = [
+            _ep(0, n_steps=22),
+            _ep(1, n_steps=4),    # ended before onset (t_anom+3 = 8) → not eligible
+            _ep(2, n_steps=120),  # past onset, longest wander
+            _ep(3, n_steps=60),   # past onset, shorter wander
+        ]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["status"], "NOFIRE")
+        self.assertEqual(res["act2"]["episode_idx"], 2)
+
+    def test_nofire_all_pre_onset_uses_longest_overall(self):
+        eps = [
+            _ep(0, n_steps=22),
+            _ep(1, n_steps=4),
+            _ep(2, n_steps=6),
+        ]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["status"], "NOFIRE")
+        self.assertEqual(res["act2"]["episode_idx"], 2)  # longest overall
+
+    def test_solo_when_only_one_video(self):
+        eps = [_ep(0, n_steps=22), _ep(1, n_steps=120, video=False)]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["status"], "SOLO")
+        self.assertIsNone(res["act2"])
+        self.assertEqual(res["act1"]["episode_idx"], 0)
+
+    def test_none_when_no_video(self):
+        eps = [_ep(0, n_steps=22, video=False), _ep(1, n_steps=30, video=False)]
+        res = M.pick_two_acts(eps, t_anom=5)
+        self.assertEqual(res["status"], "NONE")
+        self.assertIsNone(res["act1"])
+        self.assertIsNone(res["act2"])
+
+    def test_reads_only_documented_fields(self):
+        # The picker must only consult fields that EXIST in episode_NNN.json (ep_log).
+        # (Guards against the n_audio_onset_fired dead-field bug recurring.)
+        allowed = {
+            "episode_idx", "n_steps", "video_path", "success_1m",
+            "n_memory_chosen", "n_arrival_stop", "n_stop_signals",
+            "distance_to_goal", "_path",
+        }
+        sentinel = _ep(1, n_steps=30, success_1m=True, n_memory_chosen=2,
+                       n_arrival_stop=1)
+
+        class _Dict(dict):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.seen = set()
+
+            def get(self, key, default=None):
+                self.seen.add(key)
+                return super().get(key, default)
+
+        tracked = _Dict(sentinel)
+        M.pick_two_acts([_ep(0, n_steps=22), tracked], t_anom=5)
+        leaked = tracked.seen - allowed
+        self.assertEqual(leaked, set(),
+                         f"picker read undocumented ep field(s): {leaked}")
+
+
+class TestPickMainCLI(unittest.TestCase):
+    def _write_run(self, d, episodes):
+        import json
+        os.makedirs(os.path.join(d, "video"), exist_ok=True)
+        for ep in episodes:
+            idx = ep["episode_idx"]
+            if ep.get("video_path"):
+                with open(os.path.join(d, "video", f"episode_{idx:03d}.mp4"),
+                          "wb") as f:
+                    f.write(b"silent")
+            payload = {k: v for k, v in ep.items() if k != "_path"}
+            with open(os.path.join(d, f"episode_{idx:03d}.json"), "w") as f:
+                json.dump(payload, f)
+
+    def test_pick_main_emits_pick_line_and_table(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as d:
+            self._write_run(d, [
+                _ep(0, n_steps=22),
+                _ep(1, n_steps=250),  # wander
+                _ep(2, n_steps=30, success_1m=True, n_memory_chosen=3,
+                    n_arrival_stop=1, min_distance_to_goal=0.4),
+            ])
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = M.main(["--pick", "--run-dir", d, "--t-anom", "5"])
+            out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        # a machine-readable PICK line the bash driver parses
+        pick_lines = [ln for ln in out.splitlines() if ln.startswith("PICK\t")]
+        self.assertEqual(len(pick_lines), 1)
+        parts = pick_lines[0].split("\t")
+        self.assertEqual(parts[1], "OK")
+        self.assertTrue(parts[2].endswith("episode_000.json"))  # act1 = cold seed
+        self.assertTrue(parts[3].endswith("episode_002.json"))  # act2 = recall story
+        # the diagnostic table is present (per-warm-episode lines)
+        self.assertIn("steps=250", out)
+        self.assertIn("success_1m=True", out)
+
+    def test_pick_main_none_exit_3(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as d:
+            self._write_run(d, [_ep(0, n_steps=22, video=False)])
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = M.main(["--pick", "--run-dir", d])
+            out = buf.getvalue()
+        self.assertEqual(rc, 3)
+        self.assertIn("PICK\tNONE", out)
+
+
 if __name__ == "__main__":
     unittest.main()
