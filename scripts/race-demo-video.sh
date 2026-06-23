@@ -60,7 +60,7 @@ SCENE="wcojb4TFT35"; CLASS="baby_cry"; CATEGORY="bed"
 # travel). T_ANOM_FIRE=5 fires the anomaly NEAR THE START so it plays for almost
 # the whole clip AND even short episodes capture the onset. All overridable.
 TAG="demo-video"; VIDEO_FPS=4; T_ANOM_FIRE=5; SOURCE_OVERRIDE=""
-ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; KEYFRAME_EVERY=1; MIN_DIST="5.0"
+ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; KEYFRAME_EVERY=1; MIN_DIST="3.0"
 # DEFAULT = warm showcase (robot travels + recalls). --cold forces the short
 # at-the-goal cold demo.
 WARM=1; NWARM=2
@@ -123,16 +123,37 @@ rm -rf "$DS_DIR"
 # '=' form (not a space): HM3D source coords start with '-' and contain commas,
 # so argparse misreads a space-separated value as an option flag.
 SRC_ARG=""; [ -n "$SOURCE_OVERRIDE" ] && SRC_ARG="--source-position=$SOURCE_OVERRIDE"
-# --t-anom-cold sets the COLD (first/only) episode's onset LOW so the anomaly
-# fires on the demo visit (the default cold value is 10000 = silent mapping).
-# shellcheck disable=SC2086
-python embodied_memory/scripts/make_audiogoal_smoke.py \
-    --src "$SRC" --scene "$SCENE" --categories "$CATEGORY" --n-warm "$NWARM" \
-    --anomaly-class "$CLASS" --name "$NAME" --min-dist "$MIN_DIST" \
-    --t-anom-cold "$T_ANOM_FIRE" --t-anom-warm "$T_ANOM_FIRE" \
-    --out-dir "$DS_DIR" --source-manifest "$MANIFEST" $SRC_ARG \
-  || { echo "FATAL: dataset build failed."; exit 1; }
-[ -f "$DS" ] && [ -f "$MANIFEST" ] || { echo "FATAL: dataset or manifest missing"; exit 1; }
+# Build the dataset. A two-act demo NEEDS a warm (recall) episode, but a too-large
+# --min-dist on a small cell yields ONLY the cold episode (no navigable warm start
+# survives the filter) → the run produces just episode_000 → the short single clip.
+# So if NWARM>0 and no warm episode is built, RETRY with a smaller min_dist, and
+# FAIL LOUDLY if none can be built (rather than silently shipping the cold clip).
+# --t-anom-cold/-warm both = T_ANOM_FIRE so BOTH acts carry audio.
+N_BUILT=0; MD_USED=""
+for MD in "$MIN_DIST" 2.5 2.0 1.5 1.0; do
+  rm -rf "$DS_DIR"
+  # shellcheck disable=SC2086
+  python embodied_memory/scripts/make_audiogoal_smoke.py \
+      --src "$SRC" --scene "$SCENE" --categories "$CATEGORY" --n-warm "$NWARM" \
+      --anomaly-class "$CLASS" --name "$NAME" --min-dist "$MD" \
+      --t-anom-cold "$T_ANOM_FIRE" --t-anom-warm "$T_ANOM_FIRE" \
+      --out-dir "$DS_DIR" --source-manifest "$MANIFEST" $SRC_ARG \
+    || { echo "FATAL: dataset build failed."; exit 1; }
+  [ -f "$DS" ] && [ -f "$MANIFEST" ] || { echo "FATAL: dataset or manifest missing"; exit 1; }
+  N_BUILT="$(python -c "import gzip,json,glob; print(sum(len(json.load(gzip.open(f))['episodes']) for f in glob.glob('$DS_DIR/content/*.json.gz')))" 2>/dev/null || echo 0)"
+  MD_USED="$MD"
+  echo "  min_dist=$MD → $N_BUILT episode(s) (1 cold + $((N_BUILT-1)) warm)"
+  # cold-only (--cold, NWARM=0) is fine with 1; a two-act needs >=2 (a warm).
+  { [ "$NWARM" -eq 0 ] || [ "${N_BUILT:-0}" -ge 2 ]; } && break
+  echo "  ↳ no warm start at min_dist=$MD — retrying smaller so the two-act has a recall episode…"
+done
+if [ "$NWARM" -gt 0 ] && [ "${N_BUILT:-0}" -lt 2 ]; then
+  echo "FATAL: no WARM (recall) episode could be built for ($SCENE,$CATEGORY) at any min_dist."
+  echo "       This cell's candidate start poses are all near the goal. Try a different"
+  echo "       --scene/--category, or run with --cold for the short single-visit clip."
+  exit 1
+fi
+echo "  built $N_BUILT episode(s) at min_dist=$MD_USED"
 
 SRC_XYZ="$(python -c "
 import json
