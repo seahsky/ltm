@@ -24,14 +24,20 @@
 # EXECUTE (do NOT source) — it switches conda envs in its own process.
 # Aborts before the paid LLM run if pull / setup / pre-tests / build / render fail.
 #
-# CAVEAT (honest, put in the demo caption): on a COLD/first visit the LTM recalls
-# NOTHING (the fine layer is empty → propose_memory_candidates returns [] —
-# memory_bridge.py:1042). The full S3 stack is LIVE (STM/consolidation/ReMEmbR/
-# rerank/memory-injection seam/audio brain) but the story the clip TELLS is the
-# audio→goal→navigate→stop loop, NOT recall. A WARM visit is what showcases LTM
-# recall — pass --warm to add warm episodes (then the soundtrack renders the
-# LAST, warm, episode). The binaural pan is ILD-only (ITD-stripped by SoundSpaces)
-# → a clear loudness gradient, weak left/right stereo image.
+# SHOWCASE-BY-DEFAULT: this driver defaults to a WARM visit (--warm 2) because a
+# COLD audiogoal episode starts the robot AT the goal view-point (pick_cold_pose)
+# → it barely moves → a ~2 s clip, AND the LTM recalls nothing (empty fine layer,
+# memory_bridge.py:1042). A WARM visit starts the robot FAR from the goal: it hears
+# the alarm, navigates in, and the LTM RECALLS the prior sighting — a longer clip
+# that actually shows memory working. The soundtrack is rendered on the LONGEST
+# episode (so a fast cold/seed pass never becomes the demo). Force the literal cold
+# (short) demo with --cold.
+# Length levers: --min-dist (default 4 m → robot starts ~2 rooms away so it actually
+# travels) + --keyframe-every (default 2 → denser frames) + --video-fps (default 6).
+# Duration ≈ (n_steps / keyframe_every) / video_fps, reported at the end; the
+# soundtrack renders on the LONGEST successful episode.
+# Binaural pan is ILD-only (ITD-stripped by SoundSpaces) → a clear loudness
+# gradient, weak left/right stereo image.
 
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO_ROOT" || exit 1
@@ -39,8 +45,11 @@ MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodie
 
 # Default a known-good cell. wcojb4TFT35 + baby_cry→crib / chair is M0c-demo good.
 SCENE="wcojb4TFT35"; CLASS="baby_cry"; CATEGORY="bed"
-TAG="demo-video"; VIDEO_FPS=8; T_ANOM_FIRE=30; SOURCE_OVERRIDE=""
-ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; WARM=0; NWARM=0
+TAG="demo-video"; VIDEO_FPS=6; T_ANOM_FIRE=30; SOURCE_OVERRIDE=""
+ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; KEYFRAME_EVERY=2; MIN_DIST="4.0"
+# DEFAULT = warm showcase (robot travels + recalls). --cold forces the short
+# at-the-goal cold demo.
+WARM=1; NWARM=2
 while [ $# -gt 0 ]; do
   case "$1" in
     --scene) SCENE="$2"; shift 2 ;;
@@ -48,6 +57,9 @@ while [ $# -gt 0 ]; do
     --category) CATEGORY="$2"; shift 2 ;;
     --tag) TAG="$2"; shift 2 ;;
     --video-fps) VIDEO_FPS="$2"; shift 2 ;;
+    --keyframe-every) KEYFRAME_EVERY="$2"; shift 2 ;;
+    --min-dist) MIN_DIST="$2"; shift 2 ;;
+    --cold) WARM=0; NWARM=0; shift 1 ;;
     # The onset step for the DEMO episode (cold/first visit fires here). Low so
     # the anomaly sounds early in the clip.
     --t-anom) T_ANOM_FIRE="$2"; shift 2 ;;
@@ -102,7 +114,7 @@ SRC_ARG=""; [ -n "$SOURCE_OVERRIDE" ] && SRC_ARG="--source-position=$SOURCE_OVER
 # shellcheck disable=SC2086
 python embodied_memory/scripts/make_audiogoal_smoke.py \
     --src "$SRC" --scene "$SCENE" --categories "$CATEGORY" --n-warm "$NWARM" \
-    --anomaly-class "$CLASS" --name "$NAME" \
+    --anomaly-class "$CLASS" --name "$NAME" --min-dist "$MIN_DIST" \
     --t-anom-cold "$T_ANOM_FIRE" --t-anom-warm "$T_ANOM_FIRE" \
     --out-dir "$DS_DIR" --source-manifest "$MANIFEST" $SRC_ARG \
   || { echo "FATAL: dataset build failed."; exit 1; }
@@ -167,6 +179,26 @@ N_EPISODES="$(python -c "import gzip,json,glob,sys; print(sum(len(json.load(gzip
 [ "$N_EPISODES" -gt 0 ] 2>/dev/null || { echo "FATAL: episode count '$N_EPISODES' <= 0"; exit 1; }
 echo "  n-episodes = $N_EPISODES"
 
+[[ "$KEYFRAME_EVERY" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: --keyframe-every must be a positive integer"; exit 1; }
+
+banner "[5c/7] ensure ffmpeg (needed for the audio mux)"
+if command -v ffmpeg >/dev/null 2>&1; then
+  echo "  system ffmpeg: $(command -v ffmpeg)"
+elif python -c "import imageio_ffmpeg,os,sys; sys.exit(0 if os.path.exists(imageio_ffmpeg.get_ffmpeg_exe()) else 1)" 2>/dev/null; then
+  echo "  bundled ffmpeg (imageio-ffmpeg): $(python -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())')"
+else
+  echo "  no ffmpeg found — installing a bundled static binary (imageio-ffmpeg)…"
+  if pip install -q imageio-ffmpeg 2>/dev/null \
+       && python -c "import imageio_ffmpeg,os,sys; sys.exit(0 if os.path.exists(imageio_ffmpeg.get_ffmpeg_exe()) else 1)" 2>/dev/null; then
+    echo "  installed imageio-ffmpeg: $(python -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())')"
+  elif conda install -y -c conda-forge ffmpeg >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1; then
+    echo "  installed system ffmpeg via conda: $(command -v ffmpeg)"
+  else
+    echo "  WARN: ffmpeg install failed — the run still proceeds, but the mux will be"
+    echo "        skipped and the soundtrack written as a separate .wav (mux manually)."
+  fi
+fi
+
 banner "[6/7] run S3 (--task audiogoal --backbone remembr --save-video, 7B planner)"
 rm -f "$OUT_DIR/summary.json"
 # shellcheck disable=SC2086
@@ -176,7 +208,7 @@ REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
     --audio-onset-rms "$ONSET_RMS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
     --episodes-path "$DS" --scene "$SCENE" --target any \
     --n-episodes "$N_EPISODES" --out-dir "$OUT_DIR" \
-    --save-video --video-fps "$VIDEO_FPS" 2>&1 | tee "${OUT_DIR}.log"
+    --save-video --video-fps "$VIDEO_FPS" --keyframe-every "$KEYFRAME_EVERY" 2>&1 | tee "${OUT_DIR}.log"
 rc=${PIPESTATUS[0]}
 # Gate on COMPLETION, not rc (run_hm3d_pol returns 1 on S3-oriented pass-condition
 # fails too — only NO summary.json / n_completed<n_attempted is a hard crash).
@@ -191,21 +223,34 @@ except Exception:
 echo "  S3 complete (rc=$rc; rc=1 can be normal — pass_conditions are S3-oriented)"
 
 banner "[7/7] post-hoc soundtrack + ffmpeg mux → demo_with_sound.mp4"
-# Render the soundtrack for the LAST episode (the warm/recall one if --warm, else
-# the single cold demo episode). Pick the highest-numbered episode_NNN.json that
-# actually got a video.
+# Render the soundtrack for the LONGEST episode with a video (max n_steps). A cold
+# audiogoal episode starts AT the goal → tiny n_steps, so the longest is the warm
+# (travel + recall) episode — the showcase one. Print n_steps so length is visible.
+# Prefer the LONGEST episode that SUCCEEDED (a clean travel+arrive clip); fall back
+# to the longest overall. A cold at-the-goal episode has tiny n_steps so it loses.
 LAST_EP="$(python -c "
-import os,json,glob
-best=None
+import json,glob
+cands=[]
 for f in sorted(glob.glob('$OUT_DIR/episode_*.json')):
     if '_error' in f: continue
     try: ep=json.load(open(f))
     except Exception: continue
-    if ep.get('video_path'): best=f
-print(best or '')
+    if not ep.get('video_path'): continue
+    cands.append((bool(ep.get('success_1m')), ep.get('n_steps',0) or 0, f))
+if cands:
+    succ=[c for c in cands if c[0]]
+    pool=succ if succ else cands
+    pool.sort(key=lambda c: c[1], reverse=True)
+    print(pool[0][2])
+else:
+    print('')
 ")"
 [ -n "$LAST_EP" ] || { echo "FATAL: no episode_NNN.json with a video_path in $OUT_DIR — was --save-video honoured? See ${OUT_DIR}.log."; exit 1; }
-echo "  soundtrack episode = $LAST_EP"
+EP_STEPS="$(python -c "import json;print(json.load(open('$LAST_EP')).get('n_steps',0))" 2>/dev/null || echo 0)"
+EST_DUR="$(python -c "print('%.1f' % ((($EP_STEPS/$KEYFRAME_EVERY)+1)/$VIDEO_FPS))" 2>/dev/null || echo '?')"
+echo "  soundtrack episode = $LAST_EP  (n_steps=$EP_STEPS → ~${EST_DUR}s @ keyframe_every=$KEYFRAME_EVERY, fps=$VIDEO_FPS)"
+SHORT="$(python -c "print(1 if ((($EP_STEPS/$KEYFRAME_EVERY)+1)/$VIDEO_FPS) < 6 else 0)" 2>/dev/null || echo 0)"
+[ "$SHORT" = 1 ] && echo "  ⚠ short clip (~${EST_DUR}s) — for longer: --min-dist 6, --keyframe-every 1, or --warm 3 (re-run)."
 # shellcheck disable=SC2086
 python embodied_memory/scripts/render_demo_audio_track.py \
     --run-dir "$OUT_DIR" --episode-json "$LAST_EP" \
@@ -216,7 +261,7 @@ python embodied_memory/scripts/render_demo_audio_track.py \
 FINAL="$OUT_DIR/demo_with_sound.mp4"
 banner "DONE"
 if [ -f "$FINAL" ]; then
-  echo "  DEMO VIDEO WITH SOUND: $FINAL"
+  echo "  DEMO VIDEO WITH SOUND: $FINAL  (~${EST_DUR}s, $EP_STEPS steps, fps=$VIDEO_FPS)"
 else
   echo "  ffmpeg absent — soundtrack written separately. WAV: $OUT_DIR/demo_track.wav"
   echo "  Silent clip: $(python -c "import json;print('$OUT_DIR/'+ (json.load(open('$LAST_EP')).get('video_path') or 'video/episode_000.mp4'))")"
