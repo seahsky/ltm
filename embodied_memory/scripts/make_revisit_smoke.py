@@ -51,6 +51,7 @@ import gzip
 import json
 import math
 import os
+import random
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -223,10 +224,23 @@ def pick_warm_poses(
     goal_vp_positions: List[List[float]],
     n: int,
     min_dist: float = 2.0,
+    seed: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Return up to ``n`` candidate poses, farthest-first by distance to the
     nearest goal view_point, dropping any closer than ``min_dist`` (so the warm
     agent does not start already on top of the goal).
+
+    ``seed`` (default ``None``) controls a RESAMPLE for an independent second
+    sample of the warm-revisit headline. The eligible pool is computed
+    IDENTICALLY (same ``min_dist`` / category filters); only the FINAL pick
+    among the survivors changes:
+
+      * ``seed is None`` → the historical deterministic farthest-first top-``n``
+        (BYTE-IDENTICAL to before this parameter existed).
+      * ``seed is not None`` → ``random.Random(seed).sample(eligible,
+        min(n, len(eligible)))`` — a different valid ``n``-subset of the SAME
+        eligible pool (every member already satisfies the filters). ``sample``
+        takes ALL when the pool ``<= n``, so the set is seed-independent there.
     """
     scored: List[Any] = []
     for pose in candidate_poses:
@@ -240,6 +254,10 @@ def pick_warm_poses(
         if d < min_dist:
             continue
         scored.append((d, pose))
+    if seed is not None:
+        # Resample among the SAME eligible survivors (filters already applied).
+        eligible = [pose for _, pose in scored]
+        return random.Random(seed).sample(eligible, min(n, len(eligible)))
     scored.sort(key=lambda t: t[0], reverse=True)
     return [pose for _, pose in scored[:n]]
 
@@ -250,6 +268,7 @@ def pick_warm_poses_changed_world(
     goal_b_vp_positions: List[List[float]],
     n: int,
     min_dist: float = 2.0,
+    seed: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Reachability-biased warm-start selection for the CHANGED-WORLD build.
 
@@ -293,6 +312,13 @@ def pick_warm_poses_changed_world(
     # the proven-reachable poses winning ties.
     scored: List[Any] = [(d, 0, pose) for d, pose in _filter(reachable_poses)]
     scored += [(d, 1, pose) for d, pose in _filter(candidate_poses)]
+    if seed is not None:
+        # RESAMPLE among the SAME eligible survivors (the reachability/min_dist
+        # filters in ``_filter`` are already applied) — a different valid
+        # n-subset of the same pool. ``seed is None`` keeps the deterministic
+        # nearest-first pick. See ``pick_warm_poses`` for the full rationale.
+        eligible = [pose for _, _, pose in scored]
+        return random.Random(seed).sample(eligible, min(n, len(eligible)))
     scored.sort(key=lambda t: (t[0], t[1]))
     return [pose for _, _, pose in scored[:n]]
 
@@ -363,6 +389,7 @@ def build_dataset(
     instance_keyed: bool = False,
     seed_distractors: bool = False,
     n_distractors: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Assemble a content dict with, per category, one cold + ``n_warm`` warm
     episodes. Categories absent from the source are skipped. Warm-start
@@ -378,6 +405,14 @@ def build_dataset(
     metric target. ``object_category`` stays "{cat}" so the "there is a {cat}"
     retrieval query is unchanged; only the goal *set* shrinks. Warm starts are
     then filtered for distance to *that instance's* view_points only.
+
+    ``seed`` (default ``None``) RESAMPLES the warm starts for a genuinely
+    independent second sample of the warm-revisit headline (the pipeline is
+    otherwise fully deterministic). It threads to the warm-pose selectors, which
+    draw a different valid ``n``-subset of the SAME eligible pool. The cold pose
+    and the instance choice (argmax-iou) stay deterministic, so success-keying is
+    unchanged across seeds. When not ``None`` it is stamped as ``revisit_seed`` in
+    the returned content for provenance; ``None`` → field absent (byte-identical).
     """
     goals_by_category = src_content.get("goals_by_category") or {}
     src_eps = src_content.get("episodes") or []
@@ -429,7 +464,7 @@ def build_dataset(
             ]
             warm_poses = pick_warm_poses_changed_world(
                 cat_candidate_poses, a_reachable_poses, goal_vps,
-                n=n_warm, min_dist=min_dist)
+                n=n_warm, min_dist=min_dist, seed=seed)
             # seed_distractors: ALSO start a seed-only cold episode at each
             # same-category DISTRACTOR's view_point (between cold and warm), so
             # consolidation seeds the distractor into the LTM and the warm visit's
@@ -451,16 +486,19 @@ def build_dataset(
             cold_pose = pick_cold_pose(goal_instances)
             goal_vps = _goal_view_point_positions(goal_instances)
             warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps,
-                                         n=n_warm, min_dist=min_dist)
+                                         n=n_warm, min_dist=min_dist, seed=seed)
             out_eps.extend(build_category_episodes(template, cold_pose, warm_poses, cat))
 
-    return {
+    out: Dict[str, Any] = {
         "category_to_task_category_id": src_content.get("category_to_task_category_id", {}),
         "category_to_scene_annotation_category_id":
             src_content.get("category_to_scene_annotation_category_id", {}),
         "goals_by_category": out_goals,
         "episodes": out_eps,
     }
+    if seed is not None:
+        out["revisit_seed"] = seed  # provenance; None → field absent (byte-identical)
+    return out
 
 
 def build_changed_world_dataset(
@@ -768,6 +806,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="changed-world: min metres B must be from A (a genuine "
                              "move) while preferring the NEAREST such instance for "
                              "navmesh reachability.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="RESAMPLE the warm starts for a genuinely independent "
+                             "SECOND sample of the warm-revisit headline (the pipeline "
+                             "is otherwise fully deterministic). Picks a different valid "
+                             "n-subset of the SAME eligible warm-start pool; the cold "
+                             "pose + instance choice stay deterministic (success-keying "
+                             "unchanged). Stamped as revisit_seed for provenance. Default "
+                             "unset → byte-identical to the deterministic build.")
     parser.add_argument("--out-dir", required=True)
     # cross-environment mode (step 2): a sighting in --home-scene, queried in --away-scene.
     parser.add_argument("--cross-env", action="store_true",
@@ -800,7 +846,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         content = build_dataset(src, args.categories, args.n_warm, args.min_dist,
                                 instance_keyed=args.instance_keyed,
                                 seed_distractors=args.seed_distractors,
-                                n_distractors=_n_distract)
+                                n_distractors=_n_distract,
+                                seed=args.seed)
     if not content["episodes"]:
         print(f"ERROR: no episodes built for categories={args.categories} "
               f"({'need >=2 instances per category for --changed-world; ' if args.changed_world else ''}"

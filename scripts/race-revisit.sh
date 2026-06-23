@@ -60,6 +60,12 @@ REUSE_DS=""       # --reuse-dataset <DIR>: skip the build, run on an existing da
                   # (so a second arm pairs against the SAME episodes — e.g. an over-fire A/B)
 SAVE_VIDEO=0      # --save-video: record per-episode first-person clips to <out-dir>/video/
 VIDEO_FPS=""      # --video-fps <N>: fps for --save-video (run_hm3d_pol default 8)
+SEED=""           # --seed N: RESAMPLE warm starts for an INDEPENDENT second sample of the
+                  # warm-revisit headline (the pipeline is otherwise fully deterministic).
+                  # Picks a different valid n-subset of the SAME eligible warm-start pool;
+                  # cold pose + instance choice stay deterministic (success-keying unchanged).
+                  # Threads to BOTH the regular and --instance-keyed builds. Unset => no
+                  # --seed passed => byte-identical deterministic build.
 
 # --- arg parse ---
 while [ $# -gt 0 ]; do
@@ -78,6 +84,7 @@ while [ $# -gt 0 ]; do
     --reuse-dataset)     REUSE_DS="$2"; shift 2 ;;
     --save-video)        SAVE_VIDEO=1; shift ;;
     --video-fps)         VIDEO_FPS="$2"; shift 2 ;;
+    --seed)              SEED="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg '$1'"; exit 1 ;;
   esac
 done
@@ -138,7 +145,7 @@ if [ -n "$REUSE_DS" ]; then
   banner "[4/6] REUSE existing dataset (no rebuild): $DS_DIR"
   [ -f "$DS" ] || { echo "FATAL: --reuse-dataset given but top-level dataset missing: $DS"; exit 1; }
 else
-  banner "[4/6] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR$([ "$INSTANCE_KEYED" = 1 ] && echo ' (instance-keyed)')"
+  banner "[4/6] build revisit dataset: scenes=[$SCENES] cats=[$CATS] n-warm=$NWARM -> $DS_DIR$([ "$INSTANCE_KEYED" = 1 ] && echo ' (instance-keyed)')$([ -n "$SEED" ] && echo " (seed=$SEED RESAMPLE)")"
   IK_BUILD_ARG=""; [ "$INSTANCE_KEYED" = 1 ] && IK_BUILD_ARG="--instance-keyed"
   if [ "$SEED_DISTRACTORS" = 1 ]; then
     [ "$INSTANCE_KEYED" = 1 ] || { echo "FATAL: --seed-distractors requires --instance-keyed"; exit 1; }
@@ -149,9 +156,10 @@ else
     SRC="${VALMINI}/${SCENE}.json.gz"
     [ -f "$SRC" ] || { echo "FATAL: source episodes missing: $SRC"; exit 1; }
     # shellcheck disable=SC2086
+    # --seed via $([ -n ... ]) so a "0" seed still passes (NOT ${SEED:+...}).
     python embodied_memory/scripts/make_revisit_smoke.py \
         --src "$SRC" --scene "$SCENE" --categories $CATS --n-warm "$NWARM" \
-        --out-dir "$DS_DIR" $IK_BUILD_ARG \
+        --out-dir "$DS_DIR" $IK_BUILD_ARG $([ -n "$SEED" ] && echo --seed $SEED) \
       || { echo "FATAL: dataset build failed for scene $SCENE."; exit 1; }
   done
   [ -f "$DS" ] || { echo "FATAL: expected top-level dataset not written: $DS"; exit 1; }

@@ -839,6 +839,231 @@ def case_build_dataset_regular_path_still_farthest_first():
     print("  case build_dataset_regular_path_still_farthest_first: OK")
 
 
+# ----------------------------------------------------------------------
+# --seed warm-start RESAMPLE — a genuinely independent SECOND SAMPLE of the
+# warm-revisit headline. The pipeline is otherwise fully deterministic; the
+# ONLY independent sample is a different (seeded) n-subset of the SAME eligible
+# warm-start pool. The cold pose + instance choice MUST stay deterministic so
+# success-keying is unchanged across seeds. (test_* names → pytest collects.)
+# ----------------------------------------------------------------------
+
+
+def _seed_pool_src(glb="wcojb4TFT35.basis.glb"):
+    """One category ("chair") with ONE goal instance near the origin and FIVE
+    same-category source-episode starts ALL beyond min_dist from the goal — an
+    eligible pool of 5 with n=3, so resampling can pick a different valid
+    3-subset of the SAME pool. The goal sits at [0,0,0]; the starts are spread
+    10..14 m away so none is dropped by the min_dist filter."""
+    return {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {
+            f"{glb}_chair": [_goal([0, 0, 0], [_vp([0, 0, 0], iou=1.5)])],
+        },
+        "episodes": [
+            {**_template("chair", "1"), "start_position": [10, 0, 0]},
+            {**_template("chair", "2"), "start_position": [11, 0, 0]},
+            {**_template("chair", "3"), "start_position": [12, 0, 0]},
+            {**_template("chair", "4"), "start_position": [13, 0, 0]},
+            {**_template("chair", "5"), "start_position": [14, 0, 0]},
+        ],
+    }
+
+
+def _eligible_warm_positions(src, glb="wcojb4TFT35.basis.glb", min_dist=2.0):
+    """The eligible warm-start pool computed EXACTLY as the builder would (same
+    category filter + min_dist filter), as a set of position tuples."""
+    goal_vps = mk._goal_view_point_positions(src["goals_by_category"][f"{glb}_chair"])
+    pool = set()
+    for ep in src["episodes"]:
+        if ep.get("object_category") != "chair":
+            continue
+        pos = ep["start_position"]
+        d = min(mk._dist(pos, g) for g in goal_vps) if goal_vps else float("inf")
+        if d >= min_dist:
+            pool.add(tuple(pos))
+    return pool
+
+
+def test_seed_none_warm_selection_byte_identical():
+    # (a) seed=None reproduces the pre-change deterministic farthest-first top-n
+    # EXACTLY on a fixture with pool>n. The unit selector and the full build path
+    # must both match the no-arg (legacy) call.
+    src = _seed_pool_src()
+    glb = "wcojb4TFT35.basis.glb"
+    goal_vps = mk._goal_view_point_positions(src["goals_by_category"][f"{glb}_chair"])
+    candidates = [
+        {"position": ep["start_position"], "rotation": ep["start_rotation"]}
+        for ep in src["episodes"]
+    ]
+    legacy = mk.pick_warm_poses(candidates, goal_vps, n=3, min_dist=2.0)
+    seeded_none = mk.pick_warm_poses(candidates, goal_vps, n=3, min_dist=2.0, seed=None)
+    assert legacy == seeded_none, (legacy, seeded_none)
+    # farthest-first top-3 → [14], [13], [12]
+    assert [p["position"] for p in seeded_none] == [[14, 0, 0], [13, 0, 0], [12, 0, 0]]
+    # end-to-end build is byte-identical with seed absent vs seed=None
+    base = mk.build_dataset(src, categories=["chair"], n_warm=3)
+    same = mk.build_dataset(src, categories=["chair"], n_warm=3, seed=None)
+    assert base == same, "seed=None must be byte-identical to no-seed build"
+    print("  case seed_none_warm_selection_byte_identical: OK")
+
+
+def test_seed_changed_world_none_byte_identical():
+    # seed=None on the changed-world selector reproduces the nearest-first pick.
+    goal_b = [[0, 0, 0]]
+    source = [
+        {"position": [20, 0, 0], "rotation": [0, 0, 0, 1]},
+        {"position": [3, 0, 0], "rotation": [0, 0, 0, 1]},
+    ]
+    reachable = [{"position": [5, 0, 0], "rotation": [0, 0, 0, 1]}]
+    legacy = mk.pick_warm_poses_changed_world(source, reachable, goal_b, n=3, min_dist=2.0)
+    seeded_none = mk.pick_warm_poses_changed_world(
+        source, reachable, goal_b, n=3, min_dist=2.0, seed=None)
+    assert legacy == seeded_none, (legacy, seeded_none)
+    assert [p["position"] for p in seeded_none] == [[3, 0, 0], [5, 0, 0], [20, 0, 0]]
+    print("  case seed_changed_world_none_byte_identical: OK")
+
+
+def test_seed_reproducible():
+    # (b) seed=K is REPRODUCIBLE — two calls give the same warm set.
+    src = _seed_pool_src()
+    glb = "wcojb4TFT35.basis.glb"
+    goal_vps = mk._goal_view_point_positions(src["goals_by_category"][f"{glb}_chair"])
+    candidates = [
+        {"position": ep["start_position"], "rotation": ep["start_rotation"]}
+        for ep in src["episodes"]
+    ]
+    a = mk.pick_warm_poses(candidates, goal_vps, n=3, min_dist=2.0, seed=7)
+    b = mk.pick_warm_poses(candidates, goal_vps, n=3, min_dist=2.0, seed=7)
+    assert a == b, (a, b)
+    # reproducible through the full build path too
+    da = mk.build_dataset(src, categories=["chair"], n_warm=3, seed=7)
+    db = mk.build_dataset(src, categories=["chair"], n_warm=3, seed=7)
+    assert da == db, "seeded build must be reproducible"
+    # changed-world selector reproducible too
+    goal_b = [[0, 0, 0]]
+    source = [{"position": [i, 0, 0], "rotation": [0, 0, 0, 1]} for i in (3, 6, 9, 12, 20)]
+    reachable = [{"position": [5, 0, 0], "rotation": [0, 0, 0, 1]}]
+    c = mk.pick_warm_poses_changed_world(source, reachable, goal_b, n=3, min_dist=2.0, seed=7)
+    d = mk.pick_warm_poses_changed_world(source, reachable, goal_b, n=3, min_dist=2.0, seed=7)
+    assert c == d, (c, d)
+    print("  case seed_reproducible: OK")
+
+
+def test_seed_distinct_when_pool_gt_n_equal_when_pool_le_n():
+    # (c) seed=1 != seed=2 give different warm sets when pool>n; equal when
+    # pool<=n (sample takes all → the same full set regardless of seed).
+    src = _seed_pool_src()  # pool of 5
+    glb = "wcojb4TFT35.basis.glb"
+    goal_vps = mk._goal_view_point_positions(src["goals_by_category"][f"{glb}_chair"])
+    candidates = [
+        {"position": ep["start_position"], "rotation": ep["start_rotation"]}
+        for ep in src["episodes"]
+    ]
+    s1 = mk.pick_warm_poses(candidates, goal_vps, n=3, min_dist=2.0, seed=1)
+    s2 = mk.pick_warm_poses(candidates, goal_vps, n=3, min_dist=2.0, seed=2)
+    set1 = {tuple(p["position"]) for p in s1}
+    set2 = {tuple(p["position"]) for p in s2}
+    assert set1 != set2, (set1, set2)  # different 3-subsets of the 5-pool
+    # pool <= n → sample takes ALL → identical set across seeds (order may differ,
+    # but the SET is the whole eligible pool either way)
+    full_pool = _eligible_warm_positions(src)
+    f1 = mk.pick_warm_poses(candidates, goal_vps, n=5, min_dist=2.0, seed=1)
+    f2 = mk.pick_warm_poses(candidates, goal_vps, n=5, min_dist=2.0, seed=2)
+    assert {tuple(p["position"]) for p in f1} == full_pool
+    assert {tuple(p["position"]) for p in f2} == full_pool
+    # changed-world: distinct seeds differ when pool>n
+    goal_b = [[0, 0, 0]]
+    source = [{"position": [i, 0, 0], "rotation": [0, 0, 0, 1]} for i in (3, 6, 9, 12, 20)]
+    reachable = []
+    cw1 = mk.pick_warm_poses_changed_world(source, reachable, goal_b, n=3, min_dist=2.0, seed=1)
+    cw2 = mk.pick_warm_poses_changed_world(source, reachable, goal_b, n=3, min_dist=2.0, seed=2)
+    assert {tuple(p["position"]) for p in cw1} != {tuple(p["position"]) for p in cw2}, (cw1, cw2)
+    print("  case seed_distinct_when_pool_gt_n_equal_when_pool_le_n: OK")
+
+
+def test_seed_resample_members_satisfy_eligibility():
+    # (d) EVERY resampled warm start is a member of the eligible pool — none
+    # violates the min_dist / category filter. Mix eligible + ineligible starts;
+    # the resample must NEVER surface an ineligible one regardless of seed.
+    glb = "wcojb4TFT35.basis.glb"
+    src = {
+        "category_to_task_category_id": {"chair": 0},
+        "category_to_scene_annotation_category_id": {"chair": 3},
+        "goals_by_category": {
+            f"{glb}_chair": [_goal([0, 0, 0], [_vp([0, 0, 0], iou=1.5)])],
+        },
+        "episodes": [
+            {**_template("chair", "1"), "start_position": [0.5, 0, 0]},  # < min_dist (drop)
+            {**_template("chair", "2"), "start_position": [1.0, 0, 0]},  # < min_dist (drop)
+            {**_template("chair", "3"), "start_position": [10, 0, 0]},
+            {**_template("chair", "4"), "start_position": [11, 0, 0]},
+            {**_template("chair", "5"), "start_position": [12, 0, 0]},
+            {**_template("chair", "6"), "start_position": [13, 0, 0]},
+        ],
+    }
+    eligible = _eligible_warm_positions(src)
+    assert eligible == {(10, 0, 0), (11, 0, 0), (12, 0, 0), (13, 0, 0)}, eligible
+    goal_vps = mk._goal_view_point_positions(src["goals_by_category"][f"{glb}_chair"])
+    candidates = [
+        {"position": ep["start_position"], "rotation": ep["start_rotation"]}
+        for ep in src["episodes"]
+    ]
+    for sd in (1, 2, 3, 42, 1000):
+        warm = mk.pick_warm_poses(candidates, goal_vps, n=3, min_dist=2.0, seed=sd)
+        for p in warm:
+            assert tuple(p["position"]) in eligible, (sd, p["position"])
+        assert (0.5, 0, 0) not in {tuple(p["position"]) for p in warm}
+        assert (1.0, 0, 0) not in {tuple(p["position"]) for p in warm}
+    # through the full build path, every warm episode start is eligible too
+    for sd in (1, 2, 3):
+        content = mk.build_dataset(src, categories=["chair"], n_warm=3, seed=sd)
+        warm_starts = [tuple(e["start_position"]) for e in content["episodes"][1:]]
+        for ws in warm_starts:
+            assert ws in eligible, (sd, ws)
+    print("  case seed_resample_members_satisfy_eligibility: OK")
+
+
+def test_seed_cold_pose_and_instance_choice_invariant():
+    # (e) the cold pose AND the instance choice are IDENTICAL across
+    # seed=None/1/2 — only the warm starts resample. Use the instance-keyed path
+    # (which makes the instance choice explicit in goals_by_category) plus the
+    # regular path's cold pose.
+    src = _multi_instance_src()
+    glb = "wcojb4TFT35.basis.glb"
+    gkey = f"{glb}_chair"
+
+    cold_positions = []
+    keyed_goals = []
+    for sd in (None, 1, 2):
+        # regular path: cold pose invariant
+        reg = mk.build_dataset(src, categories=["chair"], n_warm=1, seed=sd)
+        cold_positions.append(reg["episodes"][0]["start_position"])
+        # instance-keyed path: the chosen TARGET instance invariant
+        ik = mk.build_dataset(src, categories=["chair"], n_warm=1,
+                              instance_keyed=True, seed=sd)
+        keyed_goals.append(ik["goals_by_category"][gkey])
+    assert cold_positions[0] == cold_positions[1] == cold_positions[2], cold_positions
+    assert keyed_goals[0] == keyed_goals[1] == keyed_goals[2], keyed_goals
+    # and the keyed goal is the deterministic argmax-iou TARGET at [0,0,0]
+    assert keyed_goals[0][0]["position"] == [0, 0, 0], keyed_goals[0]
+    print("  case seed_cold_pose_and_instance_choice_invariant: OK")
+
+
+def test_seed_stamped_into_dataset_provenance():
+    # (4) provenance: seed is stamped into the written dataset; default None →
+    # field absent (no-seed dataset byte-identical).
+    src = _seed_pool_src()
+    base = mk.build_dataset(src, categories=["chair"], n_warm=3)
+    assert "revisit_seed" not in base, base.keys()  # default → absent
+    seeded = mk.build_dataset(src, categories=["chair"], n_warm=3, seed=11)
+    assert seeded.get("revisit_seed") == 11, seeded.get("revisit_seed")
+    # seed=None explicitly is still absent (byte-identical to no-seed)
+    none_seed = mk.build_dataset(src, categories=["chair"], n_warm=3, seed=None)
+    assert "revisit_seed" not in none_seed, none_seed.keys()
+    print("  case seed_stamped_into_dataset_provenance: OK")
+
+
 def main() -> int:
     print("Phase-B1 controlled-start dataset builder sanity tests")
     case_cold_pose_picks_max_iou_viewpoint()
@@ -881,6 +1106,13 @@ def main() -> int:
     case_pick_warm_poses_changed_world_nearest_first()
     case_pick_warm_poses_changed_world_prefers_reachable_on_tie()
     case_build_dataset_regular_path_still_farthest_first()
+    test_seed_none_warm_selection_byte_identical()
+    test_seed_changed_world_none_byte_identical()
+    test_seed_reproducible()
+    test_seed_distinct_when_pool_gt_n_equal_when_pool_le_n()
+    test_seed_resample_members_satisfy_eligibility()
+    test_seed_cold_pose_and_instance_choice_invariant()
+    test_seed_stamped_into_dataset_provenance()
     print("All cases passed.")
     return 0
 
