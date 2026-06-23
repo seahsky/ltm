@@ -27,6 +27,7 @@ MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodie
 SCENE="TEEsavR23oF"; CLASS="alarm"; CATEGORY="bed"
 NWARM=3; SETTINGS="1 3"; TAG="audiogoal"; OUT_TAG=""; T_ANOM_WARM=30; SOURCE_OVERRIDE=""; REUSE_DS=""
 ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; FETCH_AUDIO=""; AUDIO_WRITE=""; LIFELONG=""
+CELL_TAG=""; SRC_CONTENT_DIR=""
 while [ $# -gt 0 ]; do
   case "$1" in
     # Lifelong cross-visit (oracle upper bound): build the dataset with INVERTED
@@ -36,6 +37,16 @@ while [ $# -gt 0 ]; do
     --scene) SCENE="$2"; shift 2 ;;
     --class) CLASS="$2"; shift 2 ;;
     --category) CATEGORY="$2"; shift 2 ;;
+    # --cell-tag keys the GRID / out-dir / analysis-log NAMES (default = $CLASS,
+    # byte-identical legacy behaviour). The scale-up driver passes the CATEGORY so
+    # that two categories sharing an anomaly class (only 3 classes exist, but a
+    # scene can hold 5–6 categories) don't collide on the same grid/out-dir. The
+    # real anomaly CLASS (the sound + CLAP label + --anomaly-class) is unchanged.
+    --cell-tag) CELL_TAG="$2"; shift 2 ;;
+    # --src-content-dir overrides where the builder reads <scene>.json.gz from
+    # (default val_mini/content). Point it at .../v1/val/content to build the 18
+    # full-val scenes that are not in the 2-scene val_mini split.
+    --src-content-dir) SRC_CONTENT_DIR="$2"; shift 2 ;;
     --n-warm) NWARM="$2"; shift 2 ;;
     --settings) SETTINGS="$2"; shift 2 ;;
     --tag) TAG="$2"; shift 2 ;;
@@ -68,6 +79,8 @@ done
 [[ "$TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --tag must be alnum/dash/underscore"; exit 1; }
 OUT_TAG="${OUT_TAG:-$TAG}"
 [[ "$OUT_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --out-tag must be alnum/dash/underscore"; exit 1; }
+CELL_TAG="${CELL_TAG:-$CLASS}"   # default = class → legacy out-dir/grid names unchanged
+[[ "$CELL_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --cell-tag must be alnum/dash/underscore"; exit 1; }
 # --audio-write: thread the Step-2 lever as a first-class flag (export INSIDE the
 # driver, so it never depends on ambient inheritance through nrun). The env-var
 # form (export LTM_AUDIO_WRITE=1 before nrun) still works and is honoured below.
@@ -78,10 +91,14 @@ OUT_TAG="${OUT_TAG:-$TAG}"
 [ -n "${LTM_AUDIO_WRITE:-}" ] && echo "  [audio-write] LTM_AUDIO_WRITE=$LTM_AUDIO_WRITE — Step-2 audio→LTM write ON: on onset, persist a fine-layer item AT THE SOURCE xyz (grep '[audio-write]' in the logs to confirm onset→write→recall fires)"
 
 VALMINI="data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content"
+SRC_CONTENT_DIR="${SRC_CONTENT_DIR:-$VALMINI}"   # default = val_mini; --src-content-dir for full val
 DS_DIR="data/hm3d/datasets/objectnav/hm3d/v1/audiogoal_${TAG}"
 NAME="audiogoal_${TAG}"; DS="${DS_DIR}/${NAME}.json.gz"
 MANIFEST="${DS_DIR}/source_manifest.json"
-GRID="runs/audiogoal/${SCENE}_${CLASS}_rir_grid.npz"
+# Grid is keyed by the CELL_TAG (category for the scale-up; class for legacy single
+# cells) because the RIR depends on the SOURCE = the goal-category position, not the
+# decorative anomaly class. Two categories sharing a class get distinct grids.
+GRID="runs/audiogoal/${SCENE}_${CELL_TAG}_rir_grid.npz"
 banner() { printf '\n========== %s ==========\n' "$1"; }
 [ -x "$MINICONDA/bin/conda" ] || { echo "FATAL: $MINICONDA/bin/conda missing"; exit 1; }
 
@@ -106,7 +123,7 @@ banner "[4/7] build audiogoal dataset: scene=$SCENE class=$CLASS cat=$CATEGORY n
 if [ -n "$REUSE_DS" ] && [ -f "$DS" ] && [ -f "$MANIFEST" ]; then
   echo "  REUSE existing dataset: $DS"
 else
-  SRC="${VALMINI}/${SCENE}.json.gz"
+  SRC="${SRC_CONTENT_DIR}/${SCENE}.json.gz"
   [ -f "$SRC" ] || { echo "FATAL: source episodes missing: $SRC"; exit 1; }
   rm -rf "$DS_DIR"
   # NOTE: '=' form (not a space) — HM3D source coords start with '-' and contain
@@ -144,7 +161,11 @@ mkdir -p "$(dirname "$GRID")"
 set +u; conda activate "$SS_ENV" || { echo "FATAL: activate $SS_ENV failed (build it: scripts/race-soundspaces-spike.sh)"; exit 1; }; set -u
 # '=' form: $SRC_XYZ starts with '-' (HM3D coords) and has commas, so a
 # space-separated value is misread by argparse as an option flag.
-python embodied_memory/scripts/render_rir_grid.py \
+# -u (unbuffered): the render output is piped through tee, so Python would
+# otherwise full-buffer stdout and a hard-killed render (CUDA OOM / timeout) would
+# never flush its "RED: ... reachable cells" off-navmesh line to render.log — the
+# downstream grep (below) would then mis-blame the source. -u keeps the log live.
+python -u embodied_memory/scripts/render_rir_grid.py \
     --scene "$GLB" --source="$SRC_XYZ" --out "$GRID" --n-cells 24 \
     2>&1 | tee "${DS_DIR}/render.log"
 rc=${PIPESTATUS[0]}
@@ -206,7 +227,7 @@ echo "  n-episodes = $N_EPISODES"
 banner "[6/7] run settings [$SETTINGS] (--task audiogoal --backbone remembr)"
 OUT_DIRS=""
 for S in $SETTINGS; do
-  out_dir="runs/${OUT_TAG}-${CLASS}-s$S"
+  out_dir="runs/${OUT_TAG}-${CELL_TAG}-s$S"
   banner "run: setting=$S -> $out_dir"
   # Clear any STALE summary first, so the completion gate below can't be fooled
   # by a previous attempt's summary.json if THIS run hard-crashes before writing.
@@ -247,7 +268,7 @@ if [ "$N_RUN_DIRS" -lt 2 ]; then
   echo "  [gate-A] skipped: need >=2 settings, got $N_RUN_DIRS (single-setting smoke -> no cross-setting paired delta)"
 else
   # shellcheck disable=SC2086
-  python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS 2>&1 | tee "runs/${OUT_TAG}-${CLASS}-analysis.log"
+  python embodied_memory/scripts/analyze_ablation.py --revisit $OUT_DIRS 2>&1 | tee "runs/${OUT_TAG}-${CELL_TAG}-analysis.log"
 fi
 echo
 
@@ -256,7 +277,7 @@ echo
 # the rerank to the injected memory candidate for the same spot); explore = it
 # said nothing relevant; retrieve_calls=0 == it never queried memory at all.
 banner "planner decision census (S3 — is the LLM 'too dumb to recall'?)"
-S3_SUM="runs/${OUT_TAG}-${CLASS}-s3/summary.json"
+S3_SUM="runs/${OUT_TAG}-${CELL_TAG}-s3/summary.json"
 if [ -f "$S3_SUM" ]; then
   python - "$S3_SUM" <<'PYEOF'
 import json, sys
@@ -287,7 +308,7 @@ echo
 banner "[S0] audio-DOA calibration gate (diagnose_audio_doa_calib)"
 # shellcheck disable=SC2086
 python embodied_memory/scripts/diagnose_audio_doa_calib.py $OUT_DIRS 2>&1 \
-  | tee "runs/${OUT_TAG}-${CLASS}-audiodoa-calib.log" || true
+  | tee "runs/${OUT_TAG}-${CELL_TAG}-audiodoa-calib.log" || true
 echo
 
 echo "DONE. AudioGoal warm S1-vs-S3 for ($SCENE,$CLASS). Cold-silent (t_anom high)"
