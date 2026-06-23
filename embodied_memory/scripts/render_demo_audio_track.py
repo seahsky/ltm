@@ -245,9 +245,16 @@ def process_episode(
     t_anom: Optional[int] = None,
     fps: float = 8.0,
     out_name: str = "demo_with_sound.mp4",
+    silent_mp4_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """End-to-end for one episode: load JSON + grid + clip → build soundtrack →
-    write wav → mux. Returns a dict of the paths written + a status."""
+    write wav → mux. Returns a dict of the paths written + a status.
+
+    ``silent_mp4_override`` (default None = byte-identical legacy behaviour) lets a
+    caller mux onto a DIFFERENT silent video than the one named in
+    ``ep["video_path"]`` — e.g. a banner-overlaid copy. When given, it is used as
+    the mux target verbatim (the poses / soundtrack / onset / RMS guard are still
+    derived from the episode JSON, unchanged)."""
     ep_path = _resolve_episode_json(run_dir, episode_json)
     with open(ep_path, "r", encoding="utf-8") as f:
         ep = json.load(f)
@@ -295,14 +302,18 @@ def process_episode(
     wav_path = os.path.join(run_dir, "demo_track.wav")
     write_wav(wav_path, track, sr)
 
-    # locate the silent mp4 (ep_log["video_path"] is relative to the run dir).
-    vid_rel = ep.get("video_path")
-    silent_mp4 = os.path.join(run_dir, vid_rel) if vid_rel else None
-    if not silent_mp4 or not os.path.isfile(silent_mp4):
-        # fall back to the conventional location
-        idx = int(ep.get("episode_idx", 0))
-        guess = os.path.join(run_dir, "video", f"episode_{idx:03d}.mp4")
-        silent_mp4 = guess if os.path.isfile(guess) else None
+    # locate the silent mp4. An explicit override (e.g. a banner-overlaid copy)
+    # wins verbatim; otherwise ep_log["video_path"] is relative to the run dir.
+    if silent_mp4_override is not None:
+        silent_mp4 = silent_mp4_override if os.path.isfile(silent_mp4_override) else None
+    else:
+        vid_rel = ep.get("video_path")
+        silent_mp4 = os.path.join(run_dir, vid_rel) if vid_rel else None
+        if not silent_mp4 or not os.path.isfile(silent_mp4):
+            # fall back to the conventional location
+            idx = int(ep.get("episode_idx", 0))
+            guess = os.path.join(run_dir, "video", f"episode_{idx:03d}.mp4")
+            silent_mp4 = guess if os.path.isfile(guess) else None
 
     result: Dict[str, Any] = {
         "episode_json": ep_path,
