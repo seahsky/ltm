@@ -279,5 +279,138 @@ class TestProcessEpisodeDegrade(unittest.TestCase):
             self.assertEqual(calls["cmd"][0], "ffmpeg")
 
 
+class TestOnsetFiredDetection(unittest.TestCase):
+    """(c) onset-fired detection — the picker question: did the anomaly actually
+    fire within this episode's recorded frames?"""
+
+    def test_explicit_t_anom_fired_when_episode_reaches_it(self):
+        steps = _steps([[3, 0, 0]] * 10)  # step_idx 0..9
+        self.assertTrue(R.onset_fired_in_steps(steps, t_anom=5))
+
+    def test_explicit_t_anom_not_fired_when_episode_too_short(self):
+        steps = _steps([[3, 0, 0]] * 5)  # step_idx 0..4, onset 30 never reached
+        self.assertFalse(R.onset_fired_in_steps(steps, t_anom=30))
+
+    def test_autodetect_from_energy_list_fired(self):
+        steps = _steps([[3, 0, 0]] * 8, audio_on_from=3)  # energy>0 from frame 3
+        self.assertTrue(R.onset_fired_in_steps(steps, t_anom=None))
+
+    def test_autodetect_all_silent_not_fired(self):
+        steps = _steps([[3, 0, 0]] * 6, audio_on_from=None)  # all energy None
+        self.assertFalse(R.onset_fired_in_steps(steps, t_anom=None))
+
+    def test_empty_steps_not_fired(self):
+        self.assertFalse(R.onset_fired_in_steps([], t_anom=5))
+
+
+class TestSoundtrackRms(unittest.TestCase):
+    def test_audible_track_has_positive_rms(self):
+        grid = _grid()
+        track = R.build_soundtrack(
+            grid, _clip(), [[1, 0, 0], [0, 0, 0]],
+            sample_rate=SR, fps=FPS, onset_frame=0)
+        self.assertGreater(R.soundtrack_rms(track), R.SILENCE_RMS_EPS)
+
+    def test_silent_track_rms_zero(self):
+        track = np.zeros((2, 1000), dtype=np.float32)
+        self.assertLessEqual(R.soundtrack_rms(track), R.SILENCE_RMS_EPS)
+
+
+class TestRefuseSilentMux(unittest.TestCase):
+    """(a) a real onset → RMS>0 and muxes; (b) no onset → raises / exits
+    non-zero (NEVER a silent mux)."""
+
+    def _write_grid_npz(self, path):
+        from embodied_memory.audio import save_rir_grid
+        g = _grid()
+        save_rir_grid(path, cell_positions=g.cell_positions,
+                      source_position=g.source_position, irs=g.irs,
+                      sample_rate=g.sample_rate, scene_id=g.scene_id)
+
+    def _episode_dir(self, d, steps, t_anom):
+        """Write a grid + a fake silent mp4 + episode JSON; return paths."""
+        import json
+        grid_path = os.path.join(d, "grid.npz")
+        self._write_grid_npz(grid_path)
+        os.makedirs(os.path.join(d, "video"), exist_ok=True)
+        silent = os.path.join(d, "video", "episode_000.mp4")
+        with open(silent, "wb") as f:
+            f.write(b"fake")
+        ep = {
+            "episode_idx": 0,
+            "video_path": "video/episode_000.mp4",
+            "source_position": [0.0, 0.0, 0.0],
+            "steps": steps,
+        }
+        with open(os.path.join(d, "episode_000.json"), "w") as f:
+            json.dump(ep, f)
+        return grid_path, silent
+
+    def test_onset_fired_track_audible_and_muxes(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            # onset at step 1; the 4-step episode reaches it → audible
+            steps = _steps([[3, 0, 0], [2, 0, 0], [1, 0, 0], [0, 0, 0]])
+            grid_path, _ = self._episode_dir(d, steps, t_anom=1)
+            calls = {}
+
+            def fake_run(cmd, **kw):
+                calls["cmd"] = cmd
+                open(cmd[-1], "wb").write(b"muxed")
+
+                class _R:
+                    returncode = 0
+                return _R()
+
+            with mock.patch.object(R, "_find_ffmpeg", return_value="ffmpeg"), \
+                    mock.patch.object(R.subprocess, "run", side_effect=fake_run):
+                res = R.process_episode(
+                    d, grid_path, anomaly_class="alarm", t_anom=1, fps=FPS)
+            self.assertGreater(res["track_rms"], R.SILENCE_RMS_EPS)
+            self.assertIsNotNone(res["muxed_mp4"])
+            self.assertTrue(os.path.isfile(res["muxed_mp4"]))
+
+    def test_no_onset_raises_and_never_muxes(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            # 5-step episode (step_idx 0..4) but onset is step 30 → never fires →
+            # whole track is pre-onset silence → MUST refuse.
+            steps = _steps([[3, 0, 0]] * 5)
+            grid_path, _ = self._episode_dir(d, steps, t_anom=30)
+            ran = {"called": False}
+
+            def fake_run(cmd, **kw):
+                ran["called"] = True
+
+                class _R:
+                    returncode = 0
+                return _R()
+
+            with mock.patch.object(R, "_find_ffmpeg", return_value="ffmpeg"), \
+                    mock.patch.object(R.subprocess, "run", side_effect=fake_run):
+                with self.assertRaises(R.SilentSoundtrackError):
+                    R.process_episode(
+                        d, grid_path, anomaly_class="alarm", t_anom=30, fps=FPS)
+            # ffmpeg must NOT have been invoked — no silent mux escaped
+            self.assertFalse(ran["called"])
+            # and no wav was written (we raise before write_wav)
+            self.assertFalse(os.path.isfile(os.path.join(d, "demo_track.wav")))
+
+    def test_cli_exits_nonzero_on_silent(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            steps = _steps([[3, 0, 0]] * 5)  # too short for onset step 30
+            grid_path, _ = self._episode_dir(d, steps, t_anom=30)
+            ep_json = os.path.join(d, "episode_000.json")
+            rc = R.main([
+                "--run-dir", d, "--rir-grid", grid_path,
+                "--episode-json", ep_json, "--anomaly-class", "alarm",
+                "--t-anom", "30", "--fps", str(FPS),
+            ])
+            self.assertNotEqual(rc, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

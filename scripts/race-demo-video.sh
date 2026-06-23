@@ -26,16 +26,25 @@
 #
 # SHOWCASE-BY-DEFAULT: this driver defaults to a WARM visit (--warm 2) because a
 # COLD audiogoal episode starts the robot AT the goal view-point (pick_cold_pose)
-# → it barely moves → a ~2 s clip, AND the LTM recalls nothing (empty fine layer,
+# → it barely moves → a ~2 s clip that ALSO ends before the onset step (so its
+# whole soundtrack is silence), AND the LTM recalls nothing (empty fine layer,
 # memory_bridge.py:1042). A WARM visit starts the robot FAR from the goal: it hears
 # the alarm, navigates in, and the LTM RECALLS the prior sighting — a longer clip
 # that actually shows memory working. The soundtrack is rendered on the LONGEST
-# episode (so a fast cold/seed pass never becomes the demo). Force the literal cold
-# (short) demo with --cold.
-# Length levers: --min-dist (default 4 m → robot starts ~2 rooms away so it actually
-# travels) + --keyframe-every (default 2 → denser frames) + --video-fps (default 6).
-# Duration ≈ (n_steps / keyframe_every) / video_fps, reported at the end; the
-# soundtrack renders on the LONGEST successful episode.
+# episode THAT RAN PAST THE ONSET STEP (n_steps >= t_anom+3) — so a fast cold/seed
+# pass that ended before onset can NEVER become the (silent) demo. (n_steps is a
+# real per-episode-log field; n_audio_onset_fired is NOT — it lives only in the
+# summary.) The render step additionally REFUSES to mux a silent track.
+# Force the literal cold (short) demo with --cold.
+# Length levers (defaults chosen so a 30-60 step episode is >=8-10s):
+#   --min-dist (default 5 m → robot starts ~2 rooms away so it actually travels)
+#   --keyframe-every (default 1 → a frame every sim-step, dense+smooth)
+#   --video-fps (default 4 → slower playback, longer clip)
+#   --t-anom (default 5 → anomaly fires near the start, audible most of the clip)
+# Duration ≈ (n_steps / keyframe_every + 1) / video_fps, reported at the end.
+# render_demo_audio_track REFUSES to mux a silent track (errors non-zero) and the
+# driver prints the soundtrack RMS/duration + ffprobe-confirms a non-silent audio
+# stream after the mux, so the run log PROVES audio is present.
 # Binaural pan is ILD-only (ITD-stripped by SoundSpaces) → a clear loudness
 # gradient, weak left/right stereo image.
 
@@ -45,8 +54,13 @@ MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodie
 
 # Default a known-good cell. wcojb4TFT35 + baby_cry→crib / chair is M0c-demo good.
 SCENE="wcojb4TFT35"; CLASS="baby_cry"; CATEGORY="bed"
-TAG="demo-video"; VIDEO_FPS=6; T_ANOM_FIRE=30; SOURCE_OVERRIDE=""
-ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; KEYFRAME_EVERY=2; MIN_DIST="4.0"
+# Demo length/onset defaults tuned so a 30-60 step episode renders >=8-10s with
+# audible sound (see [7/7] formula): keyframe_every=1 (a frame EVERY sim-step →
+# dense, slow playback) + video_fps=4 (slower → longer clip) + min_dist=5 (more
+# travel). T_ANOM_FIRE=5 fires the anomaly NEAR THE START so it plays for almost
+# the whole clip AND even short episodes capture the onset. All overridable.
+TAG="demo-video"; VIDEO_FPS=4; T_ANOM_FIRE=5; SOURCE_OVERRIDE=""
+ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; KEYFRAME_EVERY=1; MIN_DIST="5.0"
 # DEFAULT = warm showcase (robot travels + recalls). --cold forces the short
 # at-the-goal cold demo.
 WARM=1; NWARM=2
@@ -223,45 +237,85 @@ except Exception:
 echo "  S3 complete (rc=$rc; rc=1 can be normal — pass_conditions are S3-oriented)"
 
 banner "[7/7] post-hoc soundtrack + ffmpeg mux → demo_with_sound.mp4"
-# Render the soundtrack for the LONGEST episode with a video (max n_steps). A cold
-# audiogoal episode starts AT the goal → tiny n_steps, so the longest is the warm
-# (travel + recall) episode — the showcase one. Print n_steps so length is visible.
-# Prefer the LONGEST episode that SUCCEEDED (a clean travel+arrive clip); fall back
-# to the longest overall. A cold at-the-goal episode has tiny n_steps so it loses.
-LAST_EP="$(python -c "
+# PICK THE SOUNDTRACK EPISODE: the LONGEST episode that RAN PAST THE ONSET STEP
+# (n_steps >= t_anom+3). This guarantees (a) the anomaly had time to fire → the
+# soundtrack is non-silent (backstopped by the render's SilentSoundtrackError) and
+# (b) length-first picks the travel+recall warm showcase, not the short cold-at-goal
+# pass. We DROP the old "prefer success" rule: a cold at-goal episode trivially
+# "succeeds" in ~22 steps and was winning the picker, yielding the 2 s silent clip.
+# (NB the earlier "n_audio_onset_fired>=1" attempt read a field absent from the
+# per-episode log → always 0 → dead no-op; n_steps is the real, log-present signal.)
+# Loud-warn-and-fall-back only if NOTHING ran past onset (build
+# is broken — lower --t-anom / raise --min-dist).
+PICK="$(python -c "
 import json,glob
-cands=[]
+T_ANOM=int($T_ANOM_FIRE)
+viable=[]; any_video=[]
 for f in sorted(glob.glob('$OUT_DIR/episode_*.json')):
     if '_error' in f: continue
     try: ep=json.load(open(f))
     except Exception: continue
     if not ep.get('video_path'): continue
-    cands.append((bool(ep.get('success_1m')), ep.get('n_steps',0) or 0, f))
-if cands:
-    succ=[c for c in cands if c[0]]
-    pool=succ if succ else cands
-    pool.sort(key=lambda c: c[1], reverse=True)
-    print(pool[0][2])
+    n=int(ep.get('n_steps',0) or 0)
+    any_video.append((n,f))
+    # 'Ran past the onset step' is the robust filter for 'the anomaly had time to
+    # fire'. Use n_steps — it IS a real episode_NNN.json (ep_log) field, whereas
+    # n_audio_onset_fired lives ONLY in summary/metrics and is NEVER in ep_log
+    # (reading it returned 0 for every episode = a dead no-op). The render-side
+    # RMS guard backstops the rare ran-past-onset-but-silent case.
+    if n >= T_ANOM + 3: viable.append((n,f))
+if viable:
+    viable.sort(key=lambda c: c[0], reverse=True)
+    print('OK\t'+viable[0][1])
+elif any_video:
+    any_video.sort(key=lambda c: c[0], reverse=True)
+    print('NOFIRE\t'+any_video[0][1])
 else:
-    print('')
+    print('NONE\t')
 ")"
+PICK_STATUS="${PICK%%$'\t'*}"; LAST_EP="${PICK#*$'\t'}"
+if [ "$PICK_STATUS" = "NOFIRE" ]; then
+  echo "  ⚠⚠ WARNING: NO episode ran past the onset step (every episode < t_anom=$T_ANOM_FIRE + 3 steps)."
+  echo "     The build is BROKEN for a demo — the anomaly never had time to fire."
+  echo "     LOWER --t-anom (already $T_ANOM_FIRE; try 3) and/or RAISE --min-dist so episodes run longer."
+  echo "     Falling back to the longest episode anyway; the soundtrack render WILL likely error"
+  echo "     (refuses to mux silence) — that is the correct, loud failure."
+elif [ "$PICK_STATUS" = "NONE" ]; then
+  LAST_EP=""
+fi
 [ -n "$LAST_EP" ] || { echo "FATAL: no episode_NNN.json with a video_path in $OUT_DIR — was --save-video honoured? See ${OUT_DIR}.log."; exit 1; }
 EP_STEPS="$(python -c "import json;print(json.load(open('$LAST_EP')).get('n_steps',0))" 2>/dev/null || echo 0)"
 EST_DUR="$(python -c "print('%.1f' % ((($EP_STEPS/$KEYFRAME_EVERY)+1)/$VIDEO_FPS))" 2>/dev/null || echo '?')"
 echo "  soundtrack episode = $LAST_EP  (n_steps=$EP_STEPS → ~${EST_DUR}s @ keyframe_every=$KEYFRAME_EVERY, fps=$VIDEO_FPS)"
 SHORT="$(python -c "print(1 if ((($EP_STEPS/$KEYFRAME_EVERY)+1)/$VIDEO_FPS) < 6 else 0)" 2>/dev/null || echo 0)"
 [ "$SHORT" = 1 ] && echo "  ⚠ short clip (~${EST_DUR}s) — for longer: --min-dist 6, --keyframe-every 1, or --warm 3 (re-run)."
+# render_demo_audio_track REFUSES to mux a silent track (exits non-zero) → a silent
+# demo can no longer ship undetected. Capture its stdout so we can echo the proven
+# soundtrack RMS/duration into the run log.
 # shellcheck disable=SC2086
-python embodied_memory/scripts/render_demo_audio_track.py \
+RENDER_LOG="$(python embodied_memory/scripts/render_demo_audio_track.py \
     --run-dir "$OUT_DIR" --episode-json "$LAST_EP" \
     --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_FIRE" \
-    --fps "$VIDEO_FPS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
-  || { echo "FATAL: soundtrack render/mux failed."; exit 1; }
+    --fps "$VIDEO_FPS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} 2>&1)"
+RENDER_RC=$?
+echo "$RENDER_LOG"
+[ "$RENDER_RC" -eq 0 ] || { echo "FATAL: soundtrack render/mux failed (rc=$RENDER_RC) — see above. The demo would have been SILENT or empty; refusing to ship it."; exit 1; }
+DEMO_RMS="$(printf '%s\n' "$RENDER_LOG" | grep -oE 'DEMO_AUDIO_RMS=[0-9.]+' | tail -1 | cut -d= -f2)"
+DEMO_SECS="$(printf '%s\n' "$RENDER_LOG" | grep -oE 'DEMO_AUDIO_SECONDS=[0-9.]+' | tail -1 | cut -d= -f2)"
+echo "  AUDIO CONFIRMED: soundtrack RMS=${DEMO_RMS:-?} (>0 = audible), duration=${DEMO_SECS:-?}s"
 
 FINAL="$OUT_DIR/demo_with_sound.mp4"
 banner "DONE"
 if [ -f "$FINAL" ]; then
-  echo "  DEMO VIDEO WITH SOUND: $FINAL  (~${EST_DUR}s, $EP_STEPS steps, fps=$VIDEO_FPS)"
+  # PROVE the muxed mp4 actually has a non-silent audio stream (ffprobe if present).
+  if command -v ffprobe >/dev/null 2>&1; then
+    ASTREAM="$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$FINAL" 2>/dev/null | head -1)"
+    echo "  ffprobe audio stream in $FINAL: ${ASTREAM:-<none>}"
+    [ "$ASTREAM" = "audio" ] || echo "  ⚠ ffprobe found NO audio stream in the muxed mp4 (expected one)."
+  else
+    echo "  (ffprobe not on PATH — soundtrack RMS=${DEMO_RMS:-?} above already proves audible audio was muxed)"
+  fi
+  echo "  DEMO VIDEO WITH SOUND: $FINAL  (~${EST_DUR}s, $EP_STEPS steps, fps=$VIDEO_FPS, audio RMS=${DEMO_RMS:-?})"
 else
   echo "  ffmpeg absent — soundtrack written separately. WAV: $OUT_DIR/demo_track.wav"
   echo "  Silent clip: $(python -c "import json;print('$OUT_DIR/'+ (json.load(open('$LAST_EP')).get('video_path') or 'video/episode_000.mp4'))")"
