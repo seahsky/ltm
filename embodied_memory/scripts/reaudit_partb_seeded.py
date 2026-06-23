@@ -64,6 +64,29 @@ import analyze_revisit as ar  # noqa: E402
 
 
 # ----------------------------------------------------------------------
+# scene-id canonicalization (the join-key / navmesh-lookup fix)
+# ----------------------------------------------------------------------
+
+
+def _canonical_scene_id(s: Optional[str]) -> Optional[str]:
+    """Collapse BOTH scene_id representations to the same short scene token.
+
+    The dataset CONTENT keys cells on the full glb path
+    (``"hm3d/val/00802-wcojb4TFT35/wcojb4TFT35.basis.glb"``) while the RUN-DIR
+    episodes key on the short id (``"wcojb4TFT35"``). The per-cell views are
+    joined on scene_id, so they MUST agree — and ``_find_navmesh`` globs on the
+    short token, so it must be handed the short token too. This maps either to the
+    token before the first ``.`` of the basename (so ``…/wcojb4TFT35.basis.glb`` ->
+    ``"wcojb4TFT35"``) and is idempotent on an already-short id.
+    """
+    if s is None:
+        return None
+    base = os.path.basename(str(s))
+    # token before the first dot strips ``.basis.glb`` / ``.json.gz`` / ``.glb``.
+    return base.split(".", 1)[0]
+
+
+# ----------------------------------------------------------------------
 # (a) PER-CELL VALIDITY
 # ----------------------------------------------------------------------
 
@@ -79,18 +102,25 @@ def per_cell_validity_from_contents(contents: List[Dict[str, Any]],
                                     ) -> Dict[str, Any]:
     """Per-(scene, category) verdict over a list of already-loaded content dicts.
 
-    ``dist_fns_by_scene`` (only with ``use_pathfinder``) maps a scene_id to a
-    geodesic ``dist_fn(a, b)``; a scene without an entry falls back to the
-    Euclidean proxy (so a single missing navmesh degrades that scene, not the
-    run). Without ``use_pathfinder`` everything is Euclidean.
+    ``dist_fns_by_scene`` (only with ``use_pathfinder``) maps a CANONICAL scene
+    token (see ``_canonical_scene_id``) to a geodesic ``dist_fn(a, b)``; a scene
+    without an entry falls back to the Euclidean proxy (so a single missing navmesh
+    degrades that scene, not the run). The content episodes carry the FULL glb path
+    as ``scene_id`` while ``_build_geodesic_dist_fns`` keys on the short token, so
+    the lookup is canonicalized on BOTH sides — without this, geodesic SILENTLY
+    fell back to Euclidean even when the navmesh loaded. Without ``use_pathfinder``
+    everything is Euclidean.
 
     Returns the ``scan_cells`` shape (``{"cells": {(scene,cat): verdict_dict},
     "green": bool}``) with an added ``"approx"`` flag (True if ANY cell used the
-    Euclidean proxy).
+    Euclidean proxy) and a ``"per_scene_geodesic"`` map
+    (``{canonical_scene: "geodesic" | "euclidean"}``) so the caller can print an
+    HONEST per-scene status.
     """
     dist_fns_by_scene = dist_fns_by_scene or {}
     cells: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     approx = False
+    per_scene_geodesic: Dict[str, str] = {}
     for content in contents:
         # group this content's warm episodes by their scene's distance fn.
         # records_from_content keys on (scene_id, object_category); but the
@@ -100,30 +130,41 @@ def per_cell_validity_from_contents(contents: List[Dict[str, Any]],
             sid = ep.get("scene_id")
             by_scene.setdefault(sid, {"episodes": []})["episodes"].append(ep)
         for sid, sub in by_scene.items():
-            geo = dist_fns_by_scene.get(sid) if use_pathfinder else None
+            # canonicalize the lookup key: content sid is the full glb path,
+            # the dist_fn map is keyed on the short token.
+            canon = _canonical_scene_id(sid)
+            geo = dist_fns_by_scene.get(canon) if use_pathfinder else None
             if geo is None:
                 approx = approx or use_pathfinder  # asked for geodesic, got proxy
                 dist_fn = ck.euclidean_xz
+                if use_pathfinder:
+                    per_scene_geodesic[canon] = "euclidean"
             else:
                 dist_fn = geo
+                per_scene_geodesic[canon] = "geodesic"
             for key, recs in ck.records_from_content(sub, dist_fn).items():
                 cells.setdefault(key, []).extend(recs)
     rep = ck.scan_cells(cells)
     rep["approx"] = (not use_pathfinder) or approx
+    rep["per_scene_geodesic"] = per_scene_geodesic
     return rep
 
 
 def _build_geodesic_dist_fns(content_paths: List[str], roots) -> Dict[str, Any]:
-    """RACE-only: build a {scene_id: geodesic dist_fn} from per-scene navmeshes.
+    """RACE-only: build a {canonical_scene: geodesic dist_fn} from per-scene
+    navmeshes.
 
     Mirrors ``check_instance_keyed_validity``'s scene-from-filename + navmesh
-    discovery + lazy habitat-sim load. A scene whose navmesh is missing or fails
-    to load is simply absent from the returned map (=> that scene degrades to the
-    Euclidean proxy in ``per_cell_validity_from_contents``). MOCKED in tests.
+    discovery + lazy habitat-sim load. The map is keyed on the CANONICAL short
+    scene token (``_canonical_scene_id``) — and ``_find_navmesh`` is handed that
+    same short token (NOT the glb path), so the ``*<scene>*.navmesh`` glob actually
+    hits. A scene whose navmesh is missing or fails to load is simply absent from
+    the returned map (=> that scene degrades to the Euclidean proxy in
+    ``per_cell_validity_from_contents``). MOCKED in tests.
     """
     out: Dict[str, Any] = {}
     for path in content_paths:
-        scene = os.path.basename(path).replace(".json.gz", "")
+        scene = _canonical_scene_id(os.path.basename(path))
         navmesh = ck._find_navmesh(scene, roots)
         if navmesh is None:
             print(f"  [warn] no navmesh for scene {scene!r} under {roots} — that "
@@ -156,11 +197,23 @@ def run_validity(content_globs: List[str], use_pathfinder: bool,
         except (OSError, ValueError):
             print(f"  [warn] could not read {path}", file=sys.stderr)
     dist_fns_by_scene: Dict[str, Any] = {}
+    roots: List[str] = []
     if use_pathfinder:
         roots = [navmesh_root] if navmesh_root else list(ck.DEFAULT_NAVMESH_ROOTS)
         dist_fns_by_scene = _build_geodesic_dist_fns(loaded_paths, roots)
-    return per_cell_validity_from_contents(
+    rep = per_cell_validity_from_contents(
         contents, use_pathfinder=use_pathfinder, dist_fns_by_scene=dist_fns_by_scene)
+    # promote the flat {canon: "geodesic"|"euclidean"} map into the richer
+    # {canon: {"mode", "reason"}} shape format_geodesic_status consumes.
+    status: Dict[str, Dict[str, Any]] = {}
+    for scene, mode in (rep.get("per_scene_geodesic") or {}).items():
+        reason = None
+        if mode != "geodesic":
+            reason = (f"navmesh not found under {roots} / habitat_sim import failed"
+                      if roots else "no navmesh roots searched")
+        status[scene] = {"mode": mode, "reason": reason}
+    rep["per_scene_geodesic_status"] = status
+    return rep
 
 
 # ----------------------------------------------------------------------
@@ -362,9 +415,25 @@ def build_join_rows(validity: Dict[Tuple[str, str], Dict[str, Any]],
     only one view still gets a row; the missing pieces are None / 0, never a
     KeyError). Sorted by ``delta_softspl`` descending with None LAST.
 
+    The three views key scene_id INCONSISTENTLY — the VALIDITY view keys on the
+    dataset content's full glb path while the WRONG-INSTANCE / DELTA views key on
+    the run-dir short id — so every (scene_id, category) tuple is collapsed via
+    ``_canonical_scene_id`` BEFORE joining. Without this the left-join matched
+    nothing (every row printed verdict "-" / delta "None" and the roll-up summed to
+    n=0). Only the JOIN KEY is canonicalized; no value is altered.
+
     Each row: ``{scene_id, category, verdict, fires, wrong, rate, n_warm_pairs,
     n_dropped_nonfinite, delta_softspl, delta_binary_spl}``.
     """
+    def _canon(view: Dict[Tuple[str, str], Dict[str, Any]]
+               ) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        return {(_canonical_scene_id(scene), cat): val
+                for (scene, cat), val in view.items()}
+
+    validity = _canon(validity)
+    wrong = _canon(wrong)
+    deltas = _canon(deltas)
+
     keys = set(validity) | set(wrong) | set(deltas)
     rows: List[Dict[str, Any]] = []
     for scene, cat in keys:
@@ -429,6 +498,52 @@ def bucket_rollup(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # ----------------------------------------------------------------------
+# geodesic status (explicit + honest per-scene)
+# ----------------------------------------------------------------------
+
+_EUCLID_BANNER = (
+    "############################################################\n"
+    "##  VALIDITY IS PROVISIONAL (EUCLIDEAN) — re-run with conda env\n"
+    "##  so habitat_sim imports (source scripts/race-setup.sh) and\n"
+    "##  pass --use-pathfinder for the TRUE geodesic gate. A wall can\n"
+    "##  flip a Euclidean-VALID cell to DEGENERATE/UNREACHABLE.\n"
+    "############################################################")
+
+
+def format_geodesic_status(per_scene: Dict[str, Dict[str, Any]]) -> str:
+    """Render an HONEST per-scene geodesic status block.
+
+    ``per_scene`` maps a canonical scene token to ``{"mode": "geodesic" |
+    "euclidean", "reason": str | None}``. Prints one line per scene:
+      * ``geodesic: <scene> -> navmesh OK (geodesic)`` when it loaded, or
+      * ``geodesic: <scene> -> EUCLIDEAN fallback (reason: ...)`` when it didn't.
+    Then EXACTLY ONE of:
+      * the big EUCLIDEAN-PROVISIONAL banner — ONLY if >=1 scene fell back;
+      * a ``VALIDITY IS GEODESIC (--use-pathfinder)`` confirmation — if all loaded.
+    An empty map (no --use-pathfinder requested) renders nothing (silent).
+    """
+    if not per_scene:
+        return ""
+    lines: List[str] = []
+    any_euclid = False
+    for scene in sorted(per_scene):
+        st = per_scene[scene] or {}
+        mode = st.get("mode")
+        if mode == "geodesic":
+            lines.append(f"  geodesic: {scene} -> navmesh OK (geodesic)")
+        else:
+            any_euclid = True
+            reason = st.get("reason") or "navmesh not found / habitat_sim import failed"
+            lines.append(f"  geodesic: {scene} -> EUCLIDEAN fallback (reason: {reason})")
+    if any_euclid:
+        lines.append(_EUCLID_BANNER)
+    else:
+        lines.append("  VALIDITY IS GEODESIC (--use-pathfinder) — the true gate "
+                     "loaded for every scene.")
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------
 # READOUT / verdict
 # ----------------------------------------------------------------------
 
@@ -488,20 +603,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---- (a) per-cell validity ----
     print("========== PER-CELL VALIDITY (VALID / DEGENERATE / UNREACHABLE) ==========")
     val = run_validity(args.episodes, args.use_pathfinder, args.navmesh_root)
-    _EUCLID_BANNER = (
-        "############################################################\n"
-        "##  VALIDITY IS PROVISIONAL (EUCLIDEAN) — re-run with conda env\n"
-        "##  so habitat_sim imports (source scripts/race-setup.sh) and\n"
-        "##  pass --use-pathfinder for the TRUE geodesic gate. A wall can\n"
-        "##  flip a Euclidean-VALID cell to DEGENERATE/UNREACHABLE.\n"
-        "############################################################")
-    if val["approx"]:
+    per_scene_status = val.get("per_scene_geodesic_status") or {}
+    any_euclid_fallback = any(
+        (st or {}).get("mode") != "geodesic" for st in per_scene_status.values())
+    if args.use_pathfinder:
+        # EXPLICIT, HONEST per-scene status: one line per scene + EITHER the big
+        # banner (>=1 fell back) OR the all-geodesic confirmation.
+        status_block = format_geodesic_status(per_scene_status)
+        if status_block:
+            print(status_block)
+    if not args.use_pathfinder:
+        # no geodesic requested at all -> Euclidean-xz proxy everywhere.
         print(_EUCLID_BANNER)
         print("  !!! APPROX: Euclidean-xz proxy (ignores walls). Re-run with "
               "--use-pathfinder on RACE for the TRUE geodesic gate. A wall can flip "
               "a Euclidean-VALID cell to DEGENERATE/UNREACHABLE. !!!")
-    else:
-        print("  (geodesic via habitat-sim navmesh — the true gate)")
     if not val["cells"]:
         print("  no instance-keyed warm episodes with labels found in --episodes "
               "(need built content with info.instance_labels and -warm- ids).")

@@ -561,6 +561,116 @@ def test_overall_verdict_degenerate_when_none_valid():
 
 
 # ----------------------------------------------------------------------
+# (f) SCENE-ID CANONICALIZATION — the join-key / navmesh-lookup bugfix
+# ----------------------------------------------------------------------
+
+
+def test_canonical_scene_id_maps_both_representations():
+    """Both the dataset-content glb path and the run-dir short id collapse to the
+    SAME canonical token, and the function is idempotent on an already-short id."""
+    glb = "hm3d/val/00802-wcojb4TFT35/wcojb4TFT35.basis.glb"
+    short = "wcojb4TFT35"
+    assert ra._canonical_scene_id(glb) == "wcojb4TFT35"
+    assert ra._canonical_scene_id(short) == "wcojb4TFT35"
+    assert ra._canonical_scene_id(glb) == ra._canonical_scene_id(short)
+    # idempotent: applying twice is the same as once.
+    assert ra._canonical_scene_id(ra._canonical_scene_id(glb)) == "wcojb4TFT35"
+    # a .json.gz content path also collapses to the token before the first dot.
+    assert ra._canonical_scene_id("TEEsavR23oF.json.gz") == "TEEsavR23oF"
+    assert ra._canonical_scene_id("foo/bar/TEEsavR23oF.json") == "TEEsavR23oF"
+
+
+def test_build_join_rows_joins_glb_and_short_keys_into_one_row():
+    """A validity row keyed on the FULL glb path joins to a delta/wrong row keyed on
+    the SHORT id — they land in ONE row with BOTH verdict and delta populated (the
+    decisive-join bug: a left-join on the raw scene_id matched nothing)."""
+    glb = "hm3d/val/00802-wcojb4TFT35/wcojb4TFT35.basis.glb"
+    short = "wcojb4TFT35"
+    validity = {(glb, "chair"): {"verdict": "VALID"}}
+    wrong = {(short, "chair"): {"fires": 41, "wrong": 39, "rate": 39 / 41}}
+    deltas = {(short, "chair"): {"n_warm_pairs_kept": 3, "n_dropped_nonfinite": 0,
+                                 "delta_softspl": 0.29, "delta_binary_spl": 0.0}}
+    rows = ra.build_join_rows(validity, wrong, deltas)
+
+    # exactly ONE row (the two keys are the same cell after canonicalization).
+    assert len(rows) == 1
+    r = rows[0]
+    # the display scene_id is the clean canonical token, not the glb path.
+    assert r["scene_id"] == "wcojb4TFT35"
+    assert r["category"] == "chair"
+    # BOTH views are populated on the joined row.
+    assert r["verdict"] == "VALID"
+    assert r["fires"] == 41 and r["wrong"] == 39
+    assert r["n_warm_pairs"] == 3
+    assert math.isclose(r["delta_softspl"], 0.29, abs_tol=1e-9)
+
+
+def test_bucket_rollup_nonempty_after_mixed_key_join():
+    """End-to-end: validity keyed on glb + delta keyed on short id, joined, then
+    rolled up — the bucket roll-up must be NON-EMPTY (the headline bug was n=0)."""
+    glb_w = "hm3d/val/00802-wcojb4TFT35/wcojb4TFT35.basis.glb"
+    glb_t = "hm3d/val/00803-TEEsavR23oF/TEEsavR23oF.basis.glb"
+    validity = {
+        (glb_w, "chair"): {"verdict": "VALID"},          # disambiguation forced
+        (glb_t, "bed"): {"verdict": "DEGENERATE"},        # not forced
+    }
+    wrong = {
+        ("wcojb4TFT35", "chair"): {"fires": 41, "wrong": 39, "rate": 39 / 41},
+        ("TEEsavR23oF", "bed"): {"fires": 246, "wrong": 0, "rate": 0.0},
+    }
+    deltas = {
+        ("wcojb4TFT35", "chair"): {"n_warm_pairs_kept": 9, "n_dropped_nonfinite": 0,
+                                   "delta_softspl": 0.29, "delta_binary_spl": 0.0},
+        ("TEEsavR23oF", "bed"): {"n_warm_pairs_kept": 8, "n_dropped_nonfinite": 0,
+                                 "delta_softspl": 0.12, "delta_binary_spl": 0.0},
+    }
+    rows = ra.build_join_rows(validity, wrong, deltas)
+    roll = ra.bucket_rollup(rows)
+
+    # the VALID bucket caught the chair cell (NOT n=0 anymore).
+    val = roll["valid"]
+    assert val["n_pairs"] == 9
+    assert math.isclose(val["mean_delta"], 0.29, abs_tol=1e-9)
+    # the DEGENERATE+0%-wrong bucket caught the bed cell.
+    deg = roll["degenerate_0wrong"]
+    assert deg["n_pairs"] == 8
+    assert math.isclose(deg["mean_delta"], 0.12, abs_tol=1e-9)
+    # the manual partition reconstructs the headline: (0.29*9 + 0.12*8) / 17.
+    total = (val["weighted_delta_sum"] + deg["weighted_delta_sum"]) / (
+        val["n_pairs"] + deg["n_pairs"])
+    assert math.isclose(total, (0.29 * 9 + 0.12 * 8) / 17, abs_tol=1e-9)
+
+
+# ----------------------------------------------------------------------
+# (g) GEODESIC STATUS — explicit per-scene banner vs confirmation toggle
+# ----------------------------------------------------------------------
+
+
+def test_geodesic_status_banner_toggle():
+    """The big EUCLIDEAN-PROVISIONAL banner prints ONLY if >=1 scene actually fell
+    back; if every scene loaded geodesic, a confirmation prints instead."""
+    # all-geodesic => confirmation, no banner.
+    all_geo = {"wcojb4TFT35": {"mode": "geodesic", "reason": None},
+               "TEEsavR23oF": {"mode": "geodesic", "reason": None}}
+    txt_geo = ra.format_geodesic_status(all_geo)
+    assert "VALIDITY IS GEODESIC" in txt_geo
+    assert "PROVISIONAL" not in txt_geo
+    assert "navmesh OK (geodesic)" in txt_geo
+
+    # one scene fell back => the big banner appears.
+    mixed = {"wcojb4TFT35": {"mode": "geodesic", "reason": None},
+             "TEEsavR23oF": {"mode": "euclidean",
+                             "reason": "navmesh not found under [...]"}}
+    txt_mixed = ra.format_geodesic_status(mixed)
+    assert "EUCLIDEAN-PROVISIONAL" in txt_mixed or "PROVISIONAL (EUCLIDEAN)" in txt_mixed
+    assert "EUCLIDEAN fallback" in txt_mixed
+    assert "navmesh not found" in txt_mixed
+
+    # empty status (no --use-pathfinder requested) => neither (silent).
+    assert ra.format_geodesic_status({}) == ""
+
+
+# ----------------------------------------------------------------------
 # end-to-end smoke through the CLI main (Euclidean, no pathfinder)
 # ----------------------------------------------------------------------
 
