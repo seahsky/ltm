@@ -283,6 +283,152 @@ def drop_sensitivity(s1_dir: str, s3_dir: str, metric: str = "soft_spl"
 
 
 # ----------------------------------------------------------------------
+# (d) PER-CELL WARM S3-S1 DELTA (where does the +0.2085 live?)
+# ----------------------------------------------------------------------
+
+
+def per_cell_delta(run_dirs: List[str], metric: str = "soft_spl"
+                   ) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """Per-(scene_id, target_category) cell, compute the paired WARM S3-S1 mean.
+
+    Reuses the SAME machinery ``drop_sensitivity`` uses (``analyze_revisit``'s
+    ``load_revisit_run`` / ``assign_visit_order`` / ``_visit_key`` + the
+    ``math.isfinite`` finite-pair filter matching ``_paired_delta`` lines 311-314)
+    — here merely RE-GROUPED per cell. The binary-SPL delta (the ``spl`` field) is
+    computed alongside on the SAME kept finite pairs.
+
+    Never crashes on a cell with 0 finite pairs: it reports
+    ``n_warm_pairs_kept=0`` and ``delta_<metric>=None``.
+
+    Returns ``{(scene, cat): {n_warm_pairs_kept, n_dropped_nonfinite,
+    delta_softspl, delta_binary_spl}}``.
+    """
+    s1_dir, _s2_dir, s3_dir = _split_settings(run_dirs)
+    if not s1_dir or not s3_dir:
+        return {}
+
+    s1_run = ar.load_revisit_run(s1_dir)
+    s3_run = ar.load_revisit_run(s3_dir)
+    ar.assign_visit_order(s1_run.episodes)
+    ar.assign_visit_order(s3_run.episodes)
+
+    # warm episodes, keyed renumbering-invariantly (same as _paired_delta / drop).
+    s1_by = {ar._visit_key(e): e for e in s1_run.episodes if e.is_warm}
+    s3_by = {ar._visit_key(e): e for e in s3_run.episodes if e.is_warm}
+    paired = sorted(set(s1_by) & set(s3_by))
+
+    # accumulate per cell: kept finite soft-spl deltas + the matching binary deltas.
+    acc: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for k in paired:
+        scene, cat, _vo = k
+        cell = acc.setdefault((scene, cat),
+                              {"soft": [], "binary": [], "dropped": 0})
+        e1, e3 = s1_by[k], s3_by[k]
+        m1, m3 = getattr(e1, metric), getattr(e3, metric)
+        # finite filter on the PRIMARY metric — identical to _paired_delta:311-314.
+        if math.isfinite(m1) and math.isfinite(m3):
+            cell["soft"].append(m3 - m1)
+            b1, b3 = getattr(e1, "spl"), getattr(e3, "spl")
+            if math.isfinite(b1) and math.isfinite(b3):
+                cell["binary"].append(b3 - b1)
+        else:
+            cell["dropped"] += 1
+
+    out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for key, cell in acc.items():
+        soft = cell["soft"]
+        binary = cell["binary"]
+        out[key] = {
+            "n_warm_pairs_kept": len(soft),
+            "n_dropped_nonfinite": cell["dropped"],
+            "delta_softspl": (sum(soft) / len(soft)) if soft else None,
+            "delta_binary_spl": (sum(binary) / len(binary)) if binary else None,
+        }
+    return out
+
+
+# ----------------------------------------------------------------------
+# (e) DECISIVE JOIN — left-join validity + wrong-instance + per-cell delta
+# ----------------------------------------------------------------------
+
+
+def build_join_rows(validity: Dict[Tuple[str, str], Dict[str, Any]],
+                    wrong: Dict[Tuple[str, str], Dict[str, Any]],
+                    deltas: Dict[Tuple[str, str], Dict[str, Any]]
+                    ) -> List[Dict[str, Any]]:
+    """LEFT-JOIN the three per-cell views into one row per cell.
+
+    The row set is the UNION of cell keys across all three views (a cell present in
+    only one view still gets a row; the missing pieces are None / 0, never a
+    KeyError). Sorted by ``delta_softspl`` descending with None LAST.
+
+    Each row: ``{scene_id, category, verdict, fires, wrong, rate, n_warm_pairs,
+    n_dropped_nonfinite, delta_softspl, delta_binary_spl}``.
+    """
+    keys = set(validity) | set(wrong) | set(deltas)
+    rows: List[Dict[str, Any]] = []
+    for scene, cat in keys:
+        v = validity.get((scene, cat)) or {}
+        w = wrong.get((scene, cat)) or {}
+        d = deltas.get((scene, cat)) or {}
+        rows.append({
+            "scene_id": scene,
+            "category": cat,
+            "verdict": v.get("verdict"),
+            "fires": w.get("fires"),
+            "wrong": w.get("wrong"),
+            "rate": w.get("rate"),
+            "n_warm_pairs": d.get("n_warm_pairs_kept"),
+            "n_dropped_nonfinite": d.get("n_dropped_nonfinite"),
+            "delta_softspl": d.get("delta_softspl"),
+            "delta_binary_spl": d.get("delta_binary_spl"),
+        })
+    # sort by delta_softspl descending, None last (None -> sort key pushes to end).
+    rows.sort(key=lambda r: (r["delta_softspl"] is None,
+                             -(r["delta_softspl"] if r["delta_softspl"] is not None
+                               else 0.0)))
+    return rows
+
+
+def bucket_rollup(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Partition the per-cell warm delta into two buckets so a reader can see
+    whether the +0.2085 lives in cells that REQUIRED disambiguation or not.
+
+      - ``degenerate_0wrong``: cells that are DEGENERATE *and* have 0% wrong-instance
+        recall — "recall worked but the eval didn't force disambiguation".
+      - ``valid``: cells classified VALID — disambiguation WAS forced.
+
+    Each bucket reports n_pairs (sum of per-cell kept-pair n), weighted_delta_sum
+    (sum of delta*n over cells with a finite delta), and mean_delta
+    (weighted_delta_sum / n_pairs). Cells with a None delta or 0 kept pairs
+    contribute nothing.
+    """
+    buckets = {"degenerate_0wrong": {"n_pairs": 0, "weighted_delta_sum": 0.0,
+                                     "cells": 0},
+               "valid": {"n_pairs": 0, "weighted_delta_sum": 0.0, "cells": 0}}
+    for r in rows:
+        delta = r.get("delta_softspl")
+        n = r.get("n_warm_pairs") or 0
+        if delta is None or n <= 0:
+            continue
+        verdict = r.get("verdict")
+        rate = r.get("rate")
+        if verdict == "DEGENERATE" and rate == 0.0:
+            b = buckets["degenerate_0wrong"]
+        elif verdict == "VALID":
+            b = buckets["valid"]
+        else:
+            continue
+        b["n_pairs"] += n
+        b["weighted_delta_sum"] += delta * n
+        b["cells"] += 1
+    for b in buckets.values():
+        b["mean_delta"] = (b["weighted_delta_sum"] / b["n_pairs"]
+                           if b["n_pairs"] else None)
+    return buckets
+
+
+# ----------------------------------------------------------------------
 # READOUT / verdict
 # ----------------------------------------------------------------------
 
@@ -342,7 +488,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---- (a) per-cell validity ----
     print("========== PER-CELL VALIDITY (VALID / DEGENERATE / UNREACHABLE) ==========")
     val = run_validity(args.episodes, args.use_pathfinder, args.navmesh_root)
+    _EUCLID_BANNER = (
+        "############################################################\n"
+        "##  VALIDITY IS PROVISIONAL (EUCLIDEAN) — re-run with conda env\n"
+        "##  so habitat_sim imports (source scripts/race-setup.sh) and\n"
+        "##  pass --use-pathfinder for the TRUE geodesic gate. A wall can\n"
+        "##  flip a Euclidean-VALID cell to DEGENERATE/UNREACHABLE.\n"
+        "############################################################")
     if val["approx"]:
+        print(_EUCLID_BANNER)
         print("  !!! APPROX: Euclidean-xz proxy (ignores walls). Re-run with "
               "--use-pathfinder on RACE for the TRUE geodesic gate. A wall can flip "
               "a Euclidean-VALID cell to DEGENERATE/UNREACHABLE. !!!")
@@ -360,10 +514,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---- (b) per-cell wrong-instance recall ----
     print("\n========== PER-CELL WRONG-INSTANCE RECALL RATE ==========")
     episodes = _load_run_dirs(args.run_dirs)
+    wrong_per_cell: Dict[Tuple[str, str], Dict[str, Any]] = {}
     if not episodes:
         print(f"  no episode_*.json under {args.run_dirs}")
     else:
         per_cell, agg = wrong_instance_by_cell(episodes)
+        wrong_per_cell = per_cell
         if agg is None:
             print("  no instance_labels on any episode (single-goal run) -> "
                   "wrong-instance readout is silent.")
@@ -402,6 +558,61 @@ def main(argv: Optional[List[str]] = None) -> int:
                   f"why the analyzer drops it. The 4 dropped pairs are navmesh-"
                   f"adverse (unreachable goal), not cherry-picked.")
 
+    # ---- (d) per-cell warm S3-S1 delta + (e) decisive join ----
+    print("\n========== PER-CELL DECISIVE JOIN ==========")
+    if not s1_dir or not s3_dir:
+        print("  need both an -s1 and an -s3 run dir to compute the per-cell warm "
+              f"delta; got run-dirs {args.run_dirs}. Skipping the join.")
+        rows: List[Dict[str, Any]] = []
+        roll: Dict[str, Any] = {}
+    else:
+        deltas = per_cell_delta(args.run_dirs, metric=args.metric)
+        rows = build_join_rows(val["cells"], wrong_per_cell, deltas)
+        roll = bucket_rollup(rows)
+        print("  LEFT JOIN of the three per-cell views (one row per cell), "
+              "sorted by S3-S1_softspl descending (None last):")
+        print(f"  {'scene':<16} {'category':<10} {'verdict':<12} "
+              f"{'wrong/fires=rate':<18} {'n_warm':<7} {'S3-S1_softspl':<14} "
+              f"{'S3-S1_binary':<13}")
+        for r in rows:
+            verdict = r["verdict"] if r["verdict"] is not None else "-"
+            if r["fires"]:
+                wif = f"{r['wrong']}/{r['fires']}={r['rate']:.0%}"
+            else:
+                wif = "-/0"
+            nwp = r["n_warm_pairs"] if r["n_warm_pairs"] is not None else "-"
+            ds = (f"{r['delta_softspl']:+.4f}" if r["delta_softspl"] is not None
+                  else "None")
+            db = (f"{r['delta_binary_spl']:+.4f}" if r["delta_binary_spl"] is not None
+                  else "None")
+            print(f"  {str(r['scene_id']):<16} {str(r['category']):<10} "
+                  f"{str(verdict):<12} {wif:<18} {str(nwp):<7} {ds:<14} {db:<13}")
+
+        # ---- bucket roll-up: where does the +delta live? ----
+        deg = roll.get("degenerate_0wrong", {})
+        valb = roll.get("valid", {})
+        print("\n  --- WHERE THE DELTA LIVES (warm soft-SPL, pair-weighted) ---")
+        dmean = deg.get("mean_delta")
+        vmean = valb.get("mean_delta")
+        print(f"  delta carried by DEGENERATE+0%-wrong cells "
+              f"(disambiguation NOT required): "
+              f"sum={deg.get('weighted_delta_sum', 0.0):+.4f}, "
+              f"n_pairs={deg.get('n_pairs', 0)}, cells={deg.get('cells', 0)}, "
+              f"mean={'None' if dmean is None else f'{dmean:+.4f}'}")
+        print(f"  delta in VALID cells "
+              f"(disambiguation REQUIRED):              "
+              f"sum={valb.get('weighted_delta_sum', 0.0):+.4f}, "
+              f"n_pairs={valb.get('n_pairs', 0)}, cells={valb.get('cells', 0)}, "
+              f"mean={'None' if vmean is None else f'{vmean:+.4f}'}")
+        # PRE-REGISTERED VERDICT STUB — finalized by the verify agent, NOT hard-coded.
+        print("\n  PRE-REGISTERED VERDICT [TODO — verify agent finalizes after the "
+              "geodesic re-run]: read the two buckets above. IF the warm soft-SPL "
+              "delta is concentrated in DEGENERATE+0%-wrong cells while the VALID "
+              "(disambiguation-required) cells show a small/zero/negative delta with "
+              "high wrong-instance recall, THEN the +0.2085 is REAL RECALL but NOT "
+              "instance disambiguation. Do NOT hard-code a conclusion here; the "
+              "Euclidean validity verdict above is PROVISIONAL until --use-pathfinder.")
+
     # ---- READOUT ----
     print("\n========== READOUT ==========")
     if val["cells"]:
@@ -411,6 +622,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "before quoting it.)")
     else:
         print("  OVERALL: no labelled warm cells found — cannot issue a validity verdict.")
+
+    # ---- END banner: make the Euclidean fallback impossible to miss ----
+    if val["approx"]:
+        print()
+        print(_EUCLID_BANNER)
     return 0
 
 

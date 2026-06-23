@@ -360,6 +360,186 @@ def test_drop_no_nonfinite_pairs(tmp_path):
 
 
 # ----------------------------------------------------------------------
+# (d) PER-CELL WARM S3-S1 DELTA (where does the +0.2085 live?)
+# ----------------------------------------------------------------------
+
+
+def _build_two_cell_s1_s3(tmp_path):
+    """Two cells with a DROP in one of them.
+
+    sceneA/chair: cold(v0) + 2 finite warm pairs (v1,v2) => +0.3 each => +0.30.
+        S1 warm soft_spl 0.10, 0.20 ; S3 warm soft_spl 0.40, 0.50.
+    sceneA/bed:   cold(v0) + 2 warm pairs (v1,v2) but v2 has Inf S1 => DROPPED,
+        so only v1 (+0.10) survives => delta +0.10 over n=1.
+    """
+    inf = float("inf")
+    s1 = [
+        _ep(0, "sceneA", "chair", 0.05),                 # chair cold
+        _ep(1, "sceneA", "chair", 0.10),                 # chair warm v1
+        _ep(2, "sceneA", "chair", 0.20),                 # chair warm v2
+        _ep(0, "sceneA", "bed", 0.05),                   # bed cold
+        _ep(1, "sceneA", "bed", 0.30),                   # bed warm v1
+        _ep(2, "sceneA", "bed", inf, min_d2g=inf),       # bed warm v2 -> DROP
+    ]
+    s3 = [
+        _ep(0, "sceneA", "chair", 0.05),
+        _ep(1, "sceneA", "chair", 0.40),                 # +0.30
+        _ep(2, "sceneA", "chair", 0.50),                 # +0.30
+        _ep(0, "sceneA", "bed", 0.05),
+        _ep(1, "sceneA", "bed", 0.40),                   # +0.10
+        _ep(2, "sceneA", "bed", 0.90),                   # S1 inf -> still DROP
+    ]
+    s1_dir = _write_run_dir(tmp_path, "partb-seeded-s1", s1)
+    s3_dir = _write_run_dir(tmp_path, "partb-seeded-s3", s3)
+    return s1_dir, s3_dir
+
+
+def test_per_cell_delta_two_cells(tmp_path):
+    """per_cell_delta computes a paired warm S3-S1 mean per (scene, category),
+    reusing the SAME finite-pair filter the drop_sensitivity uses."""
+    s1_dir, s3_dir = _build_two_cell_s1_s3(tmp_path)
+    cells = ra.per_cell_delta([s1_dir, s3_dir], metric="soft_spl")
+
+    chair = cells[("sceneA", "chair")]
+    assert chair["n_warm_pairs_kept"] == 2
+    assert chair["n_dropped_nonfinite"] == 0
+    assert math.isclose(chair["delta_softspl"], 0.30, abs_tol=1e-9)
+
+    bed = cells[("sceneA", "bed")]
+    assert bed["n_warm_pairs_kept"] == 1          # the Inf pair was dropped
+    assert bed["n_dropped_nonfinite"] == 1
+    assert math.isclose(bed["delta_softspl"], 0.10, abs_tol=1e-9)
+
+
+def test_per_cell_delta_empty_cell_no_crash(tmp_path):
+    """A cell with ZERO finite warm pairs must report n=0 / delta=None, not crash."""
+    inf = float("inf")
+    s1 = [
+        _ep(0, "sceneA", "toilet", 0.05),                # cold
+        _ep(1, "sceneA", "toilet", inf, min_d2g=inf),    # only warm pair is Inf
+    ]
+    s3 = [
+        _ep(0, "sceneA", "toilet", 0.05),
+        _ep(1, "sceneA", "toilet", 0.90),
+    ]
+    s1_dir = _write_run_dir(tmp_path, "partb-seeded-s1", s1)
+    s3_dir = _write_run_dir(tmp_path, "partb-seeded-s3", s3)
+    cells = ra.per_cell_delta([s1_dir, s3_dir], metric="soft_spl")
+    toilet = cells[("sceneA", "toilet")]
+    assert toilet["n_warm_pairs_kept"] == 0
+    assert toilet["n_dropped_nonfinite"] == 1
+    assert toilet["delta_softspl"] is None
+
+
+def test_per_cell_delta_binary_spl(tmp_path):
+    """The binary SPL delta is reported alongside soft_spl (uses the `spl` field)."""
+    s1 = [_ep(0, "sA", "chair", 0.05, spl=0.0),
+          _ep(1, "sA", "chair", 0.10, spl=0.0)]
+    s3 = [_ep(0, "sA", "chair", 0.05, spl=0.0),
+          _ep(1, "sA", "chair", 0.50, spl=0.40)]
+    s1_dir = _write_run_dir(tmp_path, "partb-seeded-s1", s1)
+    s3_dir = _write_run_dir(tmp_path, "partb-seeded-s3", s3)
+    cells = ra.per_cell_delta([s1_dir, s3_dir], metric="soft_spl")
+    chair = cells[("sA", "chair")]
+    assert math.isclose(chair["delta_softspl"], 0.40, abs_tol=1e-9)
+    assert math.isclose(chair["delta_binary_spl"], 0.40, abs_tol=1e-9)
+
+
+# ----------------------------------------------------------------------
+# (e) DECISIVE JOIN — left-join the three per-cell views + bucket roll-up
+# ----------------------------------------------------------------------
+
+
+def test_join_assembles_one_row_per_cell():
+    """build_join_rows left-joins validity + wrong-instance + delta into one row
+    per cell, with missing pieces tolerated (left join)."""
+    validity = {
+        ("sA", "chair"): {"verdict": "VALID"},
+        ("sA", "bed"): {"verdict": "DEGENERATE"},
+        ("sA", "sofa"): {"verdict": "VALID"},  # no wrong-instance, no delta data
+    }
+    wrong = {
+        ("sA", "chair"): {"fires": 41, "wrong": 39, "rate": 39 / 41},
+        ("sA", "bed"): {"fires": 246, "wrong": 0, "rate": 0.0},
+    }
+    deltas = {
+        ("sA", "chair"): {"n_warm_pairs_kept": 3, "n_dropped_nonfinite": 0,
+                          "delta_softspl": 0.05, "delta_binary_spl": 0.0},
+        ("sA", "bed"): {"n_warm_pairs_kept": 5, "n_dropped_nonfinite": 0,
+                        "delta_softspl": 0.40, "delta_binary_spl": 0.10},
+    }
+    rows = ra.build_join_rows(validity, wrong, deltas)
+
+    # one row per cell present in ANY of the three views (left join over union).
+    keys = {(r["scene_id"], r["category"]) for r in rows}
+    assert keys == {("sA", "chair"), ("sA", "bed"), ("sA", "sofa")}
+
+    # sorted by delta_softspl descending, None last.
+    deltas_order = [r["delta_softspl"] for r in rows]
+    assert deltas_order[0] == 0.40        # bed first (largest)
+    assert deltas_order[1] == 0.05        # chair second
+    assert deltas_order[-1] is None       # sofa (no delta) last
+
+    by_key = {(r["scene_id"], r["category"]): r for r in rows}
+    # chair row carries all three views joined.
+    chair = by_key[("sA", "chair")]
+    assert chair["verdict"] == "VALID"
+    assert chair["fires"] == 41 and chair["wrong"] == 39
+    assert chair["n_warm_pairs"] == 3
+    # sofa row: validity only; the missing pieces are None / 0, not a KeyError.
+    sofa = by_key[("sA", "sofa")]
+    assert sofa["verdict"] == "VALID"
+    assert sofa["delta_softspl"] is None
+    assert sofa["fires"] is None or sofa["fires"] == 0
+
+
+def test_bucket_rollup_valid_vs_degenerate():
+    """The roll-up partitions the delta into the DEGENERATE+0%-wrong bucket vs the
+    VALID bucket, weighting each per-cell delta by its kept-pair n."""
+    rows = [
+        # DEGENERATE, 0% wrong, big delta over many pairs (the TEEsav-bed pattern).
+        {"scene_id": "sA", "category": "bed", "verdict": "DEGENERATE",
+         "fires": 246, "wrong": 0, "rate": 0.0,
+         "n_warm_pairs": 5, "delta_softspl": 0.40, "delta_binary_spl": 0.10},
+        # VALID, ~95% wrong, small delta over few pairs (the disambiguation cells).
+        {"scene_id": "sA", "category": "chair", "verdict": "VALID",
+         "fires": 41, "wrong": 39, "rate": 39 / 41,
+         "n_warm_pairs": 3, "delta_softspl": 0.05, "delta_binary_spl": 0.0},
+        # VALID cell with no delta data => contributes nothing (None skipped).
+        {"scene_id": "sA", "category": "sofa", "verdict": "VALID",
+         "fires": None, "wrong": None, "rate": None,
+         "n_warm_pairs": 0, "delta_softspl": None, "delta_binary_spl": None},
+    ]
+    roll = ra.bucket_rollup(rows)
+
+    # DEGENERATE+0%-wrong bucket: bed only.
+    deg = roll["degenerate_0wrong"]
+    assert deg["n_pairs"] == 5
+    assert math.isclose(deg["weighted_delta_sum"], 0.40 * 5, abs_tol=1e-9)
+    assert math.isclose(deg["mean_delta"], 0.40, abs_tol=1e-9)
+
+    # VALID bucket: chair (sofa's None delta contributes 0 pairs).
+    val = roll["valid"]
+    assert val["n_pairs"] == 3
+    assert math.isclose(val["weighted_delta_sum"], 0.05 * 3, abs_tol=1e-9)
+    assert math.isclose(val["mean_delta"], 0.05, abs_tol=1e-9)
+
+
+def test_bucket_rollup_degenerate_requires_zero_wrong():
+    """A DEGENERATE cell with a NON-zero wrong rate is NOT in the
+    degenerate_0wrong bucket (that bucket is the 'recall worked but disambiguation
+    not required' story specifically)."""
+    rows = [
+        {"scene_id": "sA", "category": "x", "verdict": "DEGENERATE",
+         "fires": 10, "wrong": 7, "rate": 0.7,
+         "n_warm_pairs": 2, "delta_softspl": 0.20, "delta_binary_spl": 0.0},
+    ]
+    roll = ra.bucket_rollup(rows)
+    assert roll["degenerate_0wrong"]["n_pairs"] == 0
+    assert roll["valid"]["n_pairs"] == 0  # it's DEGENERATE, not VALID
+
+
+# ----------------------------------------------------------------------
 # overall verdict line
 # ----------------------------------------------------------------------
 
@@ -405,6 +585,33 @@ def test_main_smoke_euclidean(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "PER-CELL VALIDITY" in out
     assert "DROP SENSITIVITY" in out
+    assert "PER-CELL DECISIVE JOIN" in out
     assert "READOUT" in out
     # the validity verdict line is present.
     assert "VALID" in out
+    # the new decisive-join columns are present.
+    assert "S3-S1_softspl" in out
+
+
+def test_main_euclidean_banner_impossible_to_miss(tmp_path, capsys):
+    """When ANY scene falls back to Euclidean, a big banner appears at the TOP of
+    the validity section AND is repeated at the very END."""
+    s1_dir, s3_dir = _build_s1_s3(tmp_path)
+    content_path = _write_content(tmp_path, "sceneA", [{
+        "episode_id": "chair-warm-0",
+        "object_category": "chair",
+        "start_position": [0.0, 0.0, 0.0],
+        "instance_labels": {"target_center": [10.0, 0.0, 0.0],
+                            "distractor_centers": [[1.0, 0.0, 0.0]]},
+    }])
+    rc = ra.main([
+        "--run-dirs", s1_dir, s3_dir,
+        "--episodes", content_path,
+    ])  # no --use-pathfinder => Euclidean fallback
+    assert rc == 0
+    out = capsys.readouterr().out
+    # the END banner must be present and explicit.
+    assert "VALIDITY IS PROVISIONAL (EUCLIDEAN)" in out
+    assert "re-run with conda env" in out.lower() or "habitat_sim imports" in out
+    # the banner appears at least twice (top of validity + the very end).
+    assert out.count("PROVISIONAL") >= 2 or out.count("EUCLIDEAN") >= 2
