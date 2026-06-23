@@ -46,7 +46,7 @@ CATEGORIES="chair bed sofa toilet tv_monitor plant"
 CLASSES="baby_cry alarm glass_break"
 NWARM=3; SETTINGS="1 3"; PREFIX="scaleup"
 MAX_CELLS=""                      # truncate the flat cell list (staging); "0" = plan/download then exit
-DOWNLOAD=""; FETCH="--fetch-audio"; EXTRA=""
+DOWNLOAD=""; FETCH="--fetch-audio"; EXTRA=""; CONSUME=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --split) SPLIT="$2"; shift 2 ;;
@@ -66,6 +66,15 @@ while [ $# -gt 0 ]; do
     --synthetic-audio) FETCH=""; shift ;;
     # Pass-through to every cell's race-audiogoal.sh (e.g. "--t-anom 30").
     --extra) EXTRA="$2"; shift 2 ;;
+    # A/B ARM: turn ON single-goal memory consumption (REMEMBR_CONSUME_SINGLEGOAL=1)
+    # to damp the wrong-instance recall attractor (the plant/toilet over-fire: a
+    # reached-but-unadvanced memory waypoint re-chosen every step). LIVE for this
+    # matrix because cells run --task audiogoal, where the consume gate is
+    # `task=='audiogoal' && consume_singlegoal` (no code change). Default-OFF keeps
+    # the baseline comparable with the +0.24/+0.171 arc; --consume auto-suffixes the
+    # tag-prefix with 'k' so the arm never clobbers the baseline out-dirs. A/B the
+    # two arms' S3 dirs with: analyze_revisit.py --compare-a <base s3> --compare-b <k s3>.
+    --consume) CONSUME=1; shift ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
@@ -75,6 +84,13 @@ case "$SPLIT" in val|val_mini) : ;; *) echo "FATAL: --split must be val or val_m
 # cell resume-skip as "complete (0/0)" and the matrix exit 0 having done nothing.
 [ -n "$(echo $SETTINGS | tr -d ' ')" ] || { echo "FATAL: --settings must list ≥1 of {1,2,3} (got '$SETTINGS')"; exit 1; }
 for s in $SETTINGS; do case "$s" in 1|2|3) : ;; *) echo "FATAL: --settings values must be 1/2/3 (got '$s')"; exit 1 ;; esac; done
+# --consume A/B arm: export the env so every child cell inherits it, and diverge the
+# out-prefix (append 'k') so this arm writes distinct dirs from the baseline.
+if [ -n "$CONSUME" ]; then
+  export REMEMBR_CONSUME_SINGLEGOAL=1
+  PREFIX="${PREFIX}k"
+  echo "  [consume] REMEMBR_CONSUME_SINGLEGOAL=1 — over-fire damping ON; out-prefix=$PREFIX (A/B vs baseline)"
+fi
 CONTENT_DIR="data/hm3d/datasets/objectnav/hm3d/v1/${SPLIT}/content"
 MESH_ROOT="data/hm3d"
 banner() { printf '\n########## %s ##########\n' "$1"; }
