@@ -26,9 +26,39 @@
     padding:26px 0 0;
   }
   header .wrap{padding-bottom:0}
+  .hrow{display:flex; align-items:flex-start; justify-content:space-between; gap:20px; flex-wrap:wrap}
   h1{font-size:22px; margin:0 0 4px; letter-spacing:.2px}
   .sub{color:var(--ink-dim); font-size:13px; margin:0 0 16px; max-width:820px}
   .sub b{color:var(--ink)}
+
+  /* ---- Simple/Technical toggle (segmented switch) ---- */
+  .modesw{
+    position:relative; display:inline-flex; align-items:center; gap:0;
+    background:var(--panel); border:1px solid var(--edge); border-radius:24px;
+    padding:4px; flex:0 0 auto; user-select:none; box-shadow:0 1px 0 rgba(0,0,0,.3);
+  }
+  .modesw .pillbg{
+    position:absolute; top:4px; bottom:4px; left:4px; width:calc(50% - 4px);
+    border-radius:20px; background:linear-gradient(180deg,#2a6df0,#1d54c4);
+    transition:transform .26s cubic-bezier(.4,1.3,.5,1), background .2s; z-index:0;
+    box-shadow:0 1px 6px rgba(40,110,240,.45);
+  }
+  body.mode-technical .modesw .pillbg{ transform:translateX(100%); background:linear-gradient(180deg,#7a52e0,#5a36b8); box-shadow:0 1px 6px rgba(140,90,240,.45); }
+  .modesw button{
+    appearance:none; border:0; background:transparent; cursor:pointer; position:relative; z-index:1;
+    color:var(--ink-dim); font-weight:700; font-size:13px; padding:7px 16px; border-radius:20px;
+    transition:color .2s; white-space:nowrap; letter-spacing:.2px;
+  }
+  body.mode-simple .modesw button[data-mode="simple"]{ color:#fff; }
+  body.mode-technical .modesw button[data-mode="technical"]{ color:#fff; }
+  .modecap{font-size:11px; color:var(--ink-faint); margin:6px 0 0; text-align:right; max-width:240px}
+
+  /* mode-driven content visibility */
+  body.mode-simple .tech{display:none !important}
+  body.mode-technical .lay{display:none !important}
+  /* belt-and-braces: scrub jargon in simple mode even if a stray .tech is missed */
+  body.mode-simple .cite{display:none !important}
+
   /* tab bar */
   .tabs{display:flex; gap:2px; flex-wrap:wrap}
   .tab{
@@ -49,6 +79,7 @@
   p{margin:8px 0}
   .dim{color:var(--ink-dim)}
   .faint{color:var(--ink-faint)}
+  .lead{font-size:15px; color:var(--ink); max-width:760px}
   .grid{display:grid; gap:12px}
   .g2{grid-template-columns:1fr 1fr}
   .g3{grid-template-columns:1fr 1fr 1fr}
@@ -84,6 +115,7 @@
   .node .nidx{font-size:10px; color:var(--ink-faint); font-weight:700}
   .node .nttl{font-weight:700; font-size:13px; margin:2px 0}
   .node .nfn{font-family:var(--mono); font-size:10.5px; color:var(--mem); word-break:break-all}
+  .node .nfn-lay{font-size:11px; color:var(--ink-dim); font-style:italic}
   .arrow{display:flex; align-items:center; color:var(--ink-faint); padding:0 4px; font-size:18px; user-select:none}
   @media(max-width:820px){.arrow{display:none}.node{flex-basis:100%}}
   .flow.audio .node:hover{border-color:var(--aud)}
@@ -109,9 +141,12 @@
   .callout.honest .ch{color:var(--warn)}
   .callout.scope{background:#241620; border-color:#5a2a44}
   .callout.scope .ch{color:#ff9ad0}
+  .callout.info{background:#1a2230; border-color:#2f4a6b}
+  .callout.info .ch{color:var(--accent)}
   /* eval / results */
   .pill{display:inline-flex; align-items:center; gap:6px; background:var(--panel2); border:1px solid var(--edge);
     border-radius:20px; padding:3px 11px; font-size:12px; margin:2px 4px 2px 0; font-family:var(--mono)}
+  .pill.lay{font-family:inherit}
   .pos{color:var(--accent2)} .neg{color:var(--bad)} .neu{color:var(--ink-dim)}
   table{border-collapse:collapse; width:100%; margin:10px 0; font-size:13px}
   th,td{border:1px solid var(--edge); padding:7px 10px; text-align:left; vertical-align:top}
@@ -134,16 +169,34 @@
   ul.flat .mono{color:var(--accent)}
 </style>
 </head>
-<body>
+<body class="mode-simple">
 <header>
   <div class="wrap">
-    <h1>LTM-Embodied Agent — Project Overview</h1>
-    <p class="sub">
-      A <b>lifelong hierarchical long-term memory</b> stack for embodied agents, extending the
-      <b>ReMEmbR</b> backbone (Qwen2-VL-2B captioner + Qwen2.5-7B planner) in
-      <b>Habitat / HM3D</b> ObjectNav &amp; AudioGoal. Click any module, flow node, or card to expand
-      the real function names &amp; <span class="mono">file:line</span> they live at. Offline single file — no network.
-    </p>
+    <div class="hrow">
+      <div>
+        <h1>LTM-Embodied Agent — Project Overview</h1>
+        <p class="sub lay">
+          A robot that <b>remembers</b>. It explores a simulated house once, then — on a return visit — re-finds
+          what it's looking for <b>faster</b> because it remembers where it saw things. Use the switch to read this
+          as a friendly explainer or with all the technical depth.
+        </p>
+        <p class="sub tech">
+          A <b>lifelong hierarchical long-term memory</b> stack for embodied agents, extending the
+          <b>ReMEmbR</b> backbone (Qwen2-VL-2B captioner + Qwen2.5-7B planner) in
+          <b>Habitat / HM3D</b> ObjectNav &amp; AudioGoal. Click any module, flow node, or card to expand
+          the real function names &amp; <span class="mono">file:line</span> they live at. Offline single file — no network.
+        </p>
+      </div>
+      <div style="text-align:right">
+        <div class="modesw" id="modesw" role="tablist" aria-label="Reading level">
+          <span class="pillbg" aria-hidden="true"></span>
+          <button data-mode="simple" type="button">🧒 Simple</button>
+          <button data-mode="technical" type="button">🔬 Technical</button>
+        </div>
+        <p class="modecap lay">Plain-English explainer — no code, no jargon.</p>
+        <p class="modecap tech">Full depth — function names, <span class="mono">file:line</span>, env gates.</p>
+      </div>
+    </div>
     <div class="tabs" id="tabbar">
       <button class="tab active" data-v="struct">Project Structure</button>
       <button class="tab" data-v="mem">How Memory Works</button>
@@ -158,71 +211,101 @@
 <!-- ============================ STRUCTURE ============================ -->
 <section class="view active" id="struct">
   <h2>Two-path architecture</h2>
-  <p class="dim">One LTM stack, two evaluation surfaces, joined by the <b>bridge</b>. The dialogue path holds the
+
+  <p class="lead lay">We built the robot's memory once, then tested it two different ways: in a chat-only
+  setting (text conversations) and in a simulated house where the robot actually moves around. The exact same
+  memory "brain" runs in both — we just bolt on a feature so the robot can use a remembered spot as a place to
+  walk toward. Hard rule: tinkering with the house-walking version must never break the chat version.</p>
+
+  <p class="dim tech">One LTM stack, two evaluation surfaces, joined by the <b>bridge</b>. The dialogue path holds the
   actual memory classes; the embodied path reuses them unchanged and adds waypoint injection. Convention: never
   break the dialogue/MSC path while building the embodied path.</p>
+
   <div class="grid g3">
     <div class="card click" data-card>
       <div class="ttl"><span class="tag dlg">dialogue</span> dialogue_memory/ <span class="chev">▶</span></div>
-      <div class="path">dialogue_memory/</div>
+      <div class="path tech">dialogue_memory/</div>
       <div class="body">
-        <p>Text-only prototype validated on MSC multi-session dialogue. Holds the <b>real</b> LTM classes that the
-        embodied path imports verbatim.</p>
-        <ul>
-          <li><span class="mono">ltm.py</span> — <code>HierarchicalLTM</code>, <code>MemoryLayer</code>, <code>MemoryEntry</code> (3-layer FAISS) · <span class="cite">ltm.py:37-146</span></li>
-          <li><span class="mono">consolidation.py</span> — <code>DialogueConsolidation.compute_importance</code> (I=αR+βU+γN), <code>consolidate_session</code> · <span class="cite">consolidation.py:123-373</span></li>
-          <li><span class="mono">pattern_cluster.py</span> — mid-layer clusterer</li>
-          <li><span class="mono">reranking.py</span> — <code>ResponseReranker.rerank</code> (Score = w₁S_succ+w₂S_sim+w₃S_phys) · <span class="cite">reranking.py:306-393</span></li>
-          <li><span class="mono">encoder.py</span> — pluggable SBERT embeddings</li>
-          <li><span class="mono">train_predictor.py</span> (U head) / <span class="mono">train_scorer.py</span> (R head) — both closed levers</li>
-        </ul>
+        <p class="lay">This is the text-only version, first proven on long, multi-day chat conversations. It holds
+        the actual memory machinery — and the house-walking robot borrows that exact machinery, unchanged, rather
+        than reinventing it.</p>
+        <div class="tech">
+          <p>Text-only prototype validated on MSC multi-session dialogue. Holds the <b>real</b> LTM classes that the
+          embodied path imports verbatim.</p>
+          <ul>
+            <li><span class="mono">ltm.py</span> — <code>HierarchicalLTM</code>, <code>MemoryLayer</code>, <code>MemoryEntry</code> (3-layer FAISS) · <span class="cite">ltm.py:37-146</span></li>
+            <li><span class="mono">consolidation.py</span> — <code>DialogueConsolidation.compute_importance</code> (I=αR+βU+γN), <code>consolidate_session</code> · <span class="cite">consolidation.py:123-373</span></li>
+            <li><span class="mono">pattern_cluster.py</span> — mid-layer clusterer</li>
+            <li><span class="mono">reranking.py</span> — <code>ResponseReranker.rerank</code> (Score = w₁S_succ+w₂S_sim+w₃S_phys) · <span class="cite">reranking.py:306-393</span></li>
+            <li><span class="mono">encoder.py</span> — pluggable SBERT embeddings</li>
+            <li><span class="mono">train_predictor.py</span> (U head) / <span class="mono">train_scorer.py</span> (R head) — both closed levers</li>
+          </ul>
+        </div>
       </div>
     </div>
 
     <div class="card click" data-card>
       <div class="ttl"><span class="tag emb">embodied</span> embodied_memory/ <span class="chev">▶</span></div>
-      <div class="path">embodied_memory/</div>
+      <div class="path tech">embodied_memory/</div>
       <div class="body">
-        <p>Habitat ObjectNav + AudioGoal port. Indexes the fine layer on the VLM caption's <b>SBERT text embedding</b>
-        and <b>injects waypoint candidates</b> into the planner pool (option 2), not just rerank.</p>
-        <ul>
-          <li><span class="mono">run_hm3d_pol.py</span> — CLI: <code>--backbone {frontier,remembr,oracle}</code>, <code>--setting {1,2,3}</code>, <code>--task {objectnav,audiogoal}</code> · <span class="cite">run_hm3d_pol.py:306-349</span></li>
-          <li><span class="mono">episode_runner.py</span> — per-step orchestration, <code>_build_keyframe</code>, <code>_propose_candidates</code>, <code>_waypoint_action</code>, <code>consolidate</code> · <span class="cite">episode_runner.py</span></li>
-          <li><span class="mono">memory_bridge.py</span> — <code>EmbodiedMemoryBridge</code>: glue + <code>propose_memory_candidates</code> · <span class="cite">memory_bridge.py</span></li>
-          <li><span class="mono">perception.py</span> — CLIP ViT-B/32, <code>SemanticCaptioner</code>, <code>CLAPAudioEncoder</code> · <span class="cite">perception.py:169-277</span></li>
-          <li><span class="mono">habitat_env.py</span> — live env wrapper; RENDERS audio into <code>Step.audio</code> · <span class="cite">habitat_env.py:319-342,536-566</span></li>
-          <li><span class="mono">audio.py</span> / <span class="mono">audio_task.py</span> — RIR lookup + fftconvolve + DOA / pure audio decision brain</li>
-          <li><span class="mono">goal_detector.py</span> · <span class="mono">room_resolver.py</span> · <span class="mono">spl_guard.py</span> · <span class="mono">episode_order.py</span> (<code>pin_episode_order</code>) · <span class="mono">text_encode_util.py</span> (<code>l2_normalize_encoder</code>)</li>
-        </ul>
+        <p class="lay">This is the robot-in-a-house version. When the robot looks at something, it writes a short
+        description of what it sees and files that away. Later, a remembered spot doesn't just get a quiet vote —
+        it gets dropped into the robot's actual list of places-it-could-go-next.</p>
+        <div class="tech">
+          <p>Habitat ObjectNav + AudioGoal port. Indexes the fine layer on the VLM caption's <b>SBERT text embedding</b>
+          and <b>injects waypoint candidates</b> into the planner pool (option 2), not just rerank.</p>
+          <ul>
+            <li><span class="mono">run_hm3d_pol.py</span> — CLI: <code>--backbone {frontier,remembr,oracle}</code>, <code>--setting {1,2,3}</code>, <code>--task {objectnav,audiogoal}</code> · <span class="cite">run_hm3d_pol.py:306-349</span></li>
+            <li><span class="mono">episode_runner.py</span> — per-step orchestration, <code>_build_keyframe</code>, <code>_propose_candidates</code>, <code>_waypoint_action</code>, <code>consolidate</code> · <span class="cite">episode_runner.py</span></li>
+            <li><span class="mono">memory_bridge.py</span> — <code>EmbodiedMemoryBridge</code>: glue + <code>propose_memory_candidates</code> · <span class="cite">memory_bridge.py</span></li>
+            <li><span class="mono">perception.py</span> — CLIP ViT-B/32, <code>SemanticCaptioner</code>, <code>CLAPAudioEncoder</code> · <span class="cite">perception.py:169-277</span></li>
+            <li><span class="mono">habitat_env.py</span> — live env wrapper; RENDERS audio into <code>Step.audio</code> · <span class="cite">habitat_env.py:319-342,536-566</span></li>
+            <li><span class="mono">audio.py</span> / <span class="mono">audio_task.py</span> — RIR lookup + fftconvolve + DOA / pure audio decision brain</li>
+            <li><span class="mono">goal_detector.py</span> · <span class="mono">room_resolver.py</span> · <span class="mono">spl_guard.py</span> · <span class="mono">episode_order.py</span> (<code>pin_episode_order</code>) · <span class="mono">text_encode_util.py</span> (<code>l2_normalize_encoder</code>)</li>
+          </ul>
+        </div>
       </div>
     </div>
 
     <div class="card click" data-card>
       <div class="ttl"><span class="tag emb">bridge</span> The bridge <span class="chev">▶</span></div>
-      <div class="path">embodied_memory/memory_bridge.py — EmbodiedMemoryBridge</div>
+      <div class="path tech">embodied_memory/memory_bridge.py — EmbodiedMemoryBridge</div>
       <div class="body">
-        <p><code>EmbodiedMemoryBridge</code> owns one instance each of <code>HierarchicalLTM</code>,
-        <code>DialogueConsolidation</code>, <code>PatternClusterer</code>+<code>MidLayerMemory</code>, and
-        <code>ResponseReranker</code> — gluing STM → consolidation → SBERT-indexed LTM → memory-injected reranking.</p>
-        <ul>
-          <li>Consolidator weights <code>alpha=0.4, beta=0.3, gamma=0.3</code> · <span class="cite">memory_bridge.py:521-532</span></li>
-          <li>Reranker weights <code>{history:0.0, memory:0.30, coherence:0.70}</code> · <span class="cite">memory_bridge.py:558</span></li>
-          <li><code>FrontierPhysicsScorer</code> swapped into "coherence", <code>EmbodiedMemorySimilarityScorer</code> into "memory" · <span class="cite">memory_bridge.py:568-571</span></li>
-          <li>Recall hard-filtered to current scene · <span class="cite">memory_bridge.py:1103</span></li>
-          <li>SBERT-text chosen over CLIP-image (flat ~0.25 cosine) · <span class="cite">memory_bridge.py:419-428</span></li>
-        </ul>
+        <p class="lay">The bridge is the connector that wires everything together: short-term memory feeds into a
+        sorting step, which decides what's worth keeping long-term, which then helps the robot pick where to go.
+        One important detail: the robot remembers things by the <i>words</i> it used to describe them ("a brown
+        sofa near a window"), because that turned out to work far better than trying to match raw photos, which
+        all looked confusingly alike.</p>
+        <div class="tech">
+          <p><code>EmbodiedMemoryBridge</code> owns one instance each of <code>HierarchicalLTM</code>,
+          <code>DialogueConsolidation</code>, <code>PatternClusterer</code>+<code>MidLayerMemory</code>, and
+          <code>ResponseReranker</code> — gluing STM → consolidation → SBERT-indexed LTM → memory-injected reranking.</p>
+          <ul>
+            <li>Consolidator weights <code>alpha=0.4, beta=0.3, gamma=0.3</code> · <span class="cite">memory_bridge.py:521-532</span></li>
+            <li>Reranker weights <code>{history:0.0, memory:0.30, coherence:0.70}</code> · <span class="cite">memory_bridge.py:558</span></li>
+            <li><code>FrontierPhysicsScorer</code> swapped into "coherence", <code>EmbodiedMemorySimilarityScorer</code> into "memory" · <span class="cite">memory_bridge.py:568-571</span></li>
+            <li>Recall hard-filtered to current scene · <span class="cite">memory_bridge.py:1103</span></li>
+            <li>SBERT-text chosen over CLIP-image (flat ~0.25 cosine) · <span class="cite">memory_bridge.py:419-428</span></li>
+          </ul>
+        </div>
       </div>
     </div>
   </div>
 
   <h2>Module map — embodied core</h2>
-  <p class="dim">Click a card to see its role and key symbols (all verbatim from source).</p>
+  <p class="lead lay">Below is the handful of code files that do the real work in the house-walking robot. Click
+  any one to see what it's responsible for.</p>
+  <p class="dim tech">Click a card to see its role and key symbols (all verbatim from source).</p>
+
   <div class="grid g2">
     <div class="card click" data-card>
-      <div class="ttl"><span class="tag emb">runner</span> episode_runner.py <span class="chev">▶</span></div>
-      <div class="path">embodied_memory/episode_runner.py</div>
+      <div class="ttl"><span class="tag emb">runner</span> <span class="lay">The conductor</span><span class="tech">episode_runner.py</span> <span class="chev">▶</span></div>
+      <div class="path tech">embodied_memory/episode_runner.py</div>
       <div class="body">
-        <ul>
+        <p class="lay">This is the conductor. Every time the robot pauses to look around, this file writes down
+        what it sees, gathers the candidate places it could go, slips in any remembered spots, picks one, and
+        steers the robot there. At the end of each visit it decides what was worth committing to long-term memory.</p>
+        <ul class="tech">
           <li><code>_build_keyframe</code> — builds <code>Keyframe</code>(caption, text_embedding via <code>bridge.text_encode_fn</code>) · <span class="cite">2530-2568</span></li>
           <li><code>_propose_candidates</code> — frontier / ReMEmbR LLM candidates · <span class="cite">2221-2281</span></li>
           <li>injection: <code>all_cands = cands + mem_cands</code> · <span class="cite">1414-1418</span></li>
@@ -233,10 +316,13 @@
       </div>
     </div>
     <div class="card click" data-card>
-      <div class="ttl"><span class="tag emb">bridge</span> memory_bridge.py <span class="chev">▶</span></div>
-      <div class="path">embodied_memory/memory_bridge.py</div>
+      <div class="ttl"><span class="tag emb">bridge</span> <span class="lay">The memory clerk</span><span class="tech">memory_bridge.py</span> <span class="chev">▶</span></div>
+      <div class="path tech">embodied_memory/memory_bridge.py</div>
       <div class="body">
-        <ul>
+        <p class="lay">This is the memory clerk. It files away what the robot saw during a visit (without ever
+        wiping out older memories), and when the robot returns, it pulls up relevant past sightings and offers them
+        as places to go. It also houses all the experimental add-ons that, so far, haven't beaten the simple version.</p>
+        <ul class="tech">
           <li><code>begin_episode</code> — clears ONLY <code>_pending</code>, never <code>self.ltm</code> · <span class="cite">628-634</span></li>
           <li><code>observe_keyframe</code> → buffers <code>EmbodiedRecord</code> into <code>_pending</code> · <span class="cite">636-661</span></li>
           <li><code>consolidate</code> → <code>_consolidate_pending</code> (geometry-patched fine writes) · <span class="cite">667-712, 750-830</span></li>
@@ -246,20 +332,26 @@
       </div>
     </div>
     <div class="card click" data-card>
-      <div class="ttl"><span class="tag emb">backbone</span> remembr_backbone.py / frontier_planner.py <span class="chev">▶</span></div>
-      <div class="path">embodied_memory/{remembr_backbone,frontier_planner}.py</div>
+      <div class="ttl"><span class="tag emb">backbone</span> <span class="lay">The robot's brain</span><span class="tech">remembr_backbone.py / frontier_planner.py</span> <span class="chev">▶</span></div>
+      <div class="path tech">embodied_memory/{remembr_backbone,frontier_planner}.py</div>
       <div class="body">
-        <ul>
+        <p class="lay">This is the robot's underlying "brain" doing the heavy lifting: one AI model writes rich
+        descriptions of what the camera sees, and a bigger AI model decides where to go next. There's also a
+        simpler stand-in brain we used early on before the real one was wired up.</p>
+        <ul class="tech">
           <li><span class="mono">remembr_backbone.py</span> — real ReMEmbR captioner (Qwen2-VL-2B) + planner (Qwen2.5-7B); <code>remembr_builder.caption_and_index</code> supplies the rich caption_override · <span class="cite">episode_runner.py:1198-1203</span></li>
           <li><span class="mono">frontier_planner.py</span> — Phase-1 occupancy-grid stand-in backbone</li>
         </ul>
       </div>
     </div>
     <div class="card click" data-card>
-      <div class="ttl"><span class="tag aud">audio</span> audio.py / audio_task.py <span class="chev">▶</span></div>
-      <div class="path">embodied_memory/{audio,audio_task}.py</div>
+      <div class="ttl"><span class="tag aud">audio</span> <span class="lay">The listening brain</span><span class="tech">audio.py / audio_task.py</span> <span class="chev">▶</span></div>
+      <div class="path tech">embodied_memory/{audio,audio_task}.py</div>
       <div class="body">
-        <ul>
+        <p class="lay">This handles sound. One part replays what a sound would actually sound like from wherever
+        the robot is standing; the other is the robot's "listening brain" — it notices when a sound starts, figures
+        out what kind of sound it is, guesses roughly which side it came from, and decides whether to stop.</p>
+        <ul class="tech">
           <li><code>RIRGrid.load</code> / <code>RIRGrid.nearest</code> — O(1) (x,z) cell lookup · <span class="cite">audio.py:131-156</span></li>
           <li><code>render_at_pose</code> — fftconvolve clip × nearest IR · <span class="cite">audio.py:224-236</span></li>
           <li><code>classify_anomaly</code> (forced argmax over <code>ANOMALY_CLASSES</code>) · <span class="cite">audio.py:367-387</span></li>
@@ -274,22 +366,27 @@
   <div class="grid g3">
     <div class="card">
       <div class="ttl"><span class="tag emb">analyze</span> Analyzers</div>
-      <div class="path">embodied_memory/scripts/</div>
+      <div class="path tech">embodied_memory/scripts/</div>
       <div class="body" style="display:block">
-        <ul class="flat">
+        <p class="lay">These are the scorekeeping scripts. After a test run, they crunch the numbers — did
+        remembering help or not, by how much, and was the difference real or just luck?</p>
+        <ul class="flat tech">
           <li><span class="mono">analyze_ablation.py</span> — front door; <code>--revisit</code> delegates</li>
           <li><span class="mono">analyze_revisit.py</span> — warm/cold paired + S2 decomposition + Gate-A</li>
           <li><span class="mono">check_instance_keyed_validity.py</span> — <code>classify_warm_start</code>/<code>classify_cell</code>/<code>scan_cells</code></li>
           <li><span class="mono">diagnose_goal_anchored_recall.py</span> — <code>wrong_instance_recall_rate</code></li>
+          <li><span class="mono">reaudit_partb_seeded.py</span> — per-cell VALID/DEGENERATE geodesic gate × wrong-instance × paired warm S3−S1</li>
         </ul>
       </div>
     </div>
     <div class="card">
       <div class="ttl"><span class="tag emb">build</span> Builders</div>
-      <div class="path">embodied_memory/scripts/</div>
+      <div class="path tech">embodied_memory/scripts/</div>
       <div class="body" style="display:block">
-        <ul class="flat">
-          <li><span class="mono">make_revisit_smoke.py</span> — cold→warm dataset (<code>pick_cold_pose</code>, <code>pick_warm_poses</code>)</li>
+        <p class="lay">These set up the test scenarios: they design the "explore once, then come back" visits,
+        plant the sounds, pre-compute how sounds echo through each house, and download real-world sound clips to play.</p>
+        <ul class="flat tech">
+          <li><span class="mono">make_revisit_smoke.py</span> — cold→warm dataset (<code>pick_cold_pose</code>, <code>pick_warm_poses</code>, <code>--seed-distractors</code> for the Part B distractor-seeding mode)</li>
           <li><span class="mono">make_audiogoal_smoke.py</span> — anomaly episodes (<code>build_dataset</code>, <code>build_category_episodes</code>)</li>
           <li><span class="mono">render_rir_grid.py</span> — offline binaural RIR grid (<code>select_cells</code>)</li>
           <li><span class="mono">fetch_anomaly_clips.py</span> — ESC-50 clips</li>
@@ -298,9 +395,11 @@
     </div>
     <div class="card">
       <div class="ttl"><span class="tag emb">drive</span> RACE drivers</div>
-      <div class="path">scripts/</div>
+      <div class="path tech">scripts/</div>
       <div class="body" style="display:block">
-        <ul class="flat">
+        <p class="lay">These are the one-button launch scripts that run a whole experiment end-to-end on the big
+        computer — build the test, run it, and score it.</p>
+        <ul class="flat tech">
           <li><span class="mono">race-revisit.sh</span> — headline harness</li>
           <li><span class="mono">race-audiogoal*.sh</span> — AudioGoal arc</li>
           <li><span class="mono">race-owlv2-detector.sh</span> — detector lever (planner swap)</li>
@@ -313,54 +412,75 @@
 
 <!-- ============================ MEMORY ============================ -->
 <section class="view" id="mem">
-  <h2>The memory call-path — <span class="dim">click each node</span></h2>
-  <p class="dim">Trace for <code>--backbone remembr</code>: every keyframe is captioned and buffered into STM; at
+  <h2 class="lay">How the robot's memory works</h2>
+  <h2 class="tech">The memory call-path — <span class="dim">click each node</span></h2>
+
+  <p class="lead lay">Here's the whole memory loop. As the robot walks, it describes and stashes everything it
+  sees. When a visit ends, it keeps only the handful of most useful sightings in its permanent memory. Next time
+  it visits that same house, it looks up those saved sightings and uses them to head straight for what it's
+  looking for. <span class="dim">Click each step below to see what happens.</span></p>
+
+  <p class="dim tech">Trace for <code>--backbone remembr</code>: every keyframe is captioned and buffered into STM; at
   episode end the top-5 are scored and written into the <b>persistent</b> fine FAISS layer; on the next visit the
   fine layer is queried, gated, and injected as a waypoint candidate, then reranked.</p>
 
   <div class="flow" id="memflow">
     <div class="node sel" data-mn="0">
-      <div class="nidx">STAGE 1</div><div class="nttl">STM ingest</div>
-      <div class="nfn">observe_keyframe</div></div>
+      <div class="nidx">STAGE 1</div>
+      <div class="nttl lay">Jot down what it sees</div><div class="nttl tech">STM ingest</div>
+      <div class="nfn-lay lay">it takes notes</div><div class="nfn tech">observe_keyframe</div></div>
     <div class="arrow">→</div>
     <div class="node" data-mn="1">
-      <div class="nidx">STAGE 2</div><div class="nttl">Consolidation</div>
-      <div class="nfn">I = αR+βU+γN</div></div>
+      <div class="nidx">STAGE 2</div>
+      <div class="nttl lay">Pick what's worth keeping</div><div class="nttl tech">Consolidation</div>
+      <div class="nfn-lay lay">keep the best 5</div><div class="nfn tech">I = αR+βU+γN</div></div>
     <div class="arrow">→</div>
     <div class="node" data-mn="2">
-      <div class="nidx">STAGE 3</div><div class="nttl">3-layer FAISS</div>
-      <div class="nfn">HierarchicalLTM</div></div>
+      <div class="nidx">STAGE 3</div>
+      <div class="nttl lay">File into permanent memory</div><div class="nttl tech">3-layer FAISS</div>
+      <div class="nfn-lay lay">stored for next time</div><div class="nfn tech">HierarchicalLTM</div></div>
     <div class="arrow">→</div>
     <div class="node" data-mn="3">
-      <div class="nidx">STAGE 4</div><div class="nttl">Retrieval</div>
-      <div class="nfn">propose_memory_candidates</div></div>
+      <div class="nidx">STAGE 4</div>
+      <div class="nttl lay">Look up past sightings</div><div class="nttl tech">Retrieval</div>
+      <div class="nfn-lay lay">"where did I see one?"</div><div class="nfn tech">propose_memory_candidates</div></div>
     <div class="arrow">→</div>
     <div class="node" data-mn="4">
-      <div class="nidx">STAGE 5a</div><div class="nttl">Inject + Rerank</div>
-      <div class="nfn">all_cands = cands+mem_cands</div></div>
+      <div class="nidx">STAGE 5a</div>
+      <div class="nttl lay">Memories vs fresh options</div><div class="nttl tech">Inject + Rerank</div>
+      <div class="nfn-lay lay">best one wins</div><div class="nfn tech">all_cands = cands+mem_cands</div></div>
     <div class="arrow">→</div>
     <div class="node" data-mn="5">
-      <div class="nidx">STAGE 5b</div><div class="nttl">Waypoint</div>
-      <div class="nfn">_waypoint_action</div></div>
+      <div class="nidx">STAGE 5b</div>
+      <div class="nttl lay">Walk there</div><div class="nttl tech">Waypoint</div>
+      <div class="nfn-lay lay">steer to the winner</div><div class="nfn tech">_waypoint_action</div></div>
   </div>
   <div class="flow-detail"><div class="detail" id="memdetail"></div></div>
 
   <div class="callout persist">
-    <div class="ch">⬤ Load-bearing fact — the fine LTM PERSISTS across episodes</div>
-    <code>begin_episode</code> sets <code>self._pending = []</code> and the scene/episode ids — and touches
+    <div class="ch">⬤ <span class="lay">Why "coming back" works — memory is never wiped</span><span class="tech">Load-bearing fact — the fine LTM PERSISTS across episodes</span></div>
+    <p class="lay" style="margin:6px 0 0">The key thing that makes "coming back" work: the robot's permanent memory
+    is <b>never wiped</b> between visits. Something it saw on its first walk-through is still sitting in memory the
+    next time it shows up — exactly like a person who toured a house once and still remembers the bedroom is
+    upstairs.</p>
+    <span class="tech"><code>begin_episode</code> sets <code>self._pending = []</code> and the scene/episode ids — and touches
     <b>nothing</b> on <code>self.ltm</code> (the <code>HierarchicalLTM</code> built once in <code>__init__</code> at
     <span class="cite">memory_bridge.py:433</span>). The fine FAISS index and its <code>entries</code> list are
     <b>never reset</b> between episodes. This is exactly what makes a <b>warm revisit</b> possible: a cold sighting
     written in episode <span class="kbd">N</span> is still retrievable in episode <span class="kbd">N+1</span>.
-    <span class="cite">begin_episode — memory_bridge.py:628-634</span>
+    <span class="cite">begin_episode — memory_bridge.py:628-634</span></span>
   </div>
 
-  <h3>Two structural caveats (from the audit)</h3>
+  <h3 class="lay">Two honest limits</h3>
+  <h3 class="tech">Two structural caveats (from the audit)</h3>
   <div class="grid g2">
     <div class="card" style="border-color:#5a2a44">
-      <div class="ttl">Scene hard-filter ⇒ no cross-env waypoint</div>
+      <div class="ttl"><span class="lay">Memories don't carry over to a brand-new house</span><span class="tech">Scene hard-filter ⇒ no cross-env waypoint</span></div>
       <div class="body" style="display:block">
-        <p class="dim"><code>propose_memory_candidates</code> rejects any fine entry whose
+        <p class="lay">The robot can only reuse a memory inside the <i>same house</i> it made it. If it saw a couch
+        in House A, that memory is useless for finding a couch in House B — the saved location only makes sense back
+        in House A. So "learning in one home and applying it in a brand-new home" simply doesn't happen here.</p>
+        <p class="dim tech"><code>propose_memory_candidates</code> rejects any fine entry whose
         <code>metadata["scene_id"]</code> ≠ the current scene. A home sighting can be <i>counted</i> as a
         cross-scene recall (under <code>LTM_CROSS_SCENE</code>) but is never <i>injected</i> as a waypoint — its
         stored xy is in the other scene's frame. So cross-environment transfer via the fine layer is structurally
@@ -368,9 +488,12 @@
       </div>
     </div>
     <div class="card" style="border-color:#5a2a44">
-      <div class="ttl">"3-layer" ⇒ fine + rerank in practice</div>
+      <div class="ttl"><span class="lay">"3 shelves" — really just the detailed one does the work</span><span class="tech">"3-layer" ⇒ fine + rerank in practice</span></div>
       <div class="body" style="display:block">
-        <p class="dim">The action-path retriever queries the <b>fine layer only</b>
+        <p class="lay">Even though memory technically has three shelves, only the detailed shelf actually steers the
+        robot. The summary shelf stays empty, and the big-picture shelf only slightly tweaks the scoring. So when we
+        say "memory helped," we mean: the detailed sightings, plus letting them compete for the robot's attention.</p>
+        <p class="dim tech">The action-path retriever queries the <b>fine layer only</b>
         (<code>self.ltm.fine.search</code>). Mid is empty (success-gated clustering rarely fires); coarse is seeded
         but only feeds the <i>S_sim</i> rerank scorer via <code>retrieve()</code>, not waypoint injection. The
         measured effect = <b>fine layer + memory-injected rerank</b>.
@@ -379,8 +502,24 @@
     </div>
   </div>
 
-  <h3>Optional levers — all env-gated, default-OFF</h3>
-  <table>
+  <h3 class="lay">Experimental add-ons (all off by default)</h3>
+  <h3 class="tech">Optional levers — all env-gated, default-OFF</h3>
+
+  <p class="lay">These are all the experimental add-ons we built and can switch on. Every one is <i>off by default</i>,
+  because none of them reliably beat the simple version.</p>
+  <table class="lay">
+    <tr><th>Add-on (plain name)</th><th>What it tries to do</th></tr>
+    <tr><td>Smarter re-asking</td><td>After a first lookup, ask memory a refined follow-up question to find better matches.</td></tr>
+    <tr><td>Description-based boost</td><td>Give a small nudge to sightings whose descriptions sit "in the middle" of what's remembered.</td></tr>
+    <tr><td>Recency boost</td><td>Favor more recently-seen sightings, on the theory newer = more reliable.</td></tr>
+    <tr><td>Sound-direction boost</td><td>Nudge the robot toward the side a sound came from.</td></tr>
+    <tr><td>Remember-the-sound</td><td>When the robot hears an alarm, file the noise's location into memory for next time.</td></tr>
+    <tr><td>Room-type hunch</td><td>Suggest "things like this usually live in the kitchen" even without a specific past sighting.</td></tr>
+    <tr><td>Count cross-house recalls</td><td>Just <i>tally</i> when a memory from another house comes up (it's never actually used to navigate).</td></tr>
+    <tr><td>Freeze a house's memory</td><td>For experiments: stop writing new memories in a chosen house, to test things in isolation.</td></tr>
+  </table>
+
+  <table class="tech">
     <tr><th>Env var</th><th>Symbol</th><th>Effect</th><th>file:line</th></tr>
     <tr><td class="s">LTM_QUERY_EXPANSION</td><td class="s">expand_query</td><td>Rocchio PRF re-query of the fine layer</td><td class="s">memory_bridge.py:1069-1077</td></tr>
     <tr><td class="s">LTM_CAPTION_RERANK</td><td class="s">_caption_centrality_bonus</td><td>zero-sum caption-centrality bonus on raw_score</td><td class="s">memory_bridge.py:1180-1186</td></tr>
@@ -395,58 +534,83 @@
 
 <!-- ============================ SOUND ============================ -->
 <section class="view" id="snd">
-  <h2>The audio path — <span class="dim">click each node</span></h2>
-  <p class="dim">Deliberately split across two conda envs so the live runner never imports the audio simulator.
+  <h2 class="lay">How sound works</h2>
+  <h2 class="tech">The audio path — <span class="dim">click each node</span></h2>
+
+  <p class="lead lay">Sound is handled in two stages, kept deliberately separate so the live robot stays fast.
+  First, <i>ahead of time</i>, we pre-compute how a sound would echo through every spot in the house and save it to
+  a file. Then, <i>while the robot is running</i>, it just plays back the right echo instantly each step, notices
+  when a sound starts, figures out what it is, and reacts. <span class="dim">Click each step to learn more.</span></p>
+
+  <p class="dim tech">Deliberately split across two conda envs so the live runner never imports the audio simulator.
   <b>Offline</b> (<code>soundspaces-spike</code>): render a binaural RIR grid to a plain <code>.npz</code>.
   <b>Live</b> (<code>ltm-embodied</code>): convolve O(1) per step, detect onset, classify once, steer.</p>
 
   <div class="flow audio" id="sndflow">
     <div class="node sel" data-sn="0">
-      <div class="nidx">OFFLINE</div><div class="nttl">Render RIR grid</div>
-      <div class="nfn">render_rir_grid.py</div></div>
+      <div class="nidx">OFFLINE</div>
+      <div class="nttl lay">Pre-compute the echoes</div><div class="nttl tech">Render RIR grid</div>
+      <div class="nfn-lay lay">done once, saved to a file</div><div class="nfn tech">render_rir_grid.py</div></div>
     <div class="arrow">→</div>
     <div class="node" data-sn="1">
-      <div class="nidx">LIVE · render</div><div class="nttl">Convolve → Step.audio</div>
-      <div class="nfn">render_at_pose</div></div>
+      <div class="nidx">LIVE · render</div>
+      <div class="nttl lay">Replay what it'd hear</div><div class="nttl tech">Convolve → Step.audio</div>
+      <div class="nfn-lay lay">instant, every step</div><div class="nfn tech">render_at_pose</div></div>
     <div class="arrow">→</div>
     <div class="node" data-sn="2">
-      <div class="nidx">LIVE · decide</div><div class="nttl">Onset</div>
-      <div class="nfn">process_audio_step</div></div>
+      <div class="nidx">LIVE · decide</div>
+      <div class="nttl lay">Notice it started</div><div class="nttl tech">Onset</div>
+      <div class="nfn-lay lay">"I heard something"</div><div class="nfn tech">process_audio_step</div></div>
     <div class="arrow">→</div>
     <div class="node" data-sn="3">
-      <div class="nidx">LIVE · decide</div><div class="nttl">CLAP classify-once</div>
-      <div class="nfn">classify_anomaly</div></div>
+      <div class="nidx">LIVE · decide</div>
+      <div class="nttl lay">What kind of sound?</div><div class="nttl tech">CLAP classify-once</div>
+      <div class="nfn-lay lay">decided just once</div><div class="nfn tech">classify_anomaly</div></div>
     <div class="arrow">→</div>
     <div class="node" data-sn="4">
-      <div class="nidx">LIVE · decide</div><div class="nttl">class → object</div>
-      <div class="nfn">CLASS_TO_OBJECT</div></div>
+      <div class="nidx">LIVE · decide</div>
+      <div class="nttl lay">Sound → thing to find</div><div class="nttl tech">class → object</div>
+      <div class="nfn-lay lay">alarm → look for oven</div><div class="nfn tech">CLASS_TO_OBJECT</div></div>
     <div class="arrow">→</div>
     <div class="node" data-sn="5">
-      <div class="nidx">LIVE · decide</div><div class="nttl">DOA + STOP</div>
-      <div class="nfn">lateral_sign / should_audio_stop</div></div>
+      <div class="nidx">LIVE · decide</div>
+      <div class="nttl lay">Which side? Stop?</div><div class="nttl tech">DOA + STOP</div>
+      <div class="nfn-lay lay">left/right guess</div><div class="nfn tech">lateral_sign / should_audio_stop</div></div>
   </div>
   <div class="flow-detail audio"><div class="detail" id="snddetail"></div></div>
 
   <div class="callout honest">
-    <div class="ch">⚠ Honest callout — CLAP is a trigger/classifier ONLY; audio is a code-proven NO-OP for retrieval here</div>
-    <p style="margin:6px 0">The classifier output flows only through <code>audio_target_for_retrieval</code> →
-    <code>CLASS_TO_OBJECT</code> ({baby_cry→crib, alarm→oven, glass_break→window}), which is just the
-    <code>target_category</code> string handed to the <b>unchanged</b> <code>propose_memory_candidates</code>. CLAP
-    never enters retrieval — <code>perception.CLAPAudioEncoder</code> is documented as the 3-way classifier only,
-    and retrieval stays on the proven SBERT caption path. <span class="cite">audio_task.py:246-254; perception.py:172-176</span></p>
-    <p style="margin:6px 0">In the M3 eval the dataset builder sets <code>obj = anomaly_object or category</code> and writes
-    <code>anomaly_object</code> from the goal category, so <b>anomaly_object == target_category == goal</b>. The
-    override therefore hands the retriever the same goal string it would query anyway → the recalled waypoint is
-    identical with or without the sound. <b>M3's +0.171 is pure <i>visual</i> revisit recall; audio is dressing for
-    retrieval.</b> <span class="cite">make_audiogoal_smoke.py:165, 176-178</span></p>
-    <p style="margin:6px 0 0"><b>Audio's genuine role is the onset-GATE.</b> <code>gate_retrieval_target</code>
-    (env <code>LTM_AUDIO_DOA</code>) returns <code>None</code> — suppressing <i>all</i> memory injection — until the
-    anomaly is <code>detected</code>. So hearing the sound is <b>causally necessary</b> for warm recall: no onset →
-    no target → no injected candidate. <span class="cite">audio_task.py:257-272; episode_runner.py:1400-1403</span></p>
+    <div class="ch">⚠ <span class="lay">The sound is an alarm bell, not a map — it wakes up memory, it doesn't point</span><span class="tech">Honest callout — CLAP is a trigger/classifier ONLY; audio is a code-proven NO-OP for retrieval here</span></div>
+    <p class="lay" style="margin:6px 0 0">Be upfront about this: the sound mostly works like an <i>alarm bell that
+    wakes up the robot's memory</i> — it doesn't, by itself, tell the robot where to walk. In our tests the thing
+    making the noise was the very thing the robot was already hunting for, so the sound didn't add any new "where to
+    go" information — the speed-up came entirely from the robot <b>remembering</b> the place from its earlier visit.
+    The sound's one genuinely important job: until the robot actually hears it, memory stays switched off. So hearing
+    the sound is what <b>triggers</b> the robot to recall — no sound, no recall.</p>
+    <div class="tech">
+      <p style="margin:6px 0">The classifier output flows only through <code>audio_target_for_retrieval</code> →
+      <code>CLASS_TO_OBJECT</code> ({baby_cry→crib, alarm→oven, glass_break→window}), which is just the
+      <code>target_category</code> string handed to the <b>unchanged</b> <code>propose_memory_candidates</code>. CLAP
+      never enters retrieval — <code>perception.CLAPAudioEncoder</code> is documented as the 3-way classifier only,
+      and retrieval stays on the proven SBERT caption path. <span class="cite">audio_task.py:246-254; perception.py:172-176</span></p>
+      <p style="margin:6px 0">In the M3 eval the dataset builder sets <code>obj = anomaly_object or category</code> and writes
+      <code>anomaly_object</code> from the goal category, so <b>anomaly_object == target_category == goal</b>. The
+      override therefore hands the retriever the same goal string it would query anyway → the recalled waypoint is
+      identical with or without the sound. <b>M3's +0.171 is pure <i>visual</i> revisit recall; audio is dressing for
+      retrieval.</b> <span class="cite">make_audiogoal_smoke.py:165, 176-178</span></p>
+      <p style="margin:6px 0 0"><b>Audio's genuine role is the onset-GATE.</b> <code>gate_retrieval_target</code>
+      (env <code>LTM_AUDIO_DOA</code>) returns <code>None</code> — suppressing <i>all</i> memory injection — until the
+      anomaly is <code>detected</code>. So hearing the sound is <b>causally necessary</b> for warm recall: no onset →
+      no target → no injected candidate. <span class="cite">audio_task.py:257-272; episode_runner.py:1400-1403</span></p>
+    </div>
   </div>
 
-  <h3>DOA is ITD-weak by design</h3>
-  <p class="dim"><code>estimate_doa</code> uses ITD (cross-corr / GCC-PHAT) as primary, but SoundSpaces'
+  <h3 class="lay">A quick honesty note on direction</h3>
+  <h3 class="tech">DOA is ITD-weak by design</h3>
+  <p class="lay">Normally you'd tell which way a sound came from by which ear heard it a split-second sooner. But the
+  sound simulator we use erases that timing cue. So instead the robot falls back on which ear heard it <i>louder</i>
+  to guess left or right — a rougher but workable hint.</p>
+  <p class="dim tech"><code>estimate_doa</code> uses ITD (cross-corr / GCC-PHAT) as primary, but SoundSpaces'
   Ambisonic→time-aligned-HRTF path strips broadband ITD. So when <code>|ITD| &lt; AUDIO_ITD_MIN_SAMPLES</code>
   and a real ILD is present, the <b>ILD sign</b> drives azimuth; the fold-invariant <code>lateral_sign()</code>
   (+1 right / −1 left) is the cue actually used downstream — world-frame, because the render is at identity
@@ -455,42 +619,74 @@
 
 <!-- ============================ EVAL ============================ -->
 <section class="view" id="eval">
-  <h2>Settings — S1 / S2 / S3 (<code>--backbone remembr</code>)</h2>
+  <h2 class="lay">The three robots we compare</h2>
+  <h2 class="tech">Settings — S1 / S2 / S3 (<code>--backbone remembr</code>)</h2>
+
+  <p class="lead lay">We compare three versions of the robot to isolate what memory actually buys us.</p>
+
   <div class="grid g3">
-    <div class="card"><div class="ttl">S1 — memory off</div><div class="body" style="display:block">
-      <p class="dim">Vanilla ReMEmbR baseline. <code>disable_stm</code> + <code>disable_ltm</code> → STM buffers nothing, no fine writes. The reference arm.</p></div></div>
-    <div class="card"><div class="ttl">S2 — STM only</div><div class="body" style="display:block">
-      <p class="dim">+ STM consolidation into the LTM, rerank/injection off. Isolates whether STM alone moves the metric. Decomposition control.</p></div></div>
-    <div class="card" style="border-color:#235c39"><div class="ttl">S3 — full system</div><div class="body" style="display:block">
-      <p class="dim">+ memory-injected candidates + memory-weighted rerank (the proposal's modules 2–4). The treatment arm.</p></div></div>
+    <div class="card"><div class="ttl"><span class="lay">Robot A — memory off</span><span class="tech">S1 — memory off</span></div><div class="body" style="display:block">
+      <p class="lay">The plain robot with no memory at all. This is our baseline — the "before" picture.</p>
+      <p class="dim tech">Vanilla ReMEmbR baseline. <code>disable_stm</code> + <code>disable_ltm</code> → STM buffers nothing, no fine writes. The reference arm.</p></div></div>
+    <div class="card"><div class="ttl"><span class="lay">Robot B — short-term notes only</span><span class="tech">S2 — STM only</span></div><div class="body" style="display:block">
+      <p class="lay">The robot keeps short-term notes but doesn't actually <i>use</i> its long-term memory to pick
+      where to go. This tells us whether just jotting things down helps on its own (spoiler: it doesn't).</p>
+      <p class="dim tech">+ STM consolidation into the LTM, rerank/injection off. Isolates whether STM alone moves the metric. Decomposition control.</p></div></div>
+    <div class="card" style="border-color:#235c39"><div class="ttl"><span class="lay">Robot C — full memory</span><span class="tech">S3 — full system</span></div><div class="body" style="display:block">
+      <p class="lay">The complete robot: it remembers past sightings <i>and</i> uses them to choose where to go. This
+      is the real "after" picture.</p>
+      <p class="dim tech">+ memory-injected candidates + memory-weighted rerank (the proposal's modules 2–4). The treatment arm.</p></div></div>
   </div>
-  <p class="legend"><b>Decomposition:</b> S2−S1 = STM · S3−S2 = consolidation + LTM + rerank · S3−S1 = headline.
+  <p class="legend lay"><b>The clean logic:</b> short-notes-alone minus baseline tells us short notes don't help;
+  full-system minus short-notes-alone tells us the entire benefit comes specifically from long-term memory;
+  full-system minus baseline is the headline number we report.</p>
+  <p class="legend tech"><b>Decomposition:</b> S2−S1 = STM · S3−S2 = consolidation + LTM + rerank · S3−S1 = headline.
   Settings run in separate processes / out-dirs (the LTM persists only within a process).</p>
 
-  <h2>Cold vs warm, and the revisit harness</h2>
+  <h2 class="lay">Cold visits vs warm visits, and how we test</h2>
+  <h2 class="tech">Cold vs warm, and the revisit harness</h2>
   <div class="grid g2">
     <div class="card"><div class="ttl">Cold vs warm</div><div class="body" style="display:block">
-      <p class="dim">The analyzer groups episodes by <code>(scene_id, target_category)</code>. <b>Visit 0 = cold</b>
+      <p class="lay">We split visits into two kinds. A <i>cold</i> visit is the robot's first time — it has no memory
+      of the place yet. A <i>warm</i> visit is a return trip, where memory might hold a useful past sighting. Memory
+      can only pay off on warm visits. We always make sure the first (cold) visit happens before the return (warm) one.</p>
+      <p class="toolhint lay">There's no random shuffle or "try a different sample" button in the test — the visit
+      setup is fixed and repeatable. To genuinely test a fresh sample, you have to rebuild the whole scenario from scratch.</p>
+      <p class="dim tech">The analyzer groups episodes by <code>(scene_id, target_category)</code>. <b>Visit 0 = cold</b>
       (no prior in the LTM); <b>visit ≥1 = warm</b> (the LTM may hold a prior sighting). Memory only pays off on warm.
       <code>pin_episode_order</code> pins <code>shuffle=False</code> + <code>group_by_scene=True</code> so the cold
-      seed always precedes its warm revisits. <span class="cite">episode_order.py:73-74; habitat_env.py:236</span></p>
-      <p class="toolhint">No <code>--seed</code> / RNG knob exists in the run path — warm-pose sampling is deterministic
+      seed always precedes its warm revisits. The cold ≈ 0 control is a low-power <i>cancellation</i> of two opposite
+      n=1/cell effects, not a tight zero. <span class="cite">episode_order.py:73-74; habitat_env.py:236</span></p>
+      <p class="toolhint tech">No <code>--seed</code> / RNG knob exists in the run path — warm-pose sampling is deterministic
       &amp; sort-based (<code>make_revisit_smoke.py</code> imports no <code>random</code>/<code>numpy</code>). A genuine
       "different sample" requires rebuilding the dataset.</p>
     </div></div>
     <div class="card"><div class="ttl">Revisit harness pipeline</div><div class="body" style="display:block">
-      <ul>
+      <p class="lay">The end-to-end test runs in four steps: launch the script → build the "explore once, then
+      return" scenario → run all three robot versions through it → score the results and decide whether memory helped.</p>
+      <ul class="tech">
         <li><span class="mono">race-revisit.sh</span></li>
         <li>→ <span class="mono">make_revisit_smoke.py</span> (cold→warm dataset)</li>
         <li>→ <span class="mono">run_hm3d_pol.py --backbone remembr --scene all</span> (S1 / S2 / S3)</li>
         <li>→ <span class="mono">analyze_ablation.py --revisit</span> (warm paired bootstrap + S2 decomposition + Gate-A)</li>
       </ul>
-      <p class="toolhint">Pairing is keyed on the renumbering-invariant <code>(scene_id, target_category, visit_order)</code>;
+      <p class="toolhint lay">When comparing "before vs after," we carefully match each return visit to its own
+      earlier visit, and we throw out any visit where the score couldn't be computed (e.g., the robot got stuck
+      somewhere unreachable).</p>
+      <p class="toolhint tech">Pairing is keyed on the renumbering-invariant <code>(scene_id, target_category, visit_order)</code>;
       pairs with non-finite <code>soft_spl</code> in either arm are dropped (<code>n_nonfinite</code>).
       <span class="cite">analyze_revisit.py:304, 311-314</span></p>
     </div></div>
   </div>
-  <p class="legend"><b>Metrics:</b>
+
+  <p class="legend lay"><b>What we measure:</b>
+    <span class="pill lay">how efficiently it reaches the goal <span class="dim">— our main number</span></span>
+    <span class="pill lay">did it get within ~1 meter</span>
+    <span class="pill lay">did it get within a strict 10 cm <span class="dim">— rarely</span></span>
+    <span class="pill lay">how close it got at its nearest</span>
+    <span class="pill lay">how often it followed a memory</span>
+  </p>
+  <p class="legend tech"><b>Metrics:</b>
     <span class="pill">soft-SPL S3−S1 <span class="dim">PRIMARY</span></span>
     <span class="pill">success@1m</span>
     <span class="pill">binary SPL@0.1 m <span class="neg">localization-bound</span></span>
@@ -499,24 +695,54 @@
     <span class="pill">n_remembr_chosen</span>
   </p>
 
-  <h2>Results — the honest headline</h2>
+  <h2 class="lay">The result</h2>
+  <h2 class="tech">Results — the honest headline</h2>
+
   <div class="callout persist">
-    <div class="ch">⬤ The ONE durable positive — warm-relevant LTM helps</div>
-    Warm paired soft-SPL improves when a <b>relevant prior sighting</b> exists. Clean decomposition: S2−S1 ≈ 0
-    (STM alone does nothing) ⇒ the gain is <b>LTM-specific</b>. Reproduced ~12 times across ObjectNav &amp; AudioGoal.
+    <div class="ch">⬤ <span class="lay">The one rock-solid win — remembering helps on return visits</span><span class="tech">The ONE durable positive — warm-relevant LTM helps</span></div>
+    <p class="lay" style="margin:6px 0 0">Here's the one rock-solid win: when the robot returns to a house it has
+    explored before and a relevant past sighting exists, it re-finds its goal noticeably faster and more reliably.
+    And we've confirmed it's <i>memory</i> doing the work, not just note-taking — because short-notes-alone changed
+    nothing. We've now reproduced this result about a dozen separate times.</p>
+    <span class="tech">Warm paired soft-SPL improves when a <b>relevant prior sighting</b> exists. Clean decomposition: S2−S1 ≈ 0
+    (STM alone does nothing) ⇒ the gain is <b>LTM-specific</b>. Reproduced ~12 times across ObjectNav &amp; AudioGoal.</span>
   </div>
   <div class="res">
-    <div class="stat green"><div class="big">+0.115</div><div class="lbl">warm soft-SPL S3−S1 · n=26 wide matrix · p=0.005</div></div>
-    <div class="stat green"><div class="big">+0.24</div><div class="lbl">n=12 chair+bed subset · p=0.008</div></div>
-    <div class="stat green"><div class="big">+0.171</div><div class="lbl">AudioGoal repro · n=18 · p=0.002</div></div>
-    <div class="stat blue"><div class="big">0.33→0.67</div><div class="lbl">success@1m, warm S1→S3 (Phase-C)</div></div>
+    <div class="stat green"><div class="big">+0.115</div><div class="lbl lay">the most trustworthy version of the win — across 26 return visits, measurably better with memory (real, not chance)</div><div class="lbl tech">warm soft-SPL S3−S1 · n=26 wide matrix · p=0.005</div></div>
+    <div class="stat green"><div class="big">+0.24</div><div class="lbl lay">a bigger win on an easier, smaller set (chairs &amp; beds) — same story, stronger effect</div><div class="lbl tech">n=12 chair+bed subset · p=0.008</div></div>
+    <div class="stat green"><div class="big">+0.171</div><div class="lbl lay">the same win reproduced again in the sound-driven task — independent confirmation</div><div class="lbl tech">AudioGoal repro · n=18 · p=0.002</div></div>
+    <div class="stat blue"><div class="big">0.33→0.67</div><div class="lbl lay">on return visits, the success rate roughly doubles with memory</div><div class="lbl tech">success@1m, warm S1→S3 (Phase-C)</div></div>
   </div>
-  <p class="legend">Quote both rings: binary SPL is at <b>0.1 m</b> (localization-bound — the recalled waypoint is a
+  <p class="legend lay">Two ways to measure "did it arrive." At a strict 10 cm, the robot almost never makes it —
+  because it remembers the spot it <i>stood to look at</i> the object, which is a step back from the object itself.
+  At the more standard 1 meter, success on return visits jumps from a third to two-thirds.</p>
+  <p class="legend tech">Quote both rings: binary SPL is at <b>0.1 m</b> (localization-bound — the recalled waypoint is a
   viewing pose, not the goal point); the benchmark uses <b>1.0 m</b>, where warm SR is 33%→67%.</p>
 
+  <div class="callout info">
+    <div class="ch">⏳ <span class="lay">Firming up the headline — a fresh sample is being built</span><span class="tech">In progress — second independent warm-start sample</span></div>
+    <p class="lay" style="margin:6px 0 0">A second, completely separate set of return-visit tests (built from
+    scratch) is currently running to double-check the headline numbers above. It's not finished yet, so we're not
+    reporting any number from it — just being upfront that the check is underway.</p>
+    <p class="tech" style="margin:6px 0 0">A second independent warm-start sample (a freshly-rebuilt revisit dataset)
+    is currently being built to firm up the +0.115 / +0.171 headline; not yet reported.</p>
+  </div>
+
   <div class="callout honest">
-    <div class="ch">⚠ Everything else is null or negative — built, correct, conservative-but-inert</div>
-    <table style="margin-top:8px">
+    <div class="ch">⚠ <span class="lay">Everything else we tried was a dud</span><span class="tech">Everything else is null or negative — built, correct, conservative-but-inert</span></div>
+    <p class="lay" style="margin:6px 0 0">Everything <i>else</i> we tried was built correctly but failed to beat the
+    simple version — they were either harmless-but-useless or actively slightly worse.</p>
+    <table class="lay" style="margin-top:8px">
+      <tr><th>Add-on (plain name)</th><th>What happened</th></tr>
+      <tr><td>Room-type hunch</td><td>The robot offers it, but never actually picks it — the concrete sightings always win. Harmless, but does nothing.</td></tr>
+      <tr><td>Trained "importance" judge (R)</td><td>Tried to learn what's worth remembering; it remembered too much junk and made things worse. The simple rule was already as good as it gets.</td></tr>
+      <tr><td>Trained "usefulness" judge (U)</td><td>Three different versions, all worse, all for the same reason — they over-remembered.</td></tr>
+      <tr><td>Recency boost</td><td>A dead tie — no real change either way.</td></tr>
+      <tr><td>Sound-direction boost</td><td>Mathematically cancels itself out when there's only one remembered spot, so it does nothing.</td></tr>
+      <tr><td>Remember-the-sound</td><td>The mechanism works, but it's redundant — the robot could already <i>see</i> the source from where it stood, so remembering the sound added nothing.</td></tr>
+      <tr><td>Fancy object detector</td><td>On the simulated images it could barely tell anything was there, and it still couldn't pin down the exact spot.</td></tr>
+    </table>
+    <table class="tech" style="margin-top:8px">
       <tr><th>Lever</th><th>Symbol</th><th>Verdict</th></tr>
       <tr><td>Coarse-affordance head</td><td class="s">propose_coarse_candidates</td><td class="neu">proposes but NEVER chosen at rerank weight 0.7 (zero over-fire)</td></tr>
       <tr><td>R head training</td><td class="s">train_scorer / relevance_scorer</td><td class="neg">over-fires → regresses; heuristic at/near ceiling</td></tr>
@@ -529,36 +755,57 @@
   </div>
 
   <div class="callout scope">
-    <div class="ch">◆ Instance bottleneck &amp; scope</div>
-    <p style="margin:6px 0">SBERT carries instance signal (within-instance caption cosine 0.628 vs between-instance
+    <div class="ch">◆ <span class="lay">The core limitation, and where this works</span><span class="tech">Instance bottleneck &amp; scope</span></div>
+    <p class="lay" style="margin:6px 0 0"><b>The core limitation:</b> the robot can tell it saw <i>a</i> chair, but it
+    can't tell <i>which</i> chair — two chairs of the same kind look nearly identical to its memory. The descriptions
+    actually do hold a faint "which one" signal, but the simple "find me a chair" question throws that signal away.
+    Fixing this needs a smarter way of telling identical-looking objects apart — a whole separate, bigger project,
+    not another memory tweak.</p>
+    <p class="lay" style="margin:6px 0 0"><b>Where it works:</b> the win only holds <i>inside the same house, for the
+    same kind of object</i>. Carrying knowledge from one house to a new one doesn't happen here.</p>
+    <p class="tech" style="margin:6px 0">SBERT carries instance signal (within-instance caption cosine 0.628 vs between-instance
     same-category 0.535, +0.093) but the live category query <code>"there is a {cat}"</code> collapses it to a
     <b>0.047 rank gap</b>. Any head that stores <i>more</i> goal-ish frames surfaces more <i>wrong-instance</i>
     candidates → over-fire. The next genuinely-different lever is a better instance-discriminating embedding/detector
     (a separate, larger project) — not another LTM head. <span class="cite">memory_bridge.py:126 (_GOAL_QUERY_TEMPLATE)</span></p>
-    <p style="margin:6px 0 0"><b>Scope:</b> the positive result is <b>within-scene, same-category recall</b>. Recall is
+    <p class="tech" style="margin:6px 0 0"><b>Scope:</b> the positive result is <b>within-scene, same-category recall</b>. Recall is
     hard-filtered to the current scene (<code>memory_bridge.py:1103</code>) ⇒ cross-environment transfer is
     structurally absent for a waypoint.</p>
   </div>
 
-  <div class="callout" style="background:#1a2230; border-color:#2f4a6b">
-    <div class="ch" style="color:var(--accent)">⊙ Part B closed — seed-distractor de-confound: GENUINE, but REGION-level not instance disambiguation</div>
-    <p style="margin:6px 0 0 0" class="dim">With real distractor instances seeded into memory and the <b>geodesic</b> validity gate run green
+  <div class="callout info">
+    <div class="ch">⊙ <span class="lay">The toughest test yet — the win is real, but it's "right area," not "exact object"</span><span class="tech">Part B closed — seed-distractor de-confound: GENUINE, but REGION-level not instance disambiguation</span></div>
+    <p class="lay" style="margin:6px 0 0">The newest test, and the most rigorous so far. We worried the speed-up
+    might be a cheat — maybe the robot just barrels toward the <i>nearest</i> matching object and we'd been getting
+    lucky. So we deliberately planted look-alike decoy objects into its memory and set up situations where a decoy
+    was genuinely closer than the real target, forcing the robot to actually choose. The result: <b>the speed-up
+    survived</b> (+0.21 across these tougher tests, and it's biggest — +0.26 — exactly in the cases that force a real
+    choice, versus near-zero where it's easy). So it's <i>not</i> just a "go to the nearest thing" trick. <b>But</b>
+    here's the honest catch: the robot picks the <i>wrong</i> same-looking object about <b>86%</b> of the time. It
+    works because it heads to the right general <i>area</i>, not because it nails the exact right object. So memory
+    reliably gets the robot to the right <i>neighborhood</i> — that's the real, durable win — but it still can't tell
+    two look-alikes apart. We always report this <i>alongside</i>, never instead of, the main numbers. <i>(Caveat:
+    each individual test case has very few examples, so only the overall picture is trustworthy.)</i></p>
+    <p class="dim tech" style="margin:6px 0 0">With real distractor instances seeded into memory and the <b>geodesic</b> validity gate run green
     (<b>6/8 cells VALID</b> — a distractor is truly nearer the warm start), warm soft-SPL S3−S1 = <b>+0.2085</b>
     (n=17), <b>concentrated in the VALID cells</b> (pair-weighted <b>+0.26</b>, n=13) vs <b>+0.03</b> in the degenerate
     ones — the free-lunch bucket is empty, so go-to-nearest cannot explain it. <b>But</b> retrieval picks the
     <b>wrong same-category instance 86%</b> of the time (92–100% in 4 of the 5 forcing cells), and the 0.1 m gains
     land in <i>wrong</i>-instance cells. <b>Verdict:</b> the LTM steers to a nearby same-category sighting that
     shortens the path (<b>region recall</b>), not to the target instance — robust to instance confusion, but
-    <b>not</b> fine disambiguation (the SBERT 0.047 instance-rank ceiling). Kept beside, never instead of,
+    <b>not</b> fine disambiguation (the SBERT 0.047 instance-rank ceiling). This de-confounds the earlier,
+    target-only <b>+0.34</b> down to this region-level <b>+0.21</b>. Kept beside, never instead of,
     +0.115 / +0.171 / +0.24. <i>Caveat: per-cell n=1–3 → only the aggregate + the VALID-vs-DEGENERATE split are
     quotable.</i> <span class="cite">reaudit_partb_seeded.py · PHASE2_ABLATION_REPORT.md "Part B seed-distractors"</span></p>
   </div>
 </section>
 
 <footer>
-  <div>LTM-Embodied Agent · self-contained overview · all <span class="mono">file:line</span> citations refer to
+  <div class="lay">LTM-Embodied Agent · plain-English overview · flip to <b>🔬 Technical</b> for function names and
+  exact file references · last verified 2026-06-23 · works offline, no internet needed.</div>
+  <div class="tech">LTM-Embodied Agent · self-contained overview · all <span class="mono">file:line</span> citations refer to
   <span class="mono">/Users/kyseah/Documents/GitHub/ltm</span>. Cards/nodes are click-to-expand; the four tabs above
-  switch views. No external assets — works offline.</div>
+  switch views. No external assets — works offline · last verified 2026-06-23.</div>
 </footer>
 
 </div>
@@ -566,6 +813,25 @@
 <script>
 (function(){
   "use strict";
+
+  // ---- Simple / Technical mode toggle ----
+  var body = document.body;
+  var modesw = document.getElementById("modesw");
+  function applyMode(m){
+    var simple = (m !== "technical");
+    body.classList.toggle("mode-simple", simple);
+    body.classList.toggle("mode-technical", !simple);
+    try{ localStorage.setItem("ltm_overview_mode", simple ? "simple" : "technical"); }catch(e){}
+  }
+  // restore saved preference (default = simple); guarded for file://
+  try{
+    var saved = localStorage.getItem("ltm_overview_mode");
+    if(saved === "technical") applyMode("technical");
+  }catch(e){}
+  modesw.addEventListener("click", function(e){
+    var b = e.target.closest("button[data-mode]"); if(!b) return;
+    applyMode(b.getAttribute("data-mode"));
+  });
 
   // ---- tab switching ----
   var tabbar = document.getElementById("tabbar");
@@ -582,31 +848,43 @@
     c.addEventListener("click", function(){ c.classList.toggle("open"); });
   });
 
-  // ---- MEMORY flow detail ----
+  // ---- MEMORY flow detail (carries both lay + tech variants) ----
   var MEM = [
     {t:"Stage 1 — STM ingest (keyframe → caption → buffer)",
+     lt:"Step 1 — The robot jots down what it sees",
      fn:"EpisodeRunner._build_keyframe → bridge.observe_keyframe",
      cite:"episode_runner.py:2530-2568 · memory_bridge.py:636-661",
+     lay:"Every time the robot stops to look, it writes a sentence describing the scene (e.g., \"a kitchen with a wooden table\") and tucks it into a temporary notepad for this visit. (In the no-memory test setup, this notepad is switched off.)",
      d:"Each keyframe gets the rich Qwen-VL caption (passed as caption_override for the remembr backbone), its SBERT text embedding via bridge.text_encode_fn, and is buffered as an EmbodiedRecord into the per-episode _pending list. Guarded off in S1 by disable_stm."},
     {t:"Stage 2 — Consolidation: I = 0.4·R + 0.3·U + 0.3·N",
+     lt:"Step 2 — It decides which sightings are worth keeping",
      fn:"DialogueConsolidation.compute_importance → consolidate_session",
      cite:"consolidation.py:123-152, 302-373 · memory_bridge.py:521-532, 750-830",
+     lay:"At the end of a visit, the robot reviews everything it jotted down and keeps only the five most worthwhile sightings — judging each on three things: how generally interesting it seems, how surprising it was, and how new it is compared to what's already stored. It also tags each kept sighting with exactly where the robot was standing.",
      d:"At episode end, bridge.consolidate → _consolidate_pending scores every buffered segment. R = heuristic relevance (length + personal-keyword + question — goal-agnostic), U = surprise vs history, N = min-L2 novelty vs the LTM. The top-k=5 by importance are written into the FINE layer, with geometry (scene_id, agent_position, agent_yaw) patched back onto the inserted entries."},
     {t:"Stage 3 — 3-layer FAISS LTM (fine / mid / coarse)",
+     lt:"Step 3 — The kept sightings go into permanent memory",
      fn:"HierarchicalLTM (MemoryLayer × 3, faiss.IndexFlatL2)",
      cite:"ltm.py:37-146 · memory_bridge.py:419-428 (SBERT) · text_encode_util.py:22-33 (l2_normalize_encoder)",
+     lay:"Memory has three shelves — a detailed one, a summary one, and a big-picture \"what kind of room usually holds this\" one. In practice only the detailed shelf does the real work of guiding the robot; the others mostly sit idle or just nudge the scoring a little.",
      d:"FINE = SBERT caption-text embeddings, L2-normalized (consumed as a cosine index). MID = pattern-clustered, empty in practice (success-gated). COARSE = position-free category→preferred_room priors. The action-path retriever queries the FINE layer ONLY; the 3-layer multi_scale_search feeds only the rerank S_sim scorer."},
     {t:"Stage 4 — Retrieval: propose_memory_candidates",
+     lt:"Step 4 — On a return visit, it looks up relevant past sightings",
      fn:"EmbodiedMemoryBridge.propose_memory_candidates",
      cite:"memory_bridge.py:1012-1230 · query template :126 · gates :1098-1134",
+     lay:"The robot asks its memory \"where did I see one of these?\" and pulls up its best matches — but only ones that are a close enough match, in this house, not too far away, and not duplicates. Each match becomes a suggested place to walk toward. Note: it remembers the spot it was standing when it looked at the object, which is a step or two back from the object itself.",
      d:"Query = SBERT-encode of _GOAL_QUERY_TEMPLATE.format(target) = \"there is a {cat}\". Fine search, then per-hit gates: cosine ≥ 0.23, scene match (:1103), agent_position present, dedup within 1.5 m, distance ≤ 30 m. Emits FrontierCandidate(world_xy = stored VIEWING POSE, raw_score = cosine, source=\"memory\"), capped at top_k=3."},
     {t:"Stage 5a — Inject into the pool + rerank",
+     lt:"Step 5a — Remembered spots compete with fresh options",
      fn:"all_cands = cands + mem_cands → bridge.rerank",
      cite:"episode_runner.py:1404-1418, 1528-1535 · reranking.py:306-393 · scorer memory_bridge.py:558, 321-343",
+     lay:"The remembered spots get added to the robot's normal list of places it could explore next, and everything gets scored together. A strongly-matching memory gets a real boost; a weak one gets ignored — so memory only wins when it's genuinely confident.",
      d:"Memory candidates are concatenated with the backbone's frontier/ReMEmbR candidates (option 2, not rerank-only). ResponseReranker computes Score = w·S over {history 0.0, memory 0.30, coherence 0.70}; FrontierPhysicsScorer maps the memory cosine to a goal-directed bonus (saturates at cos≥0.42, zero at cos≤0.30)."},
     {t:"Stage 5b — Selection + waypoint steering",
+     lt:"Step 5b — It picks a winner and walks there",
      fn:"_chosen_candidate_index → current_candidate → _waypoint_action",
      cite:"episode_runner.py:1558-1566, 2570-2582",
+     lay:"The top-scoring option wins, the robot tallies whether the choice came from memory or from fresh exploration, and then it physically steers itself to that spot.",
      d:"The reranked top candidate is chosen (stop-candidate wins if present), counters bump by chosen.source (n_memory_chosen / n_frontier_chosen / n_remembr_chosen), and ShortestPathFollower steers the agent toward chosen.world_xy."}
   ];
   var memdetail = document.getElementById("memdetail");
@@ -614,10 +892,12 @@
   function renderMem(i){
     var m = MEM[i];
     memdetail.innerHTML =
-      '<div class="dttl">'+m.t+'</div>'+
-      '<div class="dfn">'+m.fn+'</div>'+
-      '<div class="dline">'+m.d+'</div>'+
-      '<div class="cite">'+m.cite+'</div>';
+      '<div class="dttl lay">'+m.lt+'</div>'+
+      '<div class="dttl tech">'+m.t+'</div>'+
+      '<div class="dfn tech">'+m.fn+'</div>'+
+      '<div class="dline lay">'+m.lay+'</div>'+
+      '<div class="dline tech">'+m.d+'</div>'+
+      '<div class="cite tech">'+m.cite+'</div>';
     memflow.querySelectorAll(".node").forEach(function(n){
       n.classList.toggle("sel", n.getAttribute("data-mn")===String(i));
     });
@@ -628,31 +908,43 @@
   });
   renderMem(0);
 
-  // ---- SOUND flow detail ----
+  // ---- SOUND flow detail (carries both lay + tech variants) ----
   var SND = [
     {t:"OFFLINE — render a binaural RIR grid (soundspaces env)",
+     lt:"Offline — Pre-compute how sound echoes through the house",
      fn:"render_rir_grid.main → select_cells → audio.save_rir_grid",
      cite:"render_rir_grid.py:42-85, 127-275 · audio.py:159-216",
+     lay:"Before any robot run, a separate tool simulates how one alarm sound would echo to many listening spots around the house, and saves all those echoes to a file. The live robot never runs this heavy simulator itself — it just reads the saved file.",
      d:"In the soundspaces-spike env, habitat_sim renders a binaural impulse response from one anomaly source to well-spread source-reachable listener cells, serialized to a plain .npz (cell_positions, source_position, irs, sample_rate, scene_id). The live runner never imports the audio simulator."},
     {t:"LIVE render — convolve into Step.audio (render-only, never decides)",
+     lt:"Live — Each step, instantly replay what the robot would hear",
      fn:"habitat_env → audio_task.render_step_audio → audio.render_at_pose",
      cite:"habitat_env.py:319-342, 539-558 · audio_task.py:160-177 · audio.py:224-236",
+     lay:"As the robot moves, it grabs the pre-computed echo for its current spot and instantly mixes it with the alarm clip to produce what its two \"ears\" would hear — fast enough to do every single step. The alarm clip is either a real recorded sound or a simple synthetic beep.",
      d:"Per step (after t_anom), RIRGrid.nearest finds the nearest cell by 2-D (x,z) distance and fftconvolve(clip, IR) produces a (2,L) binaural ear signal (~0.01 s/step), stuffed into Step.audio. The clip is built once by build_anomaly_clip (real ESC-50 if staged, else a deterministic synthetic burst)."},
     {t:"Onset detection (once per episode)",
+     lt:"Live — Notice the moment a sound starts",
      fn:"audio_task.process_audio_step (energy = rms, lat = lateral_sign)",
      cite:"audio_task.py:180-243 · onset_rms default 0.05 :43 · CLI run_hm3d_pol.py:323",
+     lay:"The robot watches for the first moment the sound gets loud enough to count as \"I heard something,\" and marks that instant. The loudness threshold is tunable so the robot doesn't trigger too early or too late.",
      d:"The first step whose energy ≥ onset_rms sets state.detected + onset_step. onset_rms is env/CLI-tunable (calibrated up toward ~0.065 via diagnose_onset_calib for more runway). Optional Step-1 open-set gate (LTM_AUDIO_ANOMALY_GATE) requires is_anomaly() to beat the NORMAL_PROMPTS bank before onset fires."},
     {t:"CLAP 3-way classify — ONCE at onset",
+     lt:"Live — Figure out what kind of sound it is — just once",
      fn:"classify_anomaly (argmax over ANOMALY_CLASSES) — CLAPAudioEncoder",
      cite:"audio.py:367-387, 44 · perception.py:169-277 · run_hm3d_pol.py:526-528",
+     lay:"The instant it hears the sound, the robot decides which of three things it is — a baby crying, an alarm, or breaking glass — and locks that answer in. It only makes this call one time per visit.",
      d:"A single forced argmax over (\"baby_cry\",\"alarm\",\"glass_break\") via cosine of the CLAP audio embedding vs CLASS_TO_CLAP_PROMPT. perception.CLAPAudioEncoder (laion/clap-htsat-fused, 512-d, L2-normalized) is used ONLY as this classifier — never in retrieval."},
     {t:"class → object override (decorative for retrieval)",
+     lt:"Live — Translate the sound into a thing to look for",
      fn:"CLASS_TO_OBJECT → audio_target_for_retrieval",
      cite:"audio.py:50-54 · audio_task.py:235-254",
+     lay:"Each sound maps to an object: a baby cry means look for a crib, an alarm means look for an oven, breaking glass means look for a window. (Heads-up: in our actual tests this translation didn't change anything, because the thing making the sound was already the thing the robot was sent to find.)",
      d:"state.target_override = CLASS_TO_OBJECT.get(cls) = {baby_cry:crib, alarm:oven, glass_break:window}. This string becomes the unchanged target_category argument to propose_memory_candidates. In the M3 eval anomaly_object == target_category == goal, so the override is a no-op for retrieval — audio's real causal role is the onset-gate (gate_retrieval_target)."},
     {t:"DOA lateral-sign + energy-STOP",
+     lt:"Live — Guess which side it came from, and decide when to stop",
      fn:"lateral_sign / estimate_doa · should_audio_stop",
      cite:"audio.py:286-359 · audio_task.py:275-290 · episode_runner.py:1427-1436",
+     lay:"The simulator can't reliably tell direction from timing, so the robot uses which ear heard it louder to guess left-or-right. It stops when the sound is loud, it's heard it, and it's gotten close enough.",
      d:"ITD is stripped by the Ambisonic→HRTF path, so the ILD sign drives the fold-invariant lateral_sign() (+1 right / −1 left, world-frame at identity yaw). should_audio_stop fires STOP when detected AND energy ≥ energy_stop_db_rms (0.20) AND distance ≤ stop_distance_m (1.5) — OR-folded into STOP only for task==\"audiogoal\"."}
   ];
   var snddetail = document.getElementById("snddetail");
@@ -660,10 +952,12 @@
   function renderSnd(i){
     var m = SND[i];
     snddetail.innerHTML =
-      '<div class="dttl">'+m.t+'</div>'+
-      '<div class="dfn">'+m.fn+'</div>'+
-      '<div class="dline">'+m.d+'</div>'+
-      '<div class="cite">'+m.cite+'</div>';
+      '<div class="dttl lay">'+m.lt+'</div>'+
+      '<div class="dttl tech">'+m.t+'</div>'+
+      '<div class="dfn tech">'+m.fn+'</div>'+
+      '<div class="dline lay">'+m.lay+'</div>'+
+      '<div class="dline tech">'+m.d+'</div>'+
+      '<div class="cite tech">'+m.cite+'</div>';
     sndflow.querySelectorAll(".node").forEach(function(n){
       n.classList.toggle("sel", n.getAttribute("data-sn")===String(i));
     });
