@@ -3246,3 +3246,59 @@ goal-anchored storage (which also addresses the localization-bound 0.1m ring) is
 (3) **write-side instrumentation** (dump `consolidate` scored-segments with the I-breakdown +
 caption + distance-to-goal; log all `fetch_k=8` raw hits) to convert the inferred write-vs-rank
 split into a measured one.
+
+## Part B seed-distractors — the instance-keyed +0.34 de-confounded: GENUINE but REGION-level, not disambiguation (2026-06-23)
+
+The confounded instance-keyed +0.34 (only the target seeded → 7% wrong-instance *by
+construction* → retrieval-level disambiguation untested) got its decisive follow-up:
+**seed the distractor instances into the cold memory** so a later warm visit must choose
+among *stored* same-category sightings. Built `make_revisit_smoke --seed-distractors`
+(short `{cat}-seed-k` cold episodes at distractor view_points, `seed_only=True`, consolidated
+into the persistent fine LTM via the same path as the target; success stays target-keyed) +
+`reaudit_partb_seeded.py` (per-cell VALID/DEGENERATE geodesic gate × wrong-instance × paired
+warm S3−S1 soft-SPL join, an exact partition of the headline). Ran on RACE
+(`runs/partb-seeded-s{1,2,3}`, real ReMEmbR, exit 0).
+
+**Two tool bugs found+fixed first** (both gated the verdict): a scene-id key mismatch (dataset
+full-`.glb` path vs run-dir short id) that (a) broke the per-cell join and (b) **silently forced
+the geodesic gate to Euclidean** even with the env sourced (tell: wcojb chair reported Euclidean
+`reach=4/4` though 3 of its 4 warm starts are the known navmesh-unreachable dropped pairs). Fix:
+`_canonical_scene_id` normalizes both reps across the join key + the navmesh lookup; per-scene
+geodesic status is now printed explicitly. After the fix the true gate loads (`navmesh OK
+(geodesic)`, wcojb chair → `reach=1/4`).
+
+**Geodesic verdict (the decisive table):**
+
+| cell | geodesic verdict | wrong/fires | n | warm soft-SPL S3−S1 | binary S3−S1 |
+|---|---|---|---|---|---|
+| wcojb chair | VALID | 95% | 1 | +0.604 | +0.607 |
+| TEEsav chair | VALID | 0% | 3 | +0.538 | 0.000 |
+| wcojb sofa | VALID | 100% | 2 | +0.244 | +0.259 |
+| TEEsav sofa | DEGENERATE | 100% | 1 | +0.209 | 0.000 |
+| wcojb toilet | VALID | 92% | 1 | +0.184 | 0.000 |
+| TEEsav bed | VALID | 0% | 3 | +0.172 | 0.000 |
+| wcojb bed | VALID | 100% | 3 | +0.001 | 0.000 |
+| TEEsav toilet | DEGENERATE | 0 fires | 3 | −0.024 | +0.080 |
+
+- **De-confound GENUINE:** 6/8 cells geodesically VALID (a distractor is truly nearer the warm
+  start → go-to-nearest fails without recall). Aggregate warm soft-SPL **S3−S1 = +0.2085 (n=17**,
+  4 unreachable-goal drops). The gain is **concentrated in the VALID cells** (pair-weighted
+  **+0.2623 over n=13**) vs **+0.034 over n=4** in degenerate cells; the "free-lunch"
+  DEGENERATE+0%-wrong bucket is **empty**. So +0.2085 is **not** a go-to-nearest artifact.
+- **But REGION-level, not instance disambiguation:** with real distractors in memory, retrieval
+  selects the **wrong** same-category instance **86%** pooled (92–100% in 4 of the 5 forcing
+  cells; the 35% aggregate was a denominator artifact of TEEsav bed's 246 fires at 0%). The
+  strict-radius (0.1 m) gains land in the **wrong-instance** cells (wcojb chair +0.607 @95% wrong,
+  wcojb sofa +0.259 @100% wrong), the opposite of what disambiguation predicts; the two clean
+  right-instance cells (TEEsav chair/bed, 0% wrong) are binary-flat. The LTM steers to a *nearby
+  same-category sighting that shortens the path*, not to the target instance.
+
+**Verdict (pre-registered outcome b):** keep the warm-revisit number as a **region-recall**
+result that survives genuine same-category instance pressure; **retract any instance-disambiguation
+reading.** This is the SBERT instance ceiling (0.047 query rank gap) surfacing under an adversarial
+multi-instance harness — closing it needs a better instance-discriminating encoder, not another
+memory head. **Caveats:** per-cell n=1–3 → only the aggregate +0.2085 and the VALID-vs-DEGENERATE
+split are quotable; the binary discriminator is underpowered (n=1–2). §6/§7 of the ICRA draft
+updated accordingly (the +0.34 confounded line now resolves to the region-level +0.21). Tools:
+`reaudit_partb_seeded.py` (+per_cell_delta/join/bucket, 25 TDD), `make_revisit_smoke
+--seed-distractors`.
