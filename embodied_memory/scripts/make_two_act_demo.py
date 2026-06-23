@@ -178,6 +178,99 @@ def concat_command(clips: Sequence[str], out: str, ffmpeg: str = "ffmpeg") -> Li
 
 
 # ----------------------------------------------------------------------
+# pure ACT-1 / ACT-2 picker (no I/O — takes already-loaded episode dicts)
+# ----------------------------------------------------------------------
+
+
+def _act2_rank(ep: Dict[str, Any]) -> tuple:
+    """Sort key for ACT-2 candidates — LOWER is better.
+
+    Tiers (the recall STORY first), then SHORTEST clean path within a tier:
+      tier 0 = ARRIVED (success_1m) AND memory FIRED (n_memory_chosen>=1) AND
+               ended in a STOP (n_arrival_stop>=1 OR n_stop_signals>=1)
+               → the clean "recalled the bed and walked to it" episode
+      tier 1 = ARRIVED at all (success_1m, OR final distance_to_goal<1.0)
+      tier 2 = neither (a wander / timeout)
+
+    Within a tier we prefer FEWER ``n_steps`` (a short, direct recall path reads
+    as a crisp arrival; the longest such episode is the 250-step timeout the old
+    ``n_steps``-descending picker wrongly preferred).
+
+    Every field read here is present in the per-episode ``episode_NNN.json``
+    (ep_log): ``success_1m`` (episode_runner.py:2111), ``n_memory_chosen`` (:2075),
+    ``n_arrival_stop`` (:2107), ``n_stop_signals`` (:2086),
+    ``distance_to_goal`` (:2070), ``n_steps`` (:2066). No summary.json read needed.
+    """
+    succ1m = bool(ep.get("success_1m", False))
+    nmem = int(ep.get("n_memory_chosen", 0) or 0)
+    arrived_stop = (int(ep.get("n_arrival_stop", 0) or 0) >= 1
+                    or int(ep.get("n_stop_signals", 0) or 0) >= 1)
+    d2g = ep.get("distance_to_goal")
+    near = succ1m or (d2g is not None and float(d2g) < 1.0)
+    if succ1m and nmem >= 1 and arrived_stop:
+        tier = 0
+    elif near:
+        tier = 1
+    else:
+        tier = 2
+    n_steps = int(ep.get("n_steps", 0) or 0)
+    return (tier, n_steps)
+
+
+def pick_two_acts(
+    episodes: Sequence[Dict[str, Any]],
+    *,
+    t_anom: int = 0,
+) -> Dict[str, Any]:
+    """Choose ACT-1 (cold seed) and ACT-2 (best warm recall) from loaded ep dicts.
+
+    ``episodes`` is a list of already-parsed ``episode_NNN.json`` dicts (each MUST
+    carry ``episode_idx`` + a truthy ``video_path``; ones without a video are
+    ignored). Returns a status dict::
+
+        {"status": "OK"|"ARRIVED"|"NOFIRE"|"SOLO"|"NONE",
+         "act1": <ep|None>, "act2": <ep|None>}
+
+      * ACT 1 = the COLD seed = smallest ``episode_idx`` with a video.
+      * ACT 2 = among the OTHER episodes with a video, the BEST by :func:`_act2_rank`
+        (recall-story-first, then shortest). ``status`` records WHY act2 was chosen:
+          "OK"      = act2 ARRIVED and memory FIRED (the clean recall story)
+          "ARRIVED" = act2 ARRIVED but memory did not fire (or no clean stop)
+          "NOFIRE"  = NO warm episode arrived → act2 is best-effort (longest past
+                      onset, so the soundtrack is non-silent) and the demo shows
+                      EXPLORATION, not arrival → caller should warn loudly.
+          "SOLO"    = only ONE episode has a video → single-clip fallback (act2=None)
+          "NONE"    = no episode has a video at all (act1=None).
+
+    Pure: no file or ffmpeg I/O — the driver loads the JSONs and passes the dicts.
+    """
+    vids = [e for e in episodes if e.get("video_path")]
+    if not vids:
+        return {"status": "NONE", "act1": None, "act2": None}
+    by_idx = sorted(vids, key=lambda e: int(e.get("episode_idx", 0) or 0))
+    act1 = by_idx[0]
+    others = [e for e in vids if e is not act1]
+    if not others:
+        return {"status": "SOLO", "act1": act1, "act2": None}
+
+    best = min(others, key=_act2_rank)
+    tier = _act2_rank(best)[0]
+    if tier == 0:
+        status = "OK"            # arrived + memory fired = the clean recall story
+    elif tier == 1:
+        status = "ARRIVED"       # arrived, but recall didn't visibly drive it
+    else:
+        # No warm episode arrived. Fall back to the LONGEST episode that ran past
+        # onset (so the alarm fired → soundtrack is non-silent), else the longest
+        # overall — and flag that the demo is exploration, not arrival.
+        past = [e for e in others if int(e.get("n_steps", 0) or 0) >= t_anom + 3]
+        pool = past if past else others
+        best = max(pool, key=lambda e: int(e.get("n_steps", 0) or 0))
+        status = "NOFIRE"
+    return {"status": status, "act1": act1, "act2": best}
+
+
+# ----------------------------------------------------------------------
 # imageio frame I/O (impure) — mirrors video_recorder's imageio usage
 # ----------------------------------------------------------------------
 
@@ -287,7 +380,97 @@ def _est_duration(res: Dict[str, Any], fps: float) -> float:
     return (n / float(fps)) if fps else 0.0
 
 
+def _load_run_episodes(run_dir: str) -> List[Dict[str, Any]]:
+    """Load every ``episode_NNN.json`` in ``run_dir`` (skipping ``*_error*``).
+
+    Each loaded dict is tagged with ``_path`` (its file path) so the picker's
+    chosen act maps straight back to the file the driver passes to ``stitch_act``.
+    """
+    import glob
+
+    out: List[Dict[str, Any]] = []
+    for f in sorted(glob.glob(os.path.join(run_dir, "episode_*.json"))):
+        if "_error" in os.path.basename(f):
+            continue
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                ep = json.load(fh)
+        except Exception:  # noqa: BLE001 — a corrupt ep file never breaks the pick
+            continue
+        if not isinstance(ep, dict):
+            continue
+        ep["_path"] = f
+        out.append(ep)
+    return out
+
+
+def _diag_line(ep: Dict[str, Any]) -> str:
+    """One per-warm-episode diagnostic row (so recall-fired-or-not is VISIBLE)."""
+    idx = int(ep.get("episode_idx", 0) or 0)
+    steps = int(ep.get("n_steps", 0) or 0)
+    succ1m = bool(ep.get("success_1m", False))
+    nmem = int(ep.get("n_memory_chosen", 0) or 0)
+    nrem = int(ep.get("n_remembr_chosen", 0) or 0)
+    md = ep.get("min_distance_to_goal")
+    md_s = f"{float(md):.2f}m" if md is not None else "?"
+    return (f"  ep{idx}: steps={steps} success_1m={succ1m} "
+            f"mem_chosen={nmem} remembr_chosen={nrem} min_d2g={md_s}")
+
+
+def pick_main(argv: Optional[List[str]] = None) -> int:
+    """``--pick`` entry: choose ACT1/ACT2 from a run dir, print a diagnostic table,
+    and emit a machine-readable ``PICK<TAB>status<TAB>act1_path<TAB>act2_path`` line
+    the bash driver parses. Exit 0 unless NO episode has a video (status NONE → 3).
+    """
+    p = argparse.ArgumentParser(description="Pick ACT1/ACT2 for the two-act demo")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--t-anom", type=int, default=0)
+    args = p.parse_args(argv)
+
+    eps = _load_run_episodes(args.run_dir)
+    res = pick_two_acts(eps, t_anom=args.t_anom)
+    status = res["status"]
+    act1 = res["act1"]
+    act2 = res["act2"]
+
+    # Diagnostic table over EVERY warm (non-act1) episode with a video — this is
+    # how we learn whether recall fired and which episode arrived in this cell.
+    a1_path = act1.get("_path", "") if act1 else ""
+    warm = [e for e in eps if e.get("video_path") and e.get("_path") != a1_path]
+    print("[pick] warm-episode diagnostics (success_1m + mem_chosen reveal recall):")
+    if warm:
+        for e in sorted(warm, key=lambda x: int(x.get("episode_idx", 0) or 0)):
+            print(_diag_line(e))
+    else:
+        print("  (no warm episode with a video)")
+
+    if status == "NOFIRE":
+        print("⚠ no warm episode reached the bed (recall did not pay off in this "
+              "cell) — ACT 2 shows EXPLORATION, not arrival.")
+        print("   try --warm 6 or a different --scene/--class/--category.")
+    elif status == "ARRIVED":
+        print("[pick] ACT 2 ARRIVED (success_1m) but recall did not visibly drive "
+              "it (n_memory_chosen=0 or no clean stop).")
+    elif status == "OK":
+        a2 = act2 or {}
+        print(f"[pick] ACT 2 = clean recall story: arrived AND memory fired "
+              f"(ep{int(a2.get('episode_idx', 0) or 0)}, "
+              f"mem_chosen={int(a2.get('n_memory_chosen', 0) or 0)}, "
+              f"n_steps={int(a2.get('n_steps', 0) or 0)}).")
+
+    a2_path = act2.get("_path", "") if act2 else ""
+    print(f"PICK\t{status}\t{a1_path}\t{a2_path}")
+    return 3 if status == "NONE" else 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    # --pick routes to the (tested) ACT1/ACT2 picker (prints the diagnostic table
+    # + a PICK<TAB>... line the bash driver parses); everything else stitches.
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--pick" in argv:
+        rest = [a for a in argv if a != "--pick"]
+        return pick_main(rest)
     p = argparse.ArgumentParser(
         description="Stitch a two-act (cold-seed + warm-recall) demo video")
     p.add_argument("--run-dir", required=True,
