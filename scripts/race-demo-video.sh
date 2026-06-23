@@ -236,7 +236,99 @@ except Exception:
   || { echo "FATAL: S3 run INCOMPLETE at $OUT_DIR (rc=$rc; summary missing or n_completed<n_attempted = hard crash). See ${OUT_DIR}.log."; exit 1; }
 echo "  S3 complete (rc=$rc; rc=1 can be normal — pass_conditions are S3-oriented)"
 
-banner "[7/7] post-hoc soundtrack + ffmpeg mux → demo_with_sound.mp4"
+banner "[7/7] post-hoc soundtrack + ffmpeg mux → demo video"
+# ============================================================================
+# TWO-ACT path (default; NWARM>0). Stitch ONE story from two episodes of this run:
+#   ACT 1 = the COLD seed (smallest episode_idx with a video — idx 0; the robot is
+#           spawned at the bed, observes & memorizes it).
+#   ACT 2 = the LONGEST *other* episode that RAN PAST THE ONSET STEP
+#           (n_steps >= t_anom+3 — the alarm had time to fire; the warm travel+recall
+#           showcase). Both acts fire the alarm (driver passes t_anom to every
+#           episode) so both have audio → they concat cleanly into demo_two_act.mp4.
+# The single-clip path (below, NWARM==0 / --cold) is the fallback when there is no
+# warm episode to play ACT 2.
+# ============================================================================
+if [ "$NWARM" -gt 0 ] 2>/dev/null; then
+  # Pick ACT1 (cold seed, smallest idx w/ video) and ACT2 (longest OTHER ep past onset).
+  PICK2="$(python -c "
+import json,glob
+T_ANOM=int($T_ANOM_FIRE)
+vids=[]   # (episode_idx, n_steps, path)
+for f in sorted(glob.glob('$OUT_DIR/episode_*.json')):
+    if '_error' in f: continue
+    try: ep=json.load(open(f))
+    except Exception: continue
+    if not ep.get('video_path'): continue
+    idx=int(ep.get('episode_idx',0) or 0); n=int(ep.get('n_steps',0) or 0)
+    vids.append((idx,n,f))
+if not vids:
+    print('NONE\t\t'); raise SystemExit
+vids.sort(key=lambda c: c[0])             # by episode_idx
+act1=vids[0]                              # cold seed = smallest idx
+others=[v for v in vids if v[2]!=act1[2]] # every OTHER episode
+past=[v for v in others if v[1] >= T_ANOM + 3]
+pool=past if past else others
+if not pool:
+    # only one video total — degrade to single-clip
+    print('SOLO\t'+act1[2]+'\t'); raise SystemExit
+pool.sort(key=lambda c: c[1], reverse=True)  # longest other = ACT2
+act2=pool[0]
+status='OK' if past else 'NOFIRE'
+print(status+'\t'+act1[2]+'\t'+act2[2])
+")"
+  P2_STATUS="$(printf '%s' "$PICK2" | cut -f1)"
+  ACT1_EP="$(printf '%s' "$PICK2" | cut -f2)"
+  ACT2_EP="$(printf '%s' "$PICK2" | cut -f3)"
+  if [ "$P2_STATUS" = "NONE" ]; then
+    echo "FATAL: no episode_NNN.json with a video_path in $OUT_DIR — was --save-video honoured? See ${OUT_DIR}.log."; exit 1
+  elif [ "$P2_STATUS" = "SOLO" ]; then
+    echo "  ⚠ only ONE episode has a video — cannot build two acts; falling back to single-clip on it."
+    LAST_EP="$ACT1_EP"; NWARM=0   # fall through to the single-clip path below
+  else
+    [ "$P2_STATUS" = "NOFIRE" ] && {
+      echo "  ⚠⚠ WARNING: no OTHER episode ran past onset (every warm ep < t_anom=$T_ANOM_FIRE + 3 steps)."
+      echo "     ACT 2 may be silent → make_two_act_demo REFUSES to mux silence (loud failure)."
+      echo "     LOWER --t-anom (try 3) and/or RAISE --min-dist so the warm episode runs longer."; }
+    A1_STEPS="$(python -c "import json;print(json.load(open('$ACT1_EP')).get('n_steps',0))" 2>/dev/null || echo 0)"
+    A2_STEPS="$(python -c "import json;print(json.load(open('$ACT2_EP')).get('n_steps',0))" 2>/dev/null || echo 0)"
+    A1_DUR="$(python -c "print('%.1f' % ((($A1_STEPS/$KEYFRAME_EVERY)+1)/$VIDEO_FPS))" 2>/dev/null || echo '?')"
+    A2_DUR="$(python -c "print('%.1f' % ((($A2_STEPS/$KEYFRAME_EVERY)+1)/$VIDEO_FPS))" 2>/dev/null || echo '?')"
+    echo "  ACT 1 (cold seed)   = $ACT1_EP  (n_steps=$A1_STEPS → ~${A1_DUR}s)"
+    echo "  ACT 2 (warm recall) = $ACT2_EP  (n_steps=$A2_STEPS → ~${A2_DUR}s)"
+    # make_two_act_demo banners each act + muxes its soundtrack + concats → demo_two_act.mp4.
+    # It REFUSES a silent act (exits non-zero) so a silent demo can never ship.
+    # shellcheck disable=SC2086
+    TWO_LOG="$(python embodied_memory/scripts/make_two_act_demo.py \
+        --run-dir "$OUT_DIR" --act1-episode "$ACT1_EP" --act2-episode "$ACT2_EP" \
+        --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_FIRE" \
+        --fps "$VIDEO_FPS" --out-name demo_two_act.mp4 \
+        ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} 2>&1)"
+    TWO_RC=$?
+    echo "$TWO_LOG"
+    [ "$TWO_RC" -eq 0 ] || { echo "FATAL: two-act stitch failed (rc=$TWO_RC) — see above. A demo act was SILENT or empty; refusing to ship it."; exit 1; }
+    TWO_SECS="$(printf '%s\n' "$TWO_LOG" | grep -oE 'TWO_ACT_SECONDS=[0-9.]+' | tail -1 | cut -d= -f2)"
+    FINAL="$OUT_DIR/demo_two_act.mp4"
+    banner "DONE"
+    if [ -f "$FINAL" ]; then
+      if command -v ffprobe >/dev/null 2>&1; then
+        ASTREAM="$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$FINAL" 2>/dev/null | head -1)"
+        echo "  ffprobe audio stream in $FINAL: ${ASTREAM:-<none>}"
+        [ "$ASTREAM" = "audio" ] || echo "  ⚠ ffprobe found NO audio stream in the two-act mp4 (expected one)."
+      fi
+      echo "  TWO-ACT DEMO VIDEO: $FINAL"
+      echo "    ACT 1 (cold seed):   n_steps=$A1_STEPS (~${A1_DUR}s)"
+      echo "    ACT 2 (warm recall): n_steps=$A2_STEPS (~${A2_DUR}s)"
+      echo "    total ~${TWO_SECS:-?}s, fps=$VIDEO_FPS"
+    else
+      echo "  ffmpeg absent — per-act mp4s written (act1.mp4 / act2.mp4); concat them manually (see [two-act] above)."
+    fi
+    exit 0
+  fi
+fi
+
+# ============================================================================
+# SINGLE-CLIP path (NWARM==0 / --cold, or the SOLO degrade above).
+# ============================================================================
 # PICK THE SOUNDTRACK EPISODE: the LONGEST episode that RAN PAST THE ONSET STEP
 # (n_steps >= t_anom+3). This guarantees (a) the anomaly had time to fire → the
 # soundtrack is non-silent (backstopped by the render's SilentSoundtrackError) and
@@ -247,6 +339,8 @@ banner "[7/7] post-hoc soundtrack + ffmpeg mux → demo_with_sound.mp4"
 # per-episode log → always 0 → dead no-op; n_steps is the real, log-present signal.)
 # Loud-warn-and-fall-back only if NOTHING ran past onset (build
 # is broken — lower --t-anom / raise --min-dist).
+# (A SOLO two-act fallback above already set $LAST_EP; honour it.)
+if [ -z "${LAST_EP:-}" ]; then
 PICK="$(python -c "
 import json,glob
 T_ANOM=int($T_ANOM_FIRE)
@@ -283,6 +377,7 @@ if [ "$PICK_STATUS" = "NOFIRE" ]; then
 elif [ "$PICK_STATUS" = "NONE" ]; then
   LAST_EP=""
 fi
+fi  # end: if [ -z "${LAST_EP:-}" ] — SOLO two-act fallback skips the picker
 [ -n "$LAST_EP" ] || { echo "FATAL: no episode_NNN.json with a video_path in $OUT_DIR — was --save-video honoured? See ${OUT_DIR}.log."; exit 1; }
 EP_STEPS="$(python -c "import json;print(json.load(open('$LAST_EP')).get('n_steps',0))" 2>/dev/null || echo 0)"
 EST_DUR="$(python -c "print('%.1f' % ((($EP_STEPS/$KEYFRAME_EVERY)+1)/$VIDEO_FPS))" 2>/dev/null || echo '?')"
