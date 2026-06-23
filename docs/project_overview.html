@@ -541,13 +541,17 @@
   </div>
 
   <div class="callout" style="background:#1a2230; border-color:#2f4a6b">
-    <div class="ch" style="color:var(--accent)">⊙ Fresh result — partb-seeded re-run (caveat: VALID verdict pending)</div>
-    <p style="margin:6px 0 0 0" class="dim">A fresh <code>partb</code>-seeded warm re-run measured <b>+0.2085</b> soft-SPL
-    S3−S1 — consistent with the +0.115 / +0.24 band. <b>Caveat:</b> its instance-keyed VALID verdict is <b>pending</b>
-    — <code>check_instance_keyed_validity.classify_cell</code> requires ≥1 <code>FORCES-DISAMBIGUATION</code>
-    warm-start (a distractor geodesically nearer than the target) for a cell to count as <b>VALID</b> rather than
-    <b>DEGENERATE</b>; until that gate runs green, treat +0.2085 as an unconfirmed reproduction, not a clean win.
-    <span class="cite">check_instance_keyed_validity.py:56-77</span></p>
+    <div class="ch" style="color:var(--accent)">⊙ Part B closed — seed-distractor de-confound: GENUINE, but REGION-level not instance disambiguation</div>
+    <p style="margin:6px 0 0 0" class="dim">With real distractor instances seeded into memory and the <b>geodesic</b> validity gate run green
+    (<b>6/8 cells VALID</b> — a distractor is truly nearer the warm start), warm soft-SPL S3−S1 = <b>+0.2085</b>
+    (n=17), <b>concentrated in the VALID cells</b> (pair-weighted <b>+0.26</b>, n=13) vs <b>+0.03</b> in the degenerate
+    ones — the free-lunch bucket is empty, so go-to-nearest cannot explain it. <b>But</b> retrieval picks the
+    <b>wrong same-category instance 86%</b> of the time (92–100% in 4 of the 5 forcing cells), and the 0.1 m gains
+    land in <i>wrong</i>-instance cells. <b>Verdict:</b> the LTM steers to a nearby same-category sighting that
+    shortens the path (<b>region recall</b>), not to the target instance — robust to instance confusion, but
+    <b>not</b> fine disambiguation (the SBERT 0.047 instance-rank ceiling). Kept beside, never instead of,
+    +0.115 / +0.171 / +0.24. <i>Caveat: per-cell n=1–3 → only the aggregate + the VALID-vs-DEGENERATE split are
+    quotable.</i> <span class="cite">reaudit_partb_seeded.py · PHASE2_ABLATION_REPORT.md "Part B seed-distractors"</span></p>
   </div>
 </section>
 
