@@ -43,8 +43,21 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 
 # audio.py imports only numpy + scipy (the live, no-habitat side of the split).
-from embodied_memory.audio import RIRGrid, render_at_pose
+from embodied_memory.audio import RIRGrid, render_at_pose, rms
 from embodied_memory.audio_task import build_anomaly_clip, resolve_anomaly_clip
+
+
+# RMS below this is treated as "silence" — a soundtrack at/under it never reached
+# the anomaly onset (or the clip was empty). The driver must surface this, not ship
+# a silent demo. ~3e-4 sits well under any real convolved anomaly chunk yet above
+# float round-off noise.
+SILENCE_RMS_EPS = 3e-4
+
+
+class SilentSoundtrackError(RuntimeError):
+    """Raised when the assembled demo soundtrack is silent (onset never fired in
+    the chosen episode, or the anomaly clip was empty). The demo MUST refuse to
+    mux a silent track — a silent mp4 looks "done" but is broken."""
 
 
 # ----------------------------------------------------------------------
@@ -55,6 +68,32 @@ from embodied_memory.audio_task import build_anomaly_clip, resolve_anomaly_clip
 def samples_per_frame(sample_rate: int, fps: float) -> int:
     """How many audio samples cover one video frame at ``fps``. >= 1."""
     return max(1, int(round(float(sample_rate) / float(fps))))
+
+
+def onset_fired_in_steps(
+    steps: Sequence[Dict[str, Any]], t_anom: Optional[int] = None
+) -> bool:
+    """True iff the anomaly onset actually FIRED within the recorded frames.
+
+    Mirrors :func:`onset_from_steps` but answers the picker's question: did this
+    episode run long enough (and pick up audio) for the soundtrack to be audible?
+    With an explicit ``t_anom`` the episode must contain a frame at/after the
+    onset step. Otherwise we look for any frame with non-zero ``audio_energy``
+    (the live runner records 0.0 before onset, the convolved energy after)."""
+    if not steps:
+        return False
+    if t_anom is not None:
+        return any(int(s.get("step_idx", i)) >= int(t_anom)
+                   for i, s in enumerate(steps))
+    return any(
+        s.get("audio_energy") is not None and float(s.get("audio_energy")) > 0.0
+        for s in steps
+    )
+
+
+def soundtrack_rms(track: np.ndarray) -> float:
+    """RMS energy of an assembled ``(2, L)`` soundtrack (0.0 == pure silence)."""
+    return rms(track)
 
 
 def onset_from_steps(
@@ -232,6 +271,27 @@ def process_episode(
         clip_offset_samples=spf,  # advance one frame of clip per frame → continuous
     )
 
+    # NEVER MUX SILENCE. If the chosen episode ended before the onset step
+    # (onset == n_frames → every frame is pre-onset silence) or the resolved
+    # anomaly clip was empty, the assembled track is silent. Refuse — a silent
+    # demo mp4 looks "done" but is broken. Raise so main() exits non-zero and the
+    # driver surfaces it (lower --t-anom / raise --min-dist / pick a longer ep).
+    track_rms = soundtrack_rms(track)
+    n_frames = len(poses)
+    if track_rms <= SILENCE_RMS_EPS:
+        reason = (
+            "onset never reached (episode ended before t_anom)"
+            if onset >= n_frames else
+            "assembled track is silent (empty anomaly clip or all-silence frames)"
+        )
+        raise SilentSoundtrackError(
+            f"refusing to mux a SILENT soundtrack for {ep_path}: {reason} "
+            f"[onset_frame={onset}, n_frames={n_frames}, "
+            f"track_rms={track_rms:.2e} <= {SILENCE_RMS_EPS:.2e}]. "
+            f"Pick an episode where the anomaly fired (n_audio_onset_fired>=1), "
+            f"lower --t-anom, or raise --min-dist so the episode is long enough."
+        )
+
     wav_path = os.path.join(run_dir, "demo_track.wav")
     write_wav(wav_path, track, sr)
 
@@ -250,10 +310,14 @@ def process_episode(
         "n_frames": len(poses),
         "onset_frame": onset,
         "track_seconds": track.shape[1] / float(sr),
+        "track_rms": track_rms,
         "silent_mp4": silent_mp4,
         "muxed_mp4": None,
         "manual_mux_cmd": None,
     }
+    print(f"[demo-audio] soundtrack: {result['track_seconds']:.1f}s, "
+          f"RMS={track_rms:.4f} (audible, > {SILENCE_RMS_EPS:.2e}), "
+          f"onset_frame={onset}/{n_frames}")
 
     if silent_mp4 is None:
         print("[demo-audio] no silent .mp4 found (was --save-video set on the "
@@ -303,17 +367,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--out-name", default="demo_with_sound.mp4")
     args = p.parse_args(argv)
 
-    res = process_episode(
-        args.run_dir, args.rir_grid,
-        episode_json=args.episode_json,
-        anomaly_clip=args.anomaly_clip,
-        anomaly_class=args.anomaly_class,
-        t_anom=args.t_anom,
-        fps=args.fps,
-        out_name=args.out_name,
-    )
+    try:
+        res = process_episode(
+            args.run_dir, args.rir_grid,
+            episode_json=args.episode_json,
+            anomaly_clip=args.anomaly_clip,
+            anomaly_class=args.anomaly_class,
+            t_anom=args.t_anom,
+            fps=args.fps,
+            out_name=args.out_name,
+        )
+    except SilentSoundtrackError as e:
+        print(f"FATAL: {e}", file=sys.stderr)
+        return 2  # non-zero so the driver aborts instead of shipping silence
     final = res.get("muxed_mp4") or res.get("wav")
     print(f"DEMO_AUDIO_OUTPUT={final}")
+    print(f"DEMO_AUDIO_RMS={res.get('track_rms', 0.0):.6f}")
+    print(f"DEMO_AUDIO_SECONDS={res.get('track_seconds', 0.0):.3f}")
     return 0
 
 
