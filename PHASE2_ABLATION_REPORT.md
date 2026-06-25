@@ -3302,3 +3302,103 @@ split are quotable; the binary discriminator is underpowered (n=1–2). §6/§7 
 updated accordingly (the +0.34 confounded line now resolves to the region-level +0.21). Tools:
 `reaudit_partb_seeded.py` (+per_cell_delta/join/bucket, 25 TDD), `make_revisit_smoke
 --seed-distractors`.
+
+# Cross-scene scale-up — the warm-revisit LTM thesis reproduced at full HM3D-val scale (97-cell matrix): +0.2505 over 20 scenes, the project's strongest and first genuinely cross-scene result (RACE, 2026-06-25)
+
+**Motivation.** Every prior warm-revisit number was measured on ≤2 scenes (Phase-C +0.24 n=12
+chair+bed; wide-matrix +0.115 n=26; audio M3 +0.171 n=18). The recurring honest caveat was
+"within-scene, same-category — not cross-environment, cell-fragile." The scale-up answers the
+*generalization* half directly: the same S1/S3 ablation across **all 20 HM3D val scenes × the
+goal categories each scene actually contains** (97 achievable (scene,category) cells; chair/bed
+20/20, sofa/toilet 19/20, tv_monitor 14/20, plant 5/20).
+
+**Method (`race-scaleup-matrix.sh`).** A thin orchestrator reusing the tested single-cell
+`race-audiogoal.sh` per cell, adding the three things it lacked for full val: token-gated mesh
+download/verify, per-scene category discovery + cell expansion (`plan_scaleup_cells.py`, 23 TDD),
+and a continue-on-failure loop with a pooled cross-scene verdict. A cell = (scene, category); the
+anomaly source is co-located with the category's goal, so the RIR grid + retrieval target are
+**category-keyed** (`race-audiogoal.sh` gained additive `--cell-tag`/`--src-content-dir`,
+byte-identical when unset). Cells run `--task audiogoal` (onset-trigger framing — the CLAP class
+is decorative for retrieval, round-robined for trigger diversity; the recall is *visual*, as in
+M3). **Consume OFF** (the comparable baseline; the `--consume` arm is separate). n_warm=3, settings
+S1=mem-off / S3=full. Reviewed pre-run by 2 workflows (5-reader pipeline map + 14-agent adversarial:
+legacy byte-identity and collision/pairing lenses fully clean).
+
+**Headline (consume-OFF baseline, `runs/scaleup-*`, 50h59m, 95/97 cells).**
+
+> **WARM soft-SPL S3−S1 = +0.2505, n=285 pairs, 90% CI [+0.2173, +0.2838], one-sided p<0.001.**
+> **WARM binary SPL S3−S1 = +0.0854, 90% CI [+0.0609, +0.1106], p<0.001** (first well-powered binary win).
+> **COLD control S3−S1 = +0.0000 exactly** (n=95). Warm memory fire-rate 228/285 = 0.800. Gate A = (a) GREEN.
+
+This **supersedes all priors** by scale and scope — the first measurement to decouple scene-variation
+from category-variation; **both generalize independently**. 2 cells failed (rc=1:
+`cvZr5TUy5C5-toilet`, `mL8ThkuaVTM-chair` — off-navmesh source / render hiccup; resumable).
+
+**Generalization is broad, not a few-scene artifact.** 76/95 cells win (Δ>+0.02), 5 flat, 14 regress;
+**20/20 scenes net-positive** (scene-mean Δ +0.055 to +0.534). Per-cell warm means were reconstructed
+exactly as `digest_mean × 4/3` (cold soft-SPL is uniformly 0); the 95-cell mean reproduces the pooled
++0.2505 to 4 dp.
+
+**By category (all positive) — the LTM's conditional value:**
+
+| category | n cells | warm Δ (S3−S1) | mean S3 mem_chosen |
+|---|---|---|---|
+| toilet | 18 | **+0.399** | 140 |
+| sofa | 19 | +0.329 | 106 |
+| bed | 20 | +0.245 | 159 |
+| plant | 5 | +0.206 | 75 |
+| chair | 19 | +0.153 | 34 |
+| tv_monitor | 14 | +0.109 | 41 |
+
+The gradient tracks instance-distinctiveness: memory helps most for large/distinctive goals
+(toilet/sofa), least for tv_monitor (small, often conflated with "room interior"). This is the
+SBERT instance ceiling surfacing *as a gradient*, not a control problem.
+
+**Robust to leave-one-out (settles the headline's only open question).**
+
+| drop | pooled Δ |  | drop | pooled Δ |
+|---|---|---|---|---|
+| toilet (best) | +0.216 |  | chair | +0.275 |
+| sofa | +0.231 |  | tv_monitor (worst) | +0.275 |
+| bed | +0.252 |  | plant | +0.253 |
+| worst scene (bxsVRursffK +0.055) | +0.257 |  | — | — |
+
+Worst case (drop toilet) is **+0.216**, comfortably positive. The pooled headline is **not** fragile
+to category or scene removal; the only residual is per-cell n=3 (individual cells swing, the pooled
+estimate does not).
+
+**Two regression modes — and the key insight: high `mem_chosen` ≠ over-fire.** The 14 regressors
+split: (A) **over-fire wrong-instance attractor** (high mem, Δ<0 — 7 cells, e.g. `qyAac-sofa` mem547
+Δ−0.116, `p53-bed` mem322 Δ−0.113, `DYeh-toilet` mem158 Δ−0.102 — the `--consume` targets); (B)
+**inert-noise** (mem=0, mostly tv_monitor — memory never fired, S3≈S1 ± n=3 variance; `--consume`
+cannot touch these). Crucially, high mem does **not** imply over-fire: 17 cells are high-mem AND
+strongly positive (`p53-toilet` mem208 Δ**+0.624**, `4ok-tv_monitor` mem293 Δ+0.245, `qyAac-toilet`
+mem601 Δ+0.179), where the repeated picks are *useful* navigation. So high-mem(≥200) cells average
++0.101 vs +0.288 for low-mem, but the split is over-fire vs useful-reaching, not a clean threshold.
+
+**Consume A/B (`scaleupk-*`, running) — predicted small and sign-uncertain.** Only **7 clear targets**
+(high-mem AND negative/flat) vs **17 high-mem-positive wildcards** consume might shave if it mis-fires.
+Expected pooled shift ~0 to +0.01; the arm resolves whether the wildcards' mem is "useful reaching"
+(consume inert) or "lucky over-fire" (consume neutral-to-negative). Held-fixed on the
+(scene,category,visit_order) pairing, so it is a clean test either way.
+
+**Verdict.** The warm-revisit LTM thesis is reproduced at **full HM3D-val scale (20 scenes, n=285,
+p<0.001)** — the project's strongest and first genuinely **cross-scene** result, robust to
+leave-one-category/scene-out. This is the paper's central generalization claim.
+
+**Caveats (state precisely).** (1) **Within-HM3D-val cross-scene generalization, NOT
+cross-ENVIRONMENT transfer** — the injector is scene-gated by design (`memory_bridge.py:829`); a home
+sighting still cannot inject a waypoint in an away scene (crossenv-3, verified). (2)
+**Single-goal-per-episode** — proves "when recall is relevant, LTM helps," not multi-goal compounding
+(MultiON full4 was a clean null). (3) **n=3 warm/cell** — tight pooled CI but per-cell fragile. (4)
+**Binary at the 1.0 m ring** — the +0.0854 *refines* not retracts the 0.1 m localization-bound finding
+(cold seeds at the goal viewpoint; a memory waypoint is a viewing pose 0.5–1.5 m from the object);
+quote both rings. (5) **cold S3−S1 = 0.000** is a degenerate-but-valid control (no prior sighting →
+memory correctly inert), distinct from Run-17's cross-category cold +0.157 (lifelong transfer). (6)
+**2 failed cells** (95/97); re-running the same command fills them. (7) the **consume-OFF baseline** is
+the reported number; the consume arm is reported as the separate A/B.
+
+**File index.** `scripts/race-scaleup-matrix.sh` (orchestrator + `--consume` arm),
+`embodied_memory/scripts/plan_scaleup_cells.py` (+`test_`, 23 TDD), `scripts/race-audiogoal.sh`
+(`--cell-tag`/`--src-content-dir`, `-u` render). Driver commits: lifelong `bd29c85`+`2bbfb90` / main
+`95cbe4e`+`6d312a8`. Data: `runs/scaleup-*` (RACE).
