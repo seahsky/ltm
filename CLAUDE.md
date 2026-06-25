@@ -233,6 +233,30 @@ verified, the lifelong harness + counters + the single-goal anti-thrash fix, the
 workflows informed the arc (anomaly-research / step2-eval-design / smoke-triage / rootcause-regime /
 hurts-diagnosis).
 
+**Cross-scene scale-up — the warm-revisit thesis at FULL HM3D-val scale, the strongest + first
+genuinely cross-scene result (2026-06-25, see `PHASE2_ABLATION_REPORT.md` → "Cross-scene scale-up").**
+Every prior warm number was ≤2 scenes (Phase-C +0.24/n=12, wide +0.115/n=26, audio M3 +0.171/n=18).
+The new `race-scaleup-matrix.sh` driver (thin orchestrator over the tested `race-audiogoal.sh`: mesh
+download + per-scene category discovery via `plan_scaleup_cells.py` + continue-on-failure pooled
+verdict; cells category-keyed via additive `--cell-tag`/`--src-content-dir`; `--task audiogoal`,
+audio decorative, recall visual) ran the S1/S3 ablation across **all 20 HM3D val scenes × per-scene
+categories = 97 cells (95/97 completed; 2 off-navmesh failures resumable)**, consume-OFF baseline.
+**Pooled warm soft-SPL S3−S1 = +0.2505, n=285, 90% CI [+0.2173,+0.2838], p<0.001; first well-powered
+binary SPL win +0.0854 (1.0 m ring), p<0.001; cold control 0.000 exactly; 20/20 scenes net-positive,
+76/95 cells win.** SUPERSEDES all priors (first to decouple scene- from category-variation — both
+generalize). ROBUST: leave-one-category-out +0.216 (drop toilet) to +0.275; leave-worst-scene-out
++0.257 (only residual = per-cell n=3). Category gradient (all +, tracks instance-distinctiveness):
+toilet +0.40 > sofa +0.33 > bed +0.25 > plant +0.21 > chair +0.15 > tv_monitor +0.11. Two regression
+modes: (A) over-fire wrong-instance attractor (7 high-mem-negative cells, the `--consume` targets) vs
+(B) inert-noise (mem=0, mostly tv_monitor, n=3 variance). **Key insight: high `mem_chosen` ≠
+over-fire** — 17 cells are high-mem AND strongly positive (`p53-toilet` mem208 Δ+0.624), so the
+`--consume` A/B (running, `scaleupk-*`) is sign-uncertain (7 targets vs 17 wildcards → expect small).
+Verified by 2 pre-run review workflows + a 5-agent analysis (robustness/consume/framing + 2 adversarial
+verifies). Headline binary at 1.0 m **refines** not retracts the 0.1 m localization-bound finding.
+Still NOT cross-ENVIRONMENT transfer (scene-gated, `memory_bridge.py:829`) nor instance disambiguation
+(SBERT ceiling). Driver commits lifelong `bd29c85`+`2bbfb90` / main `95cbe4e`+`6d312a8`, pushed; data
+`runs/scaleup-*` (RACE).
+
 ## Audit caveats (2026-06-08)
 
 A read-only fact-check (the "diagnose-first" program; full version in
