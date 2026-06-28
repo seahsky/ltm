@@ -3331,8 +3331,13 @@ legacy byte-identity and collision/pairing lenses fully clean).
 > **COLD control S3−S1 = +0.0000 exactly** (n=95). Warm memory fire-rate 228/285 = 0.800. Gate A = (a) GREEN.
 
 This **supersedes all priors** by scale and scope — the first measurement to decouple scene-variation
-from category-variation; **both generalize independently**. 2 cells failed (rc=1:
-`cvZr5TUy5C5-toilet`, `mL8ThkuaVTM-chair` — off-navmesh source / render hiccup; resumable).
+from category-variation; **both generalize independently**. **95/97 cells (2 UNRENDERABLE, not a
+bug):** `cvZr5TUy5C5-toilet` and `mL8ThkuaVTM-chair` have their goal in a tiny isolated navmesh pocket
+(a loft/platform disconnected from the main floor). A source-relocation fallback was built+reviewed
+(`render_rir_grid.py`: snap an off-navmesh source onto the navmesh, then fall back to the nearest
+same-floor point on the MAIN navmesh) and confirmed these are a genuine data limit — even the best
+nearby navigable point reaches only 3–6 cells (< the 8 a usable binaural RIR grid needs), so no audio
+source near the goal can render. Accepted as 95/97; the headline is computed on the 95 and unaffected.
 
 **Generalization is broad, not a few-scene artifact.** 76/95 cells win (Δ>+0.02), 5 flat, 14 regress;
 **20/20 scenes net-positive** (scene-mean Δ +0.055 to +0.534). Per-cell warm means were reconstructed
@@ -3403,7 +3408,8 @@ repeated navigation without instance discrimination — the same SBERT ceiling. 
 verified-correct but net-neutral; the consume-OFF baseline +0.2505 stays the headline (comparable with
 the consume-structurally-off priors); consume's value is gated on instance disambiguation.** Pre-empts
 the "did you suppress the over-fire?" reviewer question with a clean held A/B. Both arms share the same
-2 failed cells (`cvZr-toilet`, `mL8-chair`); resumable.
+2 unrenderable cells (`cvZr-toilet`, `mL8-chair` — goal in a disconnected navmesh pocket; see the
+headline section), so both are 95/97.
 
 **Verdict.** The warm-revisit LTM thesis is reproduced at **full HM3D-val scale (20 scenes, n=285,
 p<0.001)** — the project's strongest and first genuinely **cross-scene** result, robust to
@@ -3418,8 +3424,9 @@ sighting still cannot inject a waypoint in an away scene (crossenv-3, verified).
 (cold seeds at the goal viewpoint; a memory waypoint is a viewing pose 0.5–1.5 m from the object);
 quote both rings. (5) **cold S3−S1 = 0.000** is a degenerate-but-valid control (no prior sighting →
 memory correctly inert), distinct from Run-17's cross-category cold +0.157 (lifelong transfer). (6)
-**2 failed cells** (95/97); re-running the same command fills them. (7) the **consume-OFF baseline** is
-the reported number; the consume arm is reported as the separate A/B.
+**95/97** — 2 cells are unrenderable (goal in a disconnected navmesh pocket, confirmed via the
+source-relocation fallback reaching only 3–6 cells), NOT a transient failure; the headline is on the 95.
+(7) the **consume-OFF baseline** is the reported number; the consume arm is reported as the separate A/B.
 
 **File index.** `scripts/race-scaleup-matrix.sh` (orchestrator + `--consume` arm),
 `embodied_memory/scripts/plan_scaleup_cells.py` (+`test_`, 23 TDD), `scripts/race-audiogoal.sh`
