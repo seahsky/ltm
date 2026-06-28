@@ -313,6 +313,114 @@ def case_recommend_requires_two_categories():
     print("  case recommend_requires_two_categories: OK")
 
 
+# ----------------------------------------------------------------------
+# Phase-0 captioner-swap gate
+# ----------------------------------------------------------------------
+def _rec(captioner, obj, cap, scene="s", category="chair"):
+    return {"captioner": captioner, "scene": scene, "category": category,
+            "object_id": obj, "caption": cap}
+
+
+def case_captions_to_corpus_groups_by_scene_cat_and_instance():
+    records = [
+        _rec("qwen", 1, "a"), _rec("qwen", 1, "b"), _rec("qwen", 2, "c"),
+        _rec("caprl", 1, "d"),            # different captioner -> excluded
+        _rec("qwen", 1, "   "),           # blank -> dropped
+        _rec("qwen", 1, "e", scene="s2"),  # different scene -> different key
+    ]
+    corp = ds.captions_to_instance_corpus(records, "qwen")
+    assert set(corp) == {"s/chair", "s2/chair"}, corp
+    # s/chair has 2 instances: obj1=[a,b], obj2=[c]; obj order = insertion
+    assert sorted(sorted(g) for g in corp["s/chair"]) == [["a", "b"], ["c"]], corp
+    assert corp["s2/chair"] == [["e"]]
+    print("  case captions_to_corpus_groups_by_scene_cat_and_instance: OK")
+
+
+def case_gate_GO_when_candidate_separates_instances():
+    # qwen: every caption -> same vector -> within==between -> sep 0.
+    # caprl: instance1 -> A, instance2 -> B (orthogonal) -> within 1, between 0 -> sep 1.
+    enc = _fake_encode({
+        "qa1": (1, 0, 0), "qa2": (1, 0, 0), "qb1": (1, 0, 0), "qb2": (1, 0, 0),
+        "ca1": (1, 0, 0), "ca2": (1, 0, 0), "cb1": (0, 1, 0), "cb2": (0, 1, 0),
+    })
+    records = [
+        _rec("qwen", 1, "qa1"), _rec("qwen", 1, "qa2"),
+        _rec("qwen", 2, "qb1"), _rec("qwen", 2, "qb2"),
+        _rec("caprl", 1, "ca1"), _rec("caprl", 1, "ca2"),
+        _rec("caprl", 2, "cb1"), _rec("caprl", 2, "cb2"),
+    ]
+    res = ds.compare_captioners(records, enc, baseline="qwen", candidate="caprl", margin=0.02)
+    assert res["caprl"]["separation"] > 0.9, res
+    assert abs(res["qwen"]["separation"]) < 0.05, res
+    assert res["delta_separation"] > 0.9
+    assert res["gate_pass"] is True and res["result"] == "GO", res
+    assert res["verdict"].startswith("GO"), res["verdict"]
+    print("  case gate_GO_when_candidate_separates_instances: OK")
+
+
+def case_gate_INSUFFICIENT_when_candidate_corpus_empty():
+    # candidate has NO records (e.g. a stub-loaded captioner emitted nothing) ->
+    # its separation is NaN -> result INSUFFICIENT, NOT a misleading HOLD.
+    enc = _fake_encode({"qa1": (1, 0, 0), "qa2": (0, 1, 0), "qb1": (1, 0, 0), "qb2": (0, 1, 0)})
+    records = [  # baseline only
+        _rec("qwen", 1, "qa1"), _rec("qwen", 1, "qa2"),
+        _rec("qwen", 2, "qb1"), _rec("qwen", 2, "qb2"),
+    ]
+    res = ds.compare_captioners(records, enc, baseline="qwen", candidate="caprl", margin=0.02)
+    assert res["result"] == "INSUFFICIENT", res
+    assert res["gate_pass"] is False
+    assert res["verdict"].startswith("INSUFFICIENT"), res["verdict"]
+    print("  case gate_INSUFFICIENT_when_candidate_corpus_empty: OK")
+
+
+def case_corpus_skips_malformed_records_no_keyerror():
+    # records missing object_id must be SKIPPED, not raise KeyError.
+    records = [
+        _rec("qwen", 1, "a"), _rec("qwen", 1, "b"), _rec("qwen", 2, "c"),
+        {"captioner": "qwen", "scene": "s", "category": "chair", "caption": "no objid"},  # malformed
+        {"captioner": "qwen", "caption": "no scene/cat/obj"},                              # malformed
+    ]
+    corp = ds.captions_to_instance_corpus(records, "qwen")  # must not raise
+    assert sorted(sorted(g) for g in corp["s/chair"]) == [["a", "b"], ["c"]], corp
+    print("  case corpus_skips_malformed_records_no_keyerror: OK")
+
+
+def case_compare_report_prints_machine_marker():
+    import contextlib
+    import io
+    enc = _fake_encode({
+        "qa1": (1, 0, 0), "qa2": (1, 0, 0), "qb1": (1, 0, 0), "qb2": (1, 0, 0),
+        "ca1": (1, 0, 0), "ca2": (1, 0, 0), "cb1": (0, 1, 0), "cb2": (0, 1, 0),
+    })
+    records = [
+        _rec("qwen", 1, "qa1"), _rec("qwen", 1, "qa2"), _rec("qwen", 2, "qb1"), _rec("qwen", 2, "qb2"),
+        _rec("caprl", 1, "ca1"), _rec("caprl", 1, "ca2"), _rec("caprl", 2, "cb1"), _rec("caprl", 2, "cb2"),
+    ]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        res = ds.compare_captioners_report(records, enc, baseline="qwen", candidate="caprl", margin=0.02)
+    out = buf.getvalue()
+    assert "GATE_RESULT=GO" in out, out
+    assert res["result"] == "GO"
+    print("  case compare_report_prints_machine_marker: OK")
+
+
+def case_gate_HOLD_when_candidate_no_better():
+    # both captioners collapse all captions to one vector -> both sep 0 -> HOLD.
+    enc = _fake_encode({k: (1, 0, 0) for k in
+                        ["x1", "x2", "x3", "x4", "y1", "y2", "y3", "y4"]})
+    records = [
+        _rec("qwen", 1, "x1"), _rec("qwen", 1, "x2"),
+        _rec("qwen", 2, "x3"), _rec("qwen", 2, "x4"),
+        _rec("caprl", 1, "y1"), _rec("caprl", 1, "y2"),
+        _rec("caprl", 2, "y3"), _rec("caprl", 2, "y4"),
+    ]
+    res = ds.compare_captioners(records, enc, baseline="qwen", candidate="caprl", margin=0.02)
+    assert res["gate_pass"] is False, res
+    assert res["verdict"].startswith("HOLD"), res["verdict"]
+    print("  case gate_HOLD_when_candidate_no_better: OK")
+
+
 def main() -> int:
     print("instance-separability diagnostic sanity tests")
     case_pairwise_within_and_between()
@@ -334,6 +442,12 @@ def main() -> int:
     case_recommend_picks_caption_winner()
     case_recommend_honest_negative_when_no_separation()
     case_recommend_requires_two_categories()
+    case_captions_to_corpus_groups_by_scene_cat_and_instance()
+    case_gate_GO_when_candidate_separates_instances()
+    case_gate_INSUFFICIENT_when_candidate_corpus_empty()
+    case_corpus_skips_malformed_records_no_keyerror()
+    case_compare_report_prints_machine_marker()
+    case_gate_HOLD_when_candidate_no_better()
     print("All cases passed.")
     return 0
 
