@@ -249,10 +249,18 @@ generalize). ROBUST: leave-one-category-out +0.216 (drop toilet) to +0.275; leav
 toilet +0.40 > sofa +0.33 > bed +0.25 > plant +0.21 > chair +0.15 > tv_monitor +0.11. Two regression
 modes: (A) over-fire wrong-instance attractor (7 high-mem-negative cells, the `--consume` targets) vs
 (B) inert-noise (mem=0, mostly tv_monitor, n=3 variance). **Key insight: high `mem_chosen` ≠
-over-fire** — 17 cells are high-mem AND strongly positive (`p53-toilet` mem208 Δ+0.624), so the
-`--consume` A/B (running, `scaleupk-*`) is sign-uncertain (7 targets vs 17 wildcards → expect small).
-Verified by 2 pre-run review workflows + a 5-agent analysis (robustness/consume/framing + 2 adversarial
-verifies). Headline binary at 1.0 m **refines** not retracts the 0.1 m localization-bound finding.
+over-fire** — 17 cells are high-mem AND strongly positive (`p53-toilet` mem208 Δ+0.624). **Consume A/B
+CLOSED as a clean honest WASH (`scaleupk-*`, 2026-06-28, predicted correctly):** consume-ON warm
+S3−S1 +0.2592 (vs OFF +0.2505) but the proper paired S3-vs-S3 effect is **+0.0023, BELOW the
+−0.0064 S1 noise floor** (S1 is memory-OFF so consume can't touch it → pure run-to-run LLM noise;
+code-verified `disable_ltm` path). Mechanism fired (crushed mem 601→226 etc. on 18/24 high-mem cells)
+but help/harm cancel: over-fire targets +0.025 vs useful-repeat wildcards −0.007 (sharpest harm
+`p53-toilet` mem208→30 soft-SPL 0.669→0.353). **Target-specific harm-reduction that nets to neutral —
+can't tell thrashing from useful repetition without instance discrimination. Default stays OFF;
++0.2505 is the headline.** Cross-run A/B caveat (two stochastic runs, the noise floor handles it).
+Verified by 2 pre-run review workflows + a 5-agent analysis + a 2-agent consume-wash verify (noise-floor
+arg SOUND, keep-OFF PARTIAL→refined). Headline binary at 1.0 m **refines** not retracts the 0.1 m
+localization-bound finding.
 Still NOT cross-ENVIRONMENT transfer (scene-gated, `memory_bridge.py:829`) nor instance disambiguation
 (SBERT ceiling). Driver commits lifelong `bd29c85`+`2bbfb90` / main `95cbe4e`+`6d312a8`, pushed; data
 `runs/scaleup-*` (RACE).
