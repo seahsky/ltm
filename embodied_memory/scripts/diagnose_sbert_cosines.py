@@ -43,6 +43,7 @@ the query discards it (fix the query first); both > 0 ⇒ no instance bottleneck
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Callable, Dict, List, Optional
 
@@ -641,8 +642,163 @@ def instance_report(encode: Callable[[str], np.ndarray]) -> Dict[str, Any]:
     return {"separability": sep, "rank_gap": gaps, "c2c_rank_gap": c2c, "verdict": verdict}
 
 
-def main() -> int:
+# ----------------------------------------------------------------------
+# Phase 0 — captioner-swap GATE. Does a CANDIDATE captioner (e.g. CapRL-3B)
+# widen the within-vs-between instance separation vs the CURRENT one
+# (Qwen2-VL-2B)? Consumes a captions-by-instance file built offline by
+# build_instance_caption_corpus.py (real HM3D keyframes captioned by BOTH
+# models) and reuses instance_separability / caption_to_caption_rank_gap per
+# captioner. This is the $0 gate that decides whether the swap is worth a GPU
+# matrix run — if CapRL does NOT widen the gap, the ceiling is the embedding/
+# query, not the caption, and we pivot to a retriever fix instead of swapping.
+# ----------------------------------------------------------------------
+def load_caption_records(path: str) -> List[Dict[str, Any]]:
+    """Load the captions-by-instance file: a list of records, or {"records": [...]}.
+
+    Each record: {captioner, scene, category, object_id, caption[, viewpoint_idx]}.
+    """
+    with open(path) as f:
+        data = json.load(f)
+    return data["records"] if isinstance(data, dict) and "records" in data else data
+
+
+def captions_to_instance_corpus(records, captioner) -> Dict[str, List[List[str]]]:
+    """Reshape flat caption records into the {cat_key: [[inst captions], ...]}
+    instance corpus for ONE captioner.
+
+    ``cat_key = "<scene>/<category>"`` so between-instance pairs stay WITHIN one
+    scene+category (different chairs in the same room, never across scenes), and
+    instances are grouped by ``object_id``. Blank captions are dropped.
+    """
+    by_key: Dict[str, Dict[Any, List[str]]] = {}
+    skipped = 0
+    for r in records:
+        if r.get("captioner") != captioner:
+            continue
+        if any(r.get(k) is None for k in ("scene", "category", "object_id")):
+            skipped += 1  # malformed record — skip rather than KeyError
+            continue
+        cap = (r.get("caption") or "").strip()
+        if not cap:
+            continue
+        key = f"{r['scene']}/{r['category']}"
+        by_key.setdefault(key, {}).setdefault(r["object_id"], []).append(cap)
+    if skipped:
+        print(f"  [warn] {captioner}: skipped {skipped} record(s) missing scene/category/object_id")
+    return {key: list(insts.values()) for key, insts in by_key.items()}
+
+
+def _caption_gate_verdict(result, candidate, baseline, d_sep, d_gap, margin, stats) -> str:
+    if result == "INSUFFICIENT":
+        return (f"INSUFFICIENT DATA: {baseline} has {stats[baseline]['n_cells']} and {candidate} "
+                f"{stats[candidate]['n_cells']} scene/category cell(s) with measurable within+between "
+                f"pairs (Δsep={d_sep:+.3f}). The corpus is too thin OR a captioner emitted no captions "
+                f"(model load/stub failure?) — the gate is MEANINGLESS; fix the corpus before deciding.")
+    if result == "HOLD":
+        return (f"HOLD: {candidate} does NOT widen instance separation over {baseline} "
+                f"(Δsep={d_sep:+.3f} <= +{margin:.2f}). The ceiling is the EMBEDDING/QUERY, not the "
+                f"caption — do NOT spend a GPU matrix on the swap; pivot to an instance-aware / "
+                f"asymmetric retriever (the read-side query fix) instead.")
+    if d_gap > margin:
+        return (f"GO: {candidate} widens instance separation by {d_sep:+.3f} (> +{margin:.2f}) AND the "
+                f"caption-to-caption rank gap by {d_gap:+.3f}. The richer captions carry more instance "
+                f"signal that survives retrieval — worth the Phase-1 fit-smoke + held A/B.")
+    return (f"GO (write-side only): {candidate} widens instance separation by {d_sep:+.3f} (> +{margin:.2f}) "
+            f"but the caption-to-caption rank gap barely moves (Δ={d_gap:+.3f}). The captioner helps the "
+            f"WRITE side; PAIR it with the read-side query fix — run the A/B but expect query construction "
+            f"to be the second half of the gain.")
+
+
+def compare_captioners(records, encode, *, baseline: str, candidate: str,
+                       margin: float = 0.02) -> Dict[str, Any]:
+    """Per-captioner instance separation + a GATE verdict on the candidate.
+
+    For each captioner: ``separation = within-instance − between-instance(same
+    scene+category)`` cosine, plus the caption-to-caption rank gap (the realistic
+    warm-revisit retrieval signal). GATE = the candidate widens the separation by
+    > ``margin`` (its captions carry MORE instance signal, so the swap is
+    justified). The rank-gap delta is also reported: separation up but rank gap
+    flat ⇒ the captioner helps the write side but a read-side query fix is still
+    needed.
+    """
+    enc = _encode_cached(encode)
+    out: Dict[str, Any] = {}
+    for cap in (baseline, candidate):
+        corpus = captions_to_instance_corpus(records, cap)
+        sep = instance_separability(corpus, enc)
+        c2c = caption_to_caption_rank_gap(corpus, enc)
+        out[cap] = {
+            "n_cells": len(corpus),
+            "within_mean": sep["within_mean"],
+            "between_mean": sep["between_mean"],
+            "separation": sep["separation"],
+            "c2c_rank_gap": c2c["mean_rank_gap"],
+            "per_category": sep["per_category"],
+        }
+    bs, cs = out[baseline]["separation"], out[candidate]["separation"]
+    d_sep = cs - bs
+    d_gap = out[candidate]["c2c_rank_gap"] - out[baseline]["c2c_rank_gap"]
+    # INSUFFICIENT when a captioner has no measurable within+between pairs (empty
+    # corpus / all-singleton / a stub-loaded captioner that emitted nothing) -> the
+    # separation is NaN and a bare `NaN > margin` would masquerade as a HOLD.
+    if (bs != bs) or (cs != cs):  # NaN check
+        result = "INSUFFICIENT"
+    elif d_sep > margin:
+        result = "GO"
+    else:
+        result = "HOLD"
+    out["delta_separation"] = d_sep
+    out["delta_c2c_rank_gap"] = d_gap
+    out["result"] = result
+    out["gate_pass"] = (result == "GO")
+    out["verdict"] = _caption_gate_verdict(result, candidate, baseline, d_sep, d_gap, margin, out)
+    return out
+
+
+def compare_captioners_report(records, encode, *, baseline, candidate, margin) -> Dict[str, Any]:
+    """Print the captioner-swap gate table + verdict; return the raw stats."""
+    res = compare_captioners(records, encode, baseline=baseline, candidate=candidate, margin=margin)
+    b, c = res[baseline], res[candidate]
+    print(f"CAPTIONER-SWAP GATE (Phase 0): {candidate} vs {baseline}  [all-MiniLM-L6-v2]")
+    print("  within-instance = two captions of the SAME object; "
+          "between = DIFFERENT objects of the same scene+category.\n")
+    keys = sorted(set(b["per_category"]) | set(c["per_category"]))
+    print(f"  {'scene/category':<28} {(baseline+'_sep'):>14} {(candidate+'_sep'):>14} {'Δsep':>8}")
+    for k in keys:
+        bsep = b["per_category"].get(k, {}).get("separation", float("nan"))
+        csep = c["per_category"].get(k, {}).get("separation", float("nan"))
+        dd = (csep - bsep) if (bsep == bsep and csep == csep) else float("nan")
+        print(f"  {k:<28} {bsep:>+14.3f} {csep:>+14.3f} {dd:>+8.3f}")
+    print(f"\n  POOLED separation:           {baseline}={b['separation']:+.3f}  "
+          f"{candidate}={c['separation']:+.3f}  Δ={res['delta_separation']:+.3f}")
+    print(f"  caption-to-caption rank gap: {baseline}={b['c2c_rank_gap']:.3f}  "
+          f"{candidate}={c['c2c_rank_gap']:.3f}  Δ={res['delta_c2c_rank_gap']:+.3f}")
+    print(f"\n  GATE: {res['verdict']}\n")
+    # machine-readable marker on its own line — the driver greps this, NOT the prose.
+    print(f"GATE_RESULT={res['result']}")
+    return res
+
+
+def main(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="SBERT instance-separation diagnostics + the Phase-0 captioner-swap gate")
+    ap.add_argument("--compare-captions", metavar="JSON", default=None,
+                    help="captions-by-instance file (from build_instance_caption_corpus.py); "
+                         "runs ONLY the captioner-swap gate and exits")
+    ap.add_argument("--baseline", default="qwen2-vl-2b", help="current captioner label in the file")
+    ap.add_argument("--candidate", default="caprl-3b", help="candidate captioner label in the file")
+    ap.add_argument("--margin", type=float, default=0.02, help="min Δseparation for GATE=GO")
+    args = ap.parse_args(argv)
+
     encode = _build_encoder()
+
+    if args.compare_captions:
+        records = load_caption_records(args.compare_captions)
+        compare_captioners_report(records, encode, baseline=args.baseline,
+                                  candidate=args.candidate, margin=args.margin)
+        return 0
+
     cap_vecs = [encode(c) for c in CAPTIONS]
 
     # Per template: collect match / non-match cosines across all goals.
