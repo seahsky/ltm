@@ -3376,11 +3376,34 @@ strongly positive (`p53-toilet` mem208 Δ**+0.624**, `4ok-tv_monitor` mem293 Δ+
 mem601 Δ+0.179), where the repeated picks are *useful* navigation. So high-mem(≥200) cells average
 +0.101 vs +0.288 for low-mem, but the split is over-fire vs useful-reaching, not a clean threshold.
 
-**Consume A/B (`scaleupk-*`, running) — predicted small and sign-uncertain.** Only **7 clear targets**
-(high-mem AND negative/flat) vs **17 high-mem-positive wildcards** consume might shave if it mis-fires.
-Expected pooled shift ~0 to +0.01; the arm resolves whether the wildcards' mem is "useful reaching"
-(consume inert) or "lucky over-fire" (consume neutral-to-negative). Held-fixed on the
-(scene,category,visit_order) pairing, so it is a clean test either way.
+**Consume A/B (`scaleupk-*`, RACE 2026-06-28, consume-ON arm) — a clean honest WASH, predicted
+correctly.** Re-ran the full 95-cell matrix with `--consume` (`REMEMBR_CONSUME_SINGLEGOAL=1`,
+audiogoal-live). Both arms reproduce the thesis: consume-ON warm S3−S1 = **+0.2592** [+0.226,+0.293]
+(vs OFF +0.2505); binary +0.0904 vs +0.0854. **But the proper comparison is the paired S3-vs-S3
+effect, and it is a noise-floor wash: +0.0023 per cell (sd 0.075, SE ≈ 0.008, t ≈ 0.3 — not
+distinguishable from 0).** The decisive control: consume only gates *memory-candidate* consumption,
+and S1 is memory-OFF (`disable_ltm=True` → `propose_memory_candidates` returns [] → the consume code
+path is structurally unreachable; code-verified at `episode_runner.py:358-369` / `memory_bridge.py:1040`),
+so the **S1 arm-to-arm difference is a pure run-to-run noise floor** (the backbone LLM is stochastic):
+measured **−0.0064 (sd 0.069)**, *larger* in magnitude than the consume S3 effect. (The within-arm
+"+0.0087 gain" off→on is an artifact — the consume arm's S1 happened to sample ~0.006 lower.) Caveat:
+this is a **cross-run** A/B (two independent stochastic 95-cell runs, NOT a held-fixed within-episode
+arm — the LLM is non-deterministic); the S1 floor is what makes the +0.0023 interpretable.
+
+**Mechanism verified; help and harm cancel by construction.** Consume FIRED on 18/24
+baseline-high-mem(≥150) cells, crushing `mem_chosen` exactly as designed (601→226, 596→14, 547→16,
+387→9, 322→22, 232→8, 217→12, 211→24, 208→30, 160→12, 158→3; the 6 non-firing cells have
+byte-identical mem = trajectories that never reached the attractor waypoint). But the soft-SPL effect
+splits by group: **over-fire targets (n=7, baseline Δ≤+0.02): S3 B−A = +0.025** (consume helps genuine
+attractors — `mL8-bed` +0.129, `4ok-sofa` +0.123, `mL8-sofa` +0.101) vs **high-mem wildcards (n=17,
+baseline Δ>+0.02): −0.007** (consume shaves *useful* repeated picks — sharpest `p53-toilet`: mem
+208→30 but soft-SPL **+0.669→+0.353, −0.32**). So consume is **target-specific harm-reduction that
+nets to neutral**: it correctly collapses thrashing, but cannot tell a thrashing attractor from useful
+repeated navigation without instance discrimination — the same SBERT ceiling. **Verdict: consume is
+verified-correct but net-neutral; the consume-OFF baseline +0.2505 stays the headline (comparable with
+the consume-structurally-off priors); consume's value is gated on instance disambiguation.** Pre-empts
+the "did you suppress the over-fire?" reviewer question with a clean held A/B. Both arms share the same
+2 failed cells (`cvZr-toilet`, `mL8-chair`); resumable.
 
 **Verdict.** The warm-revisit LTM thesis is reproduced at **full HM3D-val scale (20 scenes, n=285,
 p<0.001)** — the project's strongest and first genuinely **cross-scene** result, robust to
