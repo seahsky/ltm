@@ -119,6 +119,21 @@ def case_load_audio_without_faiss():
     print("  case load_audio_without_faiss: OK")
 
 
+def case_nearest_same_floor_rejects_xz_close_wrong_floor():
+    # Realistic HM3D 2-floor gap (~2 m): the wrong-floor point B is xz-CLOSER and even
+    # 3D-closer than the same-floor point A, but the y-band must reject it and pick A.
+    target = np.array([0.0, 1.5, 0.0], dtype=np.float32)
+    A = np.array([2.0, 1.5, 2.0], dtype=np.float32)   # same floor, 3D dist 2.83 m
+    B = np.array([1.0, 3.5, 1.0], dtype=np.float32)   # floor +2 m, 3D dist 2.45 m (xz-closer)
+    assert rrg._nearest_same_floor([A, B], target) == 0, "y-band must reject the wrong-floor B"
+    # within-band, picks the genuinely nearest
+    near = np.array([0.2, 1.6, 0.1], dtype=np.float32)
+    assert rrg._nearest_same_floor([A, near], target) == 1
+    # band empty -> falls back to the global nearest (here the only point)
+    assert rrg._nearest_same_floor([B], target) == 0
+    print("  case nearest_same_floor_rejects_xz_close_wrong_floor: OK")
+
+
 def main() -> int:
     cases = [
         case_filters_out_of_range_and_unreachable,
@@ -127,6 +142,7 @@ def main() -> int:
         case_caps_at_max_cells,
         case_returns_empty_when_none_in_range,
         case_load_audio_without_faiss,
+        case_nearest_same_floor_rejects_xz_close_wrong_floor,
     ]
     print(f"running {len(cases)} select_cells cases…")
     for c in cases:

@@ -109,6 +109,33 @@ def _load_audio():
     return mod
 
 
+def _nearest_same_floor(points, target, y_tol: float = 1.0) -> int:
+    """Index of the point in ``points`` nearest ``target``, PREFERRING the same floor.
+
+    Pure helper (unit-tested): used to relocate a fixed source that snapped into a
+    tiny disconnected navmesh island onto the nearest point of the MAIN navmesh
+    (area-weighted random draws), keeping it near the goal but well-connected.
+
+    Restrict first to points within ``y_tol`` of ``target.y`` — the navmesh hugs the
+    floor, so a same-floor point's y matches the goal viewpoint's floor level while a
+    different-floor point differs by ~1.5–2 m — then pick the 3D-nearest among them.
+    Falling straight to a global 3D-nearest would let an xz-close WRONG-floor point
+    win; the y-band guards that. Falls back to the global nearest only if the band is
+    empty (no same-floor draw, which shouldn't happen for a real goal floor).
+    """
+    t = np.asarray(target, dtype=np.float64)
+    in_band = [i for i, p in enumerate(points)
+               if abs(float(np.asarray(p)[1]) - t[1]) <= y_tol]
+    cand = in_band if in_band else list(range(len(points)))
+    best_i, best_d = cand[0], float("inf")
+    for i in cand:
+        p = np.asarray(points[i], dtype=np.float64)
+        d = float((p[0] - t[0]) ** 2 + (p[1] - t[1]) ** 2 + (p[2] - t[2]) ** 2)
+        if d < best_d:
+            best_i, best_d = i, d
+    return best_i
+
+
 def _geodesic(pathfinder, a, b, habitat_sim) -> float:
     sp = habitat_sim.ShortestPath()
     sp.requested_start = a
@@ -185,27 +212,7 @@ def main() -> int:
 
     pf = sim.pathfinder
 
-    # A FIXED source (from the build manifest) is offset +0.5 m in +x off the goal
-    # viewpoint WITHOUT a navmesh check (pick_source_position), so for some cells it
-    # lands off-navmesh -> every geodesic is inf -> 0 reachable cells -> a hard FATAL
-    # (the loop below runs only ONCE for a fixed source, no retry). Snap it onto the
-    # navmesh first: snap_point is a no-op (<1 mm) when the source is already navigable
-    # (so working cells render byte-identically) and only relocates a genuinely
-    # off-navmesh source to the nearest navigable point. Guard the all-NaN snap (no
-    # navmesh anywhere near the source) by leaving it for the loud RED below.
-    if args.source is not None:
-        snapped = np.asarray(pf.snap_point(args.source), dtype=np.float32)
-        if np.all(np.isfinite(snapped)):
-            moved = float(np.linalg.norm((snapped - args.source)[[0, 2]]))
-            if moved > 1e-3:
-                print(f"  source {np.round(args.source, 2).tolist()} off-navmesh -> "
-                      f"snapped {moved:.2f} m (xz) to {np.round(snapped, 2).tolist()}")
-            args.source = snapped
-        else:
-            print(f"  WARN: snap_point non-finite for source "
-                  f"{np.round(args.source, 2).tolist()} (no navmesh nearby) — using as-is")
-
-    # Source: fixed, or a random navigable point that has enough reachable cells.
+    # Source: fixed (from the build manifest) or a random navigable point.
     rng = np.random.default_rng(args.seed)
     ear = np.array([0.0, args.ear_height, 0.0], dtype=np.float32)
 
@@ -213,12 +220,48 @@ def main() -> int:
         return [np.asarray(pf.get_random_navigable_point(), dtype=np.float32)
                 for _ in range(k)]
 
+    # Build the ordered list of source positions to try. A FIXED manifest source is
+    # offset +0.5 m in +x off the goal viewpoint WITHOUT a navmesh check
+    # (pick_source_position), so for some cells it lands off-navmesh OR snaps onto a
+    # tiny disconnected navmesh island with too few reachable cells -> a hard FATAL.
+    # Try, in order: (1) the source snapped onto the navmesh — a <1 mm no-op when it
+    # is already navigable, so working cells render byte-identically; (2) a FALLBACK
+    # to the nearest point on the MAIN navmesh — random navigable sampling is
+    # area-weighted so it draws the big connected component, and its closest draw
+    # keeps the source near the goal but well-connected. Fail only if NEITHER reaches
+    # min_cells. (The relocated source is saved in the grid; the episode's manifest
+    # source_position is unchanged — a small offset that only affects offline DOA
+    # labels, not the audio-decorative recall thesis.)
+    if args.source is not None:
+        desired = np.asarray(args.source, dtype=np.float32)
+        snapped = np.asarray(pf.snap_point(desired), dtype=np.float32)
+        src_tries: List[np.ndarray] = []
+        if np.all(np.isfinite(snapped)):
+            moved = float(np.linalg.norm((snapped - desired)[[0, 2]]))
+            if moved > 1e-3:
+                print(f"  source {np.round(desired, 2).tolist()} off-navmesh -> "
+                      f"snapped {moved:.2f} m (xz) to {np.round(snapped, 2).tolist()}")
+            src_tries.append(snapped)
+        else:
+            print(f"  WARN: snap_point non-finite for source "
+                  f"{np.round(desired, 2).tolist()} (no navmesh nearby)")
+            src_tries.append(desired)
+        main_pool = _sample_candidates(2000)
+        src_tries.append(main_pool[_nearest_same_floor(main_pool, desired)])
+        src_labels = ["fixed/snapped", "nearest-main-navmesh"]
+    else:
+        src_tries, src_labels = None, None
+
     source_pt = None
     chosen_idx: List[int] = []
     candidates: List[np.ndarray] = []
-    for attempt in range(1 if args.source is not None else 8):
-        src = args.source if args.source is not None else \
-            np.asarray(pf.get_random_navigable_point(), dtype=np.float32)
+    n_attempts = len(src_tries) if src_tries is not None else 8
+    for attempt in range(n_attempts):
+        if src_tries is not None:
+            src, label = src_tries[attempt], src_labels[attempt]
+        else:
+            src = np.asarray(pf.get_random_navigable_point(), dtype=np.float32)
+            label = "random"
         candidates = _sample_candidates(args.candidates)
         geo = np.array([_geodesic(pf, src, c, habitat_sim) for c in candidates],
                        dtype=np.float64)
@@ -227,12 +270,18 @@ def main() -> int:
                            min_spacing_m=args.min_spacing)
         if len(idx) >= args.min_cells:
             source_pt, chosen_idx = src, idx
+            if src_tries is not None and attempt > 0:
+                print(f"  source RELOCATED to {label} {np.round(src, 2).tolist()} "
+                      f"({len(idx)} reachable cells) — the manifest source's navmesh "
+                      f"pocket was too small")
             break
-        print(f"  [attempt {attempt}] source={np.round(src, 2).tolist()} gave only "
-              f"{len(idx)} reachable cells (< {args.min_cells}); resampling source")
+        print(f"  [attempt {attempt}] source={np.round(src, 2).tolist()} ({label}) gave "
+              f"only {len(idx)} reachable cells (< {args.min_cells})")
     if source_pt is None:
+        _why = ("fixed source + nearest-main-navmesh fallback both failed"
+                if src_tries is not None else "8 random draws failed")
         print(f"RED: could not find a source with >= {args.min_cells} reachable "
-              f"cells in 8 draws (disconnected navmesh / bad bounds?)")
+              f"cells ({_why} — disconnected navmesh / bad bounds?)")
         sim.close()
         return 1
 
