@@ -185,6 +185,26 @@ def main() -> int:
 
     pf = sim.pathfinder
 
+    # A FIXED source (from the build manifest) is offset +0.5 m in +x off the goal
+    # viewpoint WITHOUT a navmesh check (pick_source_position), so for some cells it
+    # lands off-navmesh -> every geodesic is inf -> 0 reachable cells -> a hard FATAL
+    # (the loop below runs only ONCE for a fixed source, no retry). Snap it onto the
+    # navmesh first: snap_point is a no-op (<1 mm) when the source is already navigable
+    # (so working cells render byte-identically) and only relocates a genuinely
+    # off-navmesh source to the nearest navigable point. Guard the all-NaN snap (no
+    # navmesh anywhere near the source) by leaving it for the loud RED below.
+    if args.source is not None:
+        snapped = np.asarray(pf.snap_point(args.source), dtype=np.float32)
+        if np.all(np.isfinite(snapped)):
+            moved = float(np.linalg.norm((snapped - args.source)[[0, 2]]))
+            if moved > 1e-3:
+                print(f"  source {np.round(args.source, 2).tolist()} off-navmesh -> "
+                      f"snapped {moved:.2f} m (xz) to {np.round(snapped, 2).tolist()}")
+            args.source = snapped
+        else:
+            print(f"  WARN: snap_point non-finite for source "
+                  f"{np.round(args.source, 2).tolist()} (no navmesh nearby) — using as-is")
+
     # Source: fixed, or a random navigable point that has enough reachable cells.
     rng = np.random.default_rng(args.seed)
     ear = np.array([0.0, args.ear_height, 0.0], dtype=np.float32)
