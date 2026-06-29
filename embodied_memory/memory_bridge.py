@@ -336,7 +336,7 @@ class FrontierPhysicsScorer(Scorer):
     # Guards the +0.2505 delta from a *code* crowd-out; the A/B verifies n_memory_chosen
     # stays >> 0 AND that frontiers still get chosen.
     _SEMANTIC_FRONTIER_CEILING = float(
-        os.environ.get("LTM_SEMANTIC_FRONTIER_CEILING", "0.70"))
+        os.environ.get("LTM_SEMANTIC_FRONTIER_CEILING", "0.75"))
 
     def score(self, candidate: str, candidate_embedding: np.ndarray, context: Dict[str, Any]) -> float:
         cand: Optional[FrontierCandidate] = context.get("frontier_candidate")

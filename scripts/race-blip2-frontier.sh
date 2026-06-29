@@ -53,7 +53,10 @@ cd "$REPO_ROOT" || { echo "FATAL: cannot cd to repo root"; exit 1; }
 
 # --- defaults ---
 WEIGHT="0.5"                                   # LTM_SEMANTIC_FRONTIER blend weight
-CEILING="0.45"                                 # LTM_SEMANTIC_FRONTIER_CEILING renorm
+CEILING="0.75"                                 # LTM_SEMANTIC_FRONTIER_CEILING (just below the
+                                               # 0.80 memory-match floor: a true recall still wins,
+                                               # but frontiers keep their value ordering — 0.45 was
+                                               # too low and flattened all frontiers to a tie in S1).
 VALUE_MODEL="Salesforce/blip2-itm-vit-g"       # BLIP-2 ITM checkpoint
 PROMPT="Seems like there is a {goal} ahead."   # VLFM value prompt
 AB_SCENES="wcojb4TFT35 TEEsavR23oF"
