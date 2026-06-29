@@ -172,12 +172,24 @@ def case_scorer_unflagged_planner_byte_identical():
     assert abs(_score(sc, cand) - 1.0) < 1e-6, _score(sc, cand)
 
 
-def case_scorer_flagged_semantic_scaled_to_ceiling():
+def case_scorer_flagged_semantic_clamped_to_ceiling():
     sc = _scorer()
     ceil = sc._SEMANTIC_FRONTIER_CEILING
+    # raw=1.0 -> unflagged score 1.0 (> ceiling) -> flagged CLAMPS to the ceiling.
     cand = _planner_cand(raw=1.0, bearing=0.0, dist=2.0, semantic=True)
-    # unflagged would be 1.0 -> flagged scales to ceiling * 1.0
-    assert abs(_score(sc, cand) - ceil * 1.0) < 1e-6, (_score(sc, cand), ceil)
+    assert abs(_score(sc, cand) - ceil) < 1e-6, (_score(sc, cand), ceil)
+
+
+def case_scorer_flagged_below_ceiling_unchanged():
+    # The clamp (not a scale) must LEAVE a frontier whose score is already below the
+    # ceiling UNCHANGED — this is what preserves the explore fallback (a scale would
+    # shrink it below the geometric baseline, which made the agent spin).
+    sc = _scorer()
+    weak = _planner_cand(raw=0.2, bearing=1.2, dist=2.0, semantic=False)
+    weak_flagged = _planner_cand(raw=0.2, bearing=1.2, dist=2.0, semantic=True)
+    base = _score(sc, weak)            # ~0.485, below the 0.70 ceiling
+    assert base < sc._SEMANTIC_FRONTIER_CEILING, base
+    assert abs(_score(sc, weak_flagged) - base) < 1e-6, (_score(sc, weak_flagged), base)
 
 
 def case_semantic_frontier_loses_to_memory_match_beats_nonmatch():
@@ -207,7 +219,8 @@ def main():
     case_propose_byte_identical_when_off()
     case_propose_blends_and_flags_when_on()
     case_scorer_unflagged_planner_byte_identical()
-    case_scorer_flagged_semantic_scaled_to_ceiling()
+    case_scorer_flagged_semantic_clamped_to_ceiling()
+    case_scorer_flagged_below_ceiling_unchanged()
     case_semantic_frontier_loses_to_memory_match_beats_nonmatch()
     case_scorer_ceiling_is_order_preserving()
     print("All cases passed.")

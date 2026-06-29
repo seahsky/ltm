@@ -262,7 +262,7 @@ banner "[6/7] A/B arm A: value OFF (geometric baseline) — S1/S3 on [$AB_SCENES
 # Arm A: geometric baseline (LTM_SEMANTIC_FRONTIER=0 -> weight 0.0, byte-identical).
 # shellcheck disable=SC2086
 LTM_SEMANTIC_FRONTIER=0 LTM_SEMANTIC_FRONTIER_BACKEND=clip \
-  bash scripts/race-revisit.sh --backbone remembr \
+  bash scripts/race-revisit.sh \
     --settings "1 3" --scenes "$AB_SCENES" --categories "$AB_CATS" \
     --n-warm "$NWARM" --tag "${TAG}-base" 2>&1 | tee "${OUT_DIR}/ab_base.log"
 arc=${PIPESTATUS[0]}
@@ -276,7 +276,7 @@ banner "[6/7] A/B arm B: value ON (BLIP-2 ITM, weight=$WEIGHT) — S1/S3"
 env $VALUE_CPU_ENV \
   LTM_SEMANTIC_FRONTIER="$WEIGHT" LTM_SEMANTIC_FRONTIER_BACKEND=blip2 \
   LTM_VALUE_MODEL="$VALUE_MODEL" LTM_SEMANTIC_FRONTIER_PROMPT="$PROMPT" \
-  bash scripts/race-revisit.sh --backbone remembr \
+  bash scripts/race-revisit.sh \
     --settings "1 3" --scenes "$AB_SCENES" --categories "$AB_CATS" \
     --n-warm "$NWARM" --tag "${TAG}-on" 2>&1 | tee "${OUT_DIR}/ab_on.log"
 brc=${PIPESTATUS[0]}
