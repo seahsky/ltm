@@ -221,7 +221,25 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--semantic-frontier-weight", type=float,
         default=float(os.environ.get("LTM_SEMANTIC_FRONTIER", "0.0")),
-        help="0=off (geometric frontiers); 0<w<=1 blends a CLIP goal-value map.")
+        help="0=off (geometric frontiers); 0<w<=1 blends a goal-value map.")
+    # Value-signal backend for the semantic-frontier map. "clip" (default) is the
+    # byte-identical flat CLIP cosine; "blip2" uses a BLIP-2 ITM cross-attention
+    # image-text MATCH probability on the RAW rgb (discriminates goal-facing views
+    # where CLIP is flat — the model VLFM used to reach 0.30 SPL on HM3D). Only
+    # constructed when the weight is >0 AND backend != clip, so default runs never
+    # load BLIP-2. Env LTM_SEMANTIC_FRONTIER_BACKEND overrides the default.
+    parser.add_argument(
+        "--semantic-frontier-backend", type=str,
+        default=os.environ.get("LTM_SEMANTIC_FRONTIER_BACKEND", "clip"),
+        choices=["clip", "blip2"],
+        help="clip=flat CLIP cosine (default, byte-identical); blip2=BLIP-2 ITM match prob.")
+    parser.add_argument(
+        "--value-model", type=str,
+        default=os.environ.get("LTM_VALUE_MODEL", "Salesforce/blip2-itm-vit-g"),
+        help="HF model id for the blip2 value backend.")
+    parser.add_argument(
+        "--blip2-cpu", action="store_true",
+        help="Force the BLIP-2 value scorer onto CPU (OOM escape hatch; slow but safe).")
     parser.add_argument("--text-encoder", type=str, default="sentence_transformer",
                         choices=["sentence_transformer", "mock"])
     parser.add_argument("--clip-device", type=str, default=None,
@@ -550,6 +568,26 @@ def main(argv: Optional[list] = None) -> int:
             print(f"[audiogoal] Step-1 anomaly gate ON "
                   f"(delta={args.audio_anomaly_delta}, tau={args.audio_anomaly_tau})")
 
+    # BLIP-2 ITM value scorer for the semantic-frontier "blip2" backend. Built
+    # ONLY when the lever is ON (weight>0) AND the backend is blip2, so default /
+    # clip-backend runs never load it (byte-identical). Mirrors the clap_encoder
+    # optional load. _observe_semantic_value reads the backend from the env var,
+    # so reflect the CLI choice into the env for a consistent single source.
+    os.environ["LTM_SEMANTIC_FRONTIER_BACKEND"] = args.semantic_frontier_backend
+    value_scorer = None
+    if (args.semantic_frontier_weight > 0.0
+            and args.semantic_frontier_backend == "blip2"):
+        from .perception import Blip2ITMScorer
+        # CPU placement can come from the --blip2-cpu CLI flag OR the LTM_VALUE_CPU
+        # env var. The env path is load-bearing: race-revisit.sh (used by the A/B
+        # matrix arms) cannot pass --blip2-cpu, so the OOM hatch reaches the paid
+        # matrix only through this env read. Either source forces CPU.
+        _force_cpu = bool(args.blip2_cpu or os.environ.get("LTM_VALUE_CPU"))
+        _val_device = "cpu" if _force_cpu else args.clip_device
+        value_scorer = Blip2ITMScorer(model_name=args.value_model, device=_val_device)
+        print(f"[run_hm3d_pol] semantic-frontier backend=blip2 model={args.value_model} "
+              f"device={_val_device or 'auto'} (weight={args.semantic_frontier_weight})")
+
     runner = EpisodeRunner(
         source=source,
         planner=planner,
@@ -595,6 +633,7 @@ def main(argv: Optional[list] = None) -> int:
         task=args.task,
         clap_encoder=clap_encoder,
         audio_cfg=audio_cfg,
+        value_scorer=value_scorer,
     )
 
     summary = runner.run(args.n_episodes)

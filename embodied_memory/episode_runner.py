@@ -513,12 +513,19 @@ class EpisodeRunner:
         task: str = "objectnav",
         clap_encoder: Optional[Any] = None,
         audio_cfg: Optional[Any] = None,
+        value_scorer: Optional[Any] = None,
     ):
         self.source = source
         self.planner = planner
         self.bridge = bridge
         self.clip_encoder = clip_encoder
         self.captioner = captioner
+        # Optional BLIP-2 ITM value scorer for the LTM_SEMANTIC_FRONTIER lever's
+        # "blip2" backend (a stronger goal-facing-vs-wall signal than the flat
+        # CLIP cosine). None by default => the "clip" backend path is byte-
+        # identical; only constructed by run_hm3d_pol when the lever is ON and
+        # the backend != clip. Read in _observe_semantic_value.
+        self._value_scorer = value_scorer
         # CLIP zero-shot room classifier for the coarse-affordance head (Stage 5):
         # built lazily once (the room prompts are fixed) and reused. Caches the
         # 6 room-prompt CLIP-text embeddings; the per-call closure scores an
@@ -2221,14 +2228,37 @@ class EpisodeRunner:
     # ------------------------------------------------------------------
 
     def _observe_semantic_value(self, step, keyframe, goal) -> None:
-        """Feed a goal-semantic value (CLIP goal-cosine of this keyframe) into the
-        planner's frontier value map (LTM_SEMANTIC_FRONTIER lever). No-op unless the
-        planner's semantic weight is on, so the default path is untouched. The
-        keyframe's CLIP image embedding is already computed; the goal-text embedding
-        is cached and only re-encoded when the goal changes."""
+        """Feed a goal-semantic value into the planner's frontier value map
+        (LTM_SEMANTIC_FRONTIER lever). No-op unless the planner's semantic weight
+        is on, so the default path is untouched.
+
+        Backend selected by env LTM_SEMANTIC_FRONTIER_BACKEND:
+          * "clip" (default, BYTE-IDENTICAL fast-path) — CLIP image-text cosine of
+            this keyframe (CLIP image embedding already computed; the goal-text
+            embedding is cached and re-encoded only when the goal changes). This is
+            the original, flat-on-HM3D signal.
+          * "blip2" — a BLIP-2 ITM image-text MATCH probability on the RAW rgb
+            (step.rgb, NOT keyframe.visual_embedding — BLIP-2 needs pixels), via
+            self._value_scorer. The cross-attention ITM head discriminates
+            goal-facing views where CLIP cosine is flat (VLFM, ICRA-2024).
+        Both emit v in [0,1] consumed identically by planner.observe_value."""
         if getattr(self.planner, "semantic_frontier_weight", 0.0) <= 0.0:
             return
-        if self.clip_encoder is None or keyframe is None or not goal:
+        if keyframe is None or not goal:
+            return
+        backend = os.environ.get("LTM_SEMANTIC_FRONTIER_BACKEND", "clip").strip().lower()
+        if backend == "blip2":
+            if self._value_scorer is None:
+                return
+            prompt = os.environ.get(
+                "LTM_SEMANTIC_FRONTIER_PROMPT", "Seems like there is a {goal} ahead.")
+            v = float(self._value_scorer.score(step.rgb, prompt.format(goal=goal)))
+            v = max(0.0, min(1.0, v))  # ITM match prob is already [0,1]; defensive
+            self.planner.observe_value(
+                step.agent_state.position, step.agent_state.rotation_yaw, v)
+            return
+        # backend == "clip" (default) — the original byte-identical fast-path.
+        if self.clip_encoder is None:
             return
         emb = getattr(keyframe, "visual_embedding", None)
         if emb is None:

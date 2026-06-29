@@ -278,6 +278,135 @@ class CLAPAudioEncoder:
 
 
 # ----------------------------------------------------------------------
+# BLIP-2 ITM value scorer (VLFM-style semantic-frontier value signal)
+# ----------------------------------------------------------------------
+
+
+class Blip2ITMScorer:
+    """``Salesforce/blip2-itm-vit-g`` image-text-MATCHING head → a scalar in [0,1].
+
+    The semantic-frontier value map (``LTM_SEMANTIC_FRONTIER`` lever) needs a
+    signal that DISCRIMINATES a goal-facing view from a wall on HM3D sim renders.
+    The original CLIP ViT-B/32 dual-encoder cosine is FLAT here (the $0 gate
+    measured goal-facing 0.2499 vs away 0.2294 → sep 0.020 < 0.05, the third
+    independent CLIP-flatness measurement). BLIP-2's cross-attention ITM head
+    co-encodes image+text and is far more discriminative — it is the exact model
+    VLFM (ICRA-2024) used to reach HM3D ObjectNav SPL 0.304.
+
+    ``score(rgb, text)`` → P(match) in [0,1] = softmax over the 2-logit ITM head,
+    match-class column. Already in [0,1] (the existing clamp in the consumer is a
+    defensive no-op). The 2B Qwen-VL captioner is unaffected — this is ONLY the
+    frontier value signal.
+
+    Mirrors ``CLAPAudioEncoder``: lazy-loaded (heavy imports inside ``_lazy_load``
+    so the module imports without torch/transformers), device auto-pick
+    (cuda → mps → cpu, overridable). The single heavy seam is ``_itm_logits``
+    (processor + model forward, returns the (2,) logit vector); the pure
+    ``score`` does the softmax + clamp and is unit-testable by monkeypatching
+    ``_itm_logits`` with NO GPU.
+    """
+
+    def __init__(self, model_name: str = "Salesforce/blip2-itm-vit-g",
+                 device: Optional[str] = None):
+        self.model_name = model_name
+        self._requested_device = device
+        self._model = None
+        self._processor = None
+        self._device = None
+
+    @property
+    def device(self) -> str:
+        if self._device is None:
+            self._lazy_load()
+        return self._device
+
+    def _pick_device(self) -> str:
+        if self._requested_device is not None:
+            return self._requested_device
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda"
+            if torch.backends.mps.is_available():
+                return "mps"
+        except Exception:
+            pass
+        return "cpu"
+
+    def _lazy_load(self):
+        if self._model is not None:
+            return
+        try:
+            import torch  # noqa: F401
+            from transformers import AutoProcessor, Blip2ForImageTextRetrieval
+        except ImportError as e:
+            raise RuntimeError(
+                "transformers (>=4.42) + torch are required for Blip2ITMScorer "
+                "(pip install 'transformers>=4.42' torch). Blip2ForImageTextRetrieval "
+                "landed in transformers 4.40+ and the use_image_text_matching_head "
+                "API is stable from 4.42."
+            ) from e
+        import torch
+        device = self._pick_device()
+        dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
+        model = Blip2ForImageTextRetrieval.from_pretrained(
+            self.model_name, torch_dtype=dtype).to(device).eval()
+        processor = AutoProcessor.from_pretrained(self.model_name)
+        self._model = model
+        self._processor = processor
+        self._device = device
+
+    def _itm_logits(self, rgb: np.ndarray, text: str) -> np.ndarray:
+        """The single heavy seam: processor + ITM forward → (2,) logits
+        [non-match, match]. Monkeypatched in tests so ``score`` runs GPU-free."""
+        self._lazy_load()
+        import torch
+        from PIL import Image
+        if rgb.dtype != np.uint8:
+            rgb = rgb.astype(np.uint8)
+        img = Image.fromarray(rgb)
+        inputs = self._processor(images=img, text=text, return_tensors="pt")
+        # float16 on cuda/mps; the processor emits float32 pixel_values, so cast.
+        cast_dtype = torch.float16 if self._device in ("cuda", "mps") else torch.float32
+        moved = {}
+        for k, v in inputs.items():
+            if hasattr(v, "is_floating_point") and v.is_floating_point():
+                moved[k] = v.to(self._device, cast_dtype)
+            else:
+                moved[k] = v.to(self._device)
+        with torch.inference_mode():
+            out = self._model(**moved, use_image_text_matching_head=True)
+        # logits_per_image is (1, 2): col0 = non-match, col1 = match.
+        logits = out.logits_per_image.float().reshape(-1).detach().cpu().numpy()
+        return np.asarray(logits, dtype=np.float32).reshape(-1)
+
+    @staticmethod
+    def _match_prob(logits: np.ndarray) -> float:
+        """softmax over the 2 ITM logits → the MATCH-class prob, clamped [0,1].
+
+        The HF model card double-applies softmax (issue #38514); apply it ONCE
+        here over the 2-logit vector and index the match column [1]. Defensive:
+        a degenerate (1,) logit vector (ITC fallback) returns a sigmoid-like
+        [0,1] read of that single score."""
+        v = np.asarray(logits, dtype=np.float64).reshape(-1)
+        if v.size == 0:
+            return 0.0
+        if v.size == 1:
+            # ITC-style single cosine/logit: squash to [0,1] (sigmoid).
+            p = 1.0 / (1.0 + np.exp(-float(v[0])))
+            return float(max(0.0, min(1.0, p)))
+        v = v - v.max()              # numerical-stable softmax
+        e = np.exp(v)
+        probs = e / e.sum()
+        p = float(probs[1])          # match-class column
+        return float(max(0.0, min(1.0, p)))
+
+    def score(self, rgb: np.ndarray, text: str) -> float:
+        """Image-text MATCH probability in [0,1] for ``rgb`` vs ``text``."""
+        return self._match_prob(self._itm_logits(rgb, text))
+
+
+# ----------------------------------------------------------------------
 # Semantic captioner
 # ----------------------------------------------------------------------
 
