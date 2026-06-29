@@ -265,6 +265,26 @@ Still NOT cross-ENVIRONMENT transfer (scene-gated, `memory_bridge.py:829`) nor i
 (SBERT ceiling). Driver commits lifelong `bd29c85`+`2bbfb90` / main `95cbe4e`+`6d312a8`, pushed; data
 `runs/scaleup-*` (RACE).
 
+**Backbone upgrade — CapRL-3B captioner swap: $0 GATE = HOLD, captioner is NOT the bottleneck
+(2026-06-28, see `PHASE2_ABLATION_REPORT.md` → "Backbone upgrade").** To lift the absolute soft-SPL
+ceiling (~0.39, gated by stopping #1 + instance discrimination #2, NOT the LTM which works), a
+5-agent web+code research picked the freshest lever: swap captioner `Qwen2-VL-2B`→`internlm/CapRL-3B`
+(RL coverage-tuned, drop-in `REMEMBR_CAPTIONER_MODEL`, frees ~9GB) and KEEP the 7B planner (low
+leverage, `n_remembr_chosen≈0`). The research PRE-REGISTERED a $0 gate (`race-caprl-gate.sh`,
+8m44s): render 204 real HM3D keyframes at goal-INSTANCE view_points, caption with BOTH VLMs (408
+captions, CapRL loaded clean), SBERT-embed, measure within-vs-between instance separation per
+captioner. **GATE=HOLD: pooled separation Qwen +0.146 vs CapRL +0.129 (Δ−0.016, slightly WORSE),
+c2c rank gap 0.035 vs 0.034 (Δ−0.001).** Mechanism (pre-flagged): CapRL's richer/longer captions get
+mean-pooled by SBERT (all-MiniLM 384-d), DILUTING the instance-distinctive tokens. So the **read side
+(embedding + query) is the limiter, not the caption** — the 6th instance lever closed on the read
+side, FIRST closed for $0 of matrix (the gate pre-empted a ~50h ablation). **Next = a stronger/
+asymmetric text embedder (Qwen3-Embedding-0.6B/gte/bge) or multimodal image-text embedder or the
+instance-aware query in `propose_memory_candidates` — NOT another VLM.** Cheapest immediate test
+reuses `runs/caprl-gate/captions.json`: re-embed with a candidate encoder via a
+`diagnose_sbert_cosines.py --encoder` extension (no new render/caption). Gate methodology = the
+durable win (multi-day ablation → 8-min decision). Built+verified via 4 workflows + 10-agent review;
+24+9 TDD; commits lifelong `85e9dd9` / main `b258058`.
+
 ## Audit caveats (2026-06-08)
 
 A read-only fact-check (the "diagnose-first" program; full version in

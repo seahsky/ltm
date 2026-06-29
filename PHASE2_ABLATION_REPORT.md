@@ -3432,3 +3432,55 @@ source-relocation fallback reaching only 3–6 cells), NOT a transient failure; 
 `embodied_memory/scripts/plan_scaleup_cells.py` (+`test_`, 23 TDD), `scripts/race-audiogoal.sh`
 (`--cell-tag`/`--src-content-dir`, `-u` render). Driver commits: lifelong `bd29c85`+`2bbfb90` / main
 `95cbe4e`+`6d312a8`. Data: `runs/scaleup-*` (RACE).
+
+# Backbone upgrade — CapRL-3B captioner swap: a $0 GATE returns HOLD (the captioner is NOT the bottleneck; the read side is), 6th instance lever closed without a matrix-hour (RACE, 2026-06-28)
+
+**Motivation.** The warm-revisit LTM works (+0.2505 over 20 scenes) but the ABSOLUTE soft-SPL
+ceiling (~0.39) is gated by stopping (#1) and instance discrimination (#2), not the memory. A
+5-agent web+code research pass picked the single freshest unexhausted lever: swap the keyframe
+captioner `Qwen2-VL-2B` → `internlm/CapRL-3B` (RL-tuned so its reward IS caption
+information-coverage — isomorphic to "add the distinctive attributes that widen the SBERT instance
+gap"; drop-in via `REMEMBR_CAPTIONER_MODEL`, frees ~9 GB). The research **pre-registered the gate**:
+measure whether CapRL widens the within- vs between-instance SBERT separation on REAL HM3D keyframes
+BEFORE any GPU matrix — if not, the ceiling is the embedding/query, pivot to a retriever fix.
+
+**Phase 0 (the $0 gate, `scripts/race-caprl-gate.sh`, 8m44s).** Rendered 204 real keyframes at
+goal-INSTANCE view_points across wcojb4TFT35 + TEEsavR23oF (35 instances, 6 frames each), captioned
+each with BOTH VLMs (408 captions; CapRL-3B loaded through the same `AutoModelForImageTextToText`
+seam — no code change), SBERT-embedded, and measured per-captioner instance separation.
+
+> **GATE = HOLD. Pooled within-vs-between instance separation: Qwen2-VL-2B = +0.146 vs
+> CapRL-3B = +0.129 (Δ = −0.016); caption-to-caption rank gap 0.035 vs 0.034 (Δ = −0.001).**
+
+CapRL is **slightly WORSE**, not better — 6 of 7 scene/category cells flat-or-down (only
+TEEsav/sofa +0.054). The mechanism is the one the research flagged: CapRL writes *richer, longer*
+captions, but SBERT (all-MiniLM-L6-v2, 384-d) **mean-pools** them, so the extra generic scene words
+(room/wall/floor) *dilute* the instance-distinctive tokens — denser captions separate instances
+slightly *less*, not more.
+
+**What this establishes.** (1) The captioner is **NOT** the instance-discrimination bottleneck — a
+50%-bigger, coverage-RL-tuned captioner doesn't help. (2) On REAL keyframes the separation
+(Qwen +0.146) is actually a bit higher than the synthetic corpus (+0.093), and chair is the most
+distinctive category (~+0.15) while bed/sofa/toilet are flatter (~+0.02–0.09); but the
+caption-to-caption rank gap stays small (0.035) even with rich captions — **the read side (the SBERT
+embedding's instance-discrimination ceiling + the bare-category query) is the limiter, not the
+write side.** (3) This is the **6th instance lever to close on the read side** (importance R/U heads,
+coarse-affordance, consume, audio-DOA, now captioner) — and the **first closed for $0 of matrix**,
+which is the gate's whole point: it pre-empted a ~50 h ablation that would have learned the same
+thing.
+
+**Next lever (read side, per the pre-registered branch).** A stronger / asymmetric **text embedder**
+(replace all-MiniLM with e.g. Qwen3-Embedding-0.6B / gte / bge) OR a multimodal **image-text
+embedder** that indexes the keyframe directly OR the instance-aware **query construction** in
+`propose_memory_candidates` — NOT another VLM. The cheapest immediate test reuses the EXISTING
+`runs/caprl-gate/captions.json` corpus: re-embed the same captions with a candidate encoder and
+re-measure the separation (a `diagnose_sbert_cosines.py --encoder` extension, no new render/caption).
+
+**Verdict.** Captioner-swap lever CLOSED as a clean, gate-caught honest negative. Headline backbone
+stays Qwen2-VL-2B + Qwen2.5-7B. Default unchanged. The gate methodology is the durable win: a
+GPU-free pre-screen that converts a multi-day ablation into an 8-minute decision.
+
+**File index.** `embodied_memory/scripts/diagnose_sbert_cosines.py` (`--compare-captions` gate +
+`GATE_RESULT=` marker), `embodied_memory/scripts/build_instance_caption_corpus.py` (+`test_`),
+`scripts/race-caprl-gate.sh`. Commits lifelong `85e9dd9` / main `b258058`. Data:
+`runs/caprl-gate/{captions.json,gate.log}` (RACE).
