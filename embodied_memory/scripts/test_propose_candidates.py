@@ -537,7 +537,7 @@ def case_oracle_short_circuit():
     ep = SimpleNamespace(episode_id="e0", scene_id="s0",
                          target_category="chair",
                          target_position=np.array([1.0, 0.0, 1.0], dtype=np.float32),
-                         success=False, spl=0.0)
+                         success=False, spl=0.0, metadata=None)
     r.source = SimpleNamespace(reset=lambda idx: (step0, ep),
                                step=lambda a: step1)
     grid = {"cells_free": 0, "cells_occupied": 0,
