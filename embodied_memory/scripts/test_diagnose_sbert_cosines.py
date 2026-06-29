@@ -421,6 +421,93 @@ def case_gate_HOLD_when_candidate_no_better():
     print("  case gate_HOLD_when_candidate_no_better: OK")
 
 
+# ----------------------------------------------------------------------
+# Phase-3a encoder-swap gate
+# ----------------------------------------------------------------------
+def case_parse_encoders_default_and_pairs():
+    d = ds.parse_encoders([])
+    assert d["all-MiniLM-L6-v2"] == "sentence-transformers/all-MiniLM-L6-v2", d
+    assert ds.parse_encoders(["a=org/A", "b=org/B"]) == {"a": "org/A", "b": "org/B"}
+    try:
+        ds.parse_encoders(["noequals"])
+    except ValueError:
+        print("  case parse_encoders_default_and_pairs: OK")
+        return
+    raise AssertionError("expected ValueError on malformed --encoders entry")
+
+
+def case_encoder_gate_GO_when_candidate_separates():
+    # captions FIXED; baseline encoder collapses all -> sep 0; candidate encoder maps
+    # instance1->A, instance2->B (orthogonal) -> sep 1 -> GO, best=candidate.
+    records = [
+        _rec("qwen", 1, "c_a1"), _rec("qwen", 1, "c_a2"),
+        _rec("qwen", 2, "c_b1"), _rec("qwen", 2, "c_b2"),
+    ]
+    base = _fake_encode({k: (1, 0, 0) for k in ["c_a1", "c_a2", "c_b1", "c_b2"]})
+    cand = _fake_encode({"c_a1": (1, 0, 0), "c_a2": (1, 0, 0), "c_b1": (0, 1, 0), "c_b2": (0, 1, 0)})
+    res = ds.compare_encoders(records, {"base": base, "cand": cand},
+                              captioner="qwen", baseline="base", margin=0.02)
+    assert res["encoders"]["cand"]["separation"] > 0.9, res
+    assert abs(res["encoders"]["base"]["separation"]) < 0.05, res
+    assert res["best_candidate"] == "cand"
+    assert res["result"] == "GO" and res["gate_pass"] is True
+    assert res["verdict"].startswith("GO"), res["verdict"]
+    print("  case encoder_gate_GO_when_candidate_separates: OK")
+
+
+def case_encoder_gate_HOLD_when_no_candidate_better():
+    records = [_rec("qwen", 1, "a"), _rec("qwen", 1, "b"), _rec("qwen", 2, "c"), _rec("qwen", 2, "d")]
+    same = _fake_encode({k: (1, 0, 0) for k in ["a", "b", "c", "d"]})
+    res = ds.compare_encoders(records, {"base": same, "x": same},
+                              captioner="qwen", baseline="base", margin=0.02)
+    assert res["result"] == "HOLD", res
+    assert res["verdict"].startswith("HOLD")
+    print("  case encoder_gate_HOLD_when_no_candidate_better: OK")
+
+
+def case_encoder_gate_INSUFFICIENT_when_baseline_failed():
+    # baseline encoder failed to load (None) -> can't compare -> INSUFFICIENT.
+    records = [_rec("qwen", 1, "a"), _rec("qwen", 1, "b"), _rec("qwen", 2, "c"), _rec("qwen", 2, "d")]
+    cand = _fake_encode({"a": (1, 0, 0), "b": (1, 0, 0), "c": (0, 1, 0), "d": (0, 1, 0)})
+    res = ds.compare_encoders(records, {"base": None, "cand": cand},
+                              captioner="qwen", baseline="base", margin=0.02)
+    assert res["result"] == "INSUFFICIENT", res
+    assert res["encoders"]["base"] == {"loaded": False}
+    assert res["verdict"].startswith("INSUFFICIENT")
+    print("  case encoder_gate_INSUFFICIENT_when_baseline_failed: OK")
+
+
+def case_encoder_gate_tracks_dropped_candidates():
+    # a candidate that failed to load (None) must be RECORDED in `dropped`, not
+    # silently ignored — else a HOLD could be missing the strongest encoder.
+    records = [_rec("qwen", 1, "a"), _rec("qwen", 1, "b"), _rec("qwen", 2, "c"), _rec("qwen", 2, "d")]
+    base = _fake_encode({k: (1, 0, 0) for k in ["a", "b", "c", "d"]})
+    good = _fake_encode({"a": (1, 0, 0), "b": (1, 0, 0), "c": (0, 1, 0), "d": (0, 1, 0)})
+    res = ds.compare_encoders(records, {"base": base, "good": good, "broken": None},
+                              captioner="qwen", baseline="base", margin=0.02)
+    assert res["dropped"] == ["broken"], res["dropped"]
+    assert res["n_candidates_requested"] == 2 and res["n_candidates_loaded"] == 1
+    assert res["result"] == "GO" and res["best_candidate"] == "good"  # still decides on the loaded ones
+    print("  case encoder_gate_tracks_dropped_candidates: OK")
+
+
+def case_load_caption_records_rejects_non_list():
+    import json as _json
+    import os as _os
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        _json.dump(42, f)
+        p = f.name
+    try:
+        ds.load_caption_records(p)
+    except ValueError:
+        _os.unlink(p)
+        print("  case load_caption_records_rejects_non_list: OK")
+        return
+    _os.unlink(p)
+    raise AssertionError("expected ValueError on non-list JSON")
+
+
 def main() -> int:
     print("instance-separability diagnostic sanity tests")
     case_pairwise_within_and_between()
@@ -448,6 +535,12 @@ def main() -> int:
     case_corpus_skips_malformed_records_no_keyerror()
     case_compare_report_prints_machine_marker()
     case_gate_HOLD_when_candidate_no_better()
+    case_parse_encoders_default_and_pairs()
+    case_encoder_gate_GO_when_candidate_separates()
+    case_encoder_gate_HOLD_when_no_candidate_better()
+    case_encoder_gate_INSUFFICIENT_when_baseline_failed()
+    case_encoder_gate_tracks_dropped_candidates()
+    case_load_caption_records_rejects_non_list()
     print("All cases passed.")
     return 0
 
