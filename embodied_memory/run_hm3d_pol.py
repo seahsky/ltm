@@ -214,6 +214,14 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--keyframe-every", type=int, default=5)
     parser.add_argument("--decision-period", type=int, default=10)
     parser.add_argument("--n-candidates", type=int, default=4)
+    # VLFM-style semantic-frontier lever (default OFF = 0.0 -> byte-identical
+    # geometric frontier scoring). >0 blends a CLIP goal-cosine value map into the
+    # frontier raw_score to bias exploration toward goal-affording regions (attacks
+    # the L_b path-length penalty). Env LTM_SEMANTIC_FRONTIER overrides the default.
+    parser.add_argument(
+        "--semantic-frontier-weight", type=float,
+        default=float(os.environ.get("LTM_SEMANTIC_FRONTIER", "0.0")),
+        help="0=off (geometric frontiers); 0<w<=1 blends a CLIP goal-value map.")
     parser.add_argument("--text-encoder", type=str, default="sentence_transformer",
                         choices=["sentence_transformer", "mock"])
     parser.add_argument("--clip-device", type=str, default=None,
@@ -383,6 +391,7 @@ def main(argv: Optional[list] = None) -> int:
     planner = FrontierPlanner(
         decision_period=args.decision_period,
         n_candidates=args.n_candidates,
+        semantic_frontier_weight=args.semantic_frontier_weight,
     )
 
     if args.backbone == "oracle":

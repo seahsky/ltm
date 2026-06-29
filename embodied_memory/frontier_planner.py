@@ -363,6 +363,7 @@ class FrontierPlanner:
         inflate_radius_cells: int = 1,
         unknown_cost: float = 1.5,
         astar_max_expansions: int = 20000,
+        semantic_frontier_weight: float = 0.0,
     ):
         self.decision_period = decision_period
         self.n_candidates = n_candidates
@@ -381,6 +382,13 @@ class FrontierPlanner:
         # Bound A* worst case (a passable-but-trapped goal can otherwise force a
         # full-grid exhaustion ~190 ms); on the cap, fall back to straight-line.
         self.astar_max_expansions = astar_max_expansions
+        # VLFM-style semantic-frontier value map (env LTM_SEMANTIC_FRONTIER, default
+        # OFF via weight 0.0 -> the geometric raw_score path is byte-identical). When
+        # > 0, observe_value() accumulates a goal-semantic value (CLIP goal-cosine)
+        # over the forward FOV cone and propose() blends it into the frontier
+        # raw_score so exploration biases toward goal-affording regions (attacks the
+        # L_b path-length penalty without touching the memory-injection seam).
+        self.semantic_frontier_weight = float(semantic_frontier_weight)
         # Height gate for the depth splat (Run-5 densification): a back-
         # projected endpoint counts as an obstacle only if it rises more than
         # ``obstacle_min_h`` above the floor. ``camera_height_m`` is the agent
@@ -395,6 +403,11 @@ class FrontierPlanner:
             size_m=grid_size_m,
             origin_xy=(-grid_size_m / 2.0, -grid_size_m / 2.0),
         )
+        # Per-cell accumulated goal-semantic value + confidence (same grid frame as
+        # self.grid; zeroed per-episode in reset()). Only written when
+        # semantic_frontier_weight > 0.
+        self.value_map = np.zeros((self.grid.n, self.grid.n), dtype=np.float32)
+        self.value_conf = np.zeros((self.grid.n, self.grid.n), dtype=np.float32)
 
         self._step_count = 0
         self._pos_history: List[np.ndarray] = []
@@ -444,6 +457,8 @@ class FrontierPlanner:
         """
         n = self.grid.n
         self.grid.grid = np.full((n, n), CELL_UNKNOWN, dtype=np.uint8)
+        self.value_map[:] = 0.0
+        self.value_conf[:] = 0.0
         self._step_count = 0
         self._pos_history = []
         self._candidate_counter = 0
@@ -565,6 +580,73 @@ class FrontierPlanner:
         delta = np.linalg.norm(recent.max(axis=0) - recent.min(axis=0))
         return float(delta) < self.stuck_radius_m
 
+    def observe_value(self, agent_pos: np.ndarray, agent_yaw: float, value: float) -> None:
+        """Accumulate a goal-semantic ``value`` (e.g. CLIP goal-cosine of the current
+        keyframe) over the forward FOV cone — VLFM's value-map idea. No-op unless
+        ``semantic_frontier_weight > 0``, so the default path is byte-identical.
+
+        Each in-FOV cell within ``max_depth_m`` mixes ``value`` in via a
+        confidence-weighted running mean (confidence = cosine of the angle off the
+        optical axis), so head-on observations dominate oblique ones. ``propose()``
+        reads this map at frontier cells to bias exploration toward goal-affording
+        regions.
+        """
+        if self.semantic_frontier_weight <= 0.0:
+            return
+        v = float(value)
+        ax, az = float(agent_pos[0]), float(agent_pos[2])
+        n = self.grid.n
+        res = self.grid.resolution_m
+        ox, oz = self.grid.origin_xy
+        half_fov = math.radians(self.forward_fov_deg) / 2.0
+        rad = int(self.max_depth_m / res) + 1
+        ar, ac = self.grid.world_to_grid(ax, az)
+        r0, r1 = max(0, ar - rad), min(n, ar + rad + 1)
+        c0, c1 = max(0, ac - rad), min(n, ac + rad + 1)
+        if r0 >= r1 or c0 >= c1:
+            return
+        rr = np.arange(r0, r1)
+        cc = np.arange(c0, c1)
+        zc = oz + (rr + 0.5) * res          # cell-center world z per row
+        xc = ox + (cc + 0.5) * res          # cell-center world x per col
+        dz = (zc[:, None] - az)             # (R, 1)
+        dx = (xc[None, :] - ax)             # (1, C)
+        dist = np.hypot(dx, dz)             # (R, C)
+        # bearing relative to heading; atan2(dx, dz) matches propose()'s convention.
+        bearing = np.arctan2(np.broadcast_to(dx, dist.shape),
+                             np.broadcast_to(dz, dist.shape)) - agent_yaw
+        bearing = (bearing + np.pi) % (2.0 * np.pi) - np.pi
+        in_cone = (dist <= self.max_depth_m) & (dist > 1e-6) & (np.abs(bearing) <= half_fov)
+        if not np.any(in_cone):
+            return
+        conf = np.where(in_cone, np.clip(np.cos(bearing), 0.0, 1.0), 0.0).astype(np.float32)
+        sub_val = self.value_map[r0:r1, c0:c1]
+        sub_cnf = self.value_conf[r0:r1, c0:c1]
+        new_cnf = sub_cnf + conf
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mixed = np.where(new_cnf > 0.0,
+                             (sub_cnf * sub_val + conf * v) / new_cnf,
+                             sub_val)
+        self.value_map[r0:r1, c0:c1] = mixed.astype(np.float32)
+        self.value_conf[r0:r1, c0:c1] = new_cnf.astype(np.float32)
+
+    def _semantic_value_at(self, grid_rc: Tuple[int, int], radius: int = 10) -> float:
+        """Max accumulated value over a small window around ``grid_rc`` (confidence
+        > 0 cells only); 0.0 if nothing observed nearby. A frontier sits at the
+        observed/unknown boundary, so the window catches the value of the adjacent
+        observed region the frontier opens onto."""
+        r, c = int(grid_rc[0]), int(grid_rc[1])
+        n = self.grid.n
+        r0, r1 = max(0, r - radius), min(n, r + radius + 1)
+        c0, c1 = max(0, c - radius), min(n, c + radius + 1)
+        if r0 >= r1 or c0 >= c1:
+            return 0.0
+        win_val = self.value_map[r0:r1, c0:c1]
+        seen = self.value_conf[r0:r1, c0:c1] > 0.0
+        if not np.any(seen):
+            return 0.0
+        return float(np.max(win_val[seen]))
+
     def propose(self, agent_pos: np.ndarray, agent_yaw: float) -> List[FrontierCandidate]:
         """Return up to K frontier candidates."""
         cells = self._extract_frontier_cells()
@@ -586,7 +668,20 @@ class FrontierPlanner:
             # Score: prefer larger clusters and moderate distances (1-4 m).
             size_score = math.tanh(len(cluster_cells) / 10.0)
             dist_score = math.exp(-((dist - 2.5) ** 2) / 4.0)
-            raw_score = 0.6 * size_score + 0.4 * dist_score
+            geom_score = 0.6 * size_score + 0.4 * dist_score
+            meta: Dict[str, Any] = {}
+            if self.semantic_frontier_weight > 0.0:
+                # Blend the accumulated goal-semantic value so frontiers toward
+                # goal-affording regions rank higher. Flagged so the source-aware
+                # rerank's ceiling renorm keeps a true memory recall on top.
+                sem = self._semantic_value_at((int(r_med), int(c_med)))
+                w = self.semantic_frontier_weight
+                raw_score = (1.0 - w) * geom_score + w * sem
+                meta = {"semantic_frontier": True,
+                        "geom_score": float(geom_score),
+                        "semantic_value": float(sem)}
+            else:
+                raw_score = geom_score
             self._candidate_counter += 1
             candidates.append(
                 FrontierCandidate(
@@ -597,6 +692,7 @@ class FrontierPlanner:
                     bearing_rad=bearing_rel,
                     cluster_size=len(cluster_cells),
                     raw_score=raw_score,
+                    metadata=meta,
                 )
             )
         # Reachability filter (Run-6.1): drop frontiers A* can't route to from
