@@ -659,7 +659,11 @@ def load_caption_records(path: str) -> List[Dict[str, Any]]:
     """
     with open(path) as f:
         data = json.load(f)
-    return data["records"] if isinstance(data, dict) and "records" in data else data
+    recs = data["records"] if isinstance(data, dict) and "records" in data else data
+    if not isinstance(recs, list):
+        raise ValueError(f"caption records must be a list (or {{'records': [...]}}), "
+                         f"got {type(recs).__name__}")
+    return recs
 
 
 def captions_to_instance_corpus(records, captioner) -> Dict[str, List[List[str]]]:
@@ -779,26 +783,171 @@ def compare_captioners_report(records, encode, *, baseline, candidate, margin) -
     return res
 
 
+# ----------------------------------------------------------------------
+# Phase 3a — encoder-swap GATE. Phase 0 showed the CAPTIONER is not the
+# instance-discrimination bottleneck (CapRL-3B was HOLD); this gate tests the
+# READ side: with the captions FIXED (the production Qwen captions), does a
+# stronger TEXT EMBEDDER widen the within-vs-between instance separation over the
+# current SBERT all-MiniLM-L6-v2? GO -> swap the fine-index encoder; HOLD -> not
+# the text encoder either (the next lever is a VISUAL instance embedder like
+# DINOv3, or the instance-aware query). Reuses the SAME captions corpus — no
+# re-render / re-caption.
+# ----------------------------------------------------------------------
+# A small spread of robust, no-remote-code, no-prefix text embedders (plain
+# symmetric .encode() — see compare_encoders). bge-large is the strong top-end so a
+# HOLD means "even the strongest text encoder didn't separate the instances". (gte-v1.5
+# was dropped: it needs trust_remote_code and is broken on recent sentence-transformers.)
+DEFAULT_ENCODERS = {
+    "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",   # baseline (production, 384-d)
+    "bge-base": "BAAI/bge-base-en-v1.5",                            # 768-d
+    "bge-large": "BAAI/bge-large-en-v1.5",                          # 1024-d, strong + robust
+    "qwen3-emb-0.6b": "Qwen/Qwen3-Embedding-0.6B",                 # newest small (1024-d)
+}
+
+
+def parse_encoders(pairs) -> Dict[str, str]:
+    """``["label=hf/model", ...]`` -> ``{label: model_id}`` (default shortlist if empty)."""
+    if not pairs:
+        return dict(DEFAULT_ENCODERS)
+    out: Dict[str, str] = {}
+    for p in pairs:
+        if "=" not in p:
+            raise ValueError(f"--encoders entry must be label=model_id, got {p!r}")
+        label, model = p.split("=", 1)
+        out[label.strip()] = model.strip()
+    return out
+
+
+def build_named_encoder(model_name: str):
+    """Return an encode(str)->vec fn for an arbitrary sentence-transformers model,
+    or None if it fails to load (so the gate skips it rather than crashing)."""
+    try:
+        from sentence_transformers import SentenceTransformer
+        m = SentenceTransformer(model_name, trust_remote_code=True)
+        return lambda s: np.asarray(m.encode(s), dtype=np.float32)
+    except Exception as e:  # noqa: BLE001 — any load failure -> skip this encoder
+        print(f"  [warn] could not load encoder {model_name!r}: {e}")
+        return None
+
+
+def _encoder_gate_verdict(result, best, baseline, d_sep, margin, stats) -> str:
+    if result == "INSUFFICIENT":
+        return (f"INSUFFICIENT: the baseline encoder {baseline} or all candidates failed to load / "
+                f"produced no measurable separation — the gate is meaningless; check the encoder loads.")
+    if result == "HOLD":
+        return (f"HOLD: NO candidate encoder widens instance separation over {baseline} "
+                f"(best={best}, Δsep={d_sep:+.3f} <= +{margin:.2f}). The ceiling is NOT the TEXT embedder "
+                f"either — the captions don't carry separable instance signal for these categories. The "
+                f"next lever is a VISUAL instance embedder (DINOv3) indexing the keyframe IMAGE, or the "
+                f"instance-aware query — NOT another text encoder.")
+    return (f"GO: encoder {best} widens instance separation over {baseline} by {d_sep:+.3f} "
+            f"(> +{margin:.2f}). The TEXT EMBEDDING was a limiter — swap the SBERT fine-index encoder to "
+            f"{best} (the dialogue_memory.encoder seam) and A/B the warm-revisit matrix vs +0.2505.")
+
+
+def compare_encoders(records, encoders, *, captioner: str, baseline: str,
+                     margin: float = 0.02) -> Dict[str, Any]:
+    """Per-ENCODER instance separation on FIXED ``captioner`` captions + a GATE on
+    the best candidate vs ``baseline``.
+
+    ``encoders``: ``{label: encode_fn_or_None}``. GATE = the best loaded candidate
+    encoder widens the within-vs-between separation by > ``margin`` over baseline.
+    The measurement is deliberately SYMMETRIC — plain ``encode(caption)`` with no
+    query/passage instruction (caption-vs-caption has no retrieval roles), so do not
+    "fix" it by bolting on an asymmetric query prompt. Candidate encoders that failed
+    to load (None) are tracked in ``dropped`` so a silently-missing encoder can't
+    masquerade as a thinner-but-clean HOLD.
+    """
+    corpus = captions_to_instance_corpus(records, captioner)  # captions held FIXED
+    stats: Dict[str, Any] = {}
+    for label, enc in encoders.items():
+        if enc is None:
+            stats[label] = {"loaded": False}
+            continue
+        e = _encode_cached(enc)
+        sep = instance_separability(corpus, e)
+        c2c = caption_to_caption_rank_gap(corpus, e)
+        stats[label] = {"loaded": True, "separation": sep["separation"],
+                        "within_mean": sep["within_mean"], "between_mean": sep["between_mean"],
+                        "c2c_rank_gap": c2c["mean_rank_gap"], "per_category": sep["per_category"]}
+    requested = [l for l in encoders if l != baseline]
+    dropped = [l for l in requested if not stats.get(l, {}).get("loaded")]
+    bs = stats.get(baseline, {}).get("separation", float("nan"))
+    base_ok = stats.get(baseline, {}).get("loaded") and (bs == bs)
+    cands = {l: v for l, v in stats.items()
+             if l != baseline and v.get("loaded") and v.get("separation") == v.get("separation")}
+    if not base_ok or not cands:
+        result, best, d_sep = "INSUFFICIENT", None, float("nan")
+    else:
+        best = max(cands, key=lambda l: cands[l]["separation"])
+        d_sep = cands[best]["separation"] - bs
+        result = "GO" if d_sep > margin else "HOLD"
+    return {"encoders": stats, "baseline": baseline, "best_candidate": best,
+            "delta_separation": d_sep, "result": result, "gate_pass": result == "GO",
+            "n_candidates_requested": len(requested), "n_candidates_loaded": len(requested) - len(dropped),
+            "dropped": dropped,
+            "verdict": _encoder_gate_verdict(result, best, baseline, d_sep, margin, stats)}
+
+
+def compare_encoders_report(records, encoders, *, captioner, baseline, margin) -> Dict[str, Any]:
+    """Print the encoder-swap gate table + verdict; return the raw stats."""
+    res = compare_encoders(records, encoders, captioner=captioner, baseline=baseline, margin=margin)
+    bs = res["encoders"].get(baseline, {}).get("separation", float("nan"))
+    print(f"ENCODER-SWAP GATE (Phase 3a): captioner={captioner} FIXED, varying the fine-index encoder\n")
+    print(f"  {'encoder':<40} {'within':>7} {'betwn':>7} {'sep':>7} {'c2c_gap':>8} {'Δsep_vs_base':>13}")
+    for label, v in res["encoders"].items():
+        if not v.get("loaded"):
+            print(f"  {label:<40} {'(failed to load — skipped)':>53}")
+            continue
+        d = (v["separation"] - bs) if (bs == bs) else float("nan")
+        tag = "  <- baseline" if label == baseline else ""
+        print(f"  {label:<40} {v['within_mean']:>7.3f} {v['between_mean']:>7.3f} "
+              f"{v['separation']:>+7.3f} {v['c2c_rank_gap']:>8.3f} {d:>+13.3f}{tag}")
+    if res["dropped"]:
+        print(f"\n  [WARN] only {res['n_candidates_loaded']}/{res['n_candidates_requested']} candidate "
+              f"encoders loaded — DROPPED: {', '.join(res['dropped'])}. A HOLD here may be missing the "
+              f"strongest encoder; install/fix them and re-run before trusting a HOLD.")
+    print(f"\n  GATE: {res['verdict']}\n")
+    print(f"GATE_RESULT={res['result']}")
+    return res
+
+
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(
-        description="SBERT instance-separation diagnostics + the Phase-0 captioner-swap gate")
+        description="SBERT instance-separation diagnostics + the captioner/encoder swap gates")
     ap.add_argument("--compare-captions", metavar="JSON", default=None,
-                    help="captions-by-instance file (from build_instance_caption_corpus.py); "
-                         "runs ONLY the captioner-swap gate and exits")
-    ap.add_argument("--baseline", default="qwen2-vl-2b", help="current captioner label in the file")
-    ap.add_argument("--candidate", default="caprl-3b", help="candidate captioner label in the file")
+                    help="captions-by-instance file; runs ONLY the captioner-swap gate (Phase 0)")
+    ap.add_argument("--compare-encoders", metavar="JSON", default=None,
+                    help="captions-by-instance file; runs ONLY the encoder-swap gate (Phase 3a) — "
+                         "fixes the captioner, varies the SBERT fine-index encoder")
+    ap.add_argument("--baseline", default="qwen2-vl-2b", help="baseline CAPTIONER label (Phase 0)")
+    ap.add_argument("--candidate", default="caprl-3b", help="candidate CAPTIONER label (Phase 0)")
+    ap.add_argument("--captioner", default="qwen2-vl-2b",
+                    help="which captioner's captions to FIX for the encoder gate (Phase 3a)")
+    ap.add_argument("--encoders", nargs="+", default=[],
+                    help="label=hf/model encoder pairs for Phase 3a (default: a small shortlist)")
+    ap.add_argument("--baseline-encoder", default="all-MiniLM-L6-v2",
+                    help="baseline ENCODER label = the production fine-index encoder (Phase 3a)")
     ap.add_argument("--margin", type=float, default=0.02, help="min Δseparation for GATE=GO")
     args = ap.parse_args(argv)
 
-    encode = _build_encoder()
-
     if args.compare_captions:
+        encode = _build_encoder()
         records = load_caption_records(args.compare_captions)
         compare_captioners_report(records, encode, baseline=args.baseline,
                                   candidate=args.candidate, margin=args.margin)
         return 0
 
+    if args.compare_encoders:
+        records = load_caption_records(args.compare_encoders)
+        specs = parse_encoders(args.encoders)
+        encoders = {label: build_named_encoder(mid) for label, mid in specs.items()}
+        compare_encoders_report(records, encoders, captioner=args.captioner,
+                                baseline=args.baseline_encoder, margin=args.margin)
+        return 0
+
+    encode = _build_encoder()
     cap_vecs = [encode(c) for c in CAPTIONS]
 
     # Per template: collect match / non-match cosines across all goals.
