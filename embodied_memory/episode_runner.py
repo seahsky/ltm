@@ -1203,6 +1203,7 @@ class EpisodeRunner:
                 caption_override = rec.caption
             keyframe = self._build_keyframe(step, caption_override=caption_override)
             self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
+            self._observe_semantic_value(step, keyframe, ep.target_category or self.target_category)
             stm_captions.append(keyframe.caption)
             ep_log["steps"].append(self._serialize_step(step, keyframe))
             self._record_frame(step, self._build_hud(
@@ -1977,6 +1978,7 @@ class EpisodeRunner:
                 self.bridge.observe_keyframe(
                     keyframe, action=action, reward=step.reward, success=False
                 )
+                self._observe_semantic_value(step, keyframe, ep.target_category or self.target_category)
                 stm_captions.append(keyframe.caption)
                 ep_log["steps"].append(self._serialize_step(step, keyframe))
                 self._record_frame(step, self._build_hud(
@@ -2217,6 +2219,30 @@ class EpisodeRunner:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    def _observe_semantic_value(self, step, keyframe, goal) -> None:
+        """Feed a goal-semantic value (CLIP goal-cosine of this keyframe) into the
+        planner's frontier value map (LTM_SEMANTIC_FRONTIER lever). No-op unless the
+        planner's semantic weight is on, so the default path is untouched. The
+        keyframe's CLIP image embedding is already computed; the goal-text embedding
+        is cached and only re-encoded when the goal changes."""
+        if getattr(self.planner, "semantic_frontier_weight", 0.0) <= 0.0:
+            return
+        if self.clip_encoder is None or keyframe is None or not goal:
+            return
+        emb = getattr(keyframe, "visual_embedding", None)
+        if emb is None:
+            return
+        if getattr(self, "_semantic_goal", None) != goal:
+            prompt = os.environ.get("LTM_SEMANTIC_FRONTIER_PROMPT", "a photo of a {goal}")
+            self._goal_text_emb = np.asarray(
+                self.clip_encoder.encode_text(prompt.format(goal=goal)),
+                dtype=np.float32).ravel()
+            self._semantic_goal = goal
+        v = float(np.dot(np.asarray(emb, dtype=np.float32).ravel(), self._goal_text_emb))
+        v = max(0.0, min(1.0, v))  # CLIP cos -> the blend's [0,1]
+        self.planner.observe_value(
+            step.agent_state.position, step.agent_state.rotation_yaw, v)
 
     def _propose_candidates(
         self, step: Step, ep, goal_override: Optional[str] = None
