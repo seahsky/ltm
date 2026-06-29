@@ -325,14 +325,18 @@ class FrontierPhysicsScorer(Scorer):
     # Ceiling for a semantic-frontier candidate's physics score (env LTM_SEMANTIC_
     # FRONTIER_CEILING, default-OFF lever so it only ever applies to flagged cands).
     # A goal-semantic raw_score can push the planner branch toward its ~1.0 ceiling
-    # and crowd out a true memory recall (match score ~0.8+). Scaling flagged
-    # frontiers into [0, ceiling] is order-preserving (so the memory-OFF explore
-    # choice is unchanged) with the ceiling set in the gap between a memory
-    # NON-match (<=0.2) and a memory MATCH (>=0.8): a real recall always wins while
-    # a semantic frontier still beats a non-match. Guards the +0.2505 delta from a
-    # *code* crowd-out; the A/B must still verify n_memory_chosen stays >> 0.
+    # and crowd out a true memory recall (match score ~0.8+). We CLAMP a flagged
+    # frontier to this ceiling, set in the gap between a typical geometric frontier
+    # (~0.69) and the memory-MATCH floor (>=0.8): a real recall always wins, while a
+    # semantic frontier keeps its FULL natural strength up to the cap (so it still
+    # beats a memory non-match/partial and stays available as the explore fallback).
+    # NOTE: an earlier SCALE form (ceiling*score at 0.45) was a bug — it shrank EVERY
+    # flagged frontier below the geometric baseline, so memory dominated 100% and the
+    # agent spun with no frontier fallback (blip2 preflight: n_frontier_chosen 16->0).
+    # Guards the +0.2505 delta from a *code* crowd-out; the A/B verifies n_memory_chosen
+    # stays >> 0 AND that frontiers still get chosen.
     _SEMANTIC_FRONTIER_CEILING = float(
-        os.environ.get("LTM_SEMANTIC_FRONTIER_CEILING", "0.45"))
+        os.environ.get("LTM_SEMANTIC_FRONTIER_CEILING", "0.70"))
 
     def score(self, candidate: str, candidate_embedding: np.ndarray, context: Dict[str, Any]) -> float:
         cand: Optional[FrontierCandidate] = context.get("frontier_candidate")
@@ -364,13 +368,13 @@ class FrontierPhysicsScorer(Scorer):
         else:
             bearing_score = max(0.0, 1.0 - abs(float(cand.bearing_rad)) / np.pi)
             score = 0.5 * float(cand.raw_score) + 0.3 * bearing_score + 0.2 * dist_score
-            # Semantic-frontier renorm: scale a flagged (goal-semantic) frontier
-            # below the memory-match score so it cannot crowd out a true recall.
-            # Order-preserving, so the memory-OFF frontier ranking is unchanged.
-            # No flag -> default path byte-identical.
+            # Semantic-frontier renorm: CLAMP a flagged (goal-semantic) frontier to
+            # the ceiling so it cannot out-score a true memory match (>=0.8) — but
+            # keeps its full natural strength below the cap, preserving the explore
+            # fallback. No flag -> default path byte-identical.
             meta = getattr(cand, "metadata", None)
             if meta and meta.get("semantic_frontier"):
-                score = self._SEMANTIC_FRONTIER_CEILING * score
+                score = min(score, self._SEMANTIC_FRONTIER_CEILING)
 
         return float(np.clip(score, 0.0, 1.0))
 

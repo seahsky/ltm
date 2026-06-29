@@ -112,13 +112,13 @@ export LTM_SEMANTIC_FRONTIER_CEILING="$CEILING"
 banner "[5/5] A/B — arm A: baseline (semantic OFF), arm B: semantic ON (weight=$WEIGHT)"
 # Arm A: geometric baseline (LTM_SEMANTIC_FRONTIER unset -> weight 0.0).
 # shellcheck disable=SC2086
-LTM_SEMANTIC_FRONTIER=0 bash scripts/race-revisit.sh --backbone remembr \
+LTM_SEMANTIC_FRONTIER=0 bash scripts/race-revisit.sh \
     --settings "1 3" --scenes "$AB_SCENES" --categories "$AB_CATS" \
     --n-warm "$NWARM" --tag "${TAG}-base" 2>&1 | tee "${OUT_DIR}/ab_base.log"
 arc=${PIPESTATUS[0]}
 # Arm B: semantic frontier ON.
 # shellcheck disable=SC2086
-LTM_SEMANTIC_FRONTIER="$WEIGHT" bash scripts/race-revisit.sh --backbone remembr \
+LTM_SEMANTIC_FRONTIER="$WEIGHT" bash scripts/race-revisit.sh \
     --settings "1 3" --scenes "$AB_SCENES" --categories "$AB_CATS" \
     --n-warm "$NWARM" --tag "${TAG}-on" 2>&1 | tee "${OUT_DIR}/ab_on.log"
 brc=${PIPESTATUS[0]}
