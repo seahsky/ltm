@@ -297,6 +297,15 @@ def _arrival_stop(near, candidate, caption_confirms, cos_threshold):
     return bool(caption_confirms)
 
 
+def _resolve_active_goal(multion: bool, active_category, ep_target_category):
+    """E4 no-op goal resolution: the multion cursor when multion, else the
+    immutable episode primary. Pure (no sim) so the no-op invariant is unit-
+    testable; the live _run_episode initializes active_goal from this (A1) and
+    re-points it at the multion advance (A2). The anomaly controller is the only
+    other mutator (anomaly_response INVESTIGATE) — wired in E5."""
+    return active_category if multion else ep_target_category
+
+
 def _advance_subgoal(
     dist_to_active,
     caption_confirms: bool,
@@ -1128,6 +1137,13 @@ class EpisodeRunner:
         multion = n_subgoals > 1 and not is_oracle
         subgoal_idx = 0
         active_category: str = subgoal_seq[0]
+        # E4: single mutable "currently-active goal" — for every non-anomaly task
+        # byte-identical to the legacy read at each site (the multion cursor when
+        # multion, else the immutable episode primary ep.target_category). The
+        # anomaly controller (anomaly_response only) is the sole future mutator
+        # (during INVESTIGATE, E5). All per-tick goal READ-THROUGH sites route
+        # through this; SPL/success/report sites keep ep.target_category.
+        active_goal = _resolve_active_goal(multion, active_category, ep.target_category)
         subgoals_found: List[Dict[str, Any]] = []
         multion_force_stop = False
         path_len_taken = 0.0
@@ -1210,14 +1226,14 @@ class EpisodeRunner:
                 caption_override = rec.caption
             keyframe = self._build_keyframe(step, caption_override=caption_override)
             self.bridge.observe_keyframe(keyframe, action=None, reward=0.0)
-            self._observe_semantic_value(step, keyframe, ep.target_category or self.target_category)
+            self._observe_semantic_value(step, keyframe, active_goal or self.target_category)
             stm_captions.append(keyframe.caption)
             ep_log["steps"].append(self._serialize_step(step, keyframe))
             self._record_frame(step, self._build_hud(
                 step, action=None, current_candidate=None, keyframe=keyframe,
                 n_memory_chosen=n_memory_chosen,
                 n_memory_candidates=n_memory_candidates, ep=ep,
-                active_category=active_category))
+                active_category=active_goal))
 
         # Loop. Seed-only episodes (Part B) cap at seed_max_steps so only the
         # distractor's step-0 view_point caption is captured + consolidated (it is
@@ -1244,7 +1260,7 @@ class EpisodeRunner:
                     # goal category) wins over the class affordance, so the old
                     # single 'target=' field (the affordance) was misleading.
                     _resolved_tgt = audio_task.audio_target_for_retrieval(
-                        self._audio_state, ep.target_category)
+                        self._audio_state, active_goal)
                     print(f"[audio] onset @step {step.step_idx} "
                           f"class={_adiag.get('audio_class')} "
                           f"heard->{_adiag.get('audio_target_override')} "
@@ -1263,7 +1279,7 @@ class EpisodeRunner:
                     elif self.bridge is not None:
                         ep_metrics_counters["n_audio_write_attempts"] += 1
                         _wtgt = audio_task.audio_target_for_retrieval(
-                            self._audio_state, ep.target_category)
+                            self._audio_state, active_goal)
                         _src = (((getattr(ep, "metadata", None) or {}).get("audio_config")
                                  or {}).get("source_position"))
                         if not _wtgt or _src is None:
@@ -1353,7 +1369,7 @@ class EpisodeRunner:
                         ep_metrics_counters["n_memory_consumed"] += 1
                 last_propose_step = int(step.step_idx)
                 cands = self._propose_candidates(
-                    step, ep, goal_override=active_category if multion else None
+                    step, ep, goal_override=active_goal
                 )
                 # Classify the LLM planner's decision (remembr backbone only) so
                 # we can see WHY its grounded pick never wins the rerank
@@ -1400,8 +1416,7 @@ class EpisodeRunner:
                     # the audio-inferred object (CLASS_TO_OBJECT); otherwise the
                     # fallback category VERBATIM → objectnav retrieval unchanged.
                     _retrieval_target = audio_task.audio_target_for_retrieval(
-                        self._audio_state,
-                        active_category if multion else ep.target_category)
+                        self._audio_state, active_goal)
                     # S1 onset-gate (LTM_AUDIO_DOA): make audio causally necessary
                     # for warm recall — no memory injection until the anomaly is
                     # heard. Default-OFF → byte-identical; only fires for audiogoal.
@@ -1456,8 +1471,7 @@ class EpisodeRunner:
                         coarse_cands = self.bridge.propose_coarse_candidates(
                             agent_pos=step.agent_state.position,
                             agent_yaw=step.agent_state.rotation_yaw,
-                            target_category=(active_category if multion
-                                             else ep.target_category),
+                            target_category=active_goal,
                             # room-tag the UNEXPLORED frontier cells (room borrowed
                             # from the nearest captioned keyframe) so the prior steers
                             # exploration toward the affordant region, not just visited
@@ -1537,8 +1551,7 @@ class EpisodeRunner:
                         candidates=all_cands,
                         query_text=keyframe.caption,
                         stm_captions=stm_captions[-5:],
-                        target_category=(active_category if multion
-                                         else ep.target_category),
+                        target_category=active_goal,
                         query_visual_embedding=keyframe.visual_embedding,
                     )
                     rerank_calls += 1
@@ -1651,8 +1664,7 @@ class EpisodeRunner:
                     detector=self.goal_detector,
                     rgb=step.rgb,
                     depth=step.depth,
-                    goal_category=(active_category if multion
-                                   else self.target_category),
+                    goal_category=active_goal,
                     agent_pose=self._agent_pose_matrix(step.agent_state),
                     intrinsics=self._camera_intrinsics(),
                     counters=ep_metrics_counters,
@@ -1818,8 +1830,7 @@ class EpisodeRunner:
                 )
                 _confirms = _caption_mentions(
                     keyframe.caption,
-                    _goal_terms(active_category if multion
-                                else ep.target_category),
+                    _goal_terms(active_goal),
                 ) is not None
                 if _arrival_stop(_near, current_candidate, _confirms,
                                  self._arrival_stop_cos):
@@ -1903,17 +1914,17 @@ class EpisodeRunner:
                 _last_pos = _pos
                 if not multion_force_stop:
                     _dist = self.source.distance_to_category(
-                        step.agent_state.position, active_category
+                        step.agent_state.position, active_goal
                     )
                     _conf = _caption_mentions(
-                        keyframe.caption, _goal_terms(active_category)
+                        keyframe.caption, _goal_terms(active_goal)
                     ) is not None
                     _found, _finished = _advance_subgoal(
                         _dist, _conf, subgoal_idx, n_subgoals, self.found_radius
                     )
                     if _found:
                         subgoals_found.append({
-                            "category": active_category,
+                            "category": active_goal,
                             "subgoal_idx": subgoal_idx,
                             "step_idx": int(step.step_idx),
                             "distance": float(_dist),
@@ -1939,6 +1950,7 @@ class EpisodeRunner:
                                 )
                                 _kf_since_boundary = 0
                             active_category = subgoal_seq[subgoal_idx]
+                            active_goal = active_category  # E4: track the cursor advance
                             # The recall moment: force an immediate LTM
                             # re-query for the NEW category by resetting the
                             # propose-cadence clock and dropping the waypoint.
@@ -1985,14 +1997,14 @@ class EpisodeRunner:
                 self.bridge.observe_keyframe(
                     keyframe, action=action, reward=step.reward, success=False
                 )
-                self._observe_semantic_value(step, keyframe, ep.target_category or self.target_category)
+                self._observe_semantic_value(step, keyframe, active_goal or self.target_category)
                 stm_captions.append(keyframe.caption)
                 ep_log["steps"].append(self._serialize_step(step, keyframe))
                 self._record_frame(step, self._build_hud(
                     step, action=action, current_candidate=current_candidate,
                     keyframe=keyframe, n_memory_chosen=n_memory_chosen,
                     n_memory_candidates=n_memory_candidates, ep=ep,
-                    active_category=active_category))
+                    active_category=active_goal))
                 # Periodic within-episode consolidation (extension seam, OFF
                 # by default — event-boundary consolidation at sub-goal
                 # advance is the multion default).

@@ -203,7 +203,9 @@ class _StubBridge:
         return {"fine": [], "mid": [], "coarse": []}
 
     def propose_memory_candidates(self, agent_pos, agent_yaw, target_category,
-                                  planner_world_xys=None, top_k=3):
+                                  planner_world_xys=None, top_k=3,
+                                  audio_lateral_sign=None, audio_energy=None,
+                                  **kwargs):
         for kf in self._fine:
             if _caption_mentions_stub(getattr(kf, "caption", ""),
                                       _goal_terms_stub(target_category)):
