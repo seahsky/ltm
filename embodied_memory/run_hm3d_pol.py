@@ -363,6 +363,11 @@ def main(argv: Optional[list] = None) -> int:
                              "diagnose_normal_anomaly_calib.py.")
     parser.add_argument("--audio-anomaly-tau", type=float, default=0.0,
                         help="Step 1: absolute floor on the best-anomaly CLAP cosine.")
+    parser.add_argument("--no-anomaly-gate", action="store_true",
+                        help="FORCE the open-set CLAP anomaly-gate OFF even for "
+                             "--task anomaly_response (energy-only onset). Use to "
+                             "isolate whether the gate is suppressing onset, or "
+                             "when the gate can't separate the RIR-convolved clip.")
     parser.add_argument("--investigate-max-steps", type=int, default=40,
                         help="anomaly_response: detour sub-budget; overflow aborts "
                              "the investigation and resumes the primary search.")
@@ -579,7 +584,7 @@ def main(argv: Optional[list] = None) -> int:
         # chase benign onsets). audiogoal keeps the default-OFF behaviour.
         _anomaly_gate = bool(args.audio_anomaly_gate
                              or os.environ.get("LTM_AUDIO_ANOMALY_GATE")
-                             or args.task == "anomaly_response")
+                             or args.task == "anomaly_response") and not args.no_anomaly_gate
         audio_cfg = AudioTaskConfig(
             enabled=True, t_anom=args.t_anom,
             onset_rms=args.audio_onset_rms,

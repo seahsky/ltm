@@ -912,6 +912,9 @@ class EpisodeRunner:
                 # attempted? why skipped?) — turns a 0-write smoke into a one-row
                 # verdict (see the decision table).
                 "n_audio_onset_fired": int(ep_metrics.get("n_audio_onset_fired", 0)),
+                "audio_energy_max": float(ep_metrics.get("audio_energy_max", 0.0)),
+                "n_audio_energy_over_onset": int(ep_metrics.get("n_audio_energy_over_onset", 0)),
+                "n_audio_gate_rejected": int(ep_metrics.get("n_audio_gate_rejected", 0)),
                 "n_audio_write_attempts": int(ep_metrics.get("n_audio_write_attempts", 0)),
                 "audio_write_skip_reason": ep_metrics.get("audio_write_skip_reason"),
                 "n_planner_proposals": int(ep_metrics.get("n_planner_proposals", 0)),
@@ -1149,6 +1152,15 @@ class EpisodeRunner:
             # + bridge); skip_reason one-shot = env-off / src-none / insert-none /
             # ok. "no-onset" is implicit (n_audio_onset_fired==0, reason None).
             "n_audio_onset_fired": 0,
+            # Onset-blocker instrumentation (diagnose_audio_onset): the per-tick
+            # truth the keyframe-sparse ep_log["steps"] can't carry. energy_max =
+            # did the rendered audio EVER clear onset_rms; n_over_onset = #ticks it
+            # did; n_gate_rejected = of those, #ticks the open-set CLAP gate
+            # (is_anomaly) REJECTED the onset => the GATE_SUPPRESSING vs
+            # ENERGY_TOO_LOW discriminator.
+            "audio_energy_max": 0.0,
+            "n_audio_energy_over_onset": 0,
+            "n_audio_gate_rejected": 0,
             "n_audio_write_attempts": 0,
             "audio_write_skip_reason": None,
         }
@@ -1303,6 +1315,18 @@ class EpisodeRunner:
                     self._audio_cfg.sample_rate, self._audio_cfg,
                     self._audio_state, self.clap_encoder)
                 step.info.update(_adiag)
+                # Onset-blocker instrumentation (per-tick; ep_log["steps"] is
+                # keyframe-sparse so it can't carry this). Accumulate the peak
+                # energy and, on every tick where energy clears onset_rms, whether
+                # the open-set gate rejected it (is_anomaly is False). Lets
+                # diagnose_audio_onset prove GATE_SUPPRESSING vs ENERGY_TOO_LOW.
+                _ae = float(_adiag.get("audio_energy") or 0.0)
+                if _ae > ep_metrics_counters["audio_energy_max"]:
+                    ep_metrics_counters["audio_energy_max"] = _ae
+                if _ae >= float(self._audio_cfg.onset_rms):
+                    ep_metrics_counters["n_audio_energy_over_onset"] += 1
+                    if _adiag.get("is_anomaly") is False:
+                        ep_metrics_counters["n_audio_gate_rejected"] += 1
                 if _adiag.get("onset_fired"):
                     ep_metrics_counters["n_audio_onset_fired"] += 1
                     # Show BOTH the heard-class affordance (CLASS_TO_OBJECT, the
@@ -2374,6 +2398,9 @@ class EpisodeRunner:
             "n_remembr_chosen": n_remembr_chosen,
             "n_stop_signals": n_stop_signals,
             "n_audio_onset_fired": int(ep_metrics_counters["n_audio_onset_fired"]),
+            "audio_energy_max": float(ep_metrics_counters["audio_energy_max"]),
+            "n_audio_energy_over_onset": int(ep_metrics_counters["n_audio_energy_over_onset"]),
+            "n_audio_gate_rejected": int(ep_metrics_counters["n_audio_gate_rejected"]),
             "n_audio_write_attempts": int(ep_metrics_counters["n_audio_write_attempts"]),
             "audio_write_skip_reason": ep_metrics_counters["audio_write_skip_reason"],
             "n_planner_proposals": int(ep_metrics_counters["n_planner_proposals"]),

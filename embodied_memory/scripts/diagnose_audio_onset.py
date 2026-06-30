@@ -74,12 +74,25 @@ def find_onset_rms(text: str) -> Optional[float]:
 
 
 def classify_onset_blocker(
-    n_onset_fired: int, max_energy: float, onset_rms: Optional[float]
+    n_onset_fired: int, max_energy: float, onset_rms: Optional[float],
+    n_gate_rejected: Optional[int] = None,
 ) -> Tuple[str, str]:
-    """Decide why onset did/didn't fire. Returns (verdict, recommendation)."""
+    """Decide why onset did/didn't fire. Returns (verdict, recommendation).
+
+    ``n_gate_rejected`` (the per-tick counter: ticks where energy cleared
+    onset_rms but the open-set gate rejected) is AUTHORITATIVE when present —
+    it proves GATE_SUPPRESSING regardless of the keyframe-sparse ``max_energy``.
+    """
     if n_onset_fired > 0:
         return ("ONSET_FIRES",
                 "Onset fired — the controller can enter INVESTIGATE. No blocker.")
+    if n_gate_rejected is not None and n_gate_rejected > 0:
+        return ("GATE_SUPPRESSING",
+                f"On {n_gate_rejected} tick(s) audio_energy cleared onset_rms but the "
+                "open-set CLAP anomaly-gate (is_anomaly) REJECTED the onset => the "
+                "gate is the blocker. Fix: re-run with --no-anomaly-gate (energy-only "
+                "onset) to unblock the smoke; recalibrate the gate delta on "
+                "RIR-convolved audio for the real eval.")
     if onset_rms is None:
         return ("UNKNOWN_THRESHOLD",
                 "onset_rms not found in the log; pass --onset-rms <v> (the "
@@ -147,51 +160,68 @@ def main(argv: Optional[List[str]] = None) -> int:
         text, log_path = _read_log_text(run_dir, args.log)
         onset_rms = find_onset_rms(text)
 
-    # per-episode n_audio_onset_fired from summary.json
+    # Prefer the AUTHORITATIVE per-tick counters from summary.json
+    # (audio_energy_max / n_audio_gate_rejected) — ep_log["steps"] is
+    # keyframe-sparse and cannot carry per-tick audio. Fall back to the sparse
+    # steps for older runs that predate the counters (with a loud caveat).
     summary = _load_json(os.path.join(run_dir, "summary.json")) or {}
-    onset_by_ep = {}
-    for ep in (summary.get("episodes") or []):
-        onset_by_ep[str(ep.get("episode_id", ep.get("episode_idx")))] = \
-            int(ep.get("n_audio_onset_fired", 0) or 0)
-
-    ep_files = sorted(glob.glob(os.path.join(run_dir, "episode_*.json")))
-    ep_files = [f for f in ep_files if not f.endswith("_error.json")]
+    sum_eps = summary.get("episodes") or []
+    has_counters = any(isinstance(ep, dict) and "audio_energy_max" in ep for ep in sum_eps)
 
     print(f"=== diagnose_audio_onset: {run_dir} ===")
     print(f"  onset_rms = {onset_rms if onset_rms is not None else 'UNKNOWN'}"
           f"{'  (from ' + log_path + ')' if (log_path and args.onset_rms is None) else ''}")
     if onset_rms is None and args.onset_rms is None:
         print("  (no onset_rms in the log — pass --onset-rms to get the energy-vs-threshold verdict)")
-    print(f"  episodes with per-step logs: {len(ep_files)}")
-    print()
-    print(f"  {'episode':<22} {'steps':>6} {'audible':>8} {'maxE':>9} {'meanE':>9} {'onset_fired':>12}")
 
-    global_max = 0.0
     total_onset = 0
-    for f in ep_files:
-        ep = _load_json(f)
-        if ep is None:
-            continue
-        s = episode_energy_stats(ep)
-        global_max = max(global_max, s["max_energy"])
-        name = os.path.basename(f)
-        # match summary by episode_id/idx in the ep_log
-        eid = str(ep.get("episode_id", ep.get("episode_idx", "")))
-        fired = onset_by_ep.get(eid, 0)
-        total_onset += fired
-        flag = ""
-        if onset_rms is not None and s["max_energy"] >= onset_rms and fired == 0:
-            flag = "  <- energy clears bar, no onset (gate?)"
-        print(f"  {name:<22} {s['n_steps']:>6} {s['n_audible']:>8} "
-              f"{s['max_energy']:>9.4f} {s['mean_energy']:>9.4f} {fired:>12}{flag}")
+    global_max = 0.0
+    total_gate_rejected: Optional[int] = 0 if has_counters else None
 
-    # fall back to summary total if no per-ep mapping
-    if total_onset == 0:
-        total_onset = sum(onset_by_ep.values())
+    if has_counters:
+        print("  source: summary.json per-tick counters (AUTHORITATIVE)")
+        print()
+        print(f"  {'episode':<12} {'onset':>6} {'maxE':>9} {'E>=onset':>9} {'gate_rej':>9}")
+        for ep in sum_eps:
+            eid = str(ep.get("episode_id", ep.get("episode_idx", "")))
+            fired = int(ep.get("n_audio_onset_fired", 0) or 0)
+            emax = float(ep.get("audio_energy_max", 0.0) or 0.0)
+            n_over = int(ep.get("n_audio_energy_over_onset", 0) or 0)
+            n_rej = int(ep.get("n_audio_gate_rejected", 0) or 0)
+            total_onset += fired
+            global_max = max(global_max, emax)
+            total_gate_rejected += n_rej
+            flag = "  <- energy cleared onset_rms but gate rejected" if n_rej > 0 else ""
+            print(f"  ep {eid:<9} {fired:>6} {emax:>9.4f} {n_over:>9} {n_rej:>9}{flag}")
+    else:
+        ep_files = [f for f in sorted(glob.glob(os.path.join(run_dir, "episode_*.json")))
+                    if not f.endswith("_error.json")]
+        onset_by_ep = {str(ep.get("episode_id", ep.get("episode_idx"))):
+                       int(ep.get("n_audio_onset_fired", 0) or 0) for ep in sum_eps}
+        print("  source: keyframe-sparse ep_log['steps'] (per-tick audio NOT captured;")
+        print("          maxE is only a floor — re-run with the instrumented build for a")
+        print("          conclusive GATE-vs-ENERGY verdict via the summary counters)")
+        print()
+        print(f"  {'episode':<22} {'kf_steps':>8} {'audible':>8} {'maxE':>9} {'onset':>6}")
+        for f in ep_files:
+            ep = _load_json(f)
+            if ep is None:
+                continue
+            s = episode_energy_stats(ep)
+            global_max = max(global_max, s["max_energy"])
+            eid = str(ep.get("episode_id", ep.get("episode_idx", "")))
+            fired = onset_by_ep.get(eid, 0)
+            total_onset += fired
+            print(f"  {os.path.basename(f):<22} {s['n_steps']:>8} {s['n_audible']:>8} "
+                  f"{s['max_energy']:>9.4f} {fired:>6}")
+        if total_onset == 0:
+            total_onset = sum(onset_by_ep.values())
 
-    verdict, rec = classify_onset_blocker(total_onset, global_max, onset_rms)
+    verdict, rec = classify_onset_blocker(total_onset, global_max, onset_rms,
+                                          n_gate_rejected=total_gate_rejected)
     print()
-    print(f"  global max audio_energy = {global_max:.4f}   total onset_fired = {total_onset}")
+    print(f"  global max audio_energy = {global_max:.4f}   total onset_fired = {total_onset}"
+          + (f"   total gate_rejected = {total_gate_rejected}" if has_counters else ""))
     print(f"ONSET_VERDICT={verdict}")
     print(f"  -> {rec}")
     return 0

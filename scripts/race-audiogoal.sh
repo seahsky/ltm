@@ -79,6 +79,9 @@ while [ $# -gt 0 ]; do
     # is a WIRING smoke (onset->divert->CHECK->RESUME->complete->report, no crash),
     # NOT the real eval (which needs a non-LOS source + benign distractor — N3).
     --task) TASK="$2"; shift 2 ;;
+    # Force the open-set CLAP anomaly-gate OFF (energy-only onset) even for
+    # anomaly_response — isolates whether the gate is suppressing onset.
+    --no-anomaly-gate) NO_GATE=1; shift ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
@@ -241,7 +244,7 @@ for S in $SETTINGS; do
   # by a previous attempt's summary.json if THIS run hard-crashes before writing.
   rm -f "$out_dir/summary.json"
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
-      --backbone remembr --setting "$S" --task "$TASK" \
+      --backbone remembr --setting "$S" --task "$TASK" ${NO_GATE:+--no-anomaly-gate} \
       --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
       --audio-onset-rms "$ONSET_RMS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
       --episodes-path "$DS" --scene "$SCENE" --target any \

@@ -40,6 +40,15 @@ def case_classify_energy_when_below_threshold():
     assert "onset" in rec.lower()
 
 
+def case_classify_gate_rejected_counter_is_authoritative():
+    # the per-tick n_gate_rejected counter PROVES the gate suppressed onset, even
+    # if the keyframe-sparse max_energy looks 0 (the loud ticks weren't keyframes).
+    v, rec = d.classify_onset_blocker(n_onset_fired=0, max_energy=0.0,
+                                      onset_rms=0.05, n_gate_rejected=7)
+    assert v == "GATE_SUPPRESSING", v
+    assert "gate" in rec.lower()
+
+
 def case_classify_unknown_threshold_when_onset_rms_none():
     v, _ = d.classify_onset_blocker(n_onset_fired=0, max_energy=0.01, onset_rms=None)
     assert v == "UNKNOWN_THRESHOLD", v
@@ -107,6 +116,7 @@ def main() -> int:
         case_classify_fires_when_onset_fired,
         case_classify_gate_when_energy_clears_but_no_onset,
         case_classify_energy_when_below_threshold,
+        case_classify_gate_rejected_counter_is_authoritative,
         case_classify_unknown_threshold_when_onset_rms_none,
         case_classify_boundary_equal_is_gate,
         case_energy_stats_basic,
