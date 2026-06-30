@@ -101,6 +101,15 @@ class ControllerDecision:
     report: Optional[Dict[str, Any]] = None
 
 
+def is_diverting(mode: NavMode) -> bool:
+    """True while the controller is on the anomaly detour — the runner must NOT
+    let the primary task terminate (suppress backbone stop_signal / detector STOP)
+    during INVESTIGATE / CHECK / RESUME. False in SEARCH (normal primary nav) and
+    in COMPLETE / REPORTED (primary reached, so the STOP is legitimate).
+    Suppressing the terminal states would break primary success."""
+    return mode in (NavMode.INVESTIGATE, NavMode.CHECK, NavMode.RESUME)
+
+
 def step_controller(
     state: ControllerState,
     cfg: AnomalyControllerConfig,

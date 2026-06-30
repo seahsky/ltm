@@ -330,8 +330,9 @@ def main(argv: Optional[list] = None) -> int:
     # into the live loop; the agent localizes via energy/lateral-sign and recalls
     # the affordant object from LTM. Inert unless --task audiogoal.
     parser.add_argument("--task", type=str, default="objectnav",
-                        choices=["objectnav", "audiogoal"],
-                        help="objectnav (default) or audiogoal (anomaly-sound task).")
+                        choices=["objectnav", "audiogoal", "anomaly_response"],
+                        help="objectnav (default), audiogoal (anomaly-sound task), "
+                             "or anomaly_response (interrupt-investigate-resume).")
     parser.add_argument("--rir-grid", type=str, default=None,
                         help="audiogoal: precomputed RIR grid .npz (render_rir_grid.py). "
                              "Required for --task audiogoal.")
@@ -362,20 +363,39 @@ def main(argv: Optional[list] = None) -> int:
                              "diagnose_normal_anomaly_calib.py.")
     parser.add_argument("--audio-anomaly-tau", type=float, default=0.0,
                         help="Step 1: absolute floor on the best-anomaly CLAP cosine.")
+    parser.add_argument("--investigate-max-steps", type=int, default=40,
+                        help="anomaly_response: detour sub-budget; overflow aborts "
+                             "the investigation and resumes the primary search.")
+    parser.add_argument("--investigate-arrive-radius", type=float, default=1.5,
+                        help="anomaly_response: floor-plane (xz) dist to the source "
+                             "(m) that counts as arrived => CHECK.")
+    parser.add_argument("--investigate-extend-budget", action="store_true",
+                        help="anomaly_response: if set, the detour does NOT count "
+                             "against the primary step budget.")
 
     args = parser.parse_args(argv)
 
     if args.mode == "live" and not args.scene:
         parser.error("--scene is required in live mode")
 
-    if args.task == "audiogoal":
+    if args.task in ("audiogoal", "anomaly_response"):
         if args.mode != "live":
-            parser.error("--task audiogoal requires --mode live")
+            parser.error(f"--task {args.task} requires --mode live")
         if not args.rir_grid:
-            parser.error("--task audiogoal requires --rir-grid")
+            parser.error(f"--task {args.task} requires --rir-grid")
         if args.backbone != "remembr":
-            print(f"[run_hm3d_pol] WARNING: --task audiogoal is intended with "
+            print(f"[run_hm3d_pol] WARNING: --task {args.task} is intended with "
                   f"--backbone remembr; got --backbone {args.backbone}")
+
+    # E5: --investigate-extend-budget credits the primary step budget by the max
+    # detour so the investigation doesn't starve the primary task (the plan's
+    # budget A/B). Bump args.max_steps ONCE so it reaches BOTH the env cap
+    # (habitat max_episode_steps) and the runner loop bound. anomaly_response +
+    # the flag only => every other run is unchanged.
+    if args.task == "anomaly_response" and args.investigate_extend_budget:
+        args.max_steps = int(args.max_steps) + int(args.investigate_max_steps)
+        print(f"[anomaly_response] extend-budget: max_steps -> {args.max_steps} "
+              f"(+{args.investigate_max_steps} detour credit)")
 
     # Resolve ablation toggles. --setting picks a preset; explicit per-toggle
     # flags can additionally disable a module on top of the preset (so e.g.
@@ -549,12 +569,17 @@ def main(argv: Optional[list] = None) -> int:
     # None for objectnav so the runner's audio path stays disabled (byte-same).
     clap_encoder = None
     audio_cfg = None
-    if args.task == "audiogoal":
+    anomaly_cfg = None
+    if args.task in ("audiogoal", "anomaly_response"):
         from .perception import CLAPAudioEncoder
         from .audio_task import AudioTaskConfig
         clap_encoder = CLAPAudioEncoder(device=args.clip_device)
+        # anomaly_response FORCES the open-set CLAP gate ON so is_anomaly is a
+        # real True/False (discrimination is load-bearing — the agent must NOT
+        # chase benign onsets). audiogoal keeps the default-OFF behaviour.
         _anomaly_gate = bool(args.audio_anomaly_gate
-                             or os.environ.get("LTM_AUDIO_ANOMALY_GATE"))
+                             or os.environ.get("LTM_AUDIO_ANOMALY_GATE")
+                             or args.task == "anomaly_response")
         audio_cfg = AudioTaskConfig(
             enabled=True, t_anom=args.t_anom,
             onset_rms=args.audio_onset_rms,
@@ -565,8 +590,16 @@ def main(argv: Optional[list] = None) -> int:
             anomaly_tau=args.audio_anomaly_tau,
         )
         if _anomaly_gate:
-            print(f"[audiogoal] Step-1 anomaly gate ON "
+            print(f"[{args.task}] Step-1 anomaly gate ON "
                   f"(delta={args.audio_anomaly_delta}, tau={args.audio_anomaly_tau})")
+    if args.task == "anomaly_response":
+        from .anomaly_controller import AnomalyControllerConfig
+        anomaly_cfg = AnomalyControllerConfig(
+            enabled=True,
+            investigate_max_steps=args.investigate_max_steps,
+            investigate_arrive_radius_m=args.investigate_arrive_radius,
+            extend_budget=args.investigate_extend_budget,
+        )
 
     # BLIP-2 ITM value scorer for the semantic-frontier "blip2" backend. Built
     # ONLY when the lever is ON (weight>0) AND the backend is blip2, so default /
@@ -633,6 +666,7 @@ def main(argv: Optional[list] = None) -> int:
         task=args.task,
         clap_encoder=clap_encoder,
         audio_cfg=audio_cfg,
+        anomaly_cfg=anomaly_cfg,
         value_scorer=value_scorer,
     )
 

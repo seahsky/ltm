@@ -321,7 +321,7 @@ class HabitatObjectNavSource(EpisodeSource):
         # silent mapping passes and a low value for warm-fires episodes) overrides
         # the run-level default. Gated on task=="audiogoal"; otherwise inert.
         ep_t_anom = self._audio_t_anom
-        if self.task == "audiogoal" and self._rir_grid_path:
+        if self.task in ("audiogoal", "anomaly_response") and self._rir_grid_path:
             from .audio import RIRGrid
             from .audio_task import AudioTaskConfig, resolve_t_anom
             ep_t_anom = resolve_t_anom(ep_info, self._audio_t_anom)
@@ -369,7 +369,7 @@ class HabitatObjectNavSource(EpisodeSource):
         # AudioGoal: surface the anomaly config (source_position / anomaly_class /
         # anomaly_object / per-episode t_anom written by the M2 dataset builder
         # into episode.info) for the runner + analysis.
-        if self.task == "audiogoal":
+        if self.task in ("audiogoal", "anomaly_response"):
             src_pos = None
             anom_cls = None
             anom_obj = None
@@ -537,7 +537,7 @@ class HabitatObjectNavSource(EpisodeSource):
         # RIR with the clip (silence before t_anom). No decision logic here — the
         # runner calls audio_task on Step.audio. Never imports the audio sim.
         audio = None
-        if (self.task == "audiogoal" and self._rir_grid is not None
+        if (self.task in ("audiogoal", "anomaly_response") and self._rir_grid is not None
                 and self._anomaly_clip_norm is not None and self._audio_render_cfg is not None):
             from .audio_task import render_step_audio
             audio = render_step_audio(

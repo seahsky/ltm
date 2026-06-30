@@ -254,6 +254,21 @@ def case_full_episode_no_anomaly_active_goal_never_diverges():
         assert d.mode == ac.NavMode.SEARCH
 
 
+def case_is_diverting_true_for_detour_states():
+    # while diverting, the runner must suppress the primary episode-ending STOP
+    assert ac.is_diverting(ac.NavMode.INVESTIGATE) is True
+    assert ac.is_diverting(ac.NavMode.CHECK) is True
+    assert ac.is_diverting(ac.NavMode.RESUME) is True
+
+
+def case_is_diverting_false_for_search_and_terminal():
+    # SEARCH = normal primary nav; COMPLETE/REPORTED = primary reached, the STOP
+    # is legitimate. Suppressing those would break primary success.
+    assert ac.is_diverting(ac.NavMode.SEARCH) is False
+    assert ac.is_diverting(ac.NavMode.COMPLETE) is False
+    assert ac.is_diverting(ac.NavMode.REPORTED) is False
+
+
 def case_no_habitat_sim_import():
     import importlib
     mod = importlib.import_module("embodied_memory.anomaly_controller")
@@ -281,6 +296,8 @@ def main() -> int:
         case_build_report_after_investigation_and_completion,
         case_build_report_on_timeout_primary_incomplete,
         case_full_episode_no_anomaly_active_goal_never_diverges,
+        case_is_diverting_true_for_detour_states,
+        case_is_diverting_false_for_search_and_terminal,
         case_no_habitat_sim_import,
     ]
     print(f"running {len(cases)} anomaly_controller cases…")

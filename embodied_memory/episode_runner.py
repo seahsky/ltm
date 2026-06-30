@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import numpy as np
 
 from . import audio_task
+from . import anomaly_controller
 from .episode_source import Episode, EpisodeSource, Step
 from .frontier_planner import (
     ACTION_FORWARD,
@@ -221,6 +222,31 @@ def _detector_candidate(approach_wp_xyz, agent_pos):
         raw_score=1.0,
         source="detector",
         metadata={"approach": True},
+    )
+
+
+def _investigate_candidate(wp_xyz, agent_pos):
+    """Construct a FrontierCandidate at the anomaly-investigate waypoint
+    (anomaly_response task only).
+
+    ``wp_xyz`` is the controller's investigate waypoint, a 3-vector in world
+    coords (the anomaly source pose); the candidate uses only (x, z) (floor
+    plane). ``source="audio_investigate"`` routes it to the deterministic-win
+    branch in FrontierPhysicsScorer.score so the divert wins the rerank.
+    """
+    return FrontierCandidate(
+        candidate_id=-1,
+        world_xy=np.array([wp_xyz[0], wp_xyz[2]], dtype=np.float32),
+        grid_rc=(0, 0),
+        distance_m=float(np.linalg.norm(
+            np.array([agent_pos[0], agent_pos[2]])
+            - np.array([wp_xyz[0], wp_xyz[2]])
+        )),
+        bearing_rad=0.0,
+        cluster_size=1,
+        raw_score=1.0,
+        source="audio_investigate",
+        metadata={"investigate": True},
     )
 
 
@@ -522,6 +548,7 @@ class EpisodeRunner:
         task: str = "objectnav",
         clap_encoder: Optional[Any] = None,
         audio_cfg: Optional[Any] = None,
+        anomaly_cfg: Optional[Any] = None,
         value_scorer: Optional[Any] = None,
     ):
         self.source = source
@@ -583,6 +610,7 @@ class EpisodeRunner:
         # _run_episode are skipped and every non-audio path is byte-identical
         # (audio_target_for_retrieval returns the fallback when undetected).
         from .audio_task import AudioEpisodeState, AudioTaskConfig
+        from .anomaly_controller import AnomalyControllerConfig, ControllerState
         self.task = str(task)
         self.clap_encoder = clap_encoder
         self._audio_cfg = audio_cfg if audio_cfg is not None else AudioTaskConfig()
@@ -593,6 +621,18 @@ class EpisodeRunner:
         # default path is byte-identical (gate_retrieval_target returns verbatim).
         self._audio_doa_onset_gate = bool(os.environ.get("LTM_AUDIO_DOA")) and (
             self.task == "audiogoal")
+        # Anomaly-response interrupt-resume controller (E5). Mirrors the
+        # _audio_cfg/_audio_state pair; enabled ONLY for anomaly_response so
+        # step_controller is never invoked otherwise => every other task's goal
+        # handling is byte-identical (E4 proved the active_goal seam is a no-op).
+        self._anomaly_cfg = (anomaly_cfg if anomaly_cfg is not None
+                             else AnomalyControllerConfig())
+        self._anomaly_cfg.enabled = (self.task == "anomaly_response")
+        self._anomaly_state = ControllerState()
+        # Per-episode one-shot investigate-waypoint stash + primary snapshot
+        # (E5-S2/S4/S5). None clears the divert injection each tick.
+        self._investigate_wp = None
+        self._primary_snapshot = None
         # Oracle backbone (Run-5 diagnostic): a ShortestPathFollower steers
         # straight to the episode goal, bypassing the candidate/scorer/memory
         # machinery. Lazily constructed per-episode in _init_oracle_follower.
@@ -958,7 +998,14 @@ class EpisodeRunner:
         # Step-2 write-once-per-episode latch (reset every episode so a per-episode
         # audio write is allowed exactly once; see the detected-gated write seam).
         self._audio_written = False
-        if self.task == "audiogoal":
+        # Per-episode controller reset (E5). UNCONDITIONAL like _audio_state.reset()
+        # — a no-op for non-anomaly tasks (cfg.enabled False => step_controller is
+        # never called below). primary_goal = ep.target_category, the SPL/report
+        # STAY anchor; active_goal still inits from _resolve_active_goal.
+        self._anomaly_state.reset(ep.target_category)
+        self._investigate_wp = None
+        self._primary_snapshot = None
+        if self.task in ("audiogoal", "anomaly_response"):
             _ac = (ep.metadata or {}).get("audio_config") or {}
             if _ac.get("sample_rate"):
                 self._audio_cfg.sample_rate = int(_ac["sample_rate"])
@@ -1241,11 +1288,16 @@ class EpisodeRunner:
         _ep_max_steps = (self.seed_max_steps
                          if bool((ep.metadata or {}).get("seed_only", False))
                          else self.max_steps_per_episode)
+        # NOTE: --investigate-extend-budget is applied at construction by bumping
+        # max_steps (both the env max_episode_steps cap AND max_steps_per_episode),
+        # NOT here — extending only this loop bound is unreachable because the
+        # Habitat env terminates the episode at its own cap first.
         for t in range(1, _ep_max_steps):
             # AudioGoal: process THIS step's audio (onset → classify-once → object
             # override; energy/lateral diag into step.info) before any decision
             # below consumes it. Gated → no-op for objectnav/revisit/multion.
-            if self.task == "audiogoal" and self._audio_cfg.enabled:
+            if (self.task in ("audiogoal", "anomaly_response")
+                    and self._audio_cfg.enabled):
                 _adiag = audio_task.process_audio_step(
                     getattr(step, "audio", None), step.step_idx,
                     self._audio_cfg.sample_rate, self._audio_cfg,
@@ -1296,6 +1348,90 @@ class EpisodeRunner:
                                 print(f"[audio-write] step {step.step_idx}: wrote "
                                       f"'{_wtgt}' @ source={_src} -> fine LTM "
                                       f"(id={_eid})", flush=True)
+            # --- E5-S2/S3/S5: anomaly-response interrupt-resume controller ---
+            # Gated on cfg.enabled (anomaly_response only); a near no-op on plain
+            # SEARCH ticks and never invoked for any other task, so the goal /
+            # candidate handling below stays byte-identical (E4 active_goal seam).
+            if self._anomaly_cfg.enabled:
+                _acfg = self._anomaly_cfg
+                _info = step.info or {}
+                _isrc = (((getattr(ep, "metadata", None) or {}).get("audio_config")
+                          or {}).get("source_position"))
+                # ORACLE GT source (privileged): source_position is the ground-truth
+                # anomaly location; arrived_at_source measures GT distance to it. The
+                # realizable DOA-derived arm is pending (plan §6 mandatory A/B) — any
+                # "investigates the source" number off this is an oracle upper bound.
+                source_xyz = (tuple(float(v) for v in _isrc)
+                              if _isrc is not None else None)
+                _apos = step.agent_state.position
+                arrived_at_source = (
+                    source_xyz is not None
+                    and float(np.hypot(float(_apos[0]) - source_xyz[0],
+                                       float(_apos[2]) - source_xyz[2]))
+                    < _acfg.investigate_arrive_radius_m)
+                _d2g = _info.get("distance_to_goal")
+                primary_goal_reached = (_d2g is not None and float(_d2g) < 1.0)
+                dec = anomaly_controller.step_controller(
+                    self._anomaly_state, _acfg,
+                    onset_fired=bool(_info.get("onset_fired")),
+                    is_anomaly=_info.get("is_anomaly"),
+                    source_xyz=source_xyz,
+                    arrived_at_source=arrived_at_source,
+                    primary_goal_reached=primary_goal_reached,
+                    anomaly_class=self._audio_state.anomaly_class,
+                    # prefer the dataset-mapped object (what the agent really mapped
+                    # near the source) over the static CLASS_TO_OBJECT affordance —
+                    # matches audio_target_for_retrieval so active_goal and the
+                    # memory query agree during INVESTIGATE.
+                    anomaly_object=(self._audio_state.anomaly_object_override
+                                    or self._audio_state.target_override),
+                    keyframe_caption=(stm_captions[-1] if stm_captions else None),
+                )
+                # Single mutable active goal — the controller is the sole mutator
+                # for anomaly_response. SPL/report stay ep.target_category.
+                active_goal = dec.active_goal
+                # E5-S5: snapshot primary-search state at SEARCH->INVESTIGATE so the
+                # detour never clobbers it; re-bound on RESUME. Keeps the STOP reads
+                # (detector-mem / audio-energy / arrival) intact across the divert.
+                if dec.save_primary_state:
+                    self._primary_snapshot = {
+                        "mem_cands": mem_cands,
+                        "current_candidate": current_candidate,
+                        "approach_waypoint": self._approach_waypoint,
+                        "consumed_memory_xys": list(consumed_memory_xys),
+                        "unreachable_xys": list(unreachable_xys),
+                        "consecutive_unreachable": consecutive_unreachable,
+                        "last_propose_step": last_propose_step,
+                        "last_reached_propose_step": last_reached_propose_step,
+                        "last_follower_drop_step": last_follower_drop_step,
+                        # goal-keyed CLIP semantic-frontier cache (lazily created;
+                        # getattr-guarded — __init__ never sets these attrs).
+                        "semantic_goal": getattr(self, "_semantic_goal", None),
+                        "goal_text_emb": getattr(self, "_goal_text_emb", None),
+                    }
+                if dec.restore_primary_state and self._primary_snapshot is not None:
+                    _ps = self._primary_snapshot
+                    mem_cands = _ps["mem_cands"]
+                    current_candidate = _ps["current_candidate"]
+                    self._approach_waypoint = _ps["approach_waypoint"]
+                    consumed_memory_xys = list(_ps["consumed_memory_xys"])
+                    unreachable_xys = list(_ps["unreachable_xys"])
+                    consecutive_unreachable = _ps["consecutive_unreachable"]
+                    last_propose_step = _ps["last_propose_step"]
+                    last_reached_propose_step = _ps["last_reached_propose_step"]
+                    last_follower_drop_step = _ps["last_follower_drop_step"]
+                    self._semantic_goal = _ps["semantic_goal"]
+                    self._goal_text_emb = _ps["goal_text_emb"]
+                    self._primary_snapshot = None
+                # E5-S3: force an immediate re-propose THIS tick so the new
+                # active_goal + the investigate waypoint take effect now (reuses
+                # the MultiON handoff knobs).
+                if dec.force_requery:
+                    current_candidate = None
+                    self._approach_waypoint = None
+                    last_propose_step = -10**9
+                # E5-S4 stash: one-shot investigate waypoint for the proposer seam.
+                self._investigate_wp = dec.investigate_waypoint
             if is_oracle:
                 # Oracle short-circuit: steer straight to the goal, bypassing
                 # candidate proposal, memory injection, and rerank entirely.
@@ -1407,6 +1543,17 @@ class EpisodeRunner:
                         (c for c in cands if c.metadata.get("stop_signal", False)),
                         None,
                     )
+                    # E5-CRITICAL: never let a backbone stop_signal terminate the
+                    # episode while the controller is DIVERTING to the anomaly
+                    # source — the primary task must RESUME after CHECK, not STOP
+                    # at the source (the source IS captioned with the object the
+                    # divert queries, so the grounded STOP would fire there). Gated
+                    # on the controller mode (anomaly_response only) => byte-identical
+                    # for every other task. COMPLETE/REPORTED are NOT diverting, so
+                    # the legitimate primary STOP still fires.
+                    if (self._anomaly_cfg.enabled
+                            and anomaly_controller.is_diverting(self._anomaly_state.mode)):
+                        stop_cand = None
 
                     # Option-2: extend the candidate pool with LTM-derived
                     # waypoints (locations of past observations that look like
@@ -1439,6 +1586,24 @@ class EpisodeRunner:
                         mc.candidate_id = len(cands) + i + 1000  # offset so logs are unambiguous
                     all_cands = cands + mem_cands
                     n_memory_candidates += len(mem_cands)
+
+                    # E5-S4: anomaly-response INVESTIGATE divert. When the
+                    # controller set an investigate waypoint, inject a
+                    # source="audio_investigate" candidate that deterministically
+                    # wins the rerank (S6). Gated on self._investigate_wp (set only
+                    # under the anomaly_response controller) so default paths are
+                    # byte-identical; survives the consume/anti-thrash filters
+                    # (_consume_memory_applies is False for anomaly_response).
+                    if self._investigate_wp is not None:
+                        inv = _investigate_candidate(
+                            self._investigate_wp, step.agent_state.position)
+                        inv.candidate_id = len(all_cands) + 9000
+                        all_cands = all_cands + [inv]
+                        # Deterministic divert: drop memory/coarse/backbone
+                        # candidates so nothing ties the audio_investigate win at
+                        # S_phys=1.0 (frontier kept as the reachable fallback).
+                        all_cands = [c for c in all_cands
+                                     if c.source in ("audio_investigate", "frontier")]
 
                     # AudioGoal energy STOP (disjunctive, conservative): if the
                     # backbone did not already STOP and the anomaly is detected +
@@ -1650,7 +1815,10 @@ class EpisodeRunner:
                 action = ACTION_STOP
             elif current_candidate is None:
                 action = ACTION_FORWARD
-            elif current_candidate.metadata.get("stop_signal", False) and self._approach_waypoint is None:
+            elif (current_candidate.metadata.get("stop_signal", False)
+                    and self._approach_waypoint is None
+                    and not (self._anomaly_cfg.enabled
+                             and anomaly_controller.is_diverting(self._anomaly_state.mode))):
                 # Detector intercept (Task 4): if --detector is on, ask the
                 # GoalDetector to localize the goal and navigate the last
                 # metre. None -> fall back to immediate STOP (monotonicity:
@@ -2088,6 +2256,18 @@ class EpisodeRunner:
         ep_log["success"] = success
         ep_log["spl"] = spl
         ep_log["soft_spl"] = soft_spl
+        # E5-S7: anomaly-response report (additive; anomaly_response only). success
+        # / spl above are scored vs ep.target_category and goal-expression-free, so
+        # this hook cannot perturb them. build_report stamps the controller REPORTED.
+        if self._anomaly_cfg.enabled:
+            _arep = anomaly_controller.build_report(
+                self._anomaly_state, primary_completed=bool(success))
+            # Report BOTH rings honestly: `success` is the 0.1 m localization-bound
+            # ring (essentially never fires; primary_completed here is strict);
+            # success_1m is the 1.0 m benchmark ring the controller's COMPLETE
+            # transition uses. Quote both — the 0.1 m understates resume.
+            _arep["primary_completed_1m"] = bool(success_1m)
+            ep_log["anomaly_report"] = _arep
         ep_log["distance_to_goal"] = distance_to_goal
         ep_log["rerank_calls"] = rerank_calls
         ep_log["rerank_disagreements"] = rerank_disagreements
@@ -2702,7 +2882,7 @@ class EpisodeRunner:
             "caption": getattr(keyframe, "caption", None) if keyframe is not None else None,
             "is_stop": action == ACTION_STOP,
         }
-        if self.task == "audiogoal":
+        if self.task in ("audiogoal", "anomaly_response"):
             ast = getattr(self, "_audio_state", None)
             hud["audio"] = {
                 "detected": bool(getattr(ast, "detected", False)),

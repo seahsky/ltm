@@ -517,6 +517,13 @@ def case_oracle_short_circuit():
     # so provide a stub audio state with a reset() (oracle never reads further).
     r.task = "oracle"
     r._audio_state = SimpleNamespace(reset=lambda: None)
+    # E5 anomaly-response controller: _run_episode resets it unconditionally and
+    # gates the controller block on _anomaly_cfg.enabled (False here => skipped),
+    # mirroring the _audio_state stub. __new__ bypass skips __init__.
+    r._anomaly_state = SimpleNamespace(reset=lambda g: None)
+    r._anomaly_cfg = SimpleNamespace(enabled=False)
+    r._investigate_wp = None
+    r._primary_snapshot = None
 
     propose_calls: list = []
     r._propose_candidates = lambda *a, **kw: propose_calls.append(1) or []

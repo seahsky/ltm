@@ -357,6 +357,15 @@ class FrontierPhysicsScorer(Scorer):
             cos_norm = float(np.clip(cos_norm, 0.0, 1.0))
             # 1 - _MEM_DIST_WEIGHT goes to the cosine, the rest to distance.
             score = (1.0 - self._MEM_DIST_WEIGHT) * cos_norm + self._MEM_DIST_WEIGHT * dist_score
+        elif source == "audio_investigate":
+            # Anomaly-response INVESTIGATE divert (anomaly_response task ONLY).
+            # The controller decided the agent must go to the anomaly source; the
+            # injected waypoint must win the rerank so the divert is honored. Max
+            # physics score (final rerank = 0.30*S_sim + 0.70*1.0). No other task
+            # produces source=="audio_investigate" (only _investigate_candidate,
+            # appended only when self._investigate_wp is set => anomaly_response)
+            # so every default path is byte-identical.
+            score = 1.0
         elif source == "coarse":
             # Coarse-affordance candidate: raw_score is a room-match * prior_weight
             # already in [0,1]. Bearing is dropped (heading toward the affordant

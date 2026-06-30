@@ -120,9 +120,10 @@ def case_active_goal_actually_used():
     # means a healthy count; a low count signals a forgotten route.
     n = len(re.findall(r"\bactive_goal\b", body))
     assert n >= 12, f"expected active_goal to be wired at many sites, found {n}"
-    # assigned exactly twice (A1 init, A2 advance re-point) — no stray mutation
+    # assigned exactly 3x: A1 init, A2 multion-advance re-point, E5 controller
+    # mutation (active_goal = dec.active_goal). No other stray mutation.
     assigns = len(re.findall(r"^\s*active_goal\s*=", body, flags=re.M))
-    assert assigns == 2, f"active_goal must be assigned exactly twice (A1+A2), got {assigns}"
+    assert assigns == 3, f"active_goal assigns must be A1+A2+E5 (==3), got {assigns}"
 
 
 def case_stay_sites_untouched():

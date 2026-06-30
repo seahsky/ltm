@@ -199,6 +199,10 @@ def process_audio_step(
         "audio_class": state.anomaly_class,
         "audio_target_override": state.target_override,
         "onset_fired": False,
+        # E5: anomaly-vs-benign verdict for the anomaly_response controller.
+        # Only set (True/False) when the open-set gate runs (anomaly_gate ON);
+        # stays None on the default/gate-off path so no existing consumer sees it.
+        "is_anomaly": None,
     }
     if audio_obs is None:
         return diag
@@ -224,6 +228,7 @@ def process_audio_step(
                 delta=cfg.anomaly_delta, tau_abs=cfg.anomaly_tau)
             diag["audio_anomaly_margin"] = float(ascores.get("margin", 0.0))
             diag["audio_anomaly_fired"] = bool(ok)
+            diag["is_anomaly"] = bool(ok)  # E5: the controller's interrupt verdict
             fire_onset = bool(ok)
         if fire_onset:
             state.detected = True
