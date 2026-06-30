@@ -73,6 +73,12 @@ while [ $# -gt 0 ]; do
     # race-cross-env.sh: an ambient prefix once mis-fired as rc=127; exporting is
     # robust). episode_runner.py:1168 reads os.environ.get("LTM_AUDIO_WRITE").
     --audio-write) AUDIO_WRITE=1; shift ;;
+    # --task selects the runner task. Default audiogoal (sound==goal, legacy,
+    # byte-identical). anomaly_response = the interrupt-investigate-resume
+    # controller; on THIS dataset the source is co-located with the goal, so it
+    # is a WIRING smoke (onset->divert->CHECK->RESUME->complete->report, no crash),
+    # NOT the real eval (which needs a non-LOS source + benign distractor — N3).
+    --task) TASK="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
@@ -81,6 +87,8 @@ OUT_TAG="${OUT_TAG:-$TAG}"
 [[ "$OUT_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --out-tag must be alnum/dash/underscore"; exit 1; }
 CELL_TAG="${CELL_TAG:-$CLASS}"   # default = class → legacy out-dir/grid names unchanged
 [[ "$CELL_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --cell-tag must be alnum/dash/underscore"; exit 1; }
+TASK="${TASK:-audiogoal}"        # default = audiogoal → legacy run line byte-identical
+case "$TASK" in audiogoal|anomaly_response) ;; *) echo "FATAL: --task must be audiogoal|anomaly_response"; exit 1 ;; esac
 # --audio-write: thread the Step-2 lever as a first-class flag (export INSIDE the
 # driver, so it never depends on ambient inheritance through nrun). The env-var
 # form (export LTM_AUDIO_WRITE=1 before nrun) still works and is honoured below.
@@ -114,7 +122,7 @@ set +u; source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; ex
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 banner "[3/7] pre-verify (free; abort before spend)"
-for t in test_make_audiogoal_smoke test_audio_task test_make_revisit_smoke test_analyze_revisit test_planner_decision_kind; do
+for t in test_make_audiogoal_smoke test_audio_task test_make_revisit_smoke test_analyze_revisit test_planner_decision_kind test_anomaly_controller test_anomaly_wiring test_active_goal_noop; do
   python embodied_memory/scripts/$t.py \
     || { echo "FATAL: $t failed — not spending on the live run."; exit 1; }
 done
@@ -224,7 +232,7 @@ N_EPISODES="$(python -c "import gzip,json,glob,sys; print(sum(len(json.load(gzip
 [ "$N_EPISODES" -gt 0 ] 2>/dev/null || { echo "FATAL: episode count '$N_EPISODES' <= 0"; exit 1; }
 echo "  n-episodes = $N_EPISODES"
 
-banner "[6/7] run settings [$SETTINGS] (--task audiogoal --backbone remembr)"
+banner "[6/7] run settings [$SETTINGS] (--task $TASK --backbone remembr)"
 OUT_DIRS=""
 for S in $SETTINGS; do
   out_dir="runs/${OUT_TAG}-${CELL_TAG}-s$S"
@@ -233,7 +241,7 @@ for S in $SETTINGS; do
   # by a previous attempt's summary.json if THIS run hard-crashes before writing.
   rm -f "$out_dir/summary.json"
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
-      --backbone remembr --setting "$S" --task audiogoal \
+      --backbone remembr --setting "$S" --task "$TASK" \
       --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
       --audio-onset-rms "$ONSET_RMS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
       --episodes-path "$DS" --scene "$SCENE" --target any \
