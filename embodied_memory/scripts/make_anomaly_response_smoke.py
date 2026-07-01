@@ -105,8 +105,12 @@ def pick_anomaly_source(
             vps = _goal_view_point_positions([inst])
             if not vps:
                 continue
-            # highest-iou view_point = navmesh-valid pose near the object.
-            pos = pick_cold_pose([inst])["position"]
+            # A navmesh-valid pose near the object = the first view_point that
+            # carries a position. (NOT pick_cold_pose, which selects the highest-iou
+            # view_point even when THAT vp lacks a position — a malformed-instance
+            # edge that would raise and skip the whole category. _goal_view_point_positions
+            # already filters to vps with a real position, so vps[0] is safe.)
+            pos = list(vps[0])
             d = _xz_dist(pos, primary_goal_pos)
             if d is None or d < min_sep_m:
                 continue
@@ -263,14 +267,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     choices=["baby_cry", "alarm", "glass_break"])
     ap.add_argument("--background-class", default=None)
     ap.add_argument("--min-source-sep", type=float, default=_MIN_SOURCE_SEP_DEFAULT)
+    ap.add_argument("--min-dist", type=float, default=2.0)
     ap.add_argument("--t-anom-warm", type=int, default=_T_ANOM_WARM_DEFAULT)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--name", default="anomaly_response")
     ap.add_argument("--source-manifest", default=None)
     args = ap.parse_args(argv)
 
     src_content = mk._load_gz(args.src)
     content = build_dataset(
-        src_content, args.categories, args.n_warm,
+        src_content, args.categories, args.n_warm, min_dist=args.min_dist,
         anomaly_class=args.anomaly_class, min_source_sep_m=args.min_source_sep,
         t_anom_warm=args.t_anom_warm, background_class=args.background_class)
 
@@ -281,8 +287,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if fails:
         print(f"[construction] {len(fails)} FAIL(s) — refusing to write.")
         return 1
+    if not content.get("episodes"):
+        print("[construction] FAIL: 0 episodes built (no category could decouple a "
+              "source? single-object scene) — refusing to write.")
+        return 1
 
-    write_dataset(content, args.scene, args.out_dir)
+    write_dataset(args.out_dir, args.scene, content, src_content, name=args.name)
     manifest = collect_source_manifest(content)
     if args.source_manifest:
         os.makedirs(os.path.dirname(os.path.abspath(args.source_manifest)), exist_ok=True)

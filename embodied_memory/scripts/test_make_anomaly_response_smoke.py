@@ -106,6 +106,20 @@ def case_source_nearest_among_qualifying_other_category():
     assert src["object_id"] == "chair_near", src
 
 
+def case_source_uses_valid_viewpoint_when_top_iou_lacks_position():
+    # an instance whose HIGHEST-iou view_point has an empty position must still be
+    # usable via a lower-iou vp that HAS one (not crash / skip the whole category).
+    goals = {
+        "0_bed": [_inst("bed_0", [[0.0, 0.0, 0.0]])],
+        "0_chair": [{"object_id": "chair_x", "view_points": [
+            {"iou": 0.99, "agent_state": {"position": []}},              # top-iou, no pos
+            {"iou": 0.50, "agent_state": {"position": [5.0, 0.0, 0.0]}},  # lower-iou, has pos
+        ]}],
+    }
+    src = n3.pick_anomaly_source(goals, ["bed", "chair"], "bed", [0.0, 0.0, 0.0], min_sep_m=3.0)
+    assert src["object_id"] == "chair_x" and abs(src["position"][0] - 5.0) < 1e-6, src
+
+
 def case_source_raises_when_no_decoupled_candidate():
     # single object only → cannot decouple.
     goals = {"0_bed": [_inst("bed_0", [[0.0, 0.0, 0.0]])]}
@@ -214,6 +228,7 @@ def main() -> int:
         case_source_rejects_too_close,
         case_source_falls_back_to_other_instance_same_category,
         case_source_nearest_among_qualifying_other_category,
+        case_source_uses_valid_viewpoint_when_top_iou_lacks_position,
         case_source_raises_when_no_decoupled_candidate,
         case_issues_clean_ok,
         case_issues_permit_anomaly_object_differs,
