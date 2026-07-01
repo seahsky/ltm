@@ -236,6 +236,19 @@ def render_at_pose(grid: RIRGrid, agent_pos, clip, max_len: int = None) -> np.nd
     return out
 
 
+def diotic_collapse(sig) -> np.ndarray:
+    """Collapse a ``(2, L)`` binaural signal to a non-directional (diotic) bed:
+    the mono mean broadcast to both ears, so the bed carries NO lateral/ILD cue
+    (it protects the anomaly's ``lateral_sign``/``estimate_doa`` when summed).
+    Shared by the live mixture render (render_step_audio) and the Gate-0b
+    diagnostic so the calibration domain matches the live domain exactly."""
+    m = np.asarray(sig, dtype=np.float32)
+    if m.ndim == 1:
+        return np.stack([m, m])
+    mono = m.mean(axis=0)
+    return np.stack([mono, mono]).astype(np.float32)
+
+
 def rms(signal) -> float:
     """Root-mean-square energy over all samples/channels."""
     s = np.asarray(signal, dtype=np.float64)

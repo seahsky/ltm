@@ -28,6 +28,7 @@ from .audio import (
     CLASS_TO_OBJECT,
     RIRGrid,
     classify_anomaly,
+    diotic_collapse,
     is_anomaly,
     lateral_sign,
     render_at_pose,
@@ -54,6 +55,12 @@ class AudioTaskConfig:
     anomaly_gate: bool = False
     anomaly_delta: float = 0.0
     anomaly_tau: float = 0.0
+    # Phase-1 mixture: a continuous non-directional (diotic) background bed at
+    # this gain, present from step 0, with the anomaly added at t_anom (so every
+    # scene is a blend of background + abnormal sound). 0.0 (default) => no bed,
+    # byte-identical single-source render. Set at the RENDER config in habitat_env
+    # (NOT the runner config — the render seam reads _audio_render_cfg).
+    bg_gain: float = 0.0
 
 
 @dataclass
@@ -163,18 +170,42 @@ def render_step_audio(
     clip_norm: Optional[np.ndarray],
     step_idx: int,
     cfg: AudioTaskConfig,
+    *,
+    bg_clip_norm: Optional[np.ndarray] = None,
 ) -> Optional[np.ndarray]:
     """The (2, L) binaural observation for this step, or ``None`` for silence.
 
-    None when the grid or clip is missing or before ``cfg.t_anom``; otherwise the
-    cached-RIR nearest-cell render at the agent's pose (``audio.render_at_pose``).
-    habitat_env calls this; it never touches the audio simulator.
+    Single-source (default): ``None`` when grid/clip missing or before
+    ``cfg.t_anom``; else the nearest-cell render (``audio.render_at_pose``).
+
+    Mixture (Phase 1, when ``cfg.bg_gain > 0`` AND ``bg_clip_norm`` given): a
+    continuous non-directional (diotic) benign BED plays from step 0 (scaled by
+    ``cfg.bg_gain``); the single-source anomaly is ADDED at ``cfg.t_anom`` — so
+    every scene is a blend of background + abnormal sound, the anomaly is the
+    discrete onset, and the bed's diotic-ness keeps the anomaly's lateral cue.
+    ``bg_gain == 0.0`` or ``bg_clip_norm is None`` => byte-identical to the
+    single-source path. habitat_env calls this; it never touches the audio sim.
     """
     if grid is None or clip_norm is None:
         return None
+    has_bed = float(getattr(cfg, "bg_gain", 0.0)) > 0.0 and bg_clip_norm is not None
+    if not has_bed:
+        if int(step_idx) < int(cfg.t_anom):
+            return None
+        return render_at_pose(grid, agent_pos, clip_norm)
+
+    bed = (float(cfg.bg_gain)
+           * diotic_collapse(render_at_pose(grid, agent_pos, bg_clip_norm))).astype(np.float32)
     if int(step_idx) < int(cfg.t_anom):
-        return None
-    return render_at_pose(grid, agent_pos, clip_norm)
+        return bed
+    an = render_at_pose(grid, agent_pos, clip_norm)
+    L = an.shape[-1]
+    bl = bed.shape[-1]
+    if bl < L:
+        bed = np.tile(bed, int(np.ceil(L / max(1, bl))))[..., :L]
+    else:
+        bed = bed[..., :L]
+    return (an + bed).astype(np.float32)
 
 
 def process_audio_step(

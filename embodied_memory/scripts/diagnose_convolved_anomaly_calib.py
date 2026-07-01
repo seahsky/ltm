@@ -111,15 +111,11 @@ def decide_gate(per_gain: List[Dict[str, Any]], onset_rms: float) -> Tuple[str, 
 # render + CLAP scoring (RACE/GPU; imports heavy deps lazily)
 # ----------------------------------------------------------------------
 def _diotic(sig):
-    """Collapse a (2, L) binaural signal to a non-directional (2, L) bed — mono
-    mean broadcast to both ears, so the bed carries no lateral/DOA cue (protects
-    the anomaly's lateral_sign)."""
-    import numpy as np
-    m = np.asarray(sig, dtype=np.float32)
-    if m.ndim == 1:
-        return np.stack([m, m])
-    mono = m.mean(axis=0)
-    return np.stack([mono, mono])
+    """Diotic-collapse the bed (mono mean broadcast to both ears). Delegates to
+    the SHARED audio.diotic_collapse so the calibration domain is byte-identical
+    to the live render_step_audio bed (review R4 — no domain mismatch)."""
+    from embodied_memory.audio import diotic_collapse
+    return diotic_collapse(sig)
 
 
 def _align(bed, length):
