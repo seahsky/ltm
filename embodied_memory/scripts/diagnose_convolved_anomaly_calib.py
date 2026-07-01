@@ -152,7 +152,8 @@ def _select_audible_cells(grid, an_norm, onset_rms, band_hi, max_cells, n_probe=
     not the loudest cells (which give an optimistic GO the live gate can't hit)."""
     import numpy as np
     from embodied_memory.audio import render_at_pose, rms
-    energies = grid.cell_energies() if hasattr(grid, "cell_energies") else None
+    _ce = getattr(grid, "cell_energies", None)   # @property -> ndarray (not a method)
+    energies = _ce() if callable(_ce) else _ce
     n = len(grid.cell_positions)
     order = list(np.argsort(energies)[::-1]) if energies is not None else list(range(n))
     probe = order[:n_probe]
