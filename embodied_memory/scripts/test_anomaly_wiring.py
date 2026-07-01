@@ -155,6 +155,40 @@ def case_build_report_shape():
     assert st.mode == ac.NavMode.REPORTED
 
 
+# ----------------------------------------------------------------------
+# Phase 3: resolve_anomaly_gate_thresholds — anomaly_response defaults the CLAP
+# gate to the Gate-0b convolved recalibration (delta=-0.2557, tau=0.0341) when
+# the user passes no explicit value, so the plain path drops --no-anomaly-gate.
+# audiogoal / objectnav stay byte-identical (0.0/0.0). An explicit value wins.
+# ----------------------------------------------------------------------
+def case_resolve_gate_defaults_for_anomaly_response():
+    d, t = at.resolve_anomaly_gate_thresholds("anomaly_response", None, None)
+    assert d == at.ANOMALY_GATE_DELTA_CONVOLVED == -0.2557, d
+    assert t == at.ANOMALY_GATE_TAU_CONVOLVED == 0.0341, t
+
+
+def case_resolve_gate_explicit_override_wins():
+    # a future re-calibration passed on the CLI must NOT be clobbered
+    d, t = at.resolve_anomaly_gate_thresholds("anomaly_response", 0.05, 0.20)
+    assert d == 0.05 and t == 0.20, (d, t)
+
+
+def case_resolve_gate_audiogoal_byte_identical():
+    # audiogoal keeps the argparse 0.0 default (no recal) => byte-identical
+    assert at.resolve_anomaly_gate_thresholds("audiogoal", None, None) == (0.0, 0.0)
+
+
+def case_resolve_gate_objectnav_byte_identical():
+    assert at.resolve_anomaly_gate_thresholds("objectnav", None, None) == (0.0, 0.0)
+
+
+def case_resolve_gate_partial_override():
+    # explicit delta but default tau on anomaly_response: delta kept, tau recal'd
+    d, t = at.resolve_anomaly_gate_thresholds("anomaly_response", 0.0, None)
+    assert d == 0.0, d
+    assert t == at.ANOMALY_GATE_TAU_CONVOLVED, t
+
+
 def main() -> int:
     cases = [
         case_rerank_branch_audio_investigate_returns_1,
@@ -166,6 +200,11 @@ def main() -> int:
         case_process_audio_step_is_anomaly_true_under_gate,
         case_process_audio_step_is_anomaly_none_when_gate_off,
         case_build_report_shape,
+        case_resolve_gate_defaults_for_anomaly_response,
+        case_resolve_gate_explicit_override_wins,
+        case_resolve_gate_audiogoal_byte_identical,
+        case_resolve_gate_objectnav_byte_identical,
+        case_resolve_gate_partial_override,
     ]
     print(f"running {len(cases)} anomaly_wiring cases…")
     for c in cases:

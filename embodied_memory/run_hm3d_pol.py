@@ -383,12 +383,15 @@ def main(argv: Optional[list] = None) -> int:
                         help="audiogoal Step 1: gate the onset on an open-set CLAP "
                              "normal-vs-anomaly decision (also enabled via env "
                              "LTM_AUDIO_ANOMALY_GATE). Default OFF => energy-only onset.")
-    parser.add_argument("--audio-anomaly-delta", type=float, default=0.0,
+    parser.add_argument("--audio-anomaly-delta", type=float, default=None,
                         help="Step 1: required margin (best-anomaly minus best-normal "
                              "CLAP cosine) to fire the gate. Calibrate with "
-                             "diagnose_normal_anomaly_calib.py.")
-    parser.add_argument("--audio-anomaly-tau", type=float, default=0.0,
-                        help="Step 1: absolute floor on the best-anomaly CLAP cosine.")
+                             "diagnose_convolved_anomaly_calib.py. Unset => 0.0 for "
+                             "audiogoal (byte-identical), the Gate-0b convolved recal "
+                             "(-0.2557) for anomaly_response.")
+    parser.add_argument("--audio-anomaly-tau", type=float, default=None,
+                        help="Step 1: absolute floor on the best-anomaly CLAP cosine. "
+                             "Unset => 0.0 for audiogoal, 0.0341 for anomaly_response.")
     parser.add_argument("--no-anomaly-gate", action="store_true",
                         help="FORCE the open-set CLAP anomaly-gate OFF even for "
                              "--task anomaly_response (energy-only onset). Use to "
@@ -611,18 +614,23 @@ def main(argv: Optional[list] = None) -> int:
         _anomaly_gate = bool(args.audio_anomaly_gate
                              or os.environ.get("LTM_AUDIO_ANOMALY_GATE")
                              or args.task == "anomaly_response") and not args.no_anomaly_gate
+        # anomaly_response defaults the gate to the Gate-0b convolved recal
+        # (-0.2557/0.0341) when unset, so the plain path works without --bg-gain;
+        # audiogoal stays at 0.0/0.0 (byte-identical). Explicit CLI values win.
+        _anom_delta, _anom_tau = audio_task.resolve_anomaly_gate_thresholds(
+            args.task, args.audio_anomaly_delta, args.audio_anomaly_tau)
         audio_cfg = AudioTaskConfig(
             enabled=True, t_anom=args.t_anom,
             onset_rms=args.audio_onset_rms,
             energy_stop_db_rms=args.audio_energy_stop_rms,
             stop_distance_m=args.audio_stop_distance,
             anomaly_gate=_anomaly_gate,
-            anomaly_delta=args.audio_anomaly_delta,
-            anomaly_tau=args.audio_anomaly_tau,
+            anomaly_delta=_anom_delta,
+            anomaly_tau=_anom_tau,
         )
         if _anomaly_gate:
             print(f"[{args.task}] Step-1 anomaly gate ON "
-                  f"(delta={args.audio_anomaly_delta}, tau={args.audio_anomaly_tau})")
+                  f"(delta={_anom_delta}, tau={_anom_tau})")
     if args.task == "anomaly_response":
         from .anomaly_controller import AnomalyControllerConfig
         anomaly_cfg = AnomalyControllerConfig(

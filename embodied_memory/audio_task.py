@@ -36,6 +36,39 @@ from .audio import (
 )
 
 
+# Gate-0b GO recalibration of the open-set CLAP anomaly gate on RIR-CONVOLVED
+# audio (audible far-start = the real-eval regime). The clean-clip calibration
+# (delta=0.137) REJECTED the convolved alarm (the 0c blocker); on convolved
+# audio CLAP's anomaly text-margin is NEGATIVE, so separation is carried by the
+# tiny s_anom floor (tau). Measured by diagnose_convolved_anomaly_calib.py /
+# race-convolved-anomaly-gate.sh: GATE_RESULT=GO, EER 0.094 (text).  The
+# audio-prototype discriminator was measured and is NOT better (proto EER 0.293
+# audible / 0.178 loud) so the text-gate stays the discriminator. NB the LOUD
+# source==goal start (agent begins on the loudest cell) is a BORDERLINE regime
+# where the bed can false-fire at step 0 — that is a degenerate-smoke geometry
+# artifact resolved by the non-LOS eval dataset, not by these thresholds.
+ANOMALY_GATE_DELTA_CONVOLVED = -0.2557
+ANOMALY_GATE_TAU_CONVOLVED = 0.0341
+
+
+def resolve_anomaly_gate_thresholds(task, delta, tau):
+    """Resolve the (delta, tau) for the open-set CLAP anomaly gate.
+
+    ``anomaly_response`` defaults to the Gate-0b convolved recalibration when the
+    caller passes ``None`` (argparse default), so the plain path no longer needs
+    ``--bg-gain`` / ``--no-anomaly-gate`` to get a working gate. Every other task
+    and any explicit CLI override are returned verbatim (``None`` -> 0.0), so
+    audiogoal / objectnav stay byte-identical.
+    """
+    if task == "anomaly_response":
+        if delta is None:
+            delta = ANOMALY_GATE_DELTA_CONVOLVED
+        if tau is None:
+            tau = ANOMALY_GATE_TAU_CONVOLVED
+    return (0.0 if delta is None else delta,
+            0.0 if tau is None else tau)
+
+
 @dataclass
 class AudioTaskConfig:
     """Static config for one AudioGoal run (env-tunable from the CLI)."""
