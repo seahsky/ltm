@@ -176,3 +176,71 @@ All `anomaly_response`-gated; every other task stays byte-identical (E4 already 
 **Phases 1–3 (GATED on GO, NOT built yet):** P1 mixture render — continuous **diotic** benign bed in `render_step_audio` (Option B; NO second RIR grid — a second spatial source would corrupt the anomaly's `lateral_sign` DOA cue), `bg_gain` config default 0.0 = byte-identical, bed via `build_anomaly_clip` (SST). P2 every-scene mixture — `--include-benign` staging + `background_class` in `make_audiogoal_smoke` + `--background-clip`/`--bg-gain` CLI. P3 gate back ON — thread `RECOMMEND_DELTA/TAU` (env/CLI), drop `--no-anomaly-gate` from the eval driver.
 
 **Review CRITICALs to honor in Phases 1–3:** **C1** `bg_gain` must reach the render via the `habitat_env` ctor → `_audio_render_cfg` (:339-342), NOT the runner `audio_cfg` (would silently render no bed). **C2** covered by R1 above. **C3 (deepest):** the continuous bed makes the *first-onset GATE's* job real but does NOT make the agent's *investigate decision* discrimination-dependent — `step_controller` fires on the anomaly onset regardless (and `is_anomaly is None` when the gate is off ⇒ always-investigate cheat). To make discrimination load-bearing at the TASK level, add a **discrete benign distractor onset** the gate must reject (exercises `n_benign_ignored`) — else downscope the claim to "the gate does not false-fire on the bed." **M5** the eval driver must pass the recalibrated `--audio-anomaly-delta` (a gate-ON run with delta=0 is the 0c silent-accept via another door); add a startup assert. **R2** CLAP class-flip survives (binary gate ok; retrieval uses dataset `anomaly_object`).
+
+---
+
+## §10 — N3: the non-LOS anomaly-response dataset (the REAL eval)
+
+Grounded by a 5-reader workflow (wf_7f4f2c7d; the design/review agents stalled, readers salvaged
+from the journal). The current source==goal smoke is degenerate; N3 decouples the anomaly SOURCE
+from the PRIMARY find-goal so the interrupt→investigate→resume→report loop is non-trivial and the
+agent starts in the audible-not-loud regime (no step-0 loud-bed false-fire).
+
+**KEY ENABLER (readers 1 & 5): the RUNTIME already decouples goal from source.** The controller
+reads `primary_goal = ep.target_category` (drives SPL/report) and `source_xyz =
+ep.metadata.audio_config.source_position` (oracle GT) as SEPARATE fields; `anomaly_object` is a
+third. So **decoupling is purely a BUILDER/DATA problem — zero runtime change.** N3 must stamp
+(a) `object_category` = the genuine find-target, (b) `source_position` = a location NOT co-located
+with the goal, (c) `anomaly_object` = the object AT the source (may differ from the find-target),
+(d) M3-polarity `t_anom` (cold high/silent-map, warm low/fires-during-search).
+
+**THE DEFECT (readers 1,3,4,5):** `build_dataset` sets `src_xyz =
+pick_source_position(cold_pose, offset_m=0.5)` (goal_vp + 0.5 m, NO navmesh check) and
+`anomaly_object=cat` (==goal). And `lifelong_construction_issues` HARD-FAILS
+`anomaly_object \!= object_category` — which would refuse any decoupled dataset.
+
+**PLAN/CODE MISMATCH corrected:** `pick_non_los_seed` / `build_lifelong_dataset(non_los_seed=True)`
+relocate the *SEED START* to be non-LOS to the source; they do NOT decouple the *SOURCE* from the
+goal (source stays at goal+0.5). N3's genuinely-new piece is a **SOURCE picker**, not a seed picker.
+
+**DESIGN — new module `make_anomaly_response_smoke.py`** (reuses make_audiogoal_smoke +
+make_revisit_smoke verbatim; leaves the audiogoal path byte-identical — zero risk to audiogoal):
+- **`pick_anomaly_source(goals_by_category, all_categories, primary_category, primary_goal_pos,
+  min_sep_m)`** — the SOURCE = a real, navmesh-validated goal view_point of a DIFFERENT object,
+  `>= min_sep_m` (xz) from the primary goal view_point. Prefer a DIFFERENT category (so
+  `anomaly_object \!= find-target`); else a different same-category INSTANCE; among qualifiers pick
+  the NEAREST (>= min_sep) for reachability (nearest-first — farthest lands on disconnected
+  islands). Returns `{position, anomaly_object, object_id}`; ValueError if the scene has no object
+  `>= min_sep` (can't decouple → skip cell). Using a real goal view_point gives navmesh-validity +
+  a real captioned object at the source for free.
+- **`anomaly_response_construction_issues(content, min_source_sep_m, ...)`** — fork of
+  `lifelong_construction_issues` that (1) **PERMITS `anomaly_object \!= object_category`** (the whole
+  point), (2) FAILs if the source is co-located with the goal (xz(seed.start_position, source) <
+  min_source_sep — the seed start IS the goal view_point), (3) FAILs cold t_anom not-silent / warm
+  t_anom not-fires (M3 polarity), (4) source 3D.
+- **`build_dataset(..., anomaly_class, min_source_sep_m, ...)`** — M3 polarity (cold silent, warm
+  fires); per category picks the decoupled source + calls `ag.build_category_episodes(...,
+  anomaly_object=source.anomaly_object, source_position=source.position)`. `anomaly_class=None` →
+  `mk.build_dataset` verbatim (byte-identical).
+
+**A/B/C are RUN/ANALYSIS splits, not builder variants (reader 3,5):** A(warm)=seed+response under
+S3; C(cold)=response under `--disable-ltm`/S1 (same dataset); B(new audio)=A with a different
+`anomaly_clip`. Controller-only arm = `--task anomaly_response --disable-ltm` + oracle source.
+Analyzer reuses `analyze_revisit` (pair on (scene,category,visit_order)); the controller-report
+fields (primary_completed/investigated/n_benign_ignored) need a runner→summary surface (E8, separate).
+
+**GEOMETRY FEASIBILITY = the one real risk, RACE-gated (readers 2,4):** the builder CANNOT compute
+point-to-point geodesics (two-env split; only the grid's cell→source geodesics exist). So N3 guards
+reachability by PROVENANCE (source = a real goal view_point; warm starts = same-category validated
+starts) + the never-emit-Infinity-geodesic discipline, and the decisive check (does an
+audible-not-loud, reachable-to-G start exist near the decoupled S) is a cheap RENDER+audibility gate
+BEFORE any matrix — NOT a pure build-time check. `render_rir_grid` snaps/relocates the source onto
+the main navmesh for free; read the grid's ACTUAL source back (source drift caveat).
+
+**DEFERRED (unchanged):** C3 discrete loud-benign distractor (needs a 2nd RIR grid → breaks the
+single-grid DOA invariant); realizable-DOA source (v1 stamps oracle GT = labelled UPPER BOUND);
+the A−B audio-memory contrast stays a PRE-REGISTERED honest negative (re-derives AudioGoal Step 2).
+
+**BUILD ORDER:** (1) pure pickers + adjudicator + build_dataset [TDD, this turn]; (2) 2-phase
+driver (build→manifest→render_rir_grid at decoupled S→feasibility gate) [RACE]; (3) E8 controller
+metrics surface; (4) the A/B/C matrix.
