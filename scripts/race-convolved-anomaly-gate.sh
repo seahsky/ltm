@@ -73,10 +73,17 @@ if [ "$NGRID" = "0" ]; then
 fi
 
 banner "[6/6] diagnose convolved anomaly-vs-background gate (device=$DEVICE)"
-python embodied_memory/scripts/diagnose_convolved_anomaly_calib.py \
-    --rir-grid "$GRID_GLOB" --device "$DEVICE" --onset-rms "$ONSET_RMS" \
-    --bg-gains "$BG_GAINS" --max-cells "$MAX_CELLS" --max-grids "$MAX_GRIDS"
-RC=$?
+# Two cell regimes: 'audible' (far-start, the real-eval regime) and 'loud' (the
+# source-view_point start = loudest cells, where mix1 false-fired on the bed).
+# The loud regime is the decisive one for the source==goal smoke.
+RC=0
+for REGIME in audible loud; do
+  banner "  cell-regime=$REGIME"
+  python embodied_memory/scripts/diagnose_convolved_anomaly_calib.py \
+      --rir-grid "$GRID_GLOB" --device "$DEVICE" --onset-rms "$ONSET_RMS" \
+      --bg-gains "$BG_GAINS" --max-cells "$MAX_CELLS" --max-grids "$MAX_GRIDS" \
+      --cell-regime "$REGIME" || RC=$?
+done
 echo
 echo "[gate0b] exit=$RC  — grep GATE_RESULT above (GO -> build Phase 1; STOP -> pivot)"
 exit $RC

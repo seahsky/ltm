@@ -121,6 +121,20 @@ def case_select_audible_cells_reads_property_and_selects_band():
     assert all(isinstance(c, (int, np.integer)) for c in cells)
 
 
+def case_select_loud_cells_returns_top_energy():
+    import numpy as np
+    from embodied_memory.audio import RIRGrid
+    N, T = 6, 16
+    cell_pos = np.stack([np.linspace(0, 5, N), np.zeros(N), np.zeros(N)], axis=1)
+    irs = np.zeros((N, 2, T), dtype=np.float32)
+    for i in range(N):
+        irs[i, :, 0] = 0.5 / (i + 1)    # cell 0 loudest, monotone decreasing
+    grid = RIRGrid(cell_pos, [0.0, 0.0, 0.0], irs, sample_rate=16000, scene_id="t")
+    cells = cc._select_loud_cells(grid, max_cells=3)
+    assert cells[0] == 0, "loudest cell (nearest source) first"
+    assert len(cells) == 3 and all(isinstance(c, int) for c in cells)
+
+
 def main() -> int:
     cases = [
         case_sweep_clean_separation,
@@ -133,6 +147,7 @@ def main() -> int:
         case_decide_stop_when_inseparable,
         case_decide_picks_lowest_eer_among_qualifying,
         case_select_audible_cells_reads_property_and_selects_band,
+        case_select_loud_cells_returns_top_energy,
     ]
     print(f"running {len(cases)} diagnose_convolved_anomaly_calib cases…")
     for c in cases:

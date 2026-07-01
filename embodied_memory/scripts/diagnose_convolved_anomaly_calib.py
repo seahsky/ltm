@@ -165,6 +165,19 @@ def _select_audible_cells(grid, an_norm, onset_rms, band_hi, max_cells, n_probe=
     return [ci for ci, _ in band[:max_cells]]
 
 
+def _select_loud_cells(grid, max_cells):
+    """The K LOUDEST cells (nearest the source) — the regime where the agent
+    STARTS in the source==goal cold episode (the goal view_point is ~0.5 m from
+    the source), which is where mix1 false-fired. cell_energies is a @property."""
+    import numpy as np
+    ce = getattr(grid, "cell_energies", None)
+    energies = ce() if callable(ce) else ce
+    n = len(grid.cell_positions)
+    if energies is None:
+        return list(range(min(max_cells, n)))
+    return [int(ci) for ci in np.argsort(energies)[::-1][:max_cells]]
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="$0 Gate-0b: CLAP anomaly-vs-bg on convolved audio.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -174,6 +187,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--onset-rms", type=float, default=0.05)
     ap.add_argument("--bg-gains", default="0.0 0.3 0.5 0.7 1.0")
     ap.add_argument("--band-hi", type=float, default=4.0, help="audible band upper = band_hi*onset_rms")
+    ap.add_argument("--cell-regime", choices=["audible", "loud"], default="audible",
+                    help="audible = far-start (real-eval regime); loud = source-view_point "
+                         "start (the loudest cells, where mix1 false-fired on the bed).")
     ap.add_argument("--max-cells", type=int, default=12)
     ap.add_argument("--max-grids", type=int, default=6)
     ap.add_argument("--device", default="cpu")
@@ -201,6 +217,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(f"[gate0b] grids={len(grids)} anomaly={len(an_paths)} bed={len(beds)} "
           f"gains={gains} onset_rms={args.onset_rms} band<= {args.band_hi}x  device={args.device}")
+    print(f"[gate0b] cell_regime={args.cell_regime}  "
+          f"({'LOUD source-view_point start = mix1 false-fire regime' if args.cell_regime=='loud' else 'audible far-start = real-eval regime'})")
     print(f"[gate0b] beds (non-normal-prompt preferred): {[_class_from_name(p) for p in beds]}")
     enc = CLAPAudioEncoder(device=args.device)
 
@@ -214,10 +232,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             true_cls = _class_from_name(an_path)
             an_norm = build_anomaly_clip(an_path, int(grid.sample_rate))
             try:
-                proto = enc.encode_audio(an_norm)   # m1: clean-anomaly audio prototype
-            except Exception:
+                proto = enc.encode_audio(an_norm, int(grid.sample_rate))  # m1: clean-anomaly audio prototype
+            except Exception as e:
+                print(f"[gate0b] WARN: audio-prototype encode failed ({e}); proto column stays nan")
                 proto = None
-            cells = _select_audible_cells(grid, an_norm, args.onset_rms, args.band_hi, args.max_cells)
+            if args.cell_regime == "loud":
+                cells = _select_loud_cells(grid, args.max_cells)          # source-view_point start regime (mix1 false-fire)
+            else:
+                cells = _select_audible_cells(grid, an_norm, args.onset_rms, args.band_hi, args.max_cells)
             if not cells:
                 continue
             an_by_cell = {ci: render_at_pose(grid, grid.cell_positions[ci], an_norm) for ci in cells}
@@ -234,19 +256,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                         acc[g]["accept"].append((float(s_m["margin"]), float(s_m["s_anom"])))
                         acc[g]["cls_ok"].append(1.0 if cls_m == true_cls else 0.0)
                         if proto is not None:
-                            try:
-                                acc[g]["pa"].append(_cos(enc.encode_audio(mix), proto))
-                            except Exception:
-                                pass
+                            acc[g]["pa"].append(_cos(enc.encode_audio(mix, int(grid.sample_rate)), proto))
                         if g > 0.0:
                             _, _clsb, s_b = audio.is_anomaly(bed_g, int(grid.sample_rate), enc)
                             acc[g]["reject"].append((float(s_b["margin"]), float(s_b["s_anom"])))
                             acc[g]["bed_rms"].append(float(rms(bed_g)))
                             if proto is not None:
-                                try:
-                                    acc[g]["pr"].append(_cos(enc.encode_audio(bed_g), proto))
-                                except Exception:
-                                    pass
+                                acc[g]["pr"].append(_cos(enc.encode_audio(bed_g, int(grid.sample_rate)), proto))
 
     # per-gain stats
     print("\n  bg_gain   n_acc  n_rej   bed_rms_med   EER(text)   delta    tau    cls_ok   EER(proto)")
@@ -294,6 +310,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  CLASS_CORRECT_RATE(best gain)={best_cls if best_cls==best_cls else float('nan'):.2f} "
           f"(<1.0 = CLAP class-flip on convolved audio; binary gate survives, retrieval uses "
           f"dataset anomaly_object)")
+    # DISCRIMINATOR VERDICT (m1): text-prompt gate vs audio-vs-audio prototype. The
+    # mix1 false-fire is the text gate failing on a loud bed — if proto EER < text
+    # EER (esp. at cell_regime=loud), Phase 3 should use the audio prototype.
+    _te = [pg["eer"] for pg in per_gain if pg["eer"] == pg["eer"]]
+    _pe = [pg["proto_eer"] for pg in per_gain if pg["proto_eer"] == pg["proto_eer"]]
+    best_text = min(_te) if _te else float("nan")
+    best_proto = min(_pe) if _pe else float("nan")
+    print(f"DISCRIMINATOR[{args.cell_regime}]: best EER text={best_text:.3f} "
+          f"proto={best_proto if _pe else float('nan'):.3f} -> "
+          + ("PROTO better (wire audio-prototype for Phase 3)"
+             if (_pe and best_proto < best_text) else
+             ("proto not measured" if not _pe else "text >= proto? / text adequate")))
     return 0
 
 
