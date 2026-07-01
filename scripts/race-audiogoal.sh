@@ -28,6 +28,8 @@ SCENE="TEEsavR23oF"; CLASS="alarm"; CATEGORY="bed"
 NWARM=3; SETTINGS="1 3"; TAG="audiogoal"; OUT_TAG=""; T_ANOM_WARM=30; SOURCE_OVERRIDE=""; REUSE_DS=""
 ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""; FETCH_AUDIO=""; AUDIO_WRITE=""; LIFELONG=""
 CELL_TAG=""; SRC_CONTENT_DIR=""
+BG_GAIN=""; BG_CLASS="vacuum"   # Gate-0b mixture bed: default OFF; RECOMMEND_BG_GAIN=1.00
+BG_DELTA="-0.2557"; BG_TAU="0.0341"   # Gate-0b GO recalibration (convolved anomaly gate)
 while [ $# -gt 0 ]; do
   case "$1" in
     # Lifelong cross-visit (oracle upper bound): build the dataset with INVERTED
@@ -82,6 +84,17 @@ while [ $# -gt 0 ]; do
     # Force the open-set CLAP anomaly-gate OFF (energy-only onset) even for
     # anomaly_response — isolates whether the gate is suppressing onset.
     --no-anomaly-gate) NO_GATE=1; shift ;;
+    # Gate-0b mixture: continuous benign background bed. --bg-gain <g> turns it ON
+    # (RECOMMEND 1.00 so the bed clears onset_rms); --bg-class picks the benign clip
+    # staged into data/benign_audio/<class>.wav (default vacuum — non-leaky broadband
+    # hum, NOT verbatim in NORMAL_PROMPTS). Default OFF => byte-identical single-source.
+    --bg-gain) BG_GAIN="$2"; shift 2 ;;
+    --bg-class) BG_CLASS="$2"; shift 2 ;;
+    # Gate-0b recalibrated CLAP gate (convolved audio). A mixture run MUST run the
+    # gate ON with these (the bed clears onset_rms, so energy-only onset would fire
+    # at step 0 on the bed; the gate rejects the bed pre-t_anom, accepts the anomaly).
+    --bg-delta) BG_DELTA="$2"; shift 2 ;;
+    --bg-tau) BG_TAU="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
@@ -147,6 +160,7 @@ else
       --src "$SRC" --scene "$SCENE" --categories "$CATEGORY" --n-warm "$NWARM" \
       --anomaly-class "$CLASS" --name "$NAME" --t-anom-warm "$T_ANOM_WARM" \
       --out-dir "$DS_DIR" --source-manifest "$MANIFEST" $SRC_ARG $LIFELONG_ARG \
+      ${BG_GAIN:+--background-class "$BG_CLASS"} \
     || { echo "FATAL: dataset build failed."; exit 1; }
 fi
 [ -f "$DS" ] && [ -f "$MANIFEST" ] || { echo "FATAL: dataset or manifest missing"; exit 1; }
@@ -213,6 +227,24 @@ else
   ANOMALY_CLIP=""
 fi
 
+# Gate-0b mixture bed: stage a benign ESC-50 clip into data/benign_audio/<class>.wav
+# (fetch_anomaly_clips.py --include-benign; staged separately from the anomaly clip
+# the runner auto-resolves, so it never collides). Bed is inert unless --bg-gain.
+BG_CLIP=""
+if [ -n "$BG_GAIN" ]; then
+  BG_CLIP="data/benign_audio/${BG_CLASS}.wav"
+  if [ ! -f "$BG_CLIP" ]; then
+    banner "[stage] fetch benign background bed ($BG_CLASS)"
+    python embodied_memory/scripts/fetch_anomaly_clips.py --include-benign \
+      || echo "WARN: benign fetch failed; bed will be disabled"
+  fi
+  if [ -f "$BG_CLIP" ]; then
+    echo "  background bed: REAL ESC-50 benign clip -> $BG_CLIP (bg_gain=$BG_GAIN)"
+  else
+    echo "  background bed: NO $BG_CLIP; passing no clip -> bed disabled"; BG_CLIP=""
+  fi
+fi
+
 # Onset calibration: set --audio-onset-rms so the anomaly is first audible at
 # ~ONSET_TARGET_DIST m (across a room) rather than point-blank — the step-130
 # finding (default onset_rms=0.05 < far-cell energy ~0.046, so onset only fired
@@ -247,6 +279,8 @@ for S in $SETTINGS; do
       --backbone remembr --setting "$S" --task "$TASK" ${NO_GATE:+--no-anomaly-gate} \
       --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
       --audio-onset-rms "$ONSET_RMS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
+      ${BG_GAIN:+--bg-gain "$BG_GAIN"} ${BG_CLIP:+--background-clip "$BG_CLIP"} \
+      ${BG_GAIN:+--audio-anomaly-gate} ${BG_GAIN:+--audio-anomaly-delta "$BG_DELTA"} ${BG_GAIN:+--audio-anomaly-tau "$BG_TAU"} \
       --episodes-path "$DS" --scene "$SCENE" --target any \
       --n-episodes "$N_EPISODES" --out-dir "$out_dir" 2>&1 | tee "${out_dir}.log"
   rc=${PIPESTATUS[0]}

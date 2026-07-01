@@ -103,9 +103,30 @@ def case_length_align_bed_shorter_and_longer():
         assert out.shape[-1] == L, (out.shape, L)
 
 
+def case_load_background_clip_none_path():
+    # the byte-identity witness for Phase 1b: no background_clip_path -> the bed
+    # loader returns None (absent, NOT a synthetic burst) -> render seam falls back
+    # to the single-source path. Uses a bare instance (habitat imports lazily).
+    from embodied_memory.habitat_env import HabitatObjectNavSource
+    s = HabitatObjectNavSource.__new__(HabitatObjectNavSource)
+    s._background_clip_path = None
+    assert s._load_background_clip() is None
+
+
+def case_resolve_bg_clip_explicit_path_wins():
+    # the driver passes --background-clip data/benign_audio/<bed>.wav; the explicit
+    # path must win over the (anomaly-defaulted) dir so the bed loads from the right
+    # place (guards the --background-dir defaults-to-anomaly_audio trap).
+    assert at.resolve_anomaly_clip("vacuum", "data/benign_audio/vacuum.wav",
+                                   "data/anomaly_audio") == "data/benign_audio/vacuum.wav"
+    assert at.resolve_anomaly_clip(None, None, "data/anomaly_audio") is None
+
+
 def main() -> int:
     cases = [
         case_diotic_collapse_equalizes_channels,
+        case_load_background_clip_none_path,
+        case_resolve_bg_clip_explicit_path_wins,
         case_bytewise_identical_no_bed_default,
         case_bytewise_identical_bed_present_but_gain_zero,
         case_bytewise_identical_gain_set_but_no_bed_clip,

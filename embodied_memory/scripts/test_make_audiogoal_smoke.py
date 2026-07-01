@@ -87,6 +87,29 @@ def case_episode_info_has_audio_keys():
     print("  case episode_info_has_audio_keys: OK")
 
 
+def case_background_class_stamped_every_episode():
+    cold, warm = _cold_warm()
+    eps = mk2.build_category_episodes(_template(), cold, warm, "bed",
+                                      anomaly_class="alarm", source_position=[0, 0, 0],
+                                      background_class="vacuum")
+    for ep in eps:                                    # cold + all warm
+        assert ep["info"]["background_class"] == "vacuum", ep["info"]
+    print("  case background_class_stamped_every_episode: OK")
+
+
+def case_background_class_none_is_byte_identical():
+    cold, warm = _cold_warm()
+    a = mk2.build_category_episodes(_template(), cold, warm, "bed",
+                                    anomaly_class="alarm", source_position=[0, 0, 0])
+    b = mk2.build_category_episodes(_template(), cold, warm, "bed",
+                                    anomaly_class="alarm", source_position=[0, 0, 0],
+                                    background_class=None)
+    assert a == b, "None => byte-identical to omitting the arg"
+    for ep in a:
+        assert "background_class" not in ep["info"], "None => key absent"
+    print("  case background_class_none_is_byte_identical: OK")
+
+
 def case_cold_silent_warm_fires():
     cold, warm = _cold_warm()
     eps = mk2.build_category_episodes(_template(), cold, warm, "bed",
@@ -470,6 +493,8 @@ def main() -> int:
     cases = [
         case_reuses_revisit_pure_fns,
         case_episode_info_has_audio_keys,
+        case_background_class_stamped_every_episode,
+        case_background_class_none_is_byte_identical,
         case_cold_silent_warm_fires,
         case_episode_id_class_qualified,
         case_anomaly_object_override,

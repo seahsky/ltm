@@ -141,6 +141,15 @@ def _build_source(args):
             getattr(args, "anomaly_class", None),
             getattr(args, "anomaly_clip", None),
             getattr(args, "anomaly_clip_dir", audio_task._ANOMALY_CLIP_DIR_DEFAULT)),
+        # Phase 1b: continuous diotic background bed. Same explicit>staged>None
+        # precedence as the anomaly clip; None => no bed (byte-identical). These are
+        # SOURCE ctor kwargs — the render seam (_audio_render_cfg) reads them, NOT the
+        # runner audio_cfg (setting bg_gain on the runner cfg would render NO bed).
+        background_clip_path=audio_task.resolve_anomaly_clip(
+            getattr(args, "background_class", None),
+            getattr(args, "background_clip", None),
+            getattr(args, "background_dir", audio_task._ANOMALY_CLIP_DIR_DEFAULT)),
+        bg_gain=getattr(args, "bg_gain", 0.0),
     )
 
 
@@ -345,6 +354,23 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--anomaly-clip-dir", type=str, default=audio_task._ANOMALY_CLIP_DIR_DEFAULT,
                         help="audiogoal: dir of staged per-class clips <class>.wav "
                              "(fetch_anomaly_clips.py); used when --anomaly-clip is unset.")
+    # Phase 1b: continuous benign background bed mixed under every episode. Silent
+    # unless --bg-gain > 0 AND a clip resolves (both guards) => default path
+    # (no --background-clip, bg-gain 0.0) is byte-identical.
+    parser.add_argument("--background-clip", type=str, default=None,
+                        help="audiogoal: explicit benign .wav for the continuous diotic "
+                             "background bed (mixed from step 0). Resolved before "
+                             "--background-class. None => no bed (default).")
+    parser.add_argument("--background-class", type=str, default=None,
+                        help="audiogoal: staged benign bed class -> <background-dir>/<class>.wav; "
+                             "used when --background-clip is unset.")
+    parser.add_argument("--background-dir", type=str, default="data/benign_audio",
+                        help="audiogoal: dir of staged benign bed clips "
+                             "(fetch_anomaly_clips.py --include-benign). NOT the anomaly "
+                             "dir — a benign class resolves here, else --background-clip wins.")
+    parser.add_argument("--bg-gain", type=float, default=0.0,
+                        help="audiogoal: linear gain on the background bed (0.0 => silent bed / "
+                             "byte-identical default). Gate-0b RECOMMEND_BG_GAIN=1.00 clears onset_rms.")
     parser.add_argument("--t-anom", type=int, default=30,
                         help="audiogoal: step index the anomaly begins (silence before).")
     parser.add_argument("--audio-onset-rms", type=float, default=0.05,

@@ -153,6 +153,7 @@ def build_category_episodes(
     source_position: Optional[List[float]] = None,
     t_anom_cold: int = _T_ANOM_COLD_DEFAULT,
     t_anom_warm: int = _T_ANOM_WARM_DEFAULT,
+    background_class: Optional[str] = None,   # continuous benign bed name (decorative provenance)
 ) -> List[Dict[str, Any]]:
     """Clone ``template`` into [cold, warm_1, ..., warm_k]. When ``anomaly_class``
     is None this is exactly ``make_revisit_smoke.build_category_episodes`` (same
@@ -177,6 +178,8 @@ def build_category_episodes(
         info["anomaly_object"] = obj
         info["source_position"] = src
         info["t_anom"] = t_anom_cold if is_cold else t_anom_warm
+        if background_class is not None:          # None => key absent => byte-identical
+            info["background_class"] = background_class
         # Carry the non-LOS picker's geometry/audibility onto the SEED episode so
         # the construction gate can adjudicate off the SAME quantities the picker
         # used (geodesic detour + the chosen cell's IR energy), not a conflicting
@@ -210,6 +213,7 @@ def build_dataset(
     t_anom_cold: int = _T_ANOM_COLD_DEFAULT,
     t_anom_warm: int = _T_ANOM_WARM_DEFAULT,
     cold_pose_override: Optional[Dict[str, Any]] = None,
+    background_class: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assemble the content dict. With ``anomaly_class=None`` this is exactly
     ``make_revisit_smoke.build_dataset``. With a class set, each category also
@@ -266,7 +270,8 @@ def build_dataset(
         out_eps.extend(build_category_episodes(
             template, cold_pose, warm_poses, cat,
             anomaly_class=anomaly_class, anomaly_object=cat, source_position=src_xyz,
-            t_anom_cold=t_anom_cold, t_anom_warm=t_anom_warm))
+            t_anom_cold=t_anom_cold, t_anom_warm=t_anom_warm,
+            background_class=background_class))
 
     return {
         "category_to_task_category_id": src_content.get("category_to_task_category_id", {}),
@@ -296,6 +301,7 @@ def build_lifelong_dataset(
     detour_ratio: float = 1.3,
     min_geo_m: float = 2.0,
     energy_floor: float = 0.0,
+    background_class: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Lifelong cross-visit AudioGoal (oracle-source upper bound). Mechanically this
     is :func:`build_dataset` with the t_anom polarity INVERTED — the SEED (cold
@@ -334,7 +340,7 @@ def build_lifelong_dataset(
         instance_keyed=instance_keyed, anomaly_class=anomaly_class,
         source_position=source_position, offset_m=offset_m,
         t_anom_cold=t_anom_seed, t_anom_warm=t_anom_recall,
-        cold_pose_override=cold_pose_override)
+        cold_pose_override=cold_pose_override, background_class=background_class)
 
 
 def _xz_dist(a: Optional[List[float]], b: Optional[List[float]]) -> Optional[float]:
@@ -490,6 +496,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--name", default="audiogoal")
     parser.add_argument("--anomaly-class", required=True,
                         choices=["baby_cry", "alarm", "glass_break"])
+    parser.add_argument("--background-class", default=None,
+                        help="Continuous benign bed name stamped into every "
+                             "episode.info['background_class'] (Gate-0b mixture; "
+                             "decorative provenance — the render bed loads from "
+                             "--background-clip in habitat_env, not this string). "
+                             "None => key absent => byte-identical audiogoal dataset.")
     parser.add_argument("--source-position", default=None,
                         help="Override anomaly source 'x,y,z' for ALL categories "
                              "(else a +offset from each category's cold view_point)")
@@ -561,7 +573,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             src, args.categories, args.n_warm, anomaly_class=args.anomaly_class,
             source_position=src_pos, offset_m=args.offset_m, min_dist=min_dist,
             instance_keyed=args.instance_keyed, t_anom_seed=t_seed, t_anom_recall=t_recall,
-            **rir_kwargs)
+            background_class=args.background_class, **rir_kwargs)
         # $0 construction gate: refuse to build on a FAIL; surface redundancy-risk.
         issues = lifelong_construction_issues(
             content, min_recall_dist_m=min_dist, non_los_seed=args.non_los_seed,
@@ -599,7 +611,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             src, args.categories, args.n_warm, min_dist=args.min_dist,
             instance_keyed=args.instance_keyed, anomaly_class=args.anomaly_class,
             source_position=src_pos, offset_m=args.offset_m,
-            t_anom_cold=args.t_anom_cold, t_anom_warm=args.t_anom_warm)
+            t_anom_cold=args.t_anom_cold, t_anom_warm=args.t_anom_warm,
+            background_class=args.background_class)
     if not content["episodes"]:
         print(f"RED: no episodes built for categories {args.categories} in {args.scene}")
         return 1

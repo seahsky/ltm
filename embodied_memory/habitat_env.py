@@ -72,6 +72,8 @@ class HabitatObjectNavSource(EpisodeSource):
         rir_grid_path: Optional[str] = None,
         t_anom: int = 0,
         anomaly_clip_path: Optional[str] = None,
+        background_clip_path: Optional[str] = None,
+        bg_gain: float = 0.0,
         target_norm_rms_db: float = -20.0,
     ):
         # scene_id can be a single id (legacy) or a list — passed straight to
@@ -109,9 +111,12 @@ class HabitatObjectNavSource(EpisodeSource):
         self._rir_grid_path = rir_grid_path
         self._audio_t_anom = int(t_anom)
         self._anomaly_clip_path = anomaly_clip_path
+        self._background_clip_path = background_clip_path
+        self._bg_gain = float(bg_gain)
         self._target_norm_rms_db = float(target_norm_rms_db)
         self._rir_grid = None              # lazy-loaded at reset (scene-matched)
         self._anomaly_clip_norm = None     # normalized FSD50K clip, loaded once
+        self._background_clip_norm = None  # normalized benign bed, loaded once
         self._audio_render_cfg = None      # AudioTaskConfig, built at reset
 
     @staticmethod
@@ -334,11 +339,15 @@ class HabitatObjectNavSource(EpisodeSource):
                     )
                 self._rir_grid = grid
                 self._anomaly_clip_norm = None   # re-normalize at the grid's sr
+                self._background_clip_norm = None  # re-normalize bed at the grid's sr
             if self._anomaly_clip_norm is None:
                 self._anomaly_clip_norm = self._load_anomaly_clip()
+            if self._background_clip_norm is None:
+                self._background_clip_norm = self._load_background_clip()
             self._audio_render_cfg = AudioTaskConfig(
                 enabled=True, t_anom=ep_t_anom,
                 sample_rate=int(self._rir_grid.sample_rate),
+                bg_gain=self._bg_gain,
             )
 
         # MultiON: surface the ordered category chain (written by
@@ -543,6 +552,7 @@ class HabitatObjectNavSource(EpisodeSource):
             audio = render_step_audio(
                 self._rir_grid, agent_state.position, self._anomaly_clip_norm,
                 self._step_count, self._audio_render_cfg,
+                bg_clip_norm=self._background_clip_norm,
             )
 
         return Step(
@@ -566,6 +576,20 @@ class HabitatObjectNavSource(EpisodeSource):
         from .audio_task import build_anomaly_clip
         grid_sr = int(self._rir_grid.sample_rate) if self._rir_grid is not None else 48000
         return build_anomaly_clip(self._anomaly_clip_path, grid_sr, self._target_norm_rms_db)
+
+    def _load_background_clip(self) -> Optional[np.ndarray]:
+        """Load + RMS-normalize the continuous benign bed at the grid's sample rate,
+        sharing the anomaly clip's energy scale (SST via
+        ``audio_task.build_anomaly_clip`` -> ``normalize_clip``). Returns None when
+        no ``background_clip_path`` is set — so the render seam falls back to the
+        single-source (anomaly-only) path byte-identically. NOTE the divergence from
+        ``_load_anomaly_clip``: the bed is absent-not-synthesized on None (a synthetic
+        bed would break the byte-identical default)."""
+        if not self._background_clip_path:
+            return None
+        from .audio_task import build_anomaly_clip
+        grid_sr = int(self._rir_grid.sample_rate) if self._rir_grid is not None else 48000
+        return build_anomaly_clip(self._background_clip_path, grid_sr, self._target_norm_rms_db)
 
     @staticmethod
     def _read_agent_state(env) -> AgentState:
