@@ -34,6 +34,11 @@ MINICONDA="${HOME}/miniconda3"; SS_ENV="soundspaces-spike"; LTM_ENV="ltm-embodie
 SCENE="TEEsavR23oF"; CLASS="alarm"; CATEGORY="bed"
 NWARM=3; SETTINGS="1 3"; TAG="anomresp"; T_ANOM_WARM=30
 MIN_SOURCE_SEP="3.0"; ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""
+# N3's source is a REAL detour (decoupled from the goal), so the investigate budget
+# must be larger than the audiogoal default 40 (tuned for the degenerate 0.5 m
+# source==goal case, where the first real run aborted every detour at 40 steps →
+# investigated=0). extend-budget ON so the detour doesn't starve the primary find-task.
+INVESTIGATE_MAX_STEPS=100; INVESTIGATE_EXTEND=1
 FETCH_AUDIO=1                         # N3 wants REAL audio by default
 BG_GAIN="1.0"; BG_CLASS="vacuum"      # mixture ON by default (every scene = anomaly + bed)
 # Feasibility gate band (grid-relative cell energy). coverage empty => the gate
@@ -51,6 +56,8 @@ while [ $# -gt 0 ]; do
     --tag) TAG="$2"; shift 2 ;;
     --t-anom) T_ANOM_WARM="$2"; shift 2 ;;
     --min-source-sep) MIN_SOURCE_SEP="$2"; shift 2 ;;
+    --investigate-max-steps) INVESTIGATE_MAX_STEPS="$2"; shift 2 ;;
+    --no-extend-budget) INVESTIGATE_EXTEND=""; shift ;;   # detour counts against the primary budget
     --onset-target-dist) ONSET_TARGET_DIST="$2"; shift 2 ;;
     --onset-rms) ONSET_RMS_OVERRIDE="$2"; shift 2 ;;
     --no-fetch-audio) FETCH_AUDIO=""; shift ;;
@@ -210,6 +217,7 @@ N_EPISODES="$(python -c "import gzip,json,glob,sys; print(sum(len(json.load(gzip
 echo "  n-episodes = $N_EPISODES"
 
 banner "[6/7] run settings [$SETTINGS] (--task anomaly_response --backbone remembr)"
+echo "  investigate: max_steps=$INVESTIGATE_MAX_STEPS extend_budget=$([ -n "$INVESTIGATE_EXTEND" ] && echo ON || echo OFF) (N3 source is a REAL detour → larger than the 40 default)"
 OUT_DIRS=""
 for S in $SETTINGS; do
   out_dir="runs/${TAG}-${CATEGORY}-s$S"
@@ -221,6 +229,7 @@ for S in $SETTINGS; do
   REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
       --backbone remembr --setting "$S" --task anomaly_response \
       --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
+      --investigate-max-steps "$INVESTIGATE_MAX_STEPS" ${INVESTIGATE_EXTEND:+--investigate-extend-budget} \
       --audio-onset-rms "$ONSET_RMS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
       ${BG_GAIN:+--bg-gain "$BG_GAIN"} ${BG_CLIP:+--background-clip "$BG_CLIP"} \
       --episodes-path "$DS" --scene "$SCENE" --target any \
