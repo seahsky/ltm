@@ -123,40 +123,34 @@ def _fmt(v: Any) -> str:
     return str(v)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_dir", help="a finished anomaly_response out-dir (episode_*.json)")
-    args = ap.parse_args(argv)
-    run_dir = args.run_dir
-    if not os.path.isdir(run_dir):
-        print(f"FATAL: run dir not found: {run_dir}")
-        return 2
-
-    # per-episode onset cross-ref from summary.json
+def _rows_for_dir(run_dir: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Load one run dir's episode rows + its per-episode onset cross-ref."""
     summary = _load_json(os.path.join(run_dir, "summary.json")) or {}
     onset_by_id: Dict[str, int] = {}
     for ep in (summary.get("episodes") or []):
         for k in (ep.get("episode_id"), ep.get("episode_idx")):
             if k is not None:
                 onset_by_id[str(k)] = int(ep.get("n_audio_onset_fired", 0) or 0)
-
     ep_files = [f for f in sorted(glob.glob(os.path.join(run_dir, "episode_*.json")))
                 if not f.endswith("_error.json")]
-
     rows = []
     for f in ep_files:
         ep = _load_json(f)
-        if ep is None:
-            continue
-        rows.append(episode_row(ep, os.path.basename(f)))
+        if ep is not None:
+            rows.append(episode_row(ep, os.path.basename(f)))
+    return rows, onset_by_id
 
+
+def _pct(x: Optional[float]) -> str:
+    return "n/a" if x is None else f"{100.0 * x:.0f}%"
+
+
+def _print_dir_table(run_dir: str, rows: List[Dict[str, Any]], onset_by_id: Dict[str, int]) -> None:
     print(f"=== diagnose_anomaly_controller: {run_dir} ===")
     print(f"  episodes: {len(rows)}")
     print()
-    hdr = (f"  {'episode':<8} {'steps':>5} {'onset':>5} {'inves':>5} {'resum':>5} "
-           f"{'abort':>5} {'compl':>5} {'compl1m':>7} {'benign':>6} {'succ1m':>6} {'class':>7}")
-    print(hdr)
+    print(f"  {'episode':<8} {'steps':>5} {'onset':>5} {'inves':>5} {'resum':>5} "
+          f"{'abort':>5} {'compl':>5} {'compl1m':>7} {'benign':>6} {'succ1m':>6} {'class':>7}")
     for r in rows:
         onset = onset_by_id.get(r["episode_id"], onset_by_id.get(
             r["name"].replace("episode_", "").replace(".json", "").lstrip("0") or "0"))
@@ -166,21 +160,55 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"{_fmt(r['primary_completed_1m']):>7} {_fmt(r['n_benign_ignored']):>6} "
               f"{_fmt(r['success_1m']):>6} {_fmt(r['anomaly_class']):>7}")
 
-    agg = aggregate(rows)
 
-    def _pct(x):
-        return "n/a" if x is None else f"{100.0 * x:.0f}%"
-
-    print()
-    print(f"  with_report={agg['n_with_report']}/{agg['n_episodes']}  "
+def _print_agg(agg: Dict[str, Any], label: str = "") -> None:
+    pre = f"  [{label}] " if label else "  "
+    print(f"{pre}with_report={agg['n_with_report']}/{agg['n_episodes']}  "
           f"investigated={agg['n_investigated']} (rate {_pct(agg['investigate_rate'])})  "
           f"resumed={agg['n_resumed']} (rate {_pct(agg['resume_rate'])})  "
           f"aborted={agg['n_aborted']}  full(inv+res)={agg['n_full']}")
     print(f"  primary_completed@0.1m rate={_pct(agg['primary_completed_rate'])}  "
           f"@1.0m rate={_pct(agg['primary_completed_1m_rate'])}")
-    v, rec = verdict(agg)
-    print(f"CONTROLLER_VERDICT={v}")
-    print(f"  -> {rec}")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("run_dir", nargs="+",
+                    help="one or more finished anomaly_response out-dirs (episode_*.json). "
+                         "Multiple dirs => a POOLED controller verdict across all of them "
+                         "(the matrix systems headline).")
+    args = ap.parse_args(argv)
+    run_dirs = [d for d in args.run_dir if os.path.isdir(d)]
+    missing = [d for d in args.run_dir if not os.path.isdir(d)]
+    for d in missing:
+        print(f"WARN: run dir not found (skipped): {d}")
+    if not run_dirs:
+        print("FATAL: no valid run dir given")
+        return 2
+
+    all_rows: List[Dict[str, Any]] = []
+    for run_dir in run_dirs:
+        rows, onset_by_id = _rows_for_dir(run_dir)
+        _print_dir_table(run_dir, rows, onset_by_id)
+        agg = aggregate(rows)
+        print()
+        _print_agg(agg)
+        v, rec = verdict(agg)
+        print(f"CONTROLLER_VERDICT={v}")
+        print(f"  -> {rec}")
+        print()
+        all_rows.extend(rows)
+
+    # Pooled verdict across every dir = the multi-cell matrix systems headline.
+    if len(run_dirs) > 1:
+        print("=" * 60)
+        print(f"POOLED across {len(run_dirs)} run dirs ({len(all_rows)} episodes)")
+        pooled = aggregate(all_rows)
+        _print_agg(pooled, label="pooled")
+        pv, prec = verdict(pooled)
+        print(f"POOLED_CONTROLLER_VERDICT={pv}")
+        print(f"  -> {prec}")
     return 0
 
 
