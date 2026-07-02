@@ -37,7 +37,10 @@ CATEGORIES="chair bed"
 CLASSES="baby_cry alarm glass_break"
 NWARM=3; SETTINGS="1 3"; PREFIX="anommx"
 MAX_CELLS=""
-FETCH="--fetch-audio"; EXTRA=""
+# race-anomaly-response.sh fetches REAL ESC-50 audio BY DEFAULT (--no-fetch-audio
+# disables it) — the OPPOSITE of race-audiogoal.sh. So the matrix passes NOTHING
+# by default and only forwards --no-fetch-audio for the synthetic arm.
+FETCH=""; EXTRA=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --split) SPLIT="$2"; shift 2 ;;
@@ -48,7 +51,7 @@ while [ $# -gt 0 ]; do
     --settings) SETTINGS="$2"; shift 2 ;;
     --tag-prefix) PREFIX="$2"; shift 2 ;;
     --max-cells) MAX_CELLS="$2"; shift 2 ;;
-    --synthetic-audio) FETCH=""; shift ;;
+    --synthetic-audio) FETCH="--no-fetch-audio"; shift ;;
     # pass-through to every cell's race-anomaly-response.sh (e.g. "--min-source-sep 4.0"
     # or "--investigate-max-steps 120").
     --extra) EXTRA="$2"; shift 2 ;;
