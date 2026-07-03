@@ -21,10 +21,12 @@
 #   [7] POOLED controller census (diagnose_anomaly_controller over every S3 dir)
 #
 #   cd ~/ltm && git checkout lifelong-revisit-eval && git pull
-#   # smoke (2 val_mini scenes × chair,bed ≈ 4 cells, resumable):
+#   # smoke (2 val_mini scenes, resumable):
 #   nrun bash scripts/race-anomaly-response-matrix.sh --split val_mini --tag-prefix anommx
-#   # wider (needs full-val meshes on disk):
-#   nrun bash scripts/race-anomaly-response-matrix.sh --split val --categories "chair bed sofa" --tag-prefix anommx
+#   # POWERED (20 val scenes). Step 1 — download the 18 missing meshes then exit:
+#   nrun bash scripts/race-anomaly-response-matrix.sh --split val --download --max-cells 0 --tag-prefix anommxv
+#   # Step 2 — the full matrix (~40-50 h serial, resumable; re-run to fill gaps):
+#   nrun bash scripts/race-anomaly-response-matrix.sh --split val --tag-prefix anommxv
 #
 # EXECUTE (do NOT source) — children switch conda envs in their own processes.
 
@@ -33,10 +35,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO_ROOT" ||
 
 SPLIT="val_mini"
 SCENES=""
-CATEGORIES="chair bed"
+# Full val category set (turnkey for --split val). val_mini simply has fewer of
+# these present per scene; plan_scaleup_cells drops absent ones.
+CATEGORIES="chair bed sofa toilet tv_monitor plant"
 CLASSES="baby_cry alarm glass_break"
 NWARM=3; SETTINGS="1 3"; PREFIX="anommx"
-MAX_CELLS=""
+MAX_CELLS=""          # "0" = mesh-gate/plan (and --download) then exit, no GPU spend
+DOWNLOAD=""           # --download fetches the 18 missing full-val meshes (token-gated)
 # race-anomaly-response.sh fetches REAL ESC-50 audio BY DEFAULT (--no-fetch-audio
 # disables it) — the OPPOSITE of race-audiogoal.sh. So the matrix passes NOTHING
 # by default and only forwards --no-fetch-audio for the synthetic arm.
@@ -51,6 +56,10 @@ while [ $# -gt 0 ]; do
     --settings) SETTINGS="$2"; shift 2 ;;
     --tag-prefix) PREFIX="$2"; shift 2 ;;
     --max-cells) MAX_CELLS="$2"; shift 2 ;;
+    # Fetch the 18 missing full-val meshes via habitat-sim (Matterport-token gated,
+    # reads .env). One-time; then re-run without --download. Pair with --max-cells 0
+    # to download-then-exit before committing to the ~40-50h matrix.
+    --download) DOWNLOAD=1; shift ;;
     --synthetic-audio) FETCH="--no-fetch-audio"; shift ;;
     # pass-through to every cell's race-anomaly-response.sh (e.g. "--min-source-sep 4.0"
     # or "--investigate-max-steps 120").
@@ -85,8 +94,20 @@ for t in test_plan_scaleup_cells test_make_anomaly_response_smoke test_diagnose_
     || { echo "FATAL: $t failed — not spending on the live run."; exit 1; }
 done
 
-banner "[4/7] plan cells (per-scene categories present, mesh-gated)"
-[ -d "$CONTENT_DIR" ] || { echo "FATAL: content dir missing: $CONTENT_DIR"; exit 1; }
+banner "[4/7] mesh gate + plan cells (per-scene categories present, mesh-gated)"
+[ -d "$CONTENT_DIR" ] || { echo "FATAL: content dir missing: $CONTENT_DIR (need ObjectNav $SPLIT episodes)"; exit 1; }
+if [ -n "$DOWNLOAD" ]; then
+  banner "[4b] download full-val meshes (HM3D_SCENE_GROUP=hm3d_val_full; Matterport-token gated)"
+  HM3D_SCENE_GROUP=hm3d_val_full bash embodied_memory/scripts/download_hm3d.sh "$MESH_ROOT" \
+    || { echo "FATAL: mesh download failed (check .env MATTERPORT_TOKEN_ID/SECRET + habitat-sim)"; exit 1; }
+fi
+# Report present vs missing meshes (informational; the planner mesh-gates per scene).
+N_CONTENT=$(ls "$CONTENT_DIR"/*.json.gz 2>/dev/null | wc -l | tr -d ' ')
+N_MESH=$(python embodied_memory/scripts/plan_scaleup_cells.py --content-dir "$CONTENT_DIR" \
+           --categories $CATEGORIES --classes $CLASSES --mesh-root "$MESH_ROOT" --format json 2>/dev/null \
+         | python -c "import json,sys; print(json.load(sys.stdin)['n_scenes'])" 2>/dev/null || echo 0)
+echo "  scenes: $N_CONTENT content files, $N_MESH with a usable mesh on disk"
+[ "$N_MESH" -lt "$N_CONTENT" ] 2>/dev/null && echo "  NOTE: $((N_CONTENT-N_MESH)) scene(s) have no mesh → SKIPPED. Re-run with --download to fetch them."
 SCENES_ARG=""; [ -n "$SCENES" ] && SCENES_ARG="--scenes $SCENES"
 MAXC_ARG=""; { [ -n "$MAX_CELLS" ] && [ "$MAX_CELLS" != "0" ]; } && MAXC_ARG="--max-cells $MAX_CELLS"
 PLAN_TSV="runs/${PREFIX}-plan.tsv"
