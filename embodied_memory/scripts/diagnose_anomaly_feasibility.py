@@ -46,12 +46,21 @@ _LOUD_FRAC_DEFAULT = 0.5
 _COVERAGE_M_DEFAULT = 2.0
 
 
-def default_coverage_m(cell_positions, *, factor: float = 1.5, floor_m: float = 1.0) -> float:
+def default_coverage_m(cell_positions, *, factor: float = 1.5, floor_m: float = 2.0) -> float:
     """Coverage radius that TRACKS the grid's actual cell spacing, so a start's
     nearest cell is 'in coverage' iff it is within ~1.5x the typical inter-cell
     gap. A fixed radius false-rejects a SPARSE grid (no cell within 2 m of a
     genuinely-audible start) and is over-lenient on a DENSE one. Returns
-    ``factor * median(nearest-neighbour xz spacing)``, floored at ``floor_m``."""
+    ``factor * median(nearest-neighbour xz spacing)``, floored at ``floor_m``.
+
+    The ``floor_m=2.0`` (room-scale) matters: the LIVE runtime snaps a start to
+    its nearest cell REGARDLESS of distance (``RIRGrid.nearest`` has no max), so a
+    start a metre-plus from its nearest cell still gets that cell's convolved audio
+    and WILL fire onset at runtime — classifying it OUT_OF_COVERAGE is a false
+    negative that SKIPs a usable cell (the wcojb bed->toilet case: a warm start at
+    d2cell 1.39 m with rel_energy 0.14 was wrongly rejected under a 1.0 m floor).
+    The floor only guards genuinely off-grid starts (different floor / disconnected
+    region), where the snapped IR is meaningless."""
     import numpy as np
     p = np.asarray(cell_positions, dtype=np.float64).reshape(-1, 3)
     n = p.shape[0]

@@ -138,18 +138,35 @@ def case_from_grid_only_warm_episodes_counted():
 # ----------------------------------------------------------------------
 def case_default_coverage_tracks_grid_spacing():
     import numpy as np
-    dense = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], float)   # ~1 m spacing
-    sparse = np.array([[0, 0, 0], [4, 0, 0], [8, 0, 0], [12, 0, 0]], float)  # ~4 m spacing
+    dense = np.array([[0, 0, 0], [1.5, 0, 0], [3.0, 0, 0], [4.5, 0, 0]], float)  # ~1.5 m
+    sparse = np.array([[0, 0, 0], [4, 0, 0], [8, 0, 0], [12, 0, 0]], float)       # ~4 m
     cov_d = fz.default_coverage_m(dense)
     cov_s = fz.default_coverage_m(sparse)
     assert cov_s > cov_d, (cov_d, cov_s)          # sparse grid => larger coverage
-    assert 1.0 <= cov_d <= 2.5, cov_d             # ~1.5x median 1 m
+    assert 2.0 <= cov_d <= 2.5, cov_d             # 1.5x 1.5m = 2.25, above the 2.0 floor
     assert cov_s >= 4.0, cov_s                    # ~1.5x median 4 m
 
 
-def case_default_coverage_floor_for_tiny_grid():
+def case_default_coverage_floor_2m_for_tiny_or_dense_grid():
+    # <2 cells OR a dense cluster => the 2.0 m floor. The runtime snaps a start to
+    # its nearest cell REGARDLESS of distance, so a moderately-far cell reading is
+    # faithful; the floor keeps room-scale gaps in a sparse render in-coverage.
     import numpy as np
-    assert fz.default_coverage_m(np.array([[0, 0, 0]], float)) >= 1.0
+    assert fz.default_coverage_m(np.array([[0, 0, 0]], float)) >= 2.0
+    tight = np.array([[0, 0, 0], [0.5, 0, 0], [1.0, 0, 0]], float)   # 0.5 m spacing
+    assert fz.default_coverage_m(tight) >= 2.0                        # floored, not 0.75
+
+
+def case_coverage_floor_accepts_far_start_in_sparse_region():
+    # wcojb regression: a dense cluster (median NN 0.5m -> old 1.0m floor) with a
+    # warm start whose nearest cell is 1.39 m away (a grid gap) but AUDIBLE energy
+    # 0.1377 was wrongly OUT_OF_COVERAGE -> whole cell SKIP. The 2.0 m floor keeps
+    # it in-coverage -> AUDIBLE -> the cell runs (runtime snaps to that cell anyway).
+    import numpy as np
+    cells = np.array([[0, 0, 0], [0.5, 0, 0], [1.0, 0, 0], [1.5, 0, 0], [2.0, 0, 0]], float)
+    cov = fz.default_coverage_m(cells)
+    assert cov >= 2.0, cov
+    assert fz.classify_start(0.1377, dist_to_cell_m=1.39, coverage_m=cov) == "AUDIBLE"
 
 
 def main() -> int:
@@ -166,7 +183,8 @@ def main() -> int:
         case_from_grid_skip_when_all_loud,
         case_from_grid_only_warm_episodes_counted,
         case_default_coverage_tracks_grid_spacing,
-        case_default_coverage_floor_for_tiny_grid,
+        case_default_coverage_floor_2m_for_tiny_or_dense_grid,
+        case_coverage_floor_accepts_far_start_in_sparse_region,
     ]
     print(f"running {len(cases)} diagnose_anomaly_feasibility cases…")
     for c in cases:
