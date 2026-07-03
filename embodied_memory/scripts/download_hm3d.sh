@@ -53,10 +53,18 @@ if ! python -c "import habitat_sim" 2>/dev/null; then
 fi
 
 echo ">> Downloading HM3D scene group '${SCENE_GROUP}' to ${DEST_DIR}"
+# --no-replace: when versioned data already exists, KEEP it (fetch only what's
+# missing) instead of interactively asking "Replace versioned data? (y|n)". That
+# prompt reads stdin, which a detached `nrun` process does not have → OSError
+# [Errno 9] Bad file descriptor (the 21s FATAL). Idempotent + headless-safe; set
+# HM3D_DOWNLOAD_REPLACE=1 to force a replace, or delete the dir for a fresh fetch.
+REPLACE_FLAG="--no-replace"
+[[ -n "${HM3D_DOWNLOAD_REPLACE:-}" ]] && REPLACE_FLAG="--replace"
 python -m habitat_sim.utils.datasets_download \
   --username "${MATTERPORT_TOKEN_ID}" \
   --password "${MATTERPORT_TOKEN_SECRET}" \
   --uids "${SCENE_GROUP}" \
+  "${REPLACE_FLAG}" \
   --data-path "${DEST_DIR}"
 
 # ObjectNav HM3D v1 episode JSONs hardcode scene paths as `val/<scene>/...`,
