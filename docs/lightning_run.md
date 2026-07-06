@@ -28,28 +28,41 @@ A free GPU box only needs the main-loop env for the bulk of the compute; the ren
 
 ## One-time setup
 
+The drivers `source scripts/race-setup.sh`, which **hardcodes conda at `~/miniconda3`** and an env named `ltm-embodied`.
+The simplest way to make them run unmodified on Lightning (whose own conda lives elsewhere) is to install Miniconda at `~/miniconda3` and build the env there.
+
 ```bash
-git clone <repo> ~/ltm && cd ~/ltm && git checkout lifelong-revisit-eval
+# 0. Miniconda at ~/miniconda3 (the drivers require this exact path)
+wget -qO /tmp/mc.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash /tmp/mc.sh -b -p "$HOME/miniconda3"
 
-# 1. main-loop env (name MUST be ltm-embodied — the drivers source race-setup.sh)
-conda env create -f embodied_memory/environment.yml      # → env "ltm-embodied", python 3.9, habitat-sim 0.3.3
+git clone https://github.com/seahsky/ltm.git ~/ltm && cd ~/ltm && git checkout lifelong-revisit-eval
 
-# 2. RIR-render env (one-time build, ~1h)
+# 1. main-loop env (name MUST be ltm-embodied). habitat-sim 0.3.3 is the riskiest install; ~15-30 min.
+~/miniconda3/bin/conda env create -f embodied_memory/environment.yml
+source scripts/race-setup.sh                              # activates ltm-embodied + exports REMEMBR env vars
+python -c "import habitat_sim, faiss, sentence_transformers, transformers; print('main env OK')"
+
+# 2. RIR-render env (one-time SoundSpaces 2.0 build, ~1h; needed only for the anomaly-response task)
 bash scripts/race-soundspaces-spike.sh                    # → env "soundspaces-spike"
 
-# 3. Matterport token for HM3D mesh download (val_mini meshes may already ship; val needs this)
+# 3. HM3D val_mini data: ObjectNav episodes + meshes (Matterport/HM3D token-gated; agree to HM3D terms first)
 printf 'MATTERPORT_TOKEN_ID=...\nMATTERPORT_TOKEN_SECRET=...\n' > .env
+# episodes must live at data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content/ (the driver FATALs early if absent)
 ```
 
-`scripts/race-setup.sh` assumes `~/miniconda3` and an env named `ltm-embodied`; if Lightning's conda lives elsewhere, either symlink it or set `LTM_ENV_NAME` and adjust `MINICONDA` in that script.
+The ReMEmbR models (Qwen2-VL-2B ~4GB, Qwen2.5-7B ~15GB) download from HuggingFace on the first live run and cache to `~/.cache/huggingface` — one-time, but budget the time/disk.
+On a 24GB L4 the 7B planner + 2B captioner + CLIP/SBERT + habitat is tight but has run; if it OOMs, swap the planner (`REMEMBR_PLANNER_MODEL=microsoft/Phi-3.5-mini-instruct`) — the memory injection is planner-independent so the A/B stays valid.
 
 ## Run the validation
 
-Scoped smoke on the two `val_mini` scenes — baseline **and** query-fix in one pass:
+Scoped smoke on the two `val_mini` scenes — baseline **and** query-fix in one pass.
+`nrun` is RACE-only (it emails via Resend); on Lightning use `nohup` or a `tmux` pane so the job survives disconnects:
 
 ```bash
-nrun bash scripts/race-anomaly-response-matrix.sh \
-    --split val_mini --query-expansion prf --tag-prefix qfix
+nohup bash scripts/race-anomaly-response-matrix.sh \
+    --split val_mini --query-expansion prf --tag-prefix qfix > runs/qfix.out 2>&1 &
+tail -f runs/qfix.out
 ```
 
 Each cell runs `S1`, `S3`, `S3qx`; the driver then prints the pooled paired compare.
@@ -59,8 +72,8 @@ The child self-guards: if `n_query_expanded == 0` (expansion never fired, e.g. a
 Full `val` scale-up (adds mesh download; ~40–50 h serial, resumable):
 
 ```bash
-nrun bash scripts/race-anomaly-response-matrix.sh --split val --download --max-cells 0 --tag-prefix qfixv   # fetch meshes, then exit
-nrun bash scripts/race-anomaly-response-matrix.sh --split val --query-expansion prf --tag-prefix qfixv       # the matrix
+nohup bash scripts/race-anomaly-response-matrix.sh --split val --download --max-cells 0 --tag-prefix qfixv > runs/qfixv-dl.out 2>&1 &   # fetch meshes, then exit
+nohup bash scripts/race-anomaly-response-matrix.sh --split val --query-expansion prf --tag-prefix qfixv    > runs/qfixv.out    2>&1 &   # the matrix
 ```
 
 ### Resumability and session length
