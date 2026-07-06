@@ -46,6 +46,16 @@ BG_GAIN="1.0"; BG_CLASS="vacuum"      # mixture ON by default (every scene = ano
 # sparse grid); --feas-coverage-m overrides.
 FEAS_AUDIBLE_FRAC="0.02"; FEAS_LOUD_FRAC="0.5"; FEAS_COVERAGE_M=""
 SRC_CONTENT_DIR=""
+# Query-side instance fix A/B (Stage-1). When set to prf|caption, this run adds
+# ONE MORE S3 arm on the SAME dataset/grid with LTM_QUERY_EXPANSION exported
+# (out runs/<tag>-<cat>-s3qx), then a paired compare of that arm (B) vs the
+# baseline S3 (A). Default empty → byte-identical to the current driver. The $0
+# encoder-swap gate (GATE_RESULT=GO-QUERY) motivates this: the bare category
+# query "there is a {cat}" collapses instance signal; querying with the recalled
+# prior-sighting captions (prf keeps the category anchor; caption is pure
+# centroid) may recover the instance gap that the powered null lost to
+# wrong-instance over-fire. prf is the conservative default.
+QUEREXP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scene) SCENE="$2"; shift 2 ;;
@@ -68,11 +78,16 @@ while [ $# -gt 0 ]; do
     --feas-loud-frac) FEAS_LOUD_FRAC="$2"; shift 2 ;;
     --feas-coverage-m) FEAS_COVERAGE_M="$2"; shift 2 ;;
     --src-content-dir) SRC_CONTENT_DIR="$2"; shift 2 ;;
+    --query-expansion) QUEREXP="$2"; shift 2 ;;
     *) echo "FATAL: unknown arg $1"; exit 1 ;;
   esac
 done
 [[ "$TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "FATAL: --tag must be alnum/dash/underscore"; exit 1; }
 case "$CLASS" in baby_cry|alarm|glass_break) ;; *) echo "FATAL: --class must be baby_cry|alarm|glass_break"; exit 1 ;; esac
+if [ -n "$QUEREXP" ]; then
+  case "$QUEREXP" in prf|caption) ;; *) echo "FATAL: --query-expansion must be prf|caption (got '$QUEREXP')"; exit 1 ;; esac
+  case " $SETTINGS " in *" 3 "*) ;; *) echo "FATAL: --query-expansion needs setting 3 in --settings (got '$SETTINGS')"; exit 1 ;; esac
+fi
 
 VALMINI="data/hm3d/datasets/objectnav/hm3d/v1/val_mini/content"
 SRC_CONTENT_DIR="${SRC_CONTENT_DIR:-$VALMINI}"
@@ -97,7 +112,8 @@ export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 banner "[3/7] pre-verify (free; abort before spend)"
 for t in test_make_anomaly_response_smoke test_diagnose_anomaly_feasibility \
          test_make_audiogoal_smoke test_audio_task test_make_revisit_smoke \
-         test_anomaly_controller test_anomaly_wiring test_active_goal_noop; do
+         test_anomaly_controller test_anomaly_wiring test_active_goal_noop \
+         test_query_expansion test_summary_query_expanded; do
   python embodied_memory/scripts/$t.py \
     || { echo "FATAL: $t failed — not spending on the live run."; exit 1; }
 done
@@ -247,6 +263,44 @@ except Exception:
   OUT_DIRS="$OUT_DIRS $out_dir"
 done
 
+# --- Query-side instance fix A/B arm (Stage-1) -------------------------------
+# One MORE S3 run on the SAME dataset/grid with LTM_QUERY_EXPANSION exported.
+# Distinct out-dir (-s3qx) so the baseline S3 is never clobbered; paired vs it
+# below. Guarded: the arm must actually FIRE (n_query_expanded > 0) or the A/B is
+# vacuous. Empty QUEREXP → this block is skipped → driver byte-identical.
+QX_DIR=""
+if [ -n "$QUEREXP" ]; then
+  QX_DIR="runs/${TAG}-${CATEGORY}-s3qx"
+  banner "[6b/7] query-expansion A/B arm: setting=3 + LTM_QUERY_EXPANSION=$QUEREXP -> $QX_DIR"
+  rm -f "$QX_DIR/summary.json"
+  LTM_QUERY_EXPANSION="$QUEREXP" REMEMBR_STRICT=1 python -m embodied_memory.run_hm3d_pol --mode live \
+      --backbone remembr --setting 3 --task anomaly_response \
+      --rir-grid "$GRID" --anomaly-class "$CLASS" --t-anom "$T_ANOM_WARM" \
+      --investigate-max-steps "$INVESTIGATE_MAX_STEPS" ${INVESTIGATE_EXTEND:+--investigate-extend-budget} \
+      --audio-onset-rms "$ONSET_RMS" ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
+      ${BG_GAIN:+--bg-gain "$BG_GAIN"} ${BG_CLIP:+--background-clip "$BG_CLIP"} \
+      --episodes-path "$DS" --scene "$SCENE" --target any \
+      --n-episodes "$N_EPISODES" --out-dir "$QX_DIR" 2>&1 | tee "${QX_DIR}.log"
+  qx_rc=${PIPESTATUS[0]}
+  # complete AND expansion actually fired (n_query_expanded>0) — else a vacuous A/B.
+  qx_ok="$(python -c "import json,sys
+try:
+    s=json.load(open(sys.argv[1]))
+    a=s.get('n_episodes_attempted',0); c=s.get('n_episodes_completed',0)
+    print(1 if a>0 and c==a and s.get('n_query_expanded',0)>0 else 0)
+except Exception:
+    print(0)" "$QX_DIR/summary.json" 2>/dev/null || echo 0)"
+  if [ "$qx_ok" != 1 ]; then
+    QX_FIRED="$(python -c "import json,sys;print(json.load(open(sys.argv[1])).get('n_query_expanded','?'))" "$QX_DIR/summary.json" 2>/dev/null || echo '?')"
+    echo "FATAL: query-expansion arm unusable at $QX_DIR (rc=$qx_rc; n_query_expanded=$QX_FIRED)."
+    echo "  Either the run crashed, or expansion NEVER FIRED (n_query_expanded=0 → the arm is"
+    echo "  byte-identical to baseline S3 → a vacuous A/B). Firing needs first-pass memory hits;"
+    echo "  check that this cell recalls at all (baseline S3 n_memory_chosen>0). See ${QX_DIR}.log."
+    exit 1
+  fi
+  echo "  query-expansion arm complete (rc=$qx_rc; expansion fired, n_query_expanded>0)"
+fi
+
 banner "[7/7] Gate-A verdict (warm paired soft-SPL S3-S1) + controller census"
 N_RUN_DIRS=$(set -- $OUT_DIRS; echo $#)
 if [ "$N_RUN_DIRS" -lt 2 ]; then
@@ -257,8 +311,24 @@ else
 fi
 echo
 
+# Query-fix A/B verdict: paired soft-SPL of the query-expansion S3 (B) vs the
+# baseline S3 (A) — the direct test of whether the query change beats the
+# wrong-instance over-fire baseline (not S3-vs-S1, which is the LTM effect).
+if [ -n "$QX_DIR" ]; then
+  BASE_S3="runs/${TAG}-${CATEGORY}-s3"
+  banner "[7b/7] query-expansion A/B verdict (paired S3: expansion-on B − baseline-off A)"
+  if [ -f "$BASE_S3/summary.json" ]; then
+    python embodied_memory/scripts/analyze_revisit.py \
+        --compare-a "$BASE_S3" --compare-b "$QX_DIR" \
+        2>&1 | tee "runs/${TAG}-${CATEGORY}-queryexp-compare.log"
+  else
+    echo "  [query-fix A/B] skipped: baseline S3 $BASE_S3/summary.json missing (need setting 3 in --settings)."
+  fi
+  echo
+fi
+
 banner "controller census (did the interrupt→investigate→resume→report machine run?)"
-for d in $OUT_DIRS; do
+for d in $OUT_DIRS $QX_DIR; do
   echo "  --- $d ---"
   python embodied_memory/scripts/diagnose_anomaly_controller.py "$d" 2>&1 | tail -20 || true
 done

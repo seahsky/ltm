@@ -96,6 +96,7 @@ class RunSummary:
     n_keyframes_observed: int = 0
     n_audio_writes: int = 0
     n_audio_event_recalled: int = 0
+    n_query_expanded: int = 0         # times the query-side instance fix re-queried (LTM_QUERY_EXPANSION)
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
     ablation: Dict[str, Any] = field(default_factory=dict)
     pass_conditions: Dict[str, bool] = field(default_factory=dict)
@@ -139,6 +140,7 @@ class RunSummary:
             "n_keyframes_observed": self.n_keyframes_observed,
             "n_audio_writes": self.n_audio_writes,
             "n_audio_event_recalled": self.n_audio_event_recalled,
+            "n_query_expanded": self.n_query_expanded,
             "modules_invoked": self.modules_invoked,
             "ablation": self.ablation,
             "pass_conditions": self.pass_conditions,
@@ -976,6 +978,7 @@ class EpisodeRunner:
         summary.n_keyframes_observed = int(bridge_stats.get("n_keyframes_observed", 0))
         summary.n_audio_writes = int(bridge_stats.get("n_audio_writes", 0))
         summary.n_audio_event_recalled = int(bridge_stats.get("n_audio_event_recalled", 0))
+        summary.n_query_expanded = int(bridge_stats.get("n_query_expanded", 0))
         summary.ablation = {
             **bridge_stats.get("ablation", {}),
             **{k: v for k, v in self.run_config.items() if k not in {"setting"}},

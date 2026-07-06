@@ -46,6 +46,12 @@ DOWNLOAD=""           # --download fetches the 18 missing full-val meshes (token
 # disables it) — the OPPOSITE of race-audiogoal.sh. So the matrix passes NOTHING
 # by default and only forwards --no-fetch-audio for the synthetic arm.
 FETCH=""; EXTRA=""
+# Query-side instance fix A/B (Stage-1). When prf|caption, every cell adds ONE
+# MORE S3 arm (LTM_QUERY_EXPANSION on, out runs/<tag>-<cat>-s3qx) via the child,
+# then a POOLED paired compare of the expansion-on S3 (B) vs the baseline S3 (A)
+# across cells — the direct test of whether the query change beats the powered
+# null's wrong-instance over-fire. Empty → the matrix is byte-identical.
+QUEREXP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --split) SPLIT="$2"; shift 2 ;;
@@ -55,6 +61,7 @@ while [ $# -gt 0 ]; do
     --n-warm) NWARM="$2"; shift 2 ;;
     --settings) SETTINGS="$2"; shift 2 ;;
     --tag-prefix) PREFIX="$2"; shift 2 ;;
+    --query-expansion) QUEREXP="$2"; shift 2 ;;
     --max-cells) MAX_CELLS="$2"; shift 2 ;;
     # Fetch the 18 missing full-val meshes via habitat-sim (Matterport-token gated,
     # reads .env). One-time; then re-run without --download. Pair with --max-cells 0
@@ -71,6 +78,10 @@ done
 case "$SPLIT" in val|val_mini) : ;; *) echo "FATAL: --split must be val or val_mini"; exit 1 ;; esac
 [ -n "$(echo $SETTINGS | tr -d ' ')" ] || { echo "FATAL: --settings must list >=1 of {1,2,3}"; exit 1; }
 for s in $SETTINGS; do case "$s" in 1|2|3) : ;; *) echo "FATAL: --settings values must be 1/2/3 (got '$s')"; exit 1 ;; esac; done
+if [ -n "$QUEREXP" ]; then
+  case "$QUEREXP" in prf|caption) ;; *) echo "FATAL: --query-expansion must be prf|caption (got '$QUEREXP')"; exit 1 ;; esac
+  case " $SETTINGS " in *" 3 "*) ;; *) echo "FATAL: --query-expansion needs setting 3 in --settings (got '$SETTINGS')"; exit 1 ;; esac
+fi
 
 CONTENT_DIR="data/hm3d/datasets/objectnav/hm3d/v1/${SPLIT}/content"
 MESH_ROOT="data/hm3d"
@@ -89,7 +100,8 @@ export RACE_SKIP_PULL=1   # children must NOT pull mid-matrix
 banner "[3/7] pre-verify (free; abort before any GPU spend)"
 for t in test_plan_scaleup_cells test_make_anomaly_response_smoke test_diagnose_anomaly_feasibility \
          test_diagnose_anomaly_controller test_make_audiogoal_smoke test_make_revisit_smoke \
-         test_analyze_revisit test_anomaly_controller test_anomaly_wiring; do
+         test_analyze_revisit test_anomaly_controller test_anomaly_wiring \
+         test_query_expansion test_summary_query_expanded; do
   python embodied_memory/scripts/$t.py \
     || { echo "FATAL: $t failed — not spending on the live run."; exit 1; }
 done
@@ -123,6 +135,10 @@ if [ "${MAX_CELLS:-}" = "0" ]; then echo; echo "DONE (--max-cells 0): plan only.
 
 banner "[5/7] run cells (resume on summary.json; CONTINUE on per-cell failure)"
 ALL_OUT_DIRS=""; S3_DIRS=""; N_DONE=0; N_RAN=0; N_FAIL=0; FAILED_CELLS=""
+# Query-fix A/B: candidate (baseline-S3 | expansion-S3) pairs, existence-filtered
+# after the loop (mirrors PRESENT_DIRS). A cell is "complete" only once its s3qx
+# arm also lands, so resume re-runs cells missing the expansion arm.
+QX_PAIRS=""; N_TARGETS="$N_SET"; [ -n "$QUEREXP" ] && N_TARGETS=$((N_SET+1))
 i=0
 while IFS=$'\t' read -r S CAT CLS; do
   [ -n "$S" ] || continue
@@ -135,15 +151,20 @@ while IFS=$'\t' read -r S CAT CLS; do
     [ -f "$od/summary.json" ] && done_count=$((done_count+1))
   done
   ALL_OUT_DIRS="$ALL_OUT_DIRS $cell_dirs"
-  if [ "$done_count" -eq "$N_SET" ]; then
-    echo "  [$i/$N_CELLS] RESUME: cell ($S,$CAT) complete ($N_SET/$N_SET) — skip"
+  if [ -n "$QUEREXP" ]; then
+    qx_od="runs/${TAG}-${CAT}-s3qx"
+    [ -f "$qx_od/summary.json" ] && done_count=$((done_count+1))
+    QX_PAIRS="$QX_PAIRS runs/${TAG}-${CAT}-s3|$qx_od"
+  fi
+  if [ "$done_count" -eq "$N_TARGETS" ]; then
+    echo "  [$i/$N_CELLS] RESUME: cell ($S,$CAT) complete ($N_TARGETS/$N_TARGETS) — skip"
     N_DONE=$((N_DONE+1)); continue
   fi
-  banner "[$i/$N_CELLS] cell: scene=$S primary=$CAT class=$CLS settings=[$SETTINGS] n_warm=$NWARM"
+  banner "[$i/$N_CELLS] cell: scene=$S primary=$CAT class=$CLS settings=[$SETTINGS] n_warm=$NWARM${QUEREXP:+ +queryexp=$QUEREXP}"
   # shellcheck disable=SC2086
   bash scripts/race-anomaly-response.sh --scene "$S" --class "$CLS" --category "$CAT" \
       --tag "$TAG" --src-content-dir "$CONTENT_DIR" \
-      --n-warm "$NWARM" --settings "$SETTINGS" $FETCH $EXTRA
+      --n-warm "$NWARM" --settings "$SETTINGS" ${QUEREXP:+--query-expansion "$QUEREXP"} $FETCH $EXTRA
   rc=$?
   if [ "$rc" -eq 0 ]; then
     N_RAN=$((N_RAN+1)); echo "  [$i/$N_CELLS] cell ($S,$CAT) OK"
@@ -179,12 +200,34 @@ else
   echo "  [controller] skipped: no completed S3 out-dir."
 fi
 
+# Query-fix A/B pooled verdict (only when --query-expansion): paired soft-SPL of
+# the expansion-on S3 (B) vs baseline-off S3 (A), pooled over cells where BOTH
+# arms landed (existence-filtered, mirroring PRESENT_DIRS).
+if [ -n "$QUEREXP" ]; then
+  banner "[8/8] query-expansion ($QUEREXP) A/B pooled verdict (paired S3: expansion-on B − baseline-off A)"
+  QX_A=""; QX_B=""
+  for pr in $QX_PAIRS; do
+    a="${pr%%|*}"; b="${pr##*|}"
+    [ -f "$a/summary.json" ] && [ -f "$b/summary.json" ] && { QX_A="$QX_A $a"; QX_B="$QX_B $b"; }
+  done
+  N_QX=$(set -- $QX_A; echo $#)
+  if [ "$N_QX" -ge 1 ]; then
+    echo "  pooling $N_QX cell(s) with BOTH baseline-S3 and expansion-S3 present."
+    # shellcheck disable=SC2086
+    python embodied_memory/scripts/analyze_revisit.py --compare-a $QX_A --compare-b $QX_B \
+        2>&1 | tee "runs/${PREFIX}-queryexp-compare.log"
+  else
+    echo "  [query-fix A/B] skipped: no cell has BOTH a baseline-S3 and an expansion-S3 dir."
+  fi
+fi
+
 echo
 echo "########## ANOMALY-RESPONSE MATRIX SUMMARY ##########"
 echo "  split=$SPLIT  prefix=$PREFIX  settings=[$SETTINGS]  n_warm=$NWARM"
 echo "  cells: planned=$N_CELLS  resumed=$N_DONE  ran_ok=$N_RAN  failed/skip=$N_FAIL"
 [ -n "$FAILED_CELLS" ] && echo "  failed/skipped cells:$FAILED_CELLS"
 echo "  soft-SPL: runs/${PREFIX}-matrix-analysis.log   controller: runs/${PREFIX}-matrix-controller.log"
+[ -n "$QUEREXP" ] && echo "  query-fix A/B ($QUEREXP): runs/${PREFIX}-queryexp-compare.log (paired S3 expansion-on vs baseline-off)."
 echo "  grep POOLED_CONTROLLER_VERDICT in the controller log = the systems headline."
 echo "  re-run the SAME command to retry failed/missing cells (completed cells resume)."
 [ "$N_RAN" -eq 0 ] && [ "$N_DONE" -eq 0 ] && { echo "  FATAL: no cell completed."; exit 1; }
