@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/setup-anomaly-vm.sh — FRESH-GPU-VM bootstrap for the ANOMALY-RESPONSE arc.
 #
-# The anomaly-response work lives on the `lifelong-revisit-eval` branch and needs
-# an audio layer on top of the base ObjectNav/ReMEmbR stack. This script is a thin
+# The anomaly-response work lives on `main` (the primary branch) and needs an
+# audio layer on top of the base ObjectNav/ReMEmbR stack. This script is a thin
 # orchestrator: it reuses `scripts/setup-vm.sh` for the heavy base install
 # (Miniconda + the `ltm-embodied` conda env + HM3D + ReMEmbR weights) and then adds
 # only what the anomaly-response task needs:
@@ -29,7 +29,7 @@
 #   --cpu             forward: CPU mode (implies --skip-models)
 #   --yes | -y        non-interactive (assume yes to Miniconda install)
 #   --env-name <n>    conda env name (default: ltm-embodied, or $LTM_ENV_NAME)
-#   --branch <n>      branch to run on (default: lifelong-revisit-eval)
+#   --branch <n>      branch to run on (default: main)
 #
 # Env overrides: LTM_ENV_NAME, REMEMBR_CLAP_MODEL, CONDA_DIR.
 
@@ -40,7 +40,7 @@ cd "$REPO_ROOT" || { echo "FATAL: cannot cd to repo root"; exit 1; }
 
 CONDA_DIR="${CONDA_DIR:-$HOME/miniconda3}"
 ENV_NAME="${LTM_ENV_NAME:-ltm-embodied}"
-BRANCH="lifelong-revisit-eval"
+BRANCH="main"
 CLAP_MODEL="${REMEMBR_CLAP_MODEL:-laion/clap-htsat-fused}"
 
 WITH_RENDER=""

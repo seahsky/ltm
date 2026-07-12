@@ -39,7 +39,7 @@ So the default `setup-anomaly-vm.sh` skips it — pass `--with-render` when you 
 
 | Step | Action | Idempotent skip-if |
 |---|---|---|
-| 1 | Checkout `lifelong-revisit-eval` (the arc's branch) + `git pull --ff-only` | already on branch |
+| 1 | Checkout `main` (the primary branch) + `git pull --ff-only` | already on branch |
 | 2 | `setup-vm.sh` — Miniconda, `ltm-embodied` env from `environment.yml`, HM3D, ReMEmbR weights | env/data/weights already present |
 | 3 | Verify audio runtime deps: `scipy` (fftconvolve + wavfile), transformers CLAP classes | scipy importable |
 | 4 | Download CLAP detector weights (`laion/clap-htsat-fused`) to the HF cache | cache dir present |
