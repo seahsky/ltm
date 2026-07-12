@@ -104,6 +104,39 @@ def room_gate_verdict(accuracy: float, *, go: float = 0.75, borderline: float = 
     return "STOP"
 
 
+def build_room_pairs(category_pred_rooms, *, rooms=None):
+    """``[(true_room, pred_room)]`` from ``[(category, pred_room)]`` — the pure glue
+    the G0.1 ``main`` feeds into :func:`room_pair_accuracy`.
+
+    The TRUE room is the object category's ground truth from
+    ``room_resolver.CATEGORY_ROOM_PRIOR`` (a frame at a toilet view_point is a
+    bathroom, at a bed view_point a bedroom). Categories with no room prior are
+    dropped. If ``rooms`` is given, only pairs whose true room is in it are kept.
+    Pure (no sim/CLIP)."""
+    from embodied_memory.room_resolver import CATEGORY_ROOM_PRIOR
+    keep = set(rooms) if rooms is not None else None
+    out = []
+    for cat, pred in category_pred_rooms:
+        true_room = CATEGORY_ROOM_PRIOR.get(str(cat).strip().lower()) if cat else None
+        if true_room is None:
+            continue
+        if keep is not None and true_room not in keep:
+            continue
+        out.append((true_room, pred))
+    return out
+
+
+def gate_result(category_pred_rooms, *, rooms=None, go=0.75, borderline=0.60):
+    """End-to-end G0.1 verdict from ``[(category, pred_room)]``: build the
+    ``(true, pred)`` pairs, score accuracy over the rooms present (or ``rooms``),
+    and return ``(verdict, accuracy_dict)``. Pure — the sim/CLIP ``main`` only
+    supplies the ``(category, pred_room)`` list."""
+    pairs = build_room_pairs(category_pred_rooms, rooms=rooms)
+    scored_rooms = set(rooms) if rooms is not None else {t for t, _ in pairs}
+    acc = room_pair_accuracy(pairs, scored_rooms)
+    return room_gate_verdict(acc["accuracy"], go=go, borderline=borderline), acc
+
+
 def _walk_actions(n: int) -> List[int]:
     """A deterministic turn-heavy walk so the agent sees several rooms: a few
     forwards then a turn, repeating. 1=move_forward, 2=turn_left, 3=turn_right."""
@@ -180,6 +213,80 @@ def _probe_scene(scene: str, episodes_path: Optional[str], scene_dataset_path: O
             "fired": fired_default, "abstain": n_abstain_default, "n_frames": n_frames}
 
 
+# ----------------------------------------------------------------------
+# G0.1 gate main — render at object view_points, emit GATE_RESULT (user story 27)
+# ----------------------------------------------------------------------
+def _gate_scene(scene, content, glb, enc, room_text, min_cos, margin, n_viewpoints):
+    """Render frames at the goal-object view_points of one scene and return
+    ``[(category, pred_room)]`` — pred_room from ``classify_room_clip`` at the
+    default gate. Sim/CLIP integration (RACE), so the render helpers are imported
+    lazily from build_instance_caption_corpus (the caprl-gate renderer)."""
+    import build_instance_caption_corpus as bic  # noqa: E402 (habitat_sim, GPU host)
+    from embodied_memory.room_resolver import classify_room_clip, CATEGORY_ROOM_PRIOR
+
+    cats = [c for c in CATEGORY_ROOM_PRIOR if bic.find_goal_instances(content, c)]
+    out = []
+    sim = bic.make_sim(glb)
+    try:
+        for cat in cats:
+            for inst in bic.find_goal_instances(content, cat):
+                for vp in bic.sample_viewpoints(inst.get("view_points", []), n_viewpoints):
+                    pos, rot = bic.viewpoint_pose(vp)
+                    try:
+                        rgb = bic.render_rgb_at(sim, pos, rot)
+                        vemb = enc.encode(rgb)
+                    except Exception as e:
+                        print(f"  render/encode failed ({cat}): {e}")
+                        continue
+                    pred = classify_room_clip(vemb, room_text, min_cos=min_cos, margin=margin)
+                    out.append((cat, pred))
+    finally:
+        try:
+            sim.close()
+        except Exception:
+            pass
+    return out
+
+
+def gate_main(args) -> int:
+    """G0.1: render at object view_points, build (GT-room-from-category-prior,
+    predicted-room) pairs, feed room_pair_accuracy / room_gate_verdict, print
+    GATE_RESULT (machine-parseable)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import build_instance_caption_corpus as bic  # noqa: E402
+    from embodied_memory.run_hm3d_pol import _resolve_scene_list
+    from embodied_memory.perception import CLIPKeyframeEncoder
+    from embodied_memory.room_resolver import build_room_text_embeddings
+
+    scenes = _resolve_scene_list(args.scene, args.episodes_path)[: max(1, args.n_scenes)]
+    print(f"G0.1 gate: scenes={scenes}  rooms={args.rooms or 'all-present'}")
+    enc = CLIPKeyframeEncoder()
+    room_text = build_room_text_embeddings(enc.encode_text)
+
+    all_pred: List[tuple] = []
+    for scene in scenes:
+        content = bic.load_content(args.episodes_path) if args.episodes_path else None
+        glb = bic._find_glb(scene)
+        if content is None or glb is None:
+            print(f"  SKIP {scene}: content={content is not None} glb={glb}")
+            continue
+        pred = _gate_scene(scene, content, glb, enc, room_text,
+                           args.min_cos, args.margin, args.n_viewpoints)
+        print(f"  scene {scene}: {len(pred)} view_point frames")
+        all_pred += pred
+
+    rooms = args.rooms if args.rooms else None
+    verdict, acc = gate_result(all_pred, rooms=rooms)
+    print(f"\n  frames scored: {acc['n']}  accuracy={acc['accuracy']:.3f}  "
+          f"abstain_rate={acc['abstain_rate']:.3f}")
+    print(f"  confusion (true->pred): "
+          f"{ {f'{t}->{p}': n for (t, p), n in sorted(acc['confusion'].items())} }")
+    print(f"GATE_RESULT={verdict} accuracy={acc['accuracy']:.4f} n={acc['n']} "
+          f"abstain_rate={acc['abstain_rate']:.4f}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Calibrate the CLIP room classifier on real HM3D keyframes")
     p.add_argument("--scene", default="all")
@@ -189,7 +296,16 @@ def main(argv=None) -> int:
     p.add_argument("--steps", type=int, default=120, help="walk length per scene")
     p.add_argument("--min-cos", type=float, default=0.25, help="default-gate min_cos to report fire-rate at")
     p.add_argument("--margin", type=float, default=0.02, help="default-gate margin to report fire-rate at")
+    p.add_argument("--gate", action="store_true",
+                   help="G0.1 mode: render at object view_points, build (category-prior room, "
+                        "predicted room) pairs, print GATE_RESULT (go/no-go for scene-conditioning)")
+    p.add_argument("--rooms", nargs="+", default=None,
+                   help="restrict the gate accuracy to these true rooms (e.g. bathroom bedroom)")
+    p.add_argument("--n-viewpoints", type=int, default=3, help="view_points rendered per instance (gate mode)")
     args = p.parse_args(argv)
+
+    if args.gate:
+        return gate_main(args)
 
     from embodied_memory.run_hm3d_pol import _resolve_scene_list
     from embodied_memory.perception import CLIPKeyframeEncoder

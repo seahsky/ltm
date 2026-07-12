@@ -57,6 +57,9 @@ def episode_row(ep_log: Dict[str, Any], name: str) -> Dict[str, Any]:
         "primary_completed_1m": rep.get("primary_completed_1m"),
         "n_benign_ignored": rep.get("n_benign_ignored"),
         "anomaly_class": rep.get("anomaly_class"),
+        # ADR-0002 scene-conditioning ground truth (present only on two-rooms
+        # episodes; None otherwise → discrimination_rates ignores it).
+        "expected_interrupt": rep.get("expected_interrupt"),
     }
 
 
@@ -79,6 +82,58 @@ def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "primary_completed_rate": _rate("primary_completed"),
         "primary_completed_1m_rate": _rate("primary_completed_1m"),
     }
+
+
+def discrimination_rates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """ADR-0002 scene-conditioning discrimination (P3.3).
+
+    Over the two-rooms rows (those carrying an ``expected_interrupt`` label), report
+    the FALSE-interrupt rate (room-NORMAL episodes the agent wrongly interrupted;
+    want 0) and the CORRECT-interrupt rate (room-ANOMALOUS episodes it rightly
+    interrupted; want 1), plus the 2×2 confusion matrix. A row "interrupted" iff it
+    left SEARCH — ``investigated`` OR ``investigate_aborted``. Rows without a label
+    (non-two-rooms episodes) are ignored, so a normal anomaly-response run yields
+    ``n_normal = n_anomalous = 0`` and ``None`` rates."""
+    labeled = [r for r in rows if r.get("expected_interrupt") is not None]
+
+    def _interrupted(r: Dict[str, Any]) -> bool:
+        return bool(r.get("investigated")) or bool(r.get("investigate_aborted"))
+
+    normal = [r for r in labeled if r["expected_interrupt"] is False]
+    anom = [r for r in labeled if r["expected_interrupt"] is True]
+    n_normal, n_anom = len(normal), len(anom)
+    n_false = sum(1 for r in normal if _interrupted(r))
+    n_correct = sum(1 for r in anom if _interrupted(r))
+    confusion: Dict[Tuple[bool, bool], int] = {}
+    for r in labeled:
+        confusion[(bool(r["expected_interrupt"]), _interrupted(r))] = \
+            confusion.get((bool(r["expected_interrupt"]), _interrupted(r)), 0) + 1
+    return {
+        "n_normal": n_normal,
+        "n_anomalous": n_anom,
+        "n_false_interrupt": n_false,
+        "n_correct_interrupt": n_correct,
+        "false_interrupt_rate": (n_false / n_normal) if n_normal else None,
+        "correct_interrupt_rate": (n_correct / n_anom) if n_anom else None,
+        "confusion": confusion,
+    }
+
+
+def discrimination_verdict(rates: Dict[str, Any], *, go_correct: float = 0.75,
+                           go_false: float = 0.25) -> str:
+    """GO / BORDERLINE / STOP / NO_DATA for the discrimination A/B. GO when the
+    room-conditioned gate interrupts room-anomalous sounds reliably (correct-rate
+    >= ``go_correct``) AND rarely false-fires on room-normal ones (false-rate <=
+    ``go_false``). NO_DATA when no two-rooms episodes were run."""
+    cr = rates.get("correct_interrupt_rate")
+    fr = rates.get("false_interrupt_rate")
+    if cr is None or fr is None:
+        return "NO_DATA"
+    if cr >= go_correct and fr <= go_false:
+        return "GO"
+    if cr < 0.5 or fr > 0.5:
+        return "STOP"
+    return "BORDERLINE"
 
 
 def verdict(agg: Dict[str, Any]) -> Tuple[str, str]:
@@ -171,6 +226,23 @@ def _print_agg(agg: Dict[str, Any], label: str = "") -> None:
           f"@1.0m rate={_pct(agg['primary_completed_1m_rate'])}")
 
 
+def _print_discrimination(rows: List[Dict[str, Any]], label: str = "") -> None:
+    """ADR-0002 discrimination confusion matrix + verdict (P3.3). Prints nothing
+    when no two-rooms episodes were run (keeps ordinary-run output unchanged)."""
+    rates = discrimination_rates(rows)
+    if not (rates["n_normal"] or rates["n_anomalous"]):
+        return
+    pre = f"  [{label}] " if label else "  "
+    print(f"{pre}scene-conditioning discrimination (two-rooms):")
+    print(f"    room-NORMAL   n={rates['n_normal']:<3} false-interrupt "
+          f"{rates['n_false_interrupt']}/{rates['n_normal']} "
+          f"(rate {_pct(rates['false_interrupt_rate'])})  [want 0%]")
+    print(f"    room-ANOMALOUS n={rates['n_anomalous']:<3} correct-interrupt "
+          f"{rates['n_correct_interrupt']}/{rates['n_anomalous']} "
+          f"(rate {_pct(rates['correct_interrupt_rate'])})  [want 100%]")
+    print(f"    DISCRIMINATION_VERDICT={discrimination_verdict(rates)}")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -194,6 +266,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         agg = aggregate(rows)
         print()
         _print_agg(agg)
+        _print_discrimination(rows)
         v, rec = verdict(agg)
         print(f"CONTROLLER_VERDICT={v}")
         print(f"  -> {rec}")
@@ -206,6 +279,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"POOLED across {len(run_dirs)} run dirs ({len(all_rows)} episodes)")
         pooled = aggregate(all_rows)
         _print_agg(pooled, label="pooled")
+        _print_discrimination(all_rows, label="pooled")
         pv, prec = verdict(pooled)
         print(f"POOLED_CONTROLLER_VERDICT={pv}")
         print(f"  -> {prec}")

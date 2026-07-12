@@ -222,6 +222,120 @@ def case_build_source_decoupled_from_goal():
     assert (dx * dx + dz * dz) ** 0.5 >= 3.0, cold
 
 
+# ----------------------------------------------------------------------
+# ADR-0002 same-sound / two-rooms scene-conditioning variant (P3.2)
+# ----------------------------------------------------------------------
+# bed@origin = primary goal (bedroom); toilet ~5 m = bathroom (water NORMAL);
+# chair ~4 m = living_room (water ANOMALOUS). The same 'running_water' clip flips.
+_GOALS_2R = {
+    "0_bed": [_inst("bed_0", [[0.0, 0.0, 0.0]])],
+    "0_toilet": [_inst("toilet_0", [[5.0, 0.0, 0.0]])],
+    "0_chair": [_inst("chair_0", [[4.0, 0.0, 0.0]])],
+}
+_EPS_2R = [_ep("bed", [1.0, 0.0, 3.0]), _ep("bed", [2.0, 0.0, 4.0]),
+           _ep("toilet", [5.0, 0.0, 3.0]), _ep("chair", [4.0, 0.0, 3.0])]
+
+
+def case_expected_interrupt_flips_on_room():
+    # running water: NORMAL in a bathroom (toilet), ANOMALOUS in a bedroom (bed)
+    assert n3.expected_interrupt("running_water", "toilet") is False
+    assert n3.expected_interrupt("running_water", "bed") is True
+    assert n3.expected_interrupt("running_water", "chair") is True     # living_room
+    # a category with no room prior cannot be scene-conditioned
+    assert n3.expected_interrupt("running_water", "unknown_obj") is None
+
+
+def case_pick_two_rooms_finds_both_polarities():
+    pair = n3.pick_two_rooms_sources(
+        _GOALS_2R, ["bed", "toilet", "chair"], "bed", [0.0, 0.0, 0.0],
+        "running_water", min_sep_m=3.0)
+    assert pair["normal"]["anomaly_object"] == "toilet", pair       # bathroom → normal
+    assert pair["anomalous"]["anomaly_object"] == "chair", pair     # living_room → anomalous
+
+
+def case_pick_two_rooms_raises_without_a_normal_source():
+    # no bathroom/kitchen object → running water is anomalous everywhere → no normal
+    goals = {"0_bed": [_inst("bed_0", [[0.0, 0.0, 0.0]])],
+             "0_chair": [_inst("chair_0", [[4.0, 0.0, 0.0]])]}
+    try:
+        n3.pick_two_rooms_sources(goals, ["bed", "chair"], "bed", [0.0, 0.0, 0.0],
+                                  "running_water", min_sep_m=3.0)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError when one polarity is missing")
+
+
+def _built_2r():
+    return n3.build_two_rooms_dataset(
+        _src_content(_GOALS_2R, _EPS_2R), ["bed"], n_warm=1,
+        ambiguous_class="running_water", min_source_sep_m=3.0)
+
+
+def case_two_rooms_builds_both_families_same_clip():
+    content = _built_2r()
+    eps = content["episodes"]
+    assert eps, "should build two-rooms episodes"
+    normals = [e for e in eps if e["info"]["expected_interrupt"] is False]
+    anoms = [e for e in eps if e["info"]["expected_interrupt"] is True]
+    assert normals and anoms, (len(normals), len(anoms))
+    # ONE clip drives both polarities
+    assert {e["info"]["anomaly_class"] for e in eps} == {"running_water"}
+    # normal source is the toilet (bathroom), anomalous is the chair (living_room)
+    assert all(e["info"]["anomaly_object"] == "toilet" for e in normals)
+    assert all(e["info"]["anomaly_object"] == "chair" for e in anoms)
+    # unique episode ids across families
+    assert len({e["episode_id"] for e in eps}) == len(eps)
+
+
+def case_two_rooms_construction_issues_clean():
+    assert n3.two_rooms_construction_issues(_built_2r()) == []
+
+
+def case_two_rooms_construction_issues_detects_missing_polarity():
+    content = _built_2r()
+    content["episodes"] = [e for e in content["episodes"]
+                           if e["info"]["expected_interrupt"] is True]  # drop normals
+    issues = n3.two_rooms_construction_issues(content)
+    assert any("room-NORMAL" in s for s in issues), issues
+
+
+def case_two_rooms_construction_issues_detects_mislabel():
+    content = _built_2r()
+    # flip a normal episode's label so it disagrees with its bathroom room verdict
+    for e in content["episodes"]:
+        if e["info"]["anomaly_object"] == "toilet":
+            e["info"]["expected_interrupt"] = True
+    issues = n3.two_rooms_construction_issues(content)
+    assert any("disagrees" in s for s in issues), issues
+
+
+def case_two_rooms_default_build_dataset_has_no_expected_interrupt_key():
+    # the ordinary (non-two-rooms) build must not leak the two-rooms label
+    content = _built()
+    assert all("expected_interrupt" not in (e.get("info") or {}) for e in content["episodes"])
+
+
+def case_tag_family_does_not_mutate_input():
+    # _tag_family must be pure — the caller's episodes are untouched (global rule)
+    src = [{"episode_id": "bed-running_water-cold-0", "info": {"anomaly_class": "running_water"}}]
+    out = n3._tag_family(src, "normal", False)
+    assert src[0]["episode_id"] == "bed-running_water-cold-0"          # input unchanged
+    assert "expected_interrupt" not in src[0]["info"]                  # input unchanged
+    assert out[0]["episode_id"] == "normal-bed-running_water-cold-0"   # new list tagged
+    assert out[0]["info"]["expected_interrupt"] is False
+
+
+def case_cli_two_rooms_requires_ambiguous_class():
+    # --two-rooms without --ambiguous-class must error (argparse), not silently pass
+    try:
+        n3.main(["--src", "x", "--scene", "S", "--categories", "bed",
+                 "--out-dir", "/tmp/x", "--two-rooms"])
+    except SystemExit as e:
+        assert e.code != 0
+        return
+    raise AssertionError("expected argparse error for --two-rooms without --ambiguous-class")
+
+
 def main() -> int:
     cases = [
         case_source_prefers_other_category,
@@ -239,6 +353,16 @@ def main() -> int:
         case_build_none_class_byte_identical_to_revisit,
         case_build_decoupled_stamps_source_and_object,
         case_build_source_decoupled_from_goal,
+        case_expected_interrupt_flips_on_room,
+        case_pick_two_rooms_finds_both_polarities,
+        case_pick_two_rooms_raises_without_a_normal_source,
+        case_two_rooms_builds_both_families_same_clip,
+        case_two_rooms_construction_issues_clean,
+        case_two_rooms_construction_issues_detects_missing_polarity,
+        case_two_rooms_construction_issues_detects_mislabel,
+        case_two_rooms_default_build_dataset_has_no_expected_interrupt_key,
+        case_tag_family_does_not_mutate_input,
+        case_cli_two_rooms_requires_ambiguous_class,
     ]
     print(f"running {len(cases)} make_anomaly_response_smoke cases…")
     for c in cases:

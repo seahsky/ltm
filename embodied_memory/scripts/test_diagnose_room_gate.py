@@ -20,6 +20,8 @@ from __future__ import annotations
 import sys
 
 from embodied_memory.scripts.diagnose_room_clip_cosines import (
+    build_room_pairs,
+    gate_result,
     room_gate_verdict,
     room_pair_accuracy,
 )
@@ -55,10 +57,47 @@ def case_gate_verdict_thresholds():
     print("  case_gate_verdict_thresholds: OK")
 
 
+def case_build_room_pairs_maps_category_to_true_room():
+    # GT room comes from CATEGORY_ROOM_PRIOR: toilet->bathroom, bed->bedroom,
+    # chair->living_room; a category with no prior is dropped.
+    pairs = build_room_pairs([
+        ("toilet", "bathroom"), ("bed", "bedroom"), ("bed", "kitchen"),
+        ("unknown_obj", "bathroom"),   # no room prior -> dropped
+    ])
+    assert ("bathroom", "bathroom") in pairs
+    assert ("bedroom", "bedroom") in pairs
+    assert ("bedroom", "kitchen") in pairs
+    assert len(pairs) == 3, pairs
+    print("  case_build_room_pairs_maps_category_to_true_room: OK")
+
+
+def case_build_room_pairs_room_filter():
+    pairs = build_room_pairs([("toilet", "bathroom"), ("bed", "bedroom")],
+                             rooms={"bathroom"})
+    assert pairs == [("bathroom", "bathroom")], pairs
+    print("  case_build_room_pairs_room_filter: OK")
+
+
+def case_gate_result_end_to_end():
+    # perfect separation -> GO, accuracy 1.0
+    v, acc = gate_result([("toilet", "bathroom"), ("toilet", "bathroom"),
+                          ("bed", "bedroom"), ("bed", "bedroom")])
+    assert v == "GO" and abs(acc["accuracy"] - 1.0) < 1e-9, (v, acc)
+    # one confusion + one abstain -> below the GO bar
+    v2, acc2 = gate_result([("toilet", "bedroom"), ("toilet", None),
+                            ("bed", "bedroom"), ("bed", "bedroom")])
+    assert acc2["accuracy"] == 0.5, acc2
+    assert v2 in ("BORDERLINE", "STOP"), v2
+    print("  case_gate_result_end_to_end: OK")
+
+
 def main() -> int:
     print("running G0.1 room-gate tests…")
     case_pairwise_accuracy_counts_and_confusion()
     case_gate_verdict_thresholds()
+    case_build_room_pairs_maps_category_to_true_room()
+    case_build_room_pairs_room_filter()
+    case_gate_result_end_to_end()
     print("ALL OK")
     return 0
 

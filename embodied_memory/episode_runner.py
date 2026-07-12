@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 
+from . import audio
 from . import audio_task
 from . import anomaly_controller
 from .episode_source import Episode, EpisodeSource, Step
@@ -656,6 +657,22 @@ class EpisodeRunner:
         self._anomaly_cfg = (anomaly_cfg if anomaly_cfg is not None
                              else AnomalyControllerConfig())
         self._anomaly_cfg.enabled = (self.task == "anomaly_response")
+        # ADR-0001 realizable localization (env LTM_REALIZABLE_LOCALIZATION,
+        # default-OFF): the INVESTIGATE detour is steered by the live energy-climb
+        # (realizable_investigate_step) instead of point-goaling to the ORACLE
+        # source xyz. Only meaningful for anomaly_response; OFF => the oracle path
+        # is byte-identical (step_controller's realizable branch never runs).
+        self._anomaly_cfg.realizable_localization = (
+            bool(os.environ.get("LTM_REALIZABLE_LOCALIZATION"))
+            and self.task == "anomaly_response")
+        # ADR-0002 room-conditioned anomaly gate (env LTM_ROOM_CONDITIONED_ANOMALY,
+        # default-OFF): when on, the CLAP anomaly verdict is scene-conditioned on the
+        # CLIP-classified room (running water is normal in a bathroom, anomalous in a
+        # bedroom). OFF => the context-free gate is byte-identical.
+        self._room_conditioned_anomaly = (
+            bool(os.environ.get("LTM_ROOM_CONDITIONED_ANOMALY"))
+            and self.task == "anomaly_response")
+        self._room_text_emb = None       # lazily built CLIP room-prompt embeddings
         self._anomaly_state = ControllerState()
         # Per-episode one-shot investigate-waypoint stash + primary snapshot
         # (E5-S2/S4/S5). None clears the divert injection each tick.
@@ -1262,6 +1279,9 @@ class EpisodeRunner:
                 _anchor = np.asarray(_leg[1], dtype=np.float32)
 
         stm_captions: List[str] = []
+        # ADR-0001 realizable localization: the live binaural loudness history the
+        # energy-climb reads (agent-estimable — never the GT source distance).
+        energy_history: List[float] = []
         current_candidate: Optional[FrontierCandidate] = None
         # Same-category LTM-sighting candidates from the latest proposal; held
         # across ticks so the detector-memory gate (c9) can read them when the
@@ -1343,10 +1363,16 @@ class EpisodeRunner:
             # below consumes it. Gated → no-op for objectnav/revisit/multion.
             if (self.task in ("audiogoal", "anomaly_response")
                     and self._audio_cfg.enabled):
+                # ADR-0002: when room-conditioning is on, tag the current frame's
+                # room so the anomaly gate is scene-conditioned. Both None otherwise
+                # → process_audio_step is byte-identical.
+                _det_room = self._classify_current_room(step)
+                _room_prior = audio.ROOM_PRIOR if self._room_conditioned_anomaly else None
                 _adiag = audio_task.process_audio_step(
                     getattr(step, "audio", None), step.step_idx,
                     self._audio_cfg.sample_rate, self._audio_cfg,
-                    self._audio_state, self.clap_encoder)
+                    self._audio_state, self.clap_encoder,
+                    detected_room=_det_room, room_prior=_room_prior)
                 step.info.update(_adiag)
                 # Onset-blocker instrumentation (per-tick; ep_log["steps"] is
                 # keyframe-sparse so it can't carry this). Accumulate the peak
@@ -1354,6 +1380,7 @@ class EpisodeRunner:
                 # the open-set gate rejected it (is_anomaly is False). Lets
                 # diagnose_audio_onset prove GATE_SUPPRESSING vs ENERGY_TOO_LOW.
                 _ae = float(_adiag.get("audio_energy") or 0.0)
+                energy_history.append(_ae)   # ADR-0001 energy-climb history
                 if _ae > ep_metrics_counters["audio_energy_max"]:
                     ep_metrics_counters["audio_energy_max"] = _ae
                 if _ae >= float(self._audio_cfg.onset_rms):
@@ -1428,6 +1455,12 @@ class EpisodeRunner:
                     < _acfg.investigate_arrive_radius_m)
                 _d2g = _info.get("distance_to_goal")
                 primary_goal_reached = (_d2g is not None and float(_d2g) < 1.0)
+                # ADR-0001 realizable-localization signals (agent-estimable only;
+                # ignored when realizable_localization is off → oracle byte-identical).
+                _vc_obj = (self._audio_state.anomaly_object_override
+                           or self._audio_state.target_override or "")
+                _visual_confirm = (self._anomaly_visual_confirm(step, _vc_obj)
+                                   if self._anomaly_cfg.realizable_localization else False)
                 dec = anomaly_controller.step_controller(
                     self._anomaly_state, _acfg,
                     onset_fired=bool(_info.get("onset_fired")),
@@ -1443,6 +1476,9 @@ class EpisodeRunner:
                     anomaly_object=(self._audio_state.anomaly_object_override
                                     or self._audio_state.target_override),
                     keyframe_caption=(stm_captions[-1] if stm_captions else None),
+                    energy_history=energy_history,
+                    lateral_sign=int(_info.get("audio_lateral_sign") or 0),
+                    visual_confirm=_visual_confirm,
                 )
                 # Single mutable active goal — the controller is the sole mutator
                 # for anomaly_response. SPL/report stay ep.target_category.
@@ -1489,6 +1525,22 @@ class EpisodeRunner:
                     last_propose_step = -10**9
                 # E5-S4 stash: one-shot investigate waypoint for the proposer seam.
                 self._investigate_wp = dec.investigate_waypoint
+                # ADR-0001 realizable short-circuit: steer by the energy-climb action
+                # (never a GT waypoint). Only set on realizable INVESTIGATE ticks; the
+                # STOP that ends the detour arrives as a CHECK decision (no action), so
+                # the divert never emits a premature episode-ending STOP.
+                if dec.realizable_action is not None:
+                    _RA = {anomaly_controller.ACT_FORWARD: ACTION_FORWARD,
+                           anomaly_controller.ACT_TURN_LEFT: ACTION_TURN_LEFT,
+                           anomaly_controller.ACT_TURN_RIGHT: ACTION_TURN_RIGHT}
+                    action = _RA.get(dec.realizable_action, ACTION_FORWARD)
+                    step = self.source.step(action)
+                    self.planner.update(step.depth, step.agent_state.position,
+                                        step.agent_state.rotation_yaw)
+                    _track_d2g(step)
+                    if step.done:
+                        break
+                    continue
             if is_oracle:
                 # Oracle short-circuit: steer straight to the goal, bypassing
                 # candidate proposal, memory injection, and rerank entirely.
@@ -2324,6 +2376,12 @@ class EpisodeRunner:
             # success_1m is the 1.0 m benchmark ring the controller's COMPLETE
             # transition uses. Quote both — the 0.1 m understates resume.
             _arep["primary_completed_1m"] = bool(success_1m)
+            # ADR-0002 discrimination ground truth: carry the two-rooms dataset
+            # label so diagnose_anomaly_controller can score false/correct-interrupt
+            # rates. Absent (None) on ordinary anomaly-response episodes.
+            _ei = (getattr(ep, "info", None) or {}).get("expected_interrupt")
+            if _ei is not None:
+                _arep["expected_interrupt"] = bool(_ei)
             ep_log["anomaly_report"] = _arep
         ep_log["distance_to_goal"] = distance_to_goal
         ep_log["rerank_calls"] = rerank_calls
@@ -2819,6 +2877,60 @@ class EpisodeRunner:
 
         self._room_classifier_fn = _classify
         return _classify
+
+    def _anomaly_visual_confirm(self, step: Step, obj: str) -> bool:
+        """Cheap per-tick visual confirmation that the anomaly object is in view —
+        the visual half of the ADR-0001 realizable STOP (loudness peak + seen).
+
+        CLIP image↔text cosine of the current frame vs ``"there is a {obj}"``,
+        thresholded (``LTM_REALIZABLE_CONFIRM_COS``, default 0.26 on the real CLIP
+        ViT-B/32 scale). Falls back to a caption-substring match when CLIP is
+        unavailable. Only consulted on the realizable arm; ``obj`` empty → False."""
+        if not obj:
+            return False
+        cap = ((step.info or {}).get("caption") if step.info else None) or ""
+        if self.clip_encoder is None:
+            return obj.lower() in cap.lower()
+        try:
+            vemb = (step.info.get("visual_embedding") if step.info else None)
+            if vemb is None:
+                vemb = self.clip_encoder.encode(step.rgb)
+            temb = self.clip_encoder.encode_text(f"there is a {obj}")
+            v = np.asarray(vemb, dtype=np.float32).ravel()
+            t = np.asarray(temb, dtype=np.float32).ravel()
+            nv, nt = float(np.linalg.norm(v)), float(np.linalg.norm(t))
+            if nv <= 1e-8 or nt <= 1e-8:
+                return obj.lower() in cap.lower()
+            cos = float(v @ t / (nv * nt))
+            return cos >= float(os.environ.get("LTM_REALIZABLE_CONFIRM_COS", "0.26"))
+        except Exception:
+            return obj.lower() in cap.lower()
+
+    def _classify_current_room(self, step: Step) -> Optional[str]:
+        """CLIP zero-shot room-type of the CURRENT frame for the ADR-0002 room-
+        conditioned anomaly gate, or ``None`` (abstain / gate off / CLIP down).
+
+        Independent of the coarse head's room-CLIP knob so the two mechanisms don't
+        couple. Off (``LTM_ROOM_CONDITIONED_ANOMALY`` unset) → returns ``None`` so
+        the anomaly gate stays context-free and byte-identical."""
+        if not self._room_conditioned_anomaly or self.clip_encoder is None:
+            return None
+        if self._room_text_emb is None:
+            try:
+                self._room_text_emb = build_room_text_embeddings(self.clip_encoder.encode_text)
+            except Exception:
+                self._room_text_emb = None
+        if not self._room_text_emb:
+            return None
+        try:
+            vemb = (step.info.get("visual_embedding") if step.info else None)
+            if vemb is None:
+                vemb = self.clip_encoder.encode(step.rgb)
+        except Exception:
+            return None
+        min_cos = float(os.environ.get("LTM_ROOM_CLIP_MIN_COS", "0.25"))
+        margin = float(os.environ.get("LTM_ROOM_CLIP_MARGIN", "0.02"))
+        return classify_room_clip(vemb, self._room_text_emb, min_cos=min_cos, margin=margin)
 
     def _get_room_cos_fn(self):
         """Companion to ``_get_room_classifier``: the RAW top room cosine (no abstain

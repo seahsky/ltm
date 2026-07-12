@@ -135,6 +135,37 @@ def case_select_loud_cells_returns_top_energy():
     assert len(cells) == 3 and all(isinstance(c, int) for c in cells)
 
 
+# ----------------------------------------------------------------------
+# G0.3 augmentation specs (P2.1/P2.2)
+# ----------------------------------------------------------------------
+def case_augment_specs_deterministic_and_distinct():
+    a = cc.augment_specs(4)
+    b = cc.augment_specs(4)
+    assert len(a) == 4
+    # deterministic: same call -> identical seeds + magnitudes
+    assert [s.seed for s in a] == [s.seed for s in b]
+    assert [s.pitch_semitones for s in a] == [s.pitch_semitones for s in b]
+    # varied by index: seeds increment, not all recipes identical
+    assert [s.seed for s in a] == [0, 1, 2, 3]
+    fingerprints = {(s.pitch_semitones, s.time_shift_frac, s.reverb_decay) for s in a}
+    assert len(fingerprints) > 1, "variants must differ"
+
+
+def case_augment_specs_no_background_by_default():
+    # the bed is added by the diagnostic pipeline; augment must not double-mix it
+    for s in cc.augment_specs(3):
+        assert s.background is None and s.snr_db is None
+
+
+def case_augment_specs_variants_actually_transform_a_clip():
+    import numpy as np
+    from embodied_memory.audio import augment_clip
+    clip = (0.3 * np.sin(2 * np.pi * 440 * np.arange(8000) / 16000)).astype(np.float32)
+    variants = [augment_clip(clip, 16000, s) for s in cc.augment_specs(3)]
+    assert all(v.shape == clip.shape for v in variants)          # runtime distribution stays renderable
+    assert any(not np.allclose(v, clip) for v in variants)       # at least one really changed
+
+
 def main() -> int:
     cases = [
         case_sweep_clean_separation,
@@ -148,6 +179,9 @@ def main() -> int:
         case_decide_picks_lowest_eer_among_qualifying,
         case_select_audible_cells_reads_property_and_selects_band,
         case_select_loud_cells_returns_top_energy,
+        case_augment_specs_deterministic_and_distinct,
+        case_augment_specs_no_background_by_default,
+        case_augment_specs_variants_actually_transform_a_clip,
     ]
     print(f"running {len(cases)} diagnose_convolved_anomaly_calib cases…")
     for c in cases:

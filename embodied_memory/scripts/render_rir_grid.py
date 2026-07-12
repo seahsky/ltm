@@ -21,6 +21,13 @@ non-zero with the exact failure.
     python embodied_memory/scripts/render_rir_grid.py \
         --scene data/hm3d/.../wcojb4TFT35.basis.glb \
         --out runs/audiogoal/wcojb4TFT35_rir_grid.npz --n-cells 20
+
+ADR-0001 P4.1 (denser grid for realizable localization): the energy-gradient climb
+needs a grid dense enough to be climbable. When ``diagnose_energy_gradient.py``
+(G0.4) returns ``GATE_RESULT=STOP`` (too few cells / too many false summits on the
+current grid), RE-RENDER with a higher ``--n-cells`` (e.g. 20 -> 48) before running
+the realizable arm; the same ``--n-cells`` knob is the only change (denser cell
+sampling, same single source, same O(1) live-convolution invariant).
 """
 from __future__ import annotations
 

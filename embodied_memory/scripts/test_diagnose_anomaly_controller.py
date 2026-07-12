@@ -100,6 +100,69 @@ def case_verdict_partial_when_investigate_but_no_resume():
     assert v == "PARTIAL", v
 
 
+# ----------------------------------------------------------------------
+# ADR-0002 scene-conditioning discrimination (P3.3)
+# ----------------------------------------------------------------------
+def _disc_row(expected_interrupt, interrupted, aborted=False):
+    return dc.episode_row(_ep(report={
+        **_FULL, "expected_interrupt": expected_interrupt,
+        "investigated": interrupted, "investigate_aborted": aborted}), "e")
+
+
+def case_row_surfaces_expected_interrupt():
+    r = dc.episode_row(_ep(report={**_FULL, "expected_interrupt": True}), "e0")
+    assert r["expected_interrupt"] is True
+    # absent on ordinary anomaly-response episodes
+    assert dc.episode_row(_ep(report=_FULL), "e1")["expected_interrupt"] is None
+
+
+def case_discrimination_perfect():
+    rows = [_disc_row(True, True), _disc_row(True, True),      # correctly interrupted
+            _disc_row(False, False), _disc_row(False, False)]  # correctly ignored
+    rates = dc.discrimination_rates(rows)
+    assert rates["n_normal"] == 2 and rates["n_anomalous"] == 2
+    assert rates["correct_interrupt_rate"] == 1.0
+    assert rates["false_interrupt_rate"] == 0.0
+    assert dc.discrimination_verdict(rates) == "GO"
+
+
+def case_discrimination_counts_abort_as_interrupt():
+    # an aborted detour still means the agent chose to interrupt
+    rows = [_disc_row(True, False, aborted=True)]
+    rates = dc.discrimination_rates(rows)
+    assert rates["correct_interrupt_rate"] == 1.0
+
+
+def case_discrimination_false_fire_on_normal():
+    rows = [_disc_row(False, True), _disc_row(False, False),   # 1 of 2 normals false-fired
+            _disc_row(True, True)]
+    rates = dc.discrimination_rates(rows)
+    assert rates["false_interrupt_rate"] == 0.5
+    # correct=1.0 (good) but false=0.5 (too high for GO, not past the STOP bar) -> BORDERLINE
+    assert dc.discrimination_verdict(rates) == "BORDERLINE"
+    assert rates["confusion"][(False, True)] == 1
+
+
+def case_discrimination_stop_when_gate_broken():
+    # room-anomalous never interrupted + a room-normal false-fires -> STOP
+    rows = [_disc_row(True, False), _disc_row(False, True)]
+    rates = dc.discrimination_rates(rows)
+    assert rates["correct_interrupt_rate"] == 0.0
+    assert dc.discrimination_verdict(rates) == "STOP"
+
+
+def case_discrimination_ignores_unlabeled_rows():
+    rows = [dc.episode_row(_ep(report=_FULL), "e0"),   # no expected_interrupt label
+            _disc_row(True, True)]
+    rates = dc.discrimination_rates(rows)
+    assert rates["n_normal"] == 0 and rates["n_anomalous"] == 1
+
+
+def case_discrimination_no_data_verdict():
+    rows = [dc.episode_row(_ep(report=_FULL), "e0")]   # ordinary run, no two-rooms labels
+    assert dc.discrimination_verdict(dc.discrimination_rates(rows)) == "NO_DATA"
+
+
 def main() -> int:
     cases = [
         case_row_extracts_report_fields,
@@ -109,6 +172,13 @@ def main() -> int:
         case_verdict_no_interrupt,
         case_verdict_controller_ran,
         case_verdict_partial_when_investigate_but_no_resume,
+        case_row_surfaces_expected_interrupt,
+        case_discrimination_perfect,
+        case_discrimination_counts_abort_as_interrupt,
+        case_discrimination_false_fire_on_normal,
+        case_discrimination_stop_when_gate_broken,
+        case_discrimination_ignores_unlabeled_rows,
+        case_discrimination_no_data_verdict,
     ]
     print(f"running {len(cases)} diagnose_anomaly_controller cases…")
     for c in cases:

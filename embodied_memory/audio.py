@@ -30,7 +30,8 @@ override this default per-episode; this map is the fallback.
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Sequence, Tuple, Union
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -53,11 +54,37 @@ CLASS_TO_OBJECT: Dict[str, str] = {
     "glass_break": "window",
 }
 
+# Ambiguous, CONTEXT-DEPENDENT sounds (ADR-0002): normal in some rooms, anomalous
+# in others. These drive the same-sound / two-rooms scene-conditioning test — the
+# unambiguous ANOMALY_CLASSES (alarm/glass/cry) are anomalous everywhere, so they
+# can't exercise a room-conditioned gate.
+AMBIGUOUS_CLASSES: Tuple[str, ...] = ("running_water", "appliance_hum")
+
 # Heard class → CLAP zero-shot text prompt (classification only, NOT retrieval).
 CLASS_TO_CLAP_PROMPT: Dict[str, str] = {
     "baby_cry": "a baby crying",
     "alarm": "a loud alarm beeping",
     "glass_break": "the sound of breaking glass",
+    "running_water": "running water or a faucet",
+    "appliance_hum": "an appliance humming",
+}
+
+# ROOM_PRIOR (ADR-0002): room-type → the set of sound classes that are NORMAL
+# (expected) there. The room-conditioned gate fires iff the heard class is NOT in
+# this set for the detected room. This is a NEW, hand-authored table — distinct
+# from room_resolver.CATEGORY_ROOM_PRIOR (which maps an OBJECT to its room). HM3D
+# has no room-type ground truth, so this hand-authored prior IS the ground truth
+# for normality. Keys are the shared room taxonomy (room_resolver.ROOM_TEXT_PROMPTS
+# / ROOM_KEYWORDS) so a CLIP-classified room is interchangeable here. A room absent
+# from this table carries no normality knowledge → the gate abstains (falls back to
+# the context-free decision) rather than guessing.
+ROOM_PRIOR: Dict[str, frozenset] = {
+    "bathroom": frozenset({"running_water"}),
+    "kitchen": frozenset({"running_water", "appliance_hum"}),
+    "bedroom": frozenset(),
+    "living_room": frozenset(),
+    "dining_room": frozenset(),
+    "hallway": frozenset(),
 }
 
 # Normal/background prompt bank for the open-set normal-vs-anomaly gate (Step 1).
@@ -258,6 +285,158 @@ def rms(signal) -> float:
 
 
 # ----------------------------------------------------------------------
+# Clip augmentation (P2.1) — the one pure seam the Gate-0.3 calibration uses
+# ----------------------------------------------------------------------
+#
+# The CLAP anomaly gate is calibrated on CLEAN clips but runs on RIR-convolved,
+# room-varied, background-mixed audio (the documented clean->convolved cliff and
+# the loud-bed false-fire). ``augment_clip`` deterministically generates the
+# runtime distribution — background at a target SNR, reverb/room-size jitter,
+# pitch- and time-shift, and (optionally) the same RIR convolution the live path
+# applies — so the gate can be recalibrated on what it actually hears.
+#
+# Contract (user stories 22/25/26): ONE public function; sub-transforms are
+# internal and exercised only through it. The output is a MONO clip of the SAME
+# length and sample rate as the input (so it flows through render_at_pose
+# unchanged). Deterministic given the spec — no unseeded RNG; the reverb IR is
+# drawn from ``spec.seed`` (vary by index, never a wall-clock seed). Shares
+# ``diotic_collapse`` so the (optional) RIR path matches the live signal domain.
+
+
+@dataclass
+class AugmentSpec:
+    """A deterministic augmentation recipe for :func:`augment_clip`.
+
+    Every field defaults to a no-op, so ``AugmentSpec()`` is the identity. All
+    magnitudes are explicit (no internal randomness beyond the seeded reverb IR),
+    so the same spec always yields the same waveform.
+
+    Fields
+    ------
+    seed : int
+        Seeds ONLY the synthetic reverb IR (the sole stochastic transform). Two
+        specs that differ only in ``seed`` differ only in the reverb tail.
+    background : (M,) array | None
+        A mono background clip mixed in at ``snr_db`` (looped/cropped to length).
+        ``None`` (or ``snr_db is None``) => no background.
+    snr_db : float | None
+        Target signal-to-background ratio in dB: the background is scaled so
+        ``20*log10(rms(clip)/rms(scaled_bg)) == snr_db`` before it is added. Lower
+        dB => louder background.
+    pitch_semitones : float
+        Resample-based pitch shift (positive = up), then crop/pad to length.
+    time_shift_frac : float
+        Circular shift by ``round(time_shift_frac * len)`` samples (energy- and
+        length-preserving).
+    reverb_decay : float
+        Room-size / reverberation TIME in seconds of a synthetic
+        exponential-decay noise IR convolved with the clip (0 => no reverb).
+    rir : (T,) or (2, T) array | None
+        An optional impulse response to convolve (the live-path RIR); a binaural
+        ``(2, T)`` IR is diotic-collapsed to mono first so the output stays mono.
+    """
+    seed: int = 0
+    background: Optional[np.ndarray] = None
+    snr_db: Optional[float] = None
+    pitch_semitones: float = 0.0
+    time_shift_frac: float = 0.0
+    reverb_decay: float = 0.0
+    rir: Optional[np.ndarray] = None
+
+
+def _fit_length(sig: np.ndarray, length: int) -> np.ndarray:
+    """Crop or loop ``sig`` to exactly ``length`` samples (mono)."""
+    s = np.asarray(sig, dtype=np.float32).reshape(-1)
+    if s.size == length:
+        return s
+    if s.size == 0:
+        return np.zeros(length, dtype=np.float32)
+    if s.size > length:
+        return s[:length]
+    reps = int(np.ceil(length / s.size))
+    return np.tile(s, reps)[:length].astype(np.float32)
+
+
+def _pitch_shift(clip: np.ndarray, semitones: float) -> np.ndarray:
+    """Resample-based pitch shift: stretch the time base by 2**(-semitones/12)
+    then crop/pad back to the original length (mono, length-preserving). A pure
+    linear resample — no librosa dependency."""
+    if abs(float(semitones)) < 1e-9:
+        return clip
+    n = clip.size
+    factor = 2.0 ** (float(semitones) / 12.0)          # >1 => higher pitch
+    m = max(1, int(round(n / factor)))
+    src = np.linspace(0.0, n - 1, num=m, dtype=np.float64)
+    resampled = np.interp(src, np.arange(n, dtype=np.float64), clip).astype(np.float32)
+    return _fit_length(resampled, n)
+
+
+def _time_shift(clip: np.ndarray, frac: float) -> np.ndarray:
+    """Circular shift by ``round(frac*len)`` samples — energy- and length-stable."""
+    if abs(float(frac)) < 1e-12:
+        return clip
+    k = int(round(float(frac) * clip.size))
+    if k % clip.size == 0:
+        return clip
+    return np.roll(clip, k).astype(np.float32)
+
+
+def _reverb(clip: np.ndarray, decay_s: float, sample_rate: int, seed: int) -> np.ndarray:
+    """Convolve with a synthetic exponential-decay noise IR of ``decay_s`` seconds
+    (a cheap room-size proxy), cropped back to the clip length. Deterministic in
+    ``seed``."""
+    if float(decay_s) <= 0.0:
+        return clip
+    n_ir = max(1, int(round(float(decay_s) * int(sample_rate))))
+    rng = np.random.default_rng(int(seed))
+    t = np.arange(n_ir, dtype=np.float32)
+    env = np.exp(-3.0 * t / max(1.0, n_ir))            # ~-9 dB per decay window
+    ir = (rng.standard_normal(n_ir).astype(np.float32) * env)
+    ir[0] += 1.0                                       # keep the direct path
+    from scipy.signal import fftconvolve
+    wet = fftconvolve(clip, ir)[: clip.size].astype(np.float32)
+    return wet
+
+
+def _rir_mono(clip: np.ndarray, rir) -> np.ndarray:
+    """Convolve with a (possibly binaural) IR, diotic-collapsed to mono so the
+    output stays a mono clip; cropped to the input length."""
+    ir = np.asarray(rir, dtype=np.float32)
+    if ir.ndim == 2:
+        ir = diotic_collapse(ir)[0]                    # both rows equal after collapse
+    ir = ir.reshape(-1)
+    from scipy.signal import fftconvolve
+    return fftconvolve(clip, ir)[: clip.size].astype(np.float32)
+
+
+def augment_clip(clip, sample_rate: int, spec: "AugmentSpec") -> np.ndarray:
+    """Deterministically augment a MONO ``clip`` per ``spec`` (see :class:`AugmentSpec`).
+
+    Returns a mono float32 waveform of the SAME length and sample rate as the
+    input, so it flows through ``render_at_pose`` / the convolution path unchanged.
+    Transforms are applied in a FIXED order (pitch -> time-shift -> reverb -> RIR
+    -> background mix) so the composition is order-stable and the same spec always
+    yields the same array. Pure: no CLAP, no simulator, no unseeded RNG.
+    """
+    x = np.asarray(clip, dtype=np.float32).reshape(-1)
+    n = x.size
+    out = _pitch_shift(x, spec.pitch_semitones)
+    out = _time_shift(out, spec.time_shift_frac)
+    out = _reverb(out, spec.reverb_decay, sample_rate, spec.seed)
+    if spec.rir is not None:
+        out = _rir_mono(out, spec.rir)
+    if spec.background is not None and spec.snr_db is not None:
+        bg = _fit_length(spec.background, n)
+        sig_rms = rms(out)
+        bg_rms = rms(bg)
+        if bg_rms > 1e-12 and sig_rms > 1e-12:
+            target = sig_rms / (10.0 ** (float(spec.snr_db) / 20.0))
+            bg = bg * np.float32(target / bg_rms)
+        out = out + bg
+    return _fit_length(out, n).astype(np.float32)
+
+
+# ----------------------------------------------------------------------
 # DOA: azimuth from a binaural signal (ITD primary, ILD sign tie-break)
 # ----------------------------------------------------------------------
 
@@ -400,6 +579,27 @@ def classify_anomaly(
     return best, scores
 
 
+def room_conditioned_anomaly(
+    sound_class: Optional[str],
+    detected_room: Optional[str],
+    room_prior: Dict[str, "frozenset"],
+) -> Optional[bool]:
+    """Scene-conditioned normality verdict (ADR-0002) — a PURE function of
+    ``(sound_class, detected_room, ROOM_PRIOR)``.
+
+    Returns ``True`` (the heard class is UNEXPECTED in this room → anomalous),
+    ``False`` (EXPECTED here → normal, do not interrupt), or ``None`` (cannot
+    scene-condition: no class, no detected room, or the room carries no normality
+    knowledge in the prior). ``None`` means "abstain" — the caller falls back to
+    the context-free decision. No CLAP, no simulator (user story 32).
+    """
+    if not sound_class or detected_room is None:
+        return None
+    if detected_room not in room_prior:
+        return None
+    return bool(sound_class not in room_prior[detected_room])
+
+
 def is_anomaly(
     waveform,
     sample_rate: int,
@@ -409,6 +609,8 @@ def is_anomaly(
     normal_prompts: Sequence[str] = NORMAL_PROMPTS,
     delta: float = 0.0,
     tau_abs: float = 0.0,
+    detected_room: Optional[str] = None,
+    room_prior: Optional[Dict[str, "frozenset"]] = None,
 ) -> Tuple[bool, str, Dict[str, float]]:
     """Open-set normal-vs-anomaly gate on top of CLAP zero-shot.
 
@@ -425,6 +627,14 @@ def is_anomaly(
     carries every per-class anomaly cosine PLUS the summary keys ``s_anom`` /
     ``s_norm`` / ``margin``. ``best_class`` is the argmax anomaly class regardless
     of the gate decision, so the caller can log what it WOULD have classified.
+
+    Scene-conditioning (ADR-0002): pass a ``detected_room`` (from the CLIP room
+    classifier) AND a ``room_prior`` (room → expected-sound set) to make the
+    verdict depend on the room — the same clip is normal in one room and anomalous
+    in another. When the room can be scene-conditioned (:func:`room_conditioned_anomaly`
+    returns non-``None``) it REPLACES the margin decision and adds a ``room_verdict``
+    key to ``scores``; when it abstains, the context-free margin decision stands.
+    With both room args absent (the default) the path is byte-identical.
     """
     a = np.asarray(encoder.encode_audio(waveform, sample_rate), dtype=np.float32)
     a = a / (np.linalg.norm(a) + 1e-8)
@@ -442,4 +652,9 @@ def is_anomaly(
     fired = bool(margin >= float(delta) and s_anom >= float(tau_abs))
     scores: Dict[str, float] = dict(anom)
     scores.update({"s_anom": s_anom, "s_norm": s_norm, "margin": margin})
+    if detected_room is not None and room_prior is not None:
+        rc = room_conditioned_anomaly(best_class, detected_room, room_prior)
+        if rc is not None:                     # room known + covered → room verdict wins
+            fired = bool(rc)
+            scores["room_verdict"] = 1.0 if rc else 0.0
     return fired, best_class, scores

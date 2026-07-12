@@ -25,6 +25,8 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from .audio import (
+    AMBIGUOUS_CLASSES,
+    ANOMALY_CLASSES,
     CLASS_TO_OBJECT,
     RIRGrid,
     classify_anomaly,
@@ -248,6 +250,8 @@ def process_audio_step(
     cfg: AudioTaskConfig,
     state: AudioEpisodeState,
     clap_encoder: Any = None,
+    detected_room: Optional[str] = None,
+    room_prior: Optional[Dict[str, "frozenset"]] = None,
 ) -> Dict[str, Any]:
     """The whole per-step audio brain. Mutates ``state`` in place: on the FIRST
     step whose RMS clears ``cfg.onset_rms`` it marks ``detected``, records
@@ -256,6 +260,11 @@ def process_audio_step(
     Returns a diagnostics dict the caller stuffs into ``step.info``. Tolerates
     ``audio_obs=None`` (no-op) and ``clap_encoder=None`` (onset still records,
     class stays None — graceful degrade).
+
+    Scene-conditioning (ADR-0002): when ``detected_room`` AND ``room_prior`` are
+    supplied (and the open-set gate is on), the anomaly verdict is room-conditioned
+    — the same sound is normal in one room, anomalous in another. Both ``None`` (the
+    default) → the context-free gate is byte-identical.
     """
     diag: Dict[str, Any] = {
         "audio_energy": 0.0,
@@ -287,12 +296,23 @@ def process_audio_step(
         fire_onset = True
         gate_class: Optional[str] = None
         if cfg.anomaly_gate and clap_encoder is not None:
+            # Scene-conditioning needs the AMBIGUOUS classes in the argmax pool so a
+            # room-normal sound (running water) can be the heard class and then be
+            # SUPPRESSED by the room verdict — with the default ANOMALY_CLASSES the
+            # best_class is never room-normal, so the gate could only ever force-fire.
+            # Off (room_prior None) → default ANOMALY_CLASSES → byte-identical.
+            _gate_classes = (tuple(ANOMALY_CLASSES) + tuple(AMBIGUOUS_CLASSES)
+                             if room_prior is not None else ANOMALY_CLASSES)
             ok, gate_class, ascores = is_anomaly(
-                audio_obs, sample_rate, clap_encoder,
-                delta=cfg.anomaly_delta, tau_abs=cfg.anomaly_tau)
+                audio_obs, sample_rate, clap_encoder, classes=_gate_classes,
+                delta=cfg.anomaly_delta, tau_abs=cfg.anomaly_tau,
+                detected_room=detected_room, room_prior=room_prior)
             diag["audio_anomaly_margin"] = float(ascores.get("margin", 0.0))
             diag["audio_anomaly_fired"] = bool(ok)
             diag["is_anomaly"] = bool(ok)  # E5: the controller's interrupt verdict
+            if "room_verdict" in ascores:
+                diag["audio_room"] = detected_room
+                diag["audio_room_verdict"] = float(ascores["room_verdict"])
             fire_onset = bool(ok)
         if fire_onset:
             state.detected = True

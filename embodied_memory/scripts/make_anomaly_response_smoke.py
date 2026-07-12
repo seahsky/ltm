@@ -48,9 +48,14 @@ import sys
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# embodied_memory/ (the parent dir) on path so the light, faiss-free modules
+# audio.py / room_resolver.py import directly — keeps this builder "pure data".
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import make_revisit_smoke as mk  # noqa: E402
 import make_audiogoal_smoke as ag  # noqa: E402
+import audio as _audio  # noqa: E402  (embodied_memory/audio.py — numpy only)
+import room_resolver as _rr  # noqa: E402  (dependency-free str ops)
 
 # Reuse verbatim (single source of truth).
 pick_cold_pose = mk.pick_cold_pose
@@ -123,6 +128,189 @@ def pick_anomaly_source(
     candidates.sort(key=lambda t: (t[1], t[0]))
     _, _, obj, pos, oid = candidates[0]
     return {"position": pos, "anomaly_object": obj, "object_id": oid}
+
+
+# ----------------------------------------------------------------------
+# ADR-0002 same-sound / two-rooms scene-conditioning variant (P3.2)
+# ----------------------------------------------------------------------
+#
+# One AMBIGUOUS clip (running water / appliance hum) is placed at TWO decoupled
+# sources: one whose room makes the sound room-NORMAL (the agent must NOT
+# interrupt) and one whose room makes it room-ANOMALOUS (must interrupt). The room
+# flips the ground-truth verdict on the SAME clip — so the interrupt decision
+# genuinely depends on the room-conditioned gate, not on the audio alone. Each
+# episode still has a SINGLE source (single RIR grid → the O(1) live-convolution
+# invariant is preserved; we deliberately reject a 2-source distractor).
+
+
+def expected_interrupt(ambiguous_class: str, source_object_category: str) -> Optional[bool]:
+    """Ground-truth discrimination label (the metric's target): should the agent
+    INTERRUPT when ``ambiguous_class`` fires from a source at an object of
+    ``source_object_category``? ``True`` iff the sound is UNEXPECTED (anomalous) in
+    that object's room, ``False`` if room-normal, ``None`` if the room is
+    unknown/uncovered (cannot scene-condition). Pure: room from the object's
+    category prior (``room_resolver``), normality from ``audio.ROOM_PRIOR``."""
+    room = _rr.preferred_room(source_object_category)
+    return _audio.room_conditioned_anomaly(ambiguous_class, room, _audio.ROOM_PRIOR)
+
+
+def pick_two_rooms_sources(
+    goals_by_category: Dict[str, Any],
+    all_categories: List[str],
+    primary_category: str,
+    primary_goal_pos: List[float],
+    ambiguous_class: str,
+    *,
+    min_sep_m: float = _MIN_SOURCE_SEP_DEFAULT,
+) -> Dict[str, Dict[str, Any]]:
+    """Pick a room-NORMAL and a room-ANOMALOUS decoupled source for the SAME
+    ``ambiguous_class``. Each is a real navmesh-valid goal view_point of an object
+    whose room (from ``expected_interrupt``) has the required polarity, ``>=
+    min_sep_m`` (xz) from the primary goal, NEAREST-first (reachability discipline,
+    like ``pick_anomaly_source``). Returns ``{"normal": src, "anomalous": src}``.
+    Raises ``ValueError`` if EITHER polarity has no qualifying object (the scene
+    cannot exercise the two-rooms test → skip the cell)."""
+    normal: List[Dict[str, Any]] = []
+    anomalous: List[Dict[str, Any]] = []
+    for cat in all_categories:
+        gkey = _goals_key(goals_by_category, cat)
+        if gkey is None:
+            continue
+        pol = expected_interrupt(ambiguous_class, cat)
+        if pol is None:            # object's room carries no normality knowledge
+            continue
+        for inst in goals_by_category.get(gkey) or []:
+            vps = _goal_view_point_positions([inst])
+            if not vps:
+                continue
+            pos = list(vps[0])
+            d = _xz_dist(pos, primary_goal_pos)
+            if d is None or d < min_sep_m:
+                continue
+            rec = {"position": list(pos), "anomaly_object": cat,
+                   "object_id": inst.get("object_id"), "_d": float(d)}
+            (anomalous if pol else normal).append(rec)
+    if not normal or not anomalous:
+        raise ValueError(
+            f"two-rooms needs BOTH a room-normal and a room-anomalous source for "
+            f"'{ambiguous_class}' (normal={len(normal)}, anomalous={len(anomalous)}); "
+            "the scene lacks the required room diversity")
+    normal.sort(key=lambda r: r["_d"])
+    anomalous.sort(key=lambda r: r["_d"])
+    return {"normal": normal[0], "anomalous": anomalous[0]}
+
+
+def _tag_family(eps: List[Dict[str, Any]], tag: str, expected: bool) -> List[Dict[str, Any]]:
+    """Return a NEW list of episodes with the ``tag`` prefixed onto each
+    ``episode_id`` (keeps the ``-cold-``/``-warm-`` markers the construction gate
+    greps) and the ground-truth ``expected_interrupt`` stamped. Pure — the input
+    episodes are deep-copied, never mutated (global functional-programming rule)."""
+    import copy
+    out: List[Dict[str, Any]] = []
+    for e in eps:
+        ne = copy.deepcopy(e)
+        ne["episode_id"] = f"{tag}-{e['episode_id']}"
+        ne.setdefault("info", {})["expected_interrupt"] = bool(expected)
+        out.append(ne)
+    return out
+
+
+def build_two_rooms_dataset(
+    src_content: Dict[str, Any],
+    categories: List[str],
+    n_warm: int,
+    min_dist: float = 2.0,
+    *,
+    ambiguous_class: str,
+    min_source_sep_m: float = _MIN_SOURCE_SEP_DEFAULT,
+    t_anom_cold: int = _T_ANOM_COLD_DEFAULT,
+    t_anom_warm: int = _T_ANOM_WARM_DEFAULT,
+    background_class: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the same-sound / two-rooms scene-conditioning dataset (P3.2).
+
+    Per category: reuse the primary cold/warm poses (as ``build_dataset``), pick a
+    room-normal AND a room-anomalous source (:func:`pick_two_rooms_sources`), and
+    stamp the SAME ``ambiguous_class`` at each — one family tagged ``normal-``
+    (``expected_interrupt=False``) and one ``anom-`` (``True``). A category with no
+    valid two-rooms pair is skipped (not a crash)."""
+    goals_by_category = src_content.get("goals_by_category") or {}
+    src_eps = src_content.get("episodes") or []
+    all_cats = list((src_content.get("category_to_task_category_id") or {}).keys()) or list(categories)
+
+    out_eps: List[Dict[str, Any]] = []
+    for cat in categories:
+        gkey = _goals_key(goals_by_category, cat)
+        if gkey is None:
+            continue
+        template = next((ep for ep in src_eps if ep.get("object_category") == cat), None)
+        if template is None:
+            continue
+        cat_candidate_poses = [
+            {"position": list(ep["start_position"]), "rotation": list(ep["start_rotation"])}
+            for ep in src_eps
+            if ep.get("object_category") == cat
+            and ep.get("start_position") and ep.get("start_rotation")
+        ]
+        goal_instances = goals_by_category[gkey]
+        cold_pose = pick_cold_pose(goal_instances)
+        goal_vps = _goal_view_point_positions(goal_instances)
+        warm_poses = pick_warm_poses(cat_candidate_poses, goal_vps, n=n_warm, min_dist=min_dist)
+
+        try:
+            pair = pick_two_rooms_sources(
+                goals_by_category, all_cats, cat, cold_pose["position"],
+                ambiguous_class, min_sep_m=min_source_sep_m)
+        except ValueError:
+            continue
+
+        for tag, expected, key in (("normal", False, "normal"), ("anom", True, "anomalous")):
+            src = pair[key]
+            fam = ag.build_category_episodes(
+                template, cold_pose, warm_poses, cat,
+                anomaly_class=ambiguous_class, anomaly_object=src["anomaly_object"],
+                source_position=src["position"],
+                t_anom_cold=t_anom_cold, t_anom_warm=t_anom_warm,
+                background_class=background_class)
+            out_eps.extend(_tag_family(fam, tag, expected))
+
+    return {
+        "category_to_task_category_id": src_content.get("category_to_task_category_id", {}),
+        "category_to_scene_annotation_category_id":
+            src_content.get("category_to_scene_annotation_category_id", {}),
+        "goals_by_category": dict(goals_by_category),
+        "episodes": out_eps,
+    }
+
+
+def two_rooms_construction_issues(content: Dict[str, Any]) -> List[str]:
+    """``$0`` gate for a two-rooms dataset: BOTH polarities present, the two
+    families share ONE clip (same anomaly_class), and every ``expected_interrupt``
+    label agrees with its object's room-conditioned verdict (no mislabeled cell).
+    Returns a list of issue strings (empty ⇒ OK)."""
+    issues: List[str] = []
+    eps = content.get("episodes") or []
+    normals = [e for e in eps if (e.get("info") or {}).get("expected_interrupt") is False]
+    anoms = [e for e in eps if (e.get("info") or {}).get("expected_interrupt") is True]
+    if not normals:
+        issues.append("FAIL: no room-NORMAL episode (expected_interrupt=False)")
+    if not anoms:
+        issues.append("FAIL: no room-ANOMALOUS episode (expected_interrupt=True)")
+    classes = {(e.get("info") or {}).get("anomaly_class") for e in eps}
+    if len(classes) > 1:
+        issues.append(f"FAIL: two-rooms must use ONE ambiguous clip; saw classes {classes}")
+    for e in eps:
+        info = e.get("info") or {}
+        cls, obj = info.get("anomaly_class"), info.get("anomaly_object")
+        label = info.get("expected_interrupt")
+        if label is None:
+            continue
+        truth = expected_interrupt(cls, obj)
+        if truth is not None and bool(truth) != bool(label):
+            issues.append(
+                f"FAIL: {e.get('episode_id')} expected_interrupt={label} disagrees with "
+                f"room verdict for {cls}@{obj} (={truth})")
+    return issues
 
 
 def build_dataset(
@@ -263,8 +451,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--scene", required=True)
     ap.add_argument("--categories", nargs="+", required=True)
     ap.add_argument("--n-warm", type=int, default=2)
-    ap.add_argument("--anomaly-class", required=True,
-                    choices=["baby_cry", "alarm", "glass_break"])
+    ap.add_argument("--anomaly-class", default=None,
+                    choices=["baby_cry", "alarm", "glass_break"],
+                    help="unambiguous anomaly class (required unless --two-rooms)")
+    ap.add_argument("--two-rooms", action="store_true",
+                    help="ADR-0002 same-sound / two-rooms scene-conditioning variant: place "
+                         "one AMBIGUOUS clip room-normal (no interrupt) vs room-anomalous "
+                         "(interrupt). Requires --ambiguous-class.")
+    ap.add_argument("--ambiguous-class", default=None,
+                    choices=list(_audio.AMBIGUOUS_CLASSES),
+                    help="the context-dependent sound for --two-rooms (running_water / appliance_hum)")
     ap.add_argument("--background-class", default=None)
     ap.add_argument("--min-source-sep", type=float, default=_MIN_SOURCE_SEP_DEFAULT)
     ap.add_argument("--min-dist", type=float, default=2.0)
@@ -274,13 +470,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--source-manifest", default=None)
     args = ap.parse_args(argv)
 
-    src_content = mk._load_gz(args.src)
-    content = build_dataset(
-        src_content, args.categories, args.n_warm, min_dist=args.min_dist,
-        anomaly_class=args.anomaly_class, min_source_sep_m=args.min_source_sep,
-        t_anom_warm=args.t_anom_warm, background_class=args.background_class)
+    # Validate the mode BEFORE any I/O so a bad invocation fails fast (argparse exit).
+    if args.two_rooms and not args.ambiguous_class:
+        ap.error("--two-rooms requires --ambiguous-class (running_water / appliance_hum)")
+    if not args.two_rooms and not args.anomaly_class:
+        ap.error("--anomaly-class is required unless --two-rooms is set")
 
-    issues = anomaly_response_construction_issues(content, min_source_sep_m=args.min_source_sep)
+    src_content = mk._load_gz(args.src)
+    if args.two_rooms:
+        content = build_two_rooms_dataset(
+            src_content, args.categories, args.n_warm, min_dist=args.min_dist,
+            ambiguous_class=args.ambiguous_class, min_source_sep_m=args.min_source_sep,
+            t_anom_warm=args.t_anom_warm, background_class=args.background_class)
+        issues = (two_rooms_construction_issues(content)
+                  + anomaly_response_construction_issues(content, min_source_sep_m=args.min_source_sep))
+    else:
+        content = build_dataset(
+            src_content, args.categories, args.n_warm, min_dist=args.min_dist,
+            anomaly_class=args.anomaly_class, min_source_sep_m=args.min_source_sep,
+            t_anom_warm=args.t_anom_warm, background_class=args.background_class)
+        issues = anomaly_response_construction_issues(content, min_source_sep_m=args.min_source_sep)
+
     for s in issues:
         print(f"[construction] {s}")
     fails = [s for s in issues if s.startswith("FAIL")]

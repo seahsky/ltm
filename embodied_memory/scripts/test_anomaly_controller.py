@@ -163,6 +163,8 @@ def case_investigate_arrives_enters_check_no_stop():
     assert d.investigation_event["anomaly_class"] == "alarm"
     assert d.investigation_event["source_xyz"] == (1.0, 0.0, 2.0)
     assert d.investigation_event["caption"] == "there is a television"
+    # oracle event byte-identical: no realizable key leaks in
+    assert "realizable" not in d.investigation_event
 
 
 def case_investigate_budget_overflow_aborts_to_resume():
@@ -277,6 +279,125 @@ def case_no_habitat_sim_import():
     assert "habitat" not in src.replace("habitat_env", ""), "must not import habitat"
 
 
+# ----------------------------------------------------------------------
+# ADR-0001 realizable localization — the pure energy-climb helper
+# ----------------------------------------------------------------------
+def case_realizable_probes_forward_with_no_history():
+    assert ac.realizable_investigate_step([], 0, False) == ac.ACT_FORWARD
+
+
+def case_realizable_climbs_while_getting_louder():
+    # rising energy -> keep moving forward, even if the object is already visible
+    assert ac.realizable_investigate_step([0.1, 0.2, 0.3], 0, False) == ac.ACT_FORWARD
+    assert ac.realizable_investigate_step([0.1, 0.2, 0.3], 1, True) == ac.ACT_FORWARD
+
+
+def case_realizable_stops_on_peak_plus_visual():
+    # loudness stopped rising AND the anomaly object is confirmed -> STOP at source
+    assert ac.realizable_investigate_step([0.3, 0.3], 0, True) == ac.ACT_STOP     # plateau
+    assert ac.realizable_investigate_step([0.3, 0.2], 0, True) == ac.ACT_STOP     # dropped
+
+
+def case_realizable_no_stop_without_visual_confirm():
+    # peaked but NOT visually confirmed -> do not STOP; turn to refine
+    act = ac.realizable_investigate_step([0.3, 0.2], -1, False)
+    assert act != ac.ACT_STOP and act == ac.ACT_TURN_LEFT
+
+
+def case_realizable_turns_toward_louder_half_plane_when_stalled():
+    assert ac.realizable_investigate_step([0.3, 0.2], 1, False) == ac.ACT_TURN_RIGHT
+    assert ac.realizable_investigate_step([0.3, 0.2], -1, False) == ac.ACT_TURN_LEFT
+    assert ac.realizable_investigate_step([0.3, 0.2], 0, False) == ac.ACT_TURN_LEFT  # ambiguous
+
+
+# ----------------------------------------------------------------------
+# ADR-0001 realizable localization — the controller branch
+# ----------------------------------------------------------------------
+def case_realizable_entry_needs_only_onset_no_oracle_source():
+    cfg, st = _fresh("chair", realizable_localization=True)
+    d = _search(st, cfg, onset_fired=True, is_anomaly=True, source_xyz=None,
+                anomaly_object="tv", energy_history=[0.1], lateral_sign=1,
+                visual_confirm=False)
+    assert d.mode == ac.NavMode.INVESTIGATE
+    assert d.save_primary_state is True and d.force_requery is True
+    assert d.investigate_waypoint is None            # no oracle waypoint in realizable mode
+    assert d.realizable_action == ac.ACT_FORWARD      # single reading -> probe forward
+    assert d.active_goal == "tv"
+    assert st.investigate_target_xyz is None
+
+
+def case_realizable_investigate_emits_action_not_waypoint():
+    cfg, st = _fresh("chair", realizable_localization=True)
+    st.mode = ac.NavMode.INVESTIGATE
+    st.active_goal = "tv"
+    d = ac.step_controller(
+        st, cfg, onset_fired=False, is_anomaly=None, source_xyz=None,
+        arrived_at_source=False, primary_goal_reached=False,
+        energy_history=[0.1, 0.2, 0.3], lateral_sign=0, visual_confirm=False)
+    assert d.mode == ac.NavMode.INVESTIGATE
+    assert d.investigate_waypoint is None
+    assert d.realizable_action == ac.ACT_FORWARD
+    assert st.investigate_steps == 1
+
+
+def case_realizable_stop_transitions_to_check():
+    cfg, st = _fresh("chair", realizable_localization=True)
+    st.mode = ac.NavMode.INVESTIGATE
+    st.active_goal = "tv"
+    d = ac.step_controller(
+        st, cfg, onset_fired=False, is_anomaly=None, source_xyz=None,
+        arrived_at_source=False, primary_goal_reached=False,
+        energy_history=[0.3, 0.3], lateral_sign=0, visual_confirm=True,
+        anomaly_class="alarm", keyframe_caption="a television")
+    assert d.mode == ac.NavMode.CHECK
+    assert st.investigated is True
+    assert d.investigation_event is not None
+    assert d.investigation_event["realizable"] is True
+
+
+def case_realizable_branch_ignores_ground_truth_source():
+    # No-GT-leak static check: the realizable decision must be IDENTICAL whether the
+    # oracle source_xyz / arrived_at_source say "arrived" or are absent. If the
+    # branch leaked the GT distance, arrived_at_source=True would flip it to CHECK.
+    def _decide(source_xyz, arrived):
+        cfg, st = _fresh("chair", realizable_localization=True)
+        st.mode = ac.NavMode.INVESTIGATE
+        st.active_goal = "tv"
+        return ac.step_controller(
+            st, cfg, onset_fired=False, is_anomaly=None,
+            source_xyz=source_xyz, arrived_at_source=arrived,
+            primary_goal_reached=False,
+            energy_history=[0.1, 0.2, 0.3], lateral_sign=1, visual_confirm=False)
+    truthful = _decide(None, False)
+    leaky = _decide((0.0, 0.0, 0.0), True)     # oracle says "you're there"
+    assert truthful.mode == leaky.mode == ac.NavMode.INVESTIGATE
+    assert truthful.realizable_action == leaky.realizable_action == ac.ACT_FORWARD
+
+
+def case_realizable_helper_reads_no_ground_truth_source_field():
+    # Static check per spec: the realizable decision helper must read no ground-truth
+    # source field — its signature is only the agent-estimable signals, and its body
+    # references none of the privileged GT identifiers the runner computes.
+    import inspect
+    params = list(inspect.signature(ac.realizable_investigate_step).parameters)
+    assert params == ["energy_history", "lateral_sign", "visual_confirm", "eps"], params
+    src = inspect.getsource(ac.realizable_investigate_step)
+    for banned in ("source_xyz", "arrived_at_source", "distance_to_goal",
+                   "geodesic", "source_position"):
+        assert banned not in src, f"realizable helper leaks a GT field: {banned!r}"
+
+
+def case_oracle_path_byte_identical_when_realizable_off():
+    # The new realizable params default-off => the oracle decision is unchanged.
+    cfg, st = _fresh("chair")     # realizable_localization defaults False
+    d = _search(st, cfg, onset_fired=True, is_anomaly=True,
+                source_xyz=(1.0, 0.0, 2.0), anomaly_object="tv",
+                energy_history=[0.5, 0.9], lateral_sign=1, visual_confirm=True)
+    assert d.mode == ac.NavMode.INVESTIGATE
+    assert d.investigate_waypoint == (1.0, 0.0, 2.0)   # oracle waypoint, not an action
+    assert d.realizable_action is None
+
+
 def main() -> int:
     cases = [
         case_reset_initializes_search_with_primary_goal,
@@ -299,6 +420,17 @@ def main() -> int:
         case_is_diverting_true_for_detour_states,
         case_is_diverting_false_for_search_and_terminal,
         case_no_habitat_sim_import,
+        case_realizable_probes_forward_with_no_history,
+        case_realizable_climbs_while_getting_louder,
+        case_realizable_stops_on_peak_plus_visual,
+        case_realizable_no_stop_without_visual_confirm,
+        case_realizable_turns_toward_louder_half_plane_when_stalled,
+        case_realizable_entry_needs_only_onset_no_oracle_source,
+        case_realizable_investigate_emits_action_not_waypoint,
+        case_realizable_stop_transitions_to_check,
+        case_realizable_branch_ignores_ground_truth_source,
+        case_realizable_helper_reads_no_ground_truth_source_field,
+        case_oracle_path_byte_identical_when_realizable_off,
     ]
     print(f"running {len(cases)} anomaly_controller cases…")
     for c in cases:

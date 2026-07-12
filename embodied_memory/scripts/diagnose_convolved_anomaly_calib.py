@@ -45,10 +45,13 @@ import glob
 import os
 import statistics
 import sys
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from diagnose_normal_anomaly_calib import best_threshold, verdict  # noqa: E402
+
+if TYPE_CHECKING:                       # type-only; no runtime import (avoids faiss)
+    from embodied_memory.audio import AugmentSpec
 
 
 # ----------------------------------------------------------------------
@@ -88,6 +91,32 @@ def sweep_delta_tau(accept: Sequence[Tuple[float, float]],
                 best = {"ok": True, "delta": float(d), "tau": float(t),
                         "eer": float(eer), "tpr": float(tp), "fpr": float(fp)}
     return best  # type: ignore[return-value]
+
+
+def augment_specs(n: int, *, base_seed: int = 0, background=None,
+                  snr_choices=(0.0, 6.0, 12.0),
+                  pitch_choices=(-2.0, 0.0, 2.0),
+                  shift_choices=(0.0, 0.1, 0.2),
+                  reverb_choices=(0.0, 0.15, 0.25)) -> "List[AugmentSpec]":
+    """G0.3 (P2.1/P2.2): ``n`` DETERMINISTIC augmentation recipes that cover the
+    runtime distribution the CLAP gate actually hears — pitch/time/reverb jitter,
+    plus an optional background mix. Varied BY INDEX (no RNG): the transform
+    magnitudes cycle through their choice lists and ``spec.seed = base_seed + i``
+    keeps each reverb IR distinct-but-reproducible. The RIR convolution + bed are
+    applied by the diagnostic's existing render pipeline, so ``augment`` only adds
+    the non-bed variation (``background`` defaults to ``None`` → no bg mix here)."""
+    from embodied_memory.audio import AugmentSpec
+    specs: "List[AugmentSpec]" = []
+    for i in range(int(n)):
+        specs.append(AugmentSpec(
+            seed=base_seed + i,
+            background=background,
+            snr_db=(snr_choices[i % len(snr_choices)] if background is not None else None),
+            pitch_semitones=pitch_choices[i % len(pitch_choices)],
+            time_shift_frac=shift_choices[i % len(shift_choices)],
+            reverb_decay=reverb_choices[i % len(reverb_choices)],
+        ))
+    return specs
 
 
 def decide_gate(per_gain: List[Dict[str, Any]], onset_rms: float) -> Tuple[str, Dict[str, Any]]:
@@ -193,6 +222,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--max-cells", type=int, default=12)
     ap.add_argument("--max-grids", type=int, default=6)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--augment", action="store_true",
+                    help="G0.3: also score AUGMENTED anomaly variants (pitch/time/reverb "
+                         "jitter via audio.augment_clip) so the gate is calibrated on the "
+                         "runtime distribution, not clean clips. Default off = byte-identical.")
+    ap.add_argument("--n-augment", type=int, default=3,
+                    help="augmented variants per anomaly clip (with --augment)")
     args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     grids = sorted(glob.glob(args.rir_grid))[: args.max_grids]
@@ -219,6 +254,7 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"gains={gains} onset_rms={args.onset_rms} band<= {args.band_hi}x  device={args.device}")
     print(f"[gate0b] cell_regime={args.cell_regime}  "
           f"({'LOUD source-view_point start = mix1 false-fire regime' if args.cell_regime=='loud' else 'audible far-start = real-eval regime'})")
+    print(f"[gate0b] augment={'ON (+%d variants/clip: pitch/time/reverb jitter)' % args.n_augment if args.augment else 'OFF (clean clips only)'}")
     print(f"[gate0b] beds (non-normal-prompt preferred): {[_class_from_name(p) for p in beds]}")
     enc = CLAPAudioEncoder(device=args.device)
 
@@ -231,6 +267,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         for an_path in an_paths:
             true_cls = _class_from_name(an_path)
             an_norm = build_anomaly_clip(an_path, int(grid.sample_rate))
+            # G0.3: expand the single clean clip into the runtime distribution
+            # (pitch/time/reverb jitter). The RIR convolution + bed stay downstream,
+            # so augment adds only the non-bed variation. Off => single clean clip
+            # (the loop below is byte-identical: an_variants == [an_norm]).
+            an_variants = [an_norm]
+            if args.augment:
+                for _sp in augment_specs(args.n_augment):
+                    an_variants.append(audio.augment_clip(an_norm, int(grid.sample_rate), _sp))
             try:
                 proto = enc.encode_audio(an_norm, int(grid.sample_rate))  # m1: clean-anomaly audio prototype
             except Exception as e:
@@ -242,21 +286,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cells = _select_audible_cells(grid, an_norm, args.onset_rms, args.band_hi, args.max_cells)
             if not cells:
                 continue
-            an_by_cell = {ci: render_at_pose(grid, grid.cell_positions[ci], an_norm) for ci in cells}
+            # accept population = every (variant × cell) render (clean-only when --augment off)
+            an_by_cell = {ci: [render_at_pose(grid, grid.cell_positions[ci], v) for v in an_variants]
+                          for ci in cells}
             for bed_path in beds:
                 bg_norm = build_anomaly_clip(bed_path, int(grid.sample_rate))
                 for ci in cells:
-                    an = an_by_cell[ci]
+                    an_list = an_by_cell[ci]           # 1 clip (default) or 1 + n_augment variants
                     bed_d = _diotic(render_at_pose(grid, grid.cell_positions[ci], bg_norm))
+                    L = an_list[0].shape[-1]
                     for g in gains:
                         import numpy as np
-                        bed_g = (g * _align(bed_d, an.shape[-1])).astype(np.float32)
-                        mix = (an + bed_g).astype(np.float32)
-                        _, cls_m, s_m = audio.is_anomaly(mix, int(grid.sample_rate), enc)
-                        acc[g]["accept"].append((float(s_m["margin"]), float(s_m["s_anom"])))
-                        acc[g]["cls_ok"].append(1.0 if cls_m == true_cls else 0.0)
-                        if proto is not None:
-                            acc[g]["pa"].append(_cos(enc.encode_audio(mix, int(grid.sample_rate)), proto))
+                        bed_g = (g * _align(bed_d, L)).astype(np.float32)
+                        # accept: one point per anomaly variant (the runtime distribution)
+                        for an in an_list:
+                            mix = (an + bed_g).astype(np.float32)
+                            _, cls_m, s_m = audio.is_anomaly(mix, int(grid.sample_rate), enc)
+                            acc[g]["accept"].append((float(s_m["margin"]), float(s_m["s_anom"])))
+                            acc[g]["cls_ok"].append(1.0 if cls_m == true_cls else 0.0)
+                            if proto is not None:
+                                acc[g]["pa"].append(_cos(enc.encode_audio(mix, int(grid.sample_rate)), proto))
+                        # reject: the bed alone is independent of the anomaly variant → score ONCE
                         if g > 0.0:
                             _, _clsb, s_b = audio.is_anomaly(bed_g, int(grid.sample_rate), enc)
                             acc[g]["reject"].append((float(s_b["margin"]), float(s_b["s_anom"])))

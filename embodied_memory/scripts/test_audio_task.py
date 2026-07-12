@@ -233,6 +233,28 @@ def case_process_gate_on_benign_suppresses_onset():
     print("  case process_gate_on_benign_suppresses_onset: OK")
 
 
+def case_process_room_conditioning_flips_on_room():
+    # ADR-0002 live-path wiring (the review's load-bearing fix): with room_prior
+    # supplied, process_audio_step feeds the AMBIGUOUS classes so a running_water
+    # sound is the heard class and the room verdict SUPPRESSES it where room-normal
+    # (bathroom) yet FIRES where room-anomalous (bedroom) — the same clip flips.
+    cos = {p: 0.10 for p in audio.NORMAL_PROMPTS}
+    for c in list(audio.ANOMALY_CLASSES) + list(audio.AMBIGUOUS_CLASSES):
+        cos[audio.CLASS_TO_CLAP_PROMPT[c]] = 0.10
+    cos[audio.CLASS_TO_CLAP_PROMPT["running_water"]] = 0.50   # argmax = running_water
+    cfg = at.AudioTaskConfig(enabled=True, onset_rms=0.05, anomaly_gate=True)
+    loud = _binaural(0.3)
+    st_b = at.AudioEpisodeState()
+    d_b = at.process_audio_step(loud, 10, 16000, cfg, st_b, _MarginCLAP(cos),
+                                detected_room="bathroom", room_prior=audio.ROOM_PRIOR)
+    assert d_b["is_anomaly"] is False and d_b["onset_fired"] is False and st_b.detected is False
+    st_r = at.AudioEpisodeState()
+    d_r = at.process_audio_step(loud, 10, 16000, cfg, st_r, _MarginCLAP(cos),
+                                detected_room="bedroom", room_prior=audio.ROOM_PRIOR)
+    assert d_r["is_anomaly"] is True and d_r["onset_fired"] is True and st_r.detected is True
+    print("  case process_room_conditioning_flips_on_room: OK")
+
+
 def case_process_gate_off_byte_identical():
     # Gate OFF (default): the SAME benign-reading sound still fires on energy
     # alone, exactly as before Step 1 — the gate is opt-in.
@@ -507,6 +529,7 @@ def main() -> int:
         case_process_clap_none_records_onset_no_class,
         case_process_gate_on_anomaly_fires,
         case_process_gate_on_benign_suppresses_onset,
+        case_process_room_conditioning_flips_on_room,
         case_process_gate_off_byte_identical,
         case_process_lateral_and_energy_in_diag,
         case_target_fallback_when_undetected,
