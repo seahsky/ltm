@@ -53,6 +53,32 @@ if TYPE_CHECKING:
     from .goal_detector import GoalDetector
 
 
+# The metric-bearing subset of the controller's ``anomaly_report`` that the
+# per-episode ``summary.episodes`` row carries so Anomaly-response SR is
+# computable from ``summary.json`` alone (same set the census reads).
+_ANOMALY_REPORT_SUMMARY_KEYS = (
+    "investigated",
+    "resumed",
+    "investigate_aborted",
+    "primary_completed",
+    "primary_completed_1m",
+    "n_benign_ignored",
+)
+
+
+def anomaly_report_summary_fields(ep_log: Dict[str, Any]) -> Dict[str, Any]:
+    """Project the anomaly-response controller report into summary-row fields.
+
+    Returns the metric-bearing controller fields when ``ep_log`` carries an
+    ``anomaly_report`` (anomaly_response task); ``{}`` otherwise, so objectnav /
+    audiogoal / revisit rows stay byte-identical.
+    """
+    rep = ep_log.get("anomaly_report")
+    if not rep:
+        return {}
+    return {k: rep.get(k) for k in _ANOMALY_REPORT_SUMMARY_KEYS}
+
+
 @dataclass
 class RunSummary:
     n_episodes_attempted: int = 0
@@ -968,6 +994,10 @@ class EpisodeRunner:
                 # gate (race-nonlos-tier3.sh): it aborts RED-INVALID if this != the
                 # seed start_xyz.
                 "start_position": ep_log.get("start_position"),
+                # Anomaly-response controller report (investigated / resumed /
+                # primary_completed …) so Anomaly-response SR is computable from
+                # summary.json; {} for every non-anomaly_response task (byte-identical).
+                **anomaly_report_summary_fields(ep_log),
             })
 
         # Finalize summary. The oracle backbone runs without a memory bridge,

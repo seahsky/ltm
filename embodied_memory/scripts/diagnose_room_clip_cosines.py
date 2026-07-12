@@ -51,6 +51,59 @@ def _pct(xs: List[float], ps=(5, 10, 25, 50, 60, 70, 75, 90, 95)) -> str:
     return "  ".join(f"p{p}={np.percentile(a, p):.3f}" for p in ps)
 
 
+# ----------------------------------------------------------------------
+# G0.1 — scene-conditioning kill-switch (keyword #16)
+# ----------------------------------------------------------------------
+# A room-conditioned anomaly gate is only trustworthy if the CLIP room classifier
+# reliably tells the sound's normal-room from its anomalous-room. These pure
+# functions turn (true_room, pred_room) pairs — ground truth from the object
+# category's CATEGORY_ROOM_PRIOR, prediction from classify_room_clip — into a
+# pairwise accuracy + a GO/BORDERLINE/STOP gate verdict.
+
+def room_pair_accuracy(pairs, rooms) -> dict:
+    """Accuracy of the room classifier over frames whose TRUE room is in ``rooms``.
+
+    ``pairs`` is a sequence of ``(true_room, pred_room)`` where ``pred_room`` may be
+    ``None`` (abstain). A prediction is correct iff ``pred_room == true_room``; an
+    abstain counts as wrong (an abstain means the gate cannot tell the rooms apart).
+    Frames whose true room is not in ``rooms`` are ignored.
+    """
+    rooms = set(rooms)
+    n = n_correct = n_abstain = 0
+    confusion: dict = {}
+    for true_room, pred_room in pairs:
+        if true_room not in rooms:
+            continue
+        n += 1
+        confusion[(true_room, pred_room)] = confusion.get((true_room, pred_room), 0) + 1
+        if pred_room is None:
+            n_abstain += 1
+        elif pred_room == true_room:
+            n_correct += 1
+    return {
+        "n": n,
+        "n_correct": n_correct,
+        "n_abstain": n_abstain,
+        "accuracy": (n_correct / n) if n else 0.0,
+        "abstain_rate": (n_abstain / n) if n else 0.0,
+        "confusion": confusion,
+    }
+
+
+def room_gate_verdict(accuracy: float, *, go: float = 0.75, borderline: float = 0.60) -> str:
+    """GO / BORDERLINE / STOP for the scene-conditioning gate.
+
+    GO (>= ``go``) — the classifier separates the two rooms reliably enough to
+    trust a room-conditioned anomaly verdict. STOP (< ``borderline``) — drop #16
+    to future work; keep the context-free gate. BORDERLINE in between.
+    """
+    if accuracy >= go:
+        return "GO"
+    if accuracy >= borderline:
+        return "BORDERLINE"
+    return "STOP"
+
+
 def _walk_actions(n: int) -> List[int]:
     """A deterministic turn-heavy walk so the agent sees several rooms: a few
     forwards then a turn, repeating. 1=move_forward, 2=turn_left, 3=turn_right."""
