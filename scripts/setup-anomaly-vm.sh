@@ -199,6 +199,10 @@ done
 # --------------------------------------------------------------------------- #
 banner "DONE"
 cat <<EOF
+Verify every download survived a flaky link (re-pulls only what's missing):
+
+    nrun bash scripts/verify-setup.sh          # or: bash scripts/verify-setup.sh --check-only
+
 Re-bootstrap after every restart:
 
     source scripts/race-setup.sh
