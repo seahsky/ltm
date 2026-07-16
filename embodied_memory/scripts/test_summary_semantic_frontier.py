@@ -29,9 +29,14 @@ Run: KMP_DUPLICATE_LIB_OK=TRUE PYTHONPATH=. \
 """
 from __future__ import annotations
 
+import os
 import sys
 
-from embodied_memory.episode_runner import RunSummary
+# Runnable standalone (bare `python embodied_memory/scripts/test_*.py`) without a
+# pre-set PYTHONPATH, matching test_semantic_frontier's self-insert.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from embodied_memory.episode_runner import RunSummary  # noqa: E402
 
 
 def case_defaults_zero_and_serialized():

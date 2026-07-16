@@ -85,6 +85,10 @@ fi
 
 banner "[2/7] conda setup (source scripts/race-setup.sh → $LTM_ENV; keeps the 7B planner)"
 set +u; source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; exit 1; }; set -u
+# race-setup does NOT set PYTHONPATH; every race driver exports it so the
+# pre-verify tests (run as `python embodied_memory/scripts/<t>.py` from the repo
+# root) can `import embodied_memory`.
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 banner "[3/7] pre-verify (free; abort before spend)"
 # The semantic-frontier path end to end: the spread diag on the planner, the

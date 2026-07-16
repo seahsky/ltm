@@ -22,9 +22,14 @@ Run: PYTHONPATH=. /opt/anaconda3/envs/ltm-embodied/bin/python \
 """
 from __future__ import annotations
 
+import os
 import sys
 
-from embodied_memory.scripts.check_semantic_arm import evaluate_semantic_arm
+# Runnable standalone (bare `python embodied_memory/scripts/test_*.py`) without a
+# pre-set PYTHONPATH, matching test_semantic_frontier's self-insert.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from embodied_memory.scripts.check_semantic_arm import evaluate_semantic_arm  # noqa: E402
 
 
 def _live_summary(**over):
