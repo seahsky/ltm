@@ -135,6 +135,48 @@ def case_propose_blends_and_flags_when_on():
     assert lo[0].metadata["semantic_value"] == 0.0
 
 
+def case_propose_reports_semantic_spread():
+    # The vacuous-arm guard for R1 (S1 geometric vs S1+ BLIP-2 frontier).
+    #
+    # With the weight on but nothing ever observed into the value map, every
+    # frontier reads semantic_value=0.0, so raw_score = (1-w)*geom_score — a
+    # uniform rescale, which preserves the geometric ranking EXACTLY. S1+ then
+    # picks the same frontiers in the same order as S1 while every candidate
+    # still carries semantic_frontier=True, so a "did the branch fire" check
+    # reports green on an arm that contributed nothing. Same family as the S2
+    # audio-DOA head (zero-sum bonus, inert by construction) and M4: fires,
+    # changes nothing.
+    #
+    # Absence is not the only way to be inert: a CONSTANT nonzero value is too,
+    # since only SPREAD can reorder. That is not hypothetical — it is the CLIP
+    # flatness measured at 0.020 separation three times, and whether BLIP-2 does
+    # better is the question R1 exists to answer. So propose() must report the
+    # spread it actually saw, or Table 1 cannot tell "BLIP-2 is flat" from
+    # "BLIP-2 never loaded" and would publish the first as the second.
+    #
+    # Both halves are one spec on purpose: the flat half alone would pass a
+    # hardcoded spread of 0.0.
+    p = FrontierPlanner(decision_period=1, n_candidates=4, semantic_frontier_weight=0.5)
+    p.reset(agent_pos=np.array([0.0, 0.0, 0.0]))
+    _carve_two_frontiers(p)
+
+    # FLAT: value map never observed => every frontier reads 0.0 => inert.
+    flat = p.propose(np.array([0.0, 0.0, 0.0]), 0.0)
+    assert len(flat) >= 2, len(flat)
+    d = p._last_semantic_diag
+    assert d.get("n_scored") == len(flat), d
+    assert d.get("spread") == 0.0, f"an unobserved value map must read as zero spread: {d}"
+
+    # POPULATED: one cluster valued => spread > 0 => the blend can reorder.
+    p.value_map[74:86, 94:106] = 0.9
+    p.value_conf[74:86, 94:106] = 1.0
+    live = p.propose(np.array([0.0, 0.0, 0.0]), 0.0)
+    assert len(live) >= 2, len(live)
+    d2 = p._last_semantic_diag
+    assert d2.get("n_scored") == len(live), d2
+    assert d2.get("spread") > 0.5, f"a valued cluster must show spread: {d2}"
+
+
 # ----------------------------------------------------------------------
 # FrontierPhysicsScorer ceiling renorm (the crowd-out guardrail)
 # ----------------------------------------------------------------------
@@ -218,6 +260,7 @@ def main():
     case_semantic_value_at_ignores_zero_confidence_cells()
     case_propose_byte_identical_when_off()
     case_propose_blends_and_flags_when_on()
+    case_propose_reports_semantic_spread()
     case_scorer_unflagged_planner_byte_identical()
     case_scorer_flagged_semantic_clamped_to_ceiling()
     case_scorer_flagged_below_ceiling_unchanged()

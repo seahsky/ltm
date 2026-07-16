@@ -408,6 +408,11 @@ class FrontierPlanner:
         # semantic_frontier_weight > 0.
         self.value_map = np.zeros((self.grid.n, self.grid.n), dtype=np.float32)
         self.value_conf = np.zeros((self.grid.n, self.grid.n), dtype=np.float32)
+        # Spread of semantic_value over the last propose()'s frontiers. Empty
+        # when the weight is off. Read by episode_runner (same shape as the
+        # bridge's _last_coarse_diag) to prove a semantic-frontier arm was not
+        # vacuous. See _semantic_diag for why spread, not the flag, is the guard.
+        self._last_semantic_diag: Dict[str, Any] = {}
 
         self._step_count = 0
         self._pos_history: List[np.ndarray] = []
@@ -647,8 +652,33 @@ class FrontierPlanner:
             return 0.0
         return float(np.max(win_val[seen]))
 
+    def _semantic_diag(self, candidates: List[FrontierCandidate]) -> Dict[str, Any]:
+        """Spread of ``semantic_value`` across the proposed frontiers.
+
+        Only spread reorders. A CONSTANT semantic value — 0.0 from a value map
+        nothing was ever observed into, or a saturated one from a flat scorer —
+        leaves ``raw_score`` a uniform affine image of ``geom_score``, so the
+        ranking, and therefore every action, is identical to the weight-off arm.
+        Such an arm is vacuous while every candidate still carries
+        ``semantic_frontier=True``, which is why the flag cannot be the guard and
+        the spread is.
+        """
+        if self.semantic_frontier_weight <= 0.0:
+            return {}
+        vals = [float(c.metadata.get("semantic_value", 0.0)) for c in candidates
+                if c.metadata.get("semantic_frontier")]
+        if not vals:
+            return {"n_scored": 0, "spread": 0.0, "v_min": 0.0, "v_max": 0.0}
+        return {"n_scored": len(vals),
+                "spread": float(max(vals) - min(vals)),
+                "v_min": float(min(vals)),
+                "v_max": float(max(vals))}
+
     def propose(self, agent_pos: np.ndarray, agent_yaw: float) -> List[FrontierCandidate]:
         """Return up to K frontier candidates."""
+        # Cleared up front so the random-walk return below cannot leave the
+        # previous step's spread readable as if it were this step's.
+        self._last_semantic_diag = {}
         cells = self._extract_frontier_cells()
         if len(cells) == 0:
             # Fallback: emit a random-walk candidate ahead of the agent.
@@ -713,7 +743,9 @@ class FrontierPlanner:
 
         # Sort by intrinsic score desc.
         candidates.sort(key=lambda c: c.raw_score, reverse=True)
-        return candidates[: self.n_candidates]
+        out = candidates[: self.n_candidates]
+        self._last_semantic_diag = self._semantic_diag(out)
+        return out
 
     def step_controller(
         self,

@@ -124,6 +124,15 @@ class RunSummary:
     n_audio_writes: int = 0
     n_audio_event_recalled: int = 0
     n_query_expanded: int = 0         # times the query-side instance fix re-queried (LTM_QUERY_EXPANSION)
+    # SEMANTIC-FRONTIER VACUOUS-ARM GUARD (R1: S1 geometric vs S1+ BLIP-2 ITM).
+    # semantic_frontier=True is set on every candidate whenever the weight is on,
+    # so it cannot show the signal did anything. Only SPREAD reorders: a constant
+    # semantic_value (0.0 from an unobserved map, or a saturated one from a flat
+    # scorer — the CLIP 0.020 failure) leaves raw_score a uniform rescale of
+    # geom_score, so S1+ acts exactly like S1 while every counter reads green.
+    # n_scored high AND spread 0.0 is the vacuous arm the driver must FATAL on.
+    n_semantic_scored: int = 0        # frontier candidates that got a semantic blend
+    semantic_spread_max: float = 0.0  # max (max-min) semantic_value over one propose()
     # ONSET PROVENANCE — the ONLY fields that say WHAT fired the interrupt.
     # n_audio_onset_fired counts onsets, not causes; n_audio_gate_rejected==0 means
     # the gate ACCEPTED the first over-threshold tick (onset is one-shot), not that
@@ -180,6 +189,8 @@ class RunSummary:
             "n_audio_writes": self.n_audio_writes,
             "n_audio_event_recalled": self.n_audio_event_recalled,
             "n_query_expanded": self.n_query_expanded,
+            "n_semantic_scored": self.n_semantic_scored,
+            "semantic_spread_max": self.semantic_spread_max,
             "audio_onset_step": self.audio_onset_step,
             "audio_t_anom": self.audio_t_anom,
             "modules_invoked": self.modules_invoked,
@@ -686,6 +697,11 @@ class EpisodeRunner:
         self._room_conditioned_anomaly = (
             bool(os.environ.get("LTM_ROOM_CONDITIONED_ANOMALY"))
             and self.task == "anomaly_response")
+        # Semantic-frontier vacuous-arm guard (R1). Run-level: accumulated over
+        # every propose, read into RunSummary at finalize. See RunSummary's
+        # n_semantic_scored / semantic_spread_max for why spread is the guard.
+        self._n_semantic_scored = 0
+        self._semantic_spread_max = 0.0
         self._room_text_emb = None       # lazily built CLIP room-prompt embeddings
         self._anomaly_state = ControllerState()
         # Per-episode one-shot investigate-waypoint stash + primary snapshot
@@ -1047,6 +1063,10 @@ class EpisodeRunner:
         summary.n_audio_writes = int(bridge_stats.get("n_audio_writes", 0))
         summary.n_audio_event_recalled = int(bridge_stats.get("n_audio_event_recalled", 0))
         summary.n_query_expanded = int(bridge_stats.get("n_query_expanded", 0))
+        # Not from bridge_stats: the semantic frontier lives on the PLANNER, so
+        # these come off the runner's own accumulation (_accumulate_semantic_diag).
+        summary.n_semantic_scored = int(self._n_semantic_scored)
+        summary.semantic_spread_max = float(self._semantic_spread_max)
         summary.ablation = {
             **bridge_stats.get("ablation", {}),
             **{k: v for k, v in self.run_config.items() if k not in {"setting"}},
@@ -1646,6 +1666,7 @@ class EpisodeRunner:
                 cands = self._propose_candidates(
                     step, ep, goal_override=active_goal
                 )
+                self._accumulate_semantic_diag()
                 # Classify the LLM planner's decision (remembr backbone only) so
                 # we can see WHY its grounded pick never wins the rerank
                 # (n_remembr_chosen): tried-and-lost (goto) vs never-tried
@@ -2613,6 +2634,26 @@ class EpisodeRunner:
         v = max(0.0, min(1.0, v))  # CLIP cos -> the blend's [0,1]
         self.planner.observe_value(
             step.agent_state.position, step.agent_state.rotation_yaw, v)
+
+    def _accumulate_semantic_diag(self) -> None:
+        """Roll the planner's per-propose semantic spread into run-level counters.
+
+        Read after every propose — both the frontier backbone's direct call and
+        ``propose_diverse``, which delegates to ``propose`` — so the counters see
+        every proposal on either backbone. Empty diag (weight off, or the
+        random-walk fallback where no frontier was scored) contributes nothing.
+
+        MAX spread, not a mean: one propose that reordered proves the signal is
+        live, whereas a mean is diluted toward zero by the many steps with no
+        frontier clusters and would read as inert on a working arm.
+        """
+        d = getattr(self.planner, "_last_semantic_diag", None) or {}
+        if not d:
+            return
+        self._n_semantic_scored += int(d.get("n_scored", 0))
+        sp = d.get("spread")
+        if sp is not None:
+            self._semantic_spread_max = max(self._semantic_spread_max, float(sp))
 
     def _propose_candidates(
         self, step: Step, ep, goal_override: Optional[str] = None
