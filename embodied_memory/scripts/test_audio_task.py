@@ -93,14 +93,21 @@ def case_normalize_clip_rms_target():
 
 
 def _floor_grid():
-    """Single-floor grid at ear height 1.5 over a navmesh at y=0.163 (the
-    TEEsavR23oF geometry behind ADR-0003). The upstairs navmesh is at y=3.163.
+    """Single-floor grid as ``render_rir_grid`` actually emits one: cells carry
+    the listener pose's NAVMESH y, because the renderer sets ``st.position =
+    cell`` (an agent state, which must lie on the navmesh) and keeps the ear as a
+    sensor-local offset that never reaches ``cell_positions``.
+
+    TEEsavR23oF geometry behind ADR-0003: ground navmesh y=0.163, upstairs 3.163.
+    Do not "correct" these to 1.663 (navmesh + ear). That convention is what the
+    guard was written against, and against a real grid it read a same-floor pose
+    as 1.5 m off-floor and silenced every floor.
     """
-    cells = np.array([[0.0, 1.663, 0.0], [2.0, 1.663, 0.0]], np.float32)
+    cells = np.array([[0.0, 0.163, 0.0], [2.0, 0.163, 0.0]], np.float32)
     irs = np.zeros((2, 2, 8), np.float32)
     irs[:, 0, 0] = 1.0
     irs[:, 1, 0] = 1.0
-    return audio.RIRGrid(cells, np.array([0.0, 1.663, 0.0], np.float32), irs,
+    return audio.RIRGrid(cells, np.array([0.0, 0.163, 0.0], np.float32), irs,
                          16000, "TEEsavR23oF", ear_height_m=1.5)
 
 

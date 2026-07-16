@@ -178,18 +178,23 @@ class RIRGrid:
         co-located with the goal so an off-floor lookup cannot arise.
 
         ``max_dy`` set: only cells on the agent's FLOOR are eligible, i.e. those
-        with ``|agent_y + ear_height_m - cell_y| <= max_dy``. This is not
-        cosmetic. The grid is rendered on ONE floor, so an off-floor pose has no
-        cell that describes it, and resolving one anyway FABRICATES audio — the
-        agent "hears" a source through a storey of concrete (ADR-0003; the
-        render path already guards this via ``_nearest_same_floor``). The ear
-        offset is load-bearing: with a 1.5 m ear height and a 3.0 m storey, a
-        same-floor and a one-floor-up pose are BOTH 1.5 m from the cell in raw y.
+        with ``|cell_y - agent_y| <= max_dy``. Both sides are NAVMESH y: the
+        renderer stores each cell's listener pose (``st.position = cell``, which
+        must lie on the navmesh) and carries the ear as a sensor-local offset
+        that never enters ``cell_positions``. This is not cosmetic. The grid is
+        rendered on ONE floor, so an off-floor pose has no cell that describes
+        it, and resolving one anyway FABRICATES audio — the agent "hears" a
+        source through a storey of concrete (ADR-0003; the render path already
+        guards this via ``_nearest_same_floor``).
+
+        Do NOT reintroduce an ear offset here. It was tried, and because the
+        cells are navmesh-y it put a same-floor pose 1.5 m off its own floor and
+        silenced the entire grid on every floor (``audio_energy_max=0.0`` in 8/8
+        of runs/anomresp-bed-s{1,3}). A 1.5 m ear against a 3.0 m storey needs no
+        offset to separate floors: navmesh-to-navmesh gives 0.0 vs 3.0.
 
         Raises ``OutOfCoverageError`` when guarded and no cell is on the agent's
-        floor (the caller should render silence), and ``ValueError`` when the
-        guard is requested on a grid with no ``ear_height_m`` — a guard that
-        silently no-ops is the failure this exists to prevent.
+        floor (the caller should render silence).
 
         Returns ``(ir (2, T), cell_idx, distance_m)``.
         """
@@ -199,19 +204,14 @@ class RIRGrid:
         cxz = self.cell_positions[:, [0, 2]]
         d = np.linalg.norm(cxz - axz[None, :], axis=1)
         if max_dy is not None:
-            if self.ear_height_m is None:
-                raise ValueError(
-                    "nearest(max_dy=...) needs the grid's ear_height_m to compare a "
-                    "navmesh-y agent pose against ear-height cells; this grid has none "
-                    "(re-render it, or drop the guard). See ADR-0003.")
             if p.shape[0] < 3:
                 raise ValueError("nearest(max_dy=...) needs a 3-D agent position")
-            ear_y = float(p[1]) + float(self.ear_height_m)
-            on_floor = np.abs(self.cell_positions[:, 1] - ear_y) <= float(max_dy)
+            agent_y = float(p[1])
+            on_floor = np.abs(self.cell_positions[:, 1] - agent_y) <= float(max_dy)
             if not bool(on_floor.any()):
                 raise OutOfCoverageError(
                     f"no RIR cell within {max_dy} m of the agent's floor "
-                    f"(agent ear y={ear_y:.3f}, grid cell y="
+                    f"(agent navmesh y={agent_y:.3f}, grid cell y="
                     f"{float(self.cell_positions[0, 1]):.3f}); the grid does not "
                     f"cover this floor, so there is no audio to render.")
             d = np.where(on_floor, d, np.inf)

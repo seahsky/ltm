@@ -438,46 +438,68 @@ def case_grid_load_legacy_without_geodesics():
     print("  case grid_load_legacy_without_geodesics: OK")
 
 
-def _floor_grid():
-    """A single-floor grid at ear height 1.5 over a navmesh at y=0.163 — the
-    TEEsavR23oF geometry that exposed ADR-0003. An upstairs navmesh sits at
-    y=3.163, i.e. exactly 3.0 m above this floor.
+def _navmesh_floor_grid():
+    """A grid as ``render_rir_grid`` actually emits one: cells carry the listener
+    pose's NAVMESH y, not navmesh_y + ear_height.
+
+    The renderer sets ``st.position = cell`` — an agent state, which must lie on
+    the navmesh — and puts the ear at ``spec.position = ear``, a sensor-LOCAL
+    offset that never enters ``cell_positions``. It offsets the SOURCE by ``ear``
+    explicitly (``setAudioSourceTransform(source_pt + ear)``) because that one is
+    a world transform; the listener cells get no such treatment.
+
+    TEEsavR23oF geometry: ground navmesh y=0.163, upstairs y=3.163.
     """
-    cells = np.array([[0.0, 1.663, 0.0], [2.0, 1.663, 0.0]], dtype=np.float32)
+    cells = np.array([[0.0, 0.163, 0.0], [2.0, 0.163, 0.0]], dtype=np.float32)
     irs = np.stack([_binaural_for_azimuth(0.0) for _ in range(2)], axis=0)
-    return audio.RIRGrid(cells, np.array([0.0, 1.663, 0.0], np.float32), irs,
+    return audio.RIRGrid(cells, np.array([0.0, 0.163, 0.0], np.float32), irs,
                          _SR, "TEEsavR23oF", ear_height_m=1.5)
 
 
-def case_nearest_guard_discriminates_floors():
-    # The trap (ADR-0003): a same-floor agent (navmesh y=0.163) and a one-floor-up
-    # agent (y=3.163) are BOTH exactly 1.5 m from a cell at y=1.663. Only
-    # |agent_y + ear_height - cell_y| separates them: 0.0 vs 3.0.
-    g = _floor_grid()
+def case_nearest_guard_resolves_pose_on_rendered_floor():
+    # The ADR-0003 guard must ADMIT an agent standing on the very floor the grid
+    # was rendered on, and EXCLUDE one a storey up. Against a real grid it did
+    # neither: it compared cell_y to agent_y + ear_height_m, so a same-floor pose
+    # read as 1.5 m off-floor, every cell on every floor fell outside max_dy=1.0,
+    # and the render returned silence — audio_energy_max=0.0 in 8/8 episodes of
+    # runs/anomresp-bed-s{1,3}, with the controller never firing.
+    #
+    # Both halves are one spec on purpose: the accept half alone would also pass
+    # if someone simply widened max_dy past 1.5, which would readmit the upstairs
+    # poses ADR-0003 exists to exclude. Only the comparison itself satisfies both.
+    g = _navmesh_floor_grid()
     _, idx, _ = g.nearest(np.array([1.9, 0.163, 0.0], np.float32), max_dy=1.0)
-    assert idx == 1, f"same-floor pose must resolve; got {idx}"
+    assert idx == 1, f"a pose on the rendered floor must resolve; got {idx}"
     try:
         g.nearest(np.array([1.9, 3.163, 0.0], np.float32), max_dy=1.0)
         assert False, "a pose one floor up must NOT resolve to a ground-floor cell"
     except audio.OutOfCoverageError:
         pass
-    print("  case nearest_guard_discriminates_floors: OK")
+    print("  case nearest_guard_resolves_pose_on_rendered_floor: OK")
 
 
-def case_nearest_guard_needs_ear_height():
-    # Asking for the guard on a grid that cannot support it must RAISE, never
-    # silently fall back to the unguarded lookup — a silent no-op guard is the
-    # exact failure mode ADR-0003 exists to prevent.
-    cells = np.array([[0.0, 1.663, 0.0]], dtype=np.float32)
-    irs = np.stack([_binaural_for_azimuth(0.0)], axis=0)
+def case_nearest_guard_works_without_ear_height():
+    # The floor guard asks "is the agent on the floor this grid covers?" — a
+    # navmesh-vs-navmesh question that needs no ear height, so a legacy grid
+    # carrying none is guarded just as well. ear_height_m is informational
+    # metadata; it is deliberately NOT an input to the comparison.
+    #
+    # This replaces a test that asserted the opposite (guard on an ear-height-less
+    # grid must raise). That spec followed from the ear-offset comparison, which
+    # silenced every floor of every real grid. Guarding an unguarded lookup is
+    # still the failure to prevent — under this convention it simply cannot arise.
+    cells = np.array([[0.0, 0.163, 0.0], [2.0, 0.163, 0.0]], dtype=np.float32)
+    irs = np.stack([_binaural_for_azimuth(0.0) for _ in range(2)], axis=0)
     legacy = audio.RIRGrid(cells, np.zeros(3, np.float32), irs, _SR, "s")
     assert legacy.ear_height_m is None
+    _, idx, _ = legacy.nearest(np.array([1.9, 0.163, 0.0], np.float32), max_dy=1.0)
+    assert idx == 1, f"same-floor pose must resolve on a legacy grid; got {idx}"
     try:
-        legacy.nearest(np.array([0.0, 0.163, 0.0], np.float32), max_dy=1.0)
-        assert False, "max_dy on an ear-height-less grid must raise"
-    except ValueError:
+        legacy.nearest(np.array([1.9, 3.163, 0.0], np.float32), max_dy=1.0)
+        assert False, "a pose one floor up must NOT resolve, ear height or not"
+    except audio.OutOfCoverageError:
         pass
-    print("  case nearest_guard_needs_ear_height: OK")
+    print("  case nearest_guard_works_without_ear_height: OK")
 
 
 def case_grid_ear_height_roundtrips():
@@ -543,8 +565,8 @@ def main() -> int:
         case_grid_load_legacy_without_geodesics,
         case_grid_ear_height_roundtrips,
         case_grid_load_legacy_without_ear_height,
-        case_nearest_guard_discriminates_floors,
-        case_nearest_guard_needs_ear_height,
+        case_nearest_guard_resolves_pose_on_rendered_floor,
+        case_nearest_guard_works_without_ear_height,
         case_render_rir_grid_persists_ear_height,
         case_render_shape_and_convolution,
         case_render_rms_monotone_with_distance,
