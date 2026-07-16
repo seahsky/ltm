@@ -30,6 +30,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _TEU = os.path.join(_HERE, "..", "text_encode_util.py")
 _spec = importlib.util.spec_from_file_location("text_encode_util", _TEU)
 teu = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = teu   # standard importlib recipe: register before exec (safe for @dataclass modules)
 _spec.loader.exec_module(teu)
 
 expand_query = teu.expand_query

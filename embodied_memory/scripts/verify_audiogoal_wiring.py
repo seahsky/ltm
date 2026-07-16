@@ -32,6 +32,7 @@ def _class_object_map():
     spec = importlib.util.spec_from_file_location(
         "_vaudio", os.path.join(here, os.pardir, "audio.py"))
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod   # register before exec so audio.AugmentSpec (@dataclass) resolves its fields
     spec.loader.exec_module(mod)
     return mod.CLASS_TO_OBJECT, mod.ANOMALY_CLASSES
 

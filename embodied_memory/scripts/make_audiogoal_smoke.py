@@ -479,6 +479,7 @@ def _load_rir_grid(path: str):
         os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "audio.py"))
     spec = importlib.util.spec_from_file_location("_audiogoal_audio_mk", audio_path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod   # register before exec so audio.AugmentSpec (@dataclass) resolves its fields
     spec.loader.exec_module(mod)
     return mod.RIRGrid.load(path)
 

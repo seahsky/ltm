@@ -33,6 +33,7 @@ def _load():
     spec = importlib.util.spec_from_file_location(
         "check_planner_fit", str(_HERE / "check_planner_fit.py"))
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod   # standard importlib recipe: register before exec (safe for @dataclass modules)
     spec.loader.exec_module(mod)
     return mod
 

@@ -112,6 +112,12 @@ def _load_audio():
         os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "audio.py"))
     spec = importlib.util.spec_from_file_location("_audiogoal_audio", audio_path)
     mod = importlib.util.module_from_spec(spec)
+    # Register BEFORE exec_module: a @dataclass under `from __future__ import
+    # annotations` (audio.AugmentSpec) resolves its field annotations via
+    # sys.modules[cls.__module__] during class creation — an unregistered module
+    # makes that None and dataclasses raises AttributeError. This is the standard
+    # importlib.util load recipe; the bare load still skips the package __init__.
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
