@@ -43,7 +43,11 @@ LAB_DIR="${BUILD_ROOT}/habitat-lab"
 SIM_BRANCH="RLRAudioPropagationUpdate"
 LAB_TAG="v0.2.2"
 OUT_DIR="runs/soundspaces-spike"
-APT_LINE="sudo apt-get install -y --no-install-recommends libjpeg-dev libglm-dev libgl1-mesa-glx libegl1-mesa-dev mesa-utils xorg-dev freeglut3-dev libglvnd-dev"
+# NB: libgl1-mesa-glx was DROPPED in Ubuntu 24.04 (Noble) — it split into
+# libgl1 + libglx-mesa0. Use those (they also exist on 20.04/22.04) so the apt
+# line resolves across releases; the build is EGL-headless and never needs the
+# old GLX metapackage anyway.
+APT_LINE="sudo apt-get install -y --no-install-recommends libjpeg-dev libglm-dev libgl1 libglx-mesa0 libegl1-mesa-dev mesa-utils xorg-dev freeglut3-dev libglvnd-dev"
 
 banner() { printf '\n========== %s ==========\n' "$1"; }
 
@@ -135,7 +139,7 @@ if [ -n "$missing" ]; then
     echo "  passwordless sudo available — installing them now"
     sudo apt-get update -qq || true
     sudo apt-get install -y --no-install-recommends \
-        libjpeg-dev libglm-dev libgl1-mesa-glx libegl1-mesa-dev mesa-utils \
+        libjpeg-dev libglm-dev libgl1 libglx-mesa0 libegl1-mesa-dev mesa-utils \
         xorg-dev freeglut3-dev libglvnd-dev \
       || { echo "FATAL: apt install failed — run manually: $APT_LINE"; exit 1; }
   else
