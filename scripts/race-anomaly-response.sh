@@ -40,7 +40,15 @@ MIN_SOURCE_SEP="3.0"; ONSET_TARGET_DIST="4.0"; ONSET_RMS_OVERRIDE=""
 # investigated=0). extend-budget ON so the detour doesn't starve the primary find-task.
 INVESTIGATE_MAX_STEPS=100; INVESTIGATE_EXTEND=1
 FETCH_AUDIO=1                         # N3 wants REAL audio by default
-BG_GAIN="1.0"; BG_CLASS="vacuum"      # mixture ON by default (every scene = anomaly + bed)
+# ADR-0004: the bed is a NOISE FLOOR, never the interrupt trigger. "auto" CALIBRATES
+# the gain from the grid (diagnose_onset_calib --background-clip → RECOMMEND_BG_GAIN)
+# so the loudest bed cell lands under onset_rms. It cannot be hand-picked: bed and
+# anomaly render through the SAME grid at the same normalized level, so bed(x) ≈
+# anomaly(x) and the old hard-coded 1.0 GUARANTEED the bed cleared an onset that was
+# calibrated on the anomaly alone — every onset in runs/anomresp-bed-s{1,3} fired on
+# the vacuum at step 0, 30 steps before the alarm existed. A numeric --bg-gain pins it
+# (escape hatch / A-B against the false-fire); --no-bg disables the bed entirely.
+BG_GAIN="auto"; BG_CLASS="vacuum"     # mixture ON by default (every scene = anomaly + bed)
 # Feasibility gate band (grid-relative cell energy). coverage empty => the gate
 # DERIVES it from the grid's actual cell spacing (a fixed radius false-rejects a
 # sparse grid); --feas-coverage-m overrides.
@@ -210,22 +218,69 @@ if [ -n "$BG_GAIN" ]; then
     python embodied_memory/scripts/fetch_anomaly_clips.py --include-benign \
       || echo "WARN: benign fetch failed; bed disabled"
   fi
-  [ -f "$BG_CLIP" ] && echo "  background bed: REAL ESC-50 benign -> $BG_CLIP (bg_gain=$BG_GAIN)" \
-    || { echo "  background bed: NO $BG_CLIP -> bed disabled"; BG_CLIP=""; }
+  # No bed file => no bed => NO GAIN. Clearing BG_GAIN too is load-bearing: a
+  # leftover "auto" would reach --bg-gain (type=float) below and crash the run.
+  [ -f "$BG_CLIP" ] && echo "  background bed: REAL ESC-50 benign -> $BG_CLIP (bg_gain=$BG_GAIN, calibrated below if auto)" \
+    || { echo "  background bed: NO $BG_CLIP -> bed disabled"; BG_CLIP=""; BG_GAIN=""; }
 fi
 
 # Onset calibration (audible at ~ONSET_TARGET_DIST m across a room), reads the grid.
+# The SAME pass calibrates the bed's gain against the onset it recommends (ADR-0004).
 if [ -n "$ONSET_RMS_OVERRIDE" ]; then
   ONSET_RMS="$ONSET_RMS_OVERRIDE"; echo "  onset_rms pinned = $ONSET_RMS"
+  if [ "$BG_GAIN" = "auto" ] && [ -n "$BG_CLIP" ]; then
+    echo "FATAL: --onset-rms pins the threshold, so the bed's gain cannot be calibrated"
+    echo "  against it (ADR-0004: bg_gain is derived FROM onset_rms). Pass an explicit"
+    echo "  --bg-gain, or drop --onset-rms and let both calibrate together."
+    exit 1
+  fi
 else
-  banner "[5d/7] onset calibration (diagnose_onset_calib, target ${ONSET_TARGET_DIST} m)"
+  banner "[5d/7] onset + bed-gain calibration (diagnose_onset_calib, target ${ONSET_TARGET_DIST} m)"
   CALIB_LOG="${DS_DIR}/onset_calib.log"
+  # --background-clip makes the pass ALSO emit RECOMMEND_BG_GAIN / BG_GAIN_VERDICT.
   python embodied_memory/scripts/diagnose_onset_calib.py \
       --grid "$GRID" --target-dist "$ONSET_TARGET_DIST" \
-      ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} 2>&1 | tee "$CALIB_LOG"
+      ${ANOMALY_CLIP:+--anomaly-clip "$ANOMALY_CLIP"} \
+      ${BG_CLIP:+--background-clip "$BG_CLIP"} 2>&1 | tee "$CALIB_LOG"
   ONSET_RMS="$(grep -oE 'RECOMMEND_ONSET_RMS=[0-9.]+' "$CALIB_LOG" | tail -1 | cut -d= -f2)"
   [ -n "$ONSET_RMS" ] || { echo "WARN: no RECOMMEND_ONSET_RMS; default 0.05"; ONSET_RMS="0.05"; }
   echo "  onset_rms (calibrated) = $ONSET_RMS"
+
+  if [ "$BG_GAIN" = "auto" ] && [ -n "$BG_CLIP" ]; then
+    if grep -q 'BG_GAIN_VERDICT=NO_BED' "$CALIB_LOG"; then
+      echo "FATAL: the bed renders silent through this grid — bg_gain is meaningless."
+      echo "  See $CALIB_LOG. Re-check --bg-class / data/benign_audio, or pass --no-bg."
+      exit 1
+    fi
+    BG_GAIN="$(grep -oE 'RECOMMEND_BG_GAIN=[0-9.]+' "$CALIB_LOG" | tail -1 | cut -d= -f2)"
+    [ -n "$BG_GAIN" ] || { echo "FATAL: no RECOMMEND_BG_GAIN in $CALIB_LOG (ADR-0004: the bed must be calibrated, never assumed)."; exit 1; }
+    echo "  bg_gain (calibrated) = $BG_GAIN  [bed stays under onset_rms → the onset fires on the ANOMALY]"
+  fi
+fi
+
+# ADR-0004: an explicitly-pinned bg_gain above the calibrated one re-creates the
+# step-0 false-fire. Legitimate as a deliberate A/B, so WARN loudly rather than
+# FATAL — but never let it pass silently.
+if [ -n "$BG_CLIP" ] && [ -n "${CALIB_LOG:-}" ] && [ -f "${CALIB_LOG:-/nonexistent}" ]; then
+  REC_BG="$(grep -oE 'RECOMMEND_BG_GAIN=[0-9.]+' "$CALIB_LOG" | tail -1 | cut -d= -f2)"
+  if [ -n "$REC_BG" ] && [ -n "$BG_GAIN" ] && [ "$BG_GAIN" != "auto" ]; then
+    awk -v pinned="$BG_GAIN" -v rec="$REC_BG" 'BEGIN {
+      if (pinned+0 > rec+0 + 1e-9) {
+        printf "WARN [ADR-0004]: pinned --bg-gain %.4f EXCEEDS the calibrated %.4f.\n", pinned, rec
+        print  "  The bed will clear onset_rms and false-fire the interrupt at step 0,"
+        print  "  exactly as in runs/anomresp-bed-s{1,3}. Intended only as a deliberate A/B."
+      }
+    }'
+  fi
+fi
+
+# "auto" must never survive to the runner (--bg-gain is type=float). If it does,
+# calibration silently didn't happen — fail here, not 30 minutes in.
+if [ "$BG_GAIN" = "auto" ]; then
+  echo "FATAL: bg_gain is still 'auto' — the ADR-0004 calibration never ran."
+  echo "  Expected diagnose_onset_calib to emit RECOMMEND_BG_GAIN. Pass an explicit"
+  echo "  --bg-gain, or --no-bg to drop the bed."
+  exit 1
 fi
 
 N_EPISODES="$(python -c "import gzip,json,glob,sys; print(sum(len(json.load(gzip.open(f))['episodes']) for f in sorted(glob.glob(sys.argv[1]))))" "${DS_DIR}/content/*.json.gz")" || N_EPISODES=0

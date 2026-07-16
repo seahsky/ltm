@@ -74,6 +74,7 @@ class HabitatObjectNavSource(EpisodeSource):
         anomaly_clip_path: Optional[str] = None,
         background_clip_path: Optional[str] = None,
         bg_gain: float = 0.0,
+        max_dy: Optional[float] = None,
         target_norm_rms_db: float = -20.0,
     ):
         # scene_id can be a single id (legacy) or a list — passed straight to
@@ -113,6 +114,9 @@ class HabitatObjectNavSource(EpisodeSource):
         self._anomaly_clip_path = anomaly_clip_path
         self._background_clip_path = background_clip_path
         self._bg_gain = float(bg_gain)
+        # ADR-0003 floor guard, threaded to the RENDER cfg (see
+        # _build_audio_render_cfg). None => legacy y-ignoring lookup.
+        self._max_dy = None if max_dy is None else float(max_dy)
         self._target_norm_rms_db = float(target_norm_rms_db)
         self._rir_grid = None              # lazy-loaded at reset (scene-matched)
         self._anomaly_clip_norm = None     # normalized FSD50K clip, loaded once
@@ -344,11 +348,7 @@ class HabitatObjectNavSource(EpisodeSource):
                 self._anomaly_clip_norm = self._load_anomaly_clip()
             if self._background_clip_norm is None:
                 self._background_clip_norm = self._load_background_clip()
-            self._audio_render_cfg = AudioTaskConfig(
-                enabled=True, t_anom=ep_t_anom,
-                sample_rate=int(self._rir_grid.sample_rate),
-                bg_gain=self._bg_gain,
-            )
+            self._build_audio_render_cfg(ep_t_anom)
 
         # MultiON: surface the ordered category chain (written by
         # make_multion_smoke into the episode's info dict) so the runner's
@@ -576,6 +576,22 @@ class HabitatObjectNavSource(EpisodeSource):
         from .audio_task import build_anomaly_clip
         grid_sr = int(self._rir_grid.sample_rate) if self._rir_grid is not None else 48000
         return build_anomaly_clip(self._anomaly_clip_path, grid_sr, self._target_norm_rms_db)
+
+    def _build_audio_render_cfg(self, t_anom: int) -> None:
+        """Build the config the RENDER seam reads (``_make_step`` passes exactly
+        this to ``render_step_audio``) — never the runner's own ``audio_cfg``.
+        The distinction is load-bearing and has bitten once already: ``bg_gain``
+        set on the runner cfg was a silent no-op (review item C1), and
+        ``max_dy`` would fail the same way. One place builds it, so there is one
+        place to check.
+        """
+        from .audio_task import AudioTaskConfig   # lazy: keeps the two-env split
+        self._audio_render_cfg = AudioTaskConfig(
+            enabled=True, t_anom=int(t_anom),
+            sample_rate=int(self._rir_grid.sample_rate),
+            bg_gain=self._bg_gain,
+            max_dy=self._max_dy,
+        )
 
     def _load_background_clip(self) -> Optional[np.ndarray]:
         """Load + RMS-normalize the continuous benign bed at the grid's sample rate,

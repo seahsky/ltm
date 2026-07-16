@@ -92,6 +92,47 @@ def case_normalize_clip_rms_target():
     print("  case normalize_clip_rms_target: OK")
 
 
+def _floor_grid():
+    """Single-floor grid at ear height 1.5 over a navmesh at y=0.163 (the
+    TEEsavR23oF geometry behind ADR-0003). The upstairs navmesh is at y=3.163.
+    """
+    cells = np.array([[0.0, 1.663, 0.0], [2.0, 1.663, 0.0]], np.float32)
+    irs = np.zeros((2, 2, 8), np.float32)
+    irs[:, 0, 0] = 1.0
+    irs[:, 1, 0] = 1.0
+    return audio.RIRGrid(cells, np.array([0.0, 1.663, 0.0], np.float32), irs,
+                         16000, "TEEsavR23oF", ear_height_m=1.5)
+
+
+def case_render_off_floor_is_silence():
+    # ADR-0003: the grid covers ONE floor. A pose upstairs has no cell describing
+    # it, so the honest render is SILENCE — not the ground-floor cell's IR, which
+    # would have the agent hear the source through a storey of concrete.
+    cfg = at.AudioTaskConfig(enabled=True, t_anom=0, max_dy=1.0)
+    clip = at.normalize_clip(np.ones(100, np.float32))
+    g = _floor_grid()
+    on = at.render_step_audio(g, np.array([2.0, 0.163, 0.0], np.float32), clip,
+                              step_idx=5, cfg=cfg)
+    assert on is not None and on.shape[0] == 2, "same-floor pose must render"
+    off = at.render_step_audio(g, np.array([2.0, 3.163, 0.0], np.float32), clip,
+                               step_idx=5, cfg=cfg)
+    assert off is None, "a pose one floor up must render SILENCE, not a fabricated IR"
+    print("  case render_off_floor_is_silence: OK")
+
+
+def case_render_max_dy_unset_is_byte_identical():
+    # Default (max_dy unset) → the legacy y-ignoring lookup, unchanged. This is
+    # what keeps objectnav / audiogoal / revisit bit-identical.
+    cfg = at.AudioTaskConfig(enabled=True, t_anom=0)
+    assert cfg.max_dy is None, "max_dy must default to None (legacy behaviour)"
+    clip = at.normalize_clip(np.ones(100, np.float32))
+    g = _floor_grid()
+    out = at.render_step_audio(g, np.array([2.0, 3.163, 0.0], np.float32), clip,
+                               step_idx=5, cfg=cfg)
+    assert out is not None, "unguarded default must still resolve an off-floor pose"
+    print("  case render_max_dy_unset_is_byte_identical: OK")
+
+
 def case_render_silence_before_t_anom():
     cfg = at.AudioTaskConfig(enabled=True, t_anom=30)
     clip = at.normalize_clip(np.ones(100, np.float32))
@@ -458,6 +499,46 @@ def case_habitat_make_step_audio_gated():
     print("  case habitat_make_step_audio_gated: OK")
 
 
+def case_habitat_max_dy_reaches_the_render_cfg():
+    # C1 lesson, repeated for ADR-0003: render_step_audio reads _audio_render_cfg,
+    # NOT the runner's audio_cfg. A max_dy that lands anywhere else is a silent
+    # no-op — the exact failure mode the guard exists to prevent.
+    src = _mock_source(task="anomaly_response", max_dy=1.0)
+    assert src._max_dy == 1.0, src._max_dy
+    src._rir_grid = _floor_grid()
+    src._anomaly_clip_norm = at.normalize_clip(np.ones(64, np.float32))
+    src._build_audio_render_cfg(t_anom=0)
+    assert src._audio_render_cfg.max_dy == 1.0, \
+        "max_dy must reach _audio_render_cfg (the cfg the render seam reads)"
+    print("  case habitat_max_dy_reaches_the_render_cfg: OK")
+
+
+def case_habitat_max_dy_default_off():
+    # Default → None → the legacy y-ignoring lookup for every existing task.
+    src = _mock_source(task="audiogoal")
+    assert src._max_dy is None, src._max_dy
+    src._rir_grid = _grid()
+    src._build_audio_render_cfg(t_anom=0)
+    assert src._audio_render_cfg.max_dy is None
+    print("  case habitat_max_dy_default_off: OK")
+
+
+def case_resolve_max_dy_only_for_anomaly_response():
+    # The floor guard is task-gated at the CLI: only anomaly_response decouples the
+    # source from the goal, so only it can put the agent on a floor the single-floor
+    # grid never rendered. Every other task resolves to None => legacy lookup =>
+    # byte-identical, which is what keeps the +0.171/+0.2505 arc cross-quotable.
+    from argparse import Namespace
+    from embodied_memory.run_hm3d_pol import _resolve_max_dy, _MAX_DY_DEFAULT
+    for task in ("objectnav", "audiogoal", "revisit", "multion"):
+        assert _resolve_max_dy(Namespace(task=task, audio_max_dy=1.0)) is None, task
+    assert _resolve_max_dy(
+        Namespace(task="anomaly_response", audio_max_dy=_MAX_DY_DEFAULT)) == 1.0
+    # explicit 0 disables the guard (an A/B against the fabricated-audio behaviour)
+    assert _resolve_max_dy(Namespace(task="anomaly_response", audio_max_dy=0.0)) is None
+    print("  case resolve_max_dy_only_for_anomaly_response: OK")
+
+
 def case_habitat_objectnav_make_step_no_audio():
     src = _mock_source()                     # objectnav (audio gated off)
     src._step_count = 100
@@ -522,6 +603,8 @@ def main() -> int:
         case_render_silence_before_t_anom,
         case_render_after_t_anom,
         case_render_disabled_returns_none,
+        case_render_off_floor_is_silence,
+        case_render_max_dy_unset_is_byte_identical,
         case_process_none_audio_noop,
         case_process_below_onset_no_detect,
         case_process_onset_fires_once,
@@ -549,6 +632,9 @@ def main() -> int:
         case_no_habitat_sim_import,
         case_habitat_default_objectnav,
         case_habitat_make_step_audio_gated,
+        case_habitat_max_dy_reaches_the_render_cfg,
+        case_habitat_max_dy_default_off,
+        case_resolve_max_dy_only_for_anomaly_response,
         case_habitat_objectnav_make_step_no_audio,
         case_build_anomaly_clip_deterministic_and_normed,
         case_resolve_anomaly_clip,

@@ -40,9 +40,14 @@ _Avoid_: time (say steps or wall-clock).
 
 ### Settings and warm/cold axes
 
-**S1 / S1+ / S2 / S3**:
-Memory-off geometric-frontier baseline / memory-off **semantic-frontier** baseline (CLIP goal-cosine frontier term, the reviewer-proof strong baseline) / STM-only / full LTM. The headline memory delta is **S3 − S1+**.
-_Avoid_: baseline (unqualified — say which of S1/S1+).
+**S1 / S1+ / S2 / S3 / S3+**:
+Memory-off geometric-frontier baseline / memory-off **semantic-frontier** baseline / STM-only / full LTM on the geometric frontier / full LTM on the semantic frontier.
+The semantic frontier is a **BLIP-2 ITM** match probability (VLFM, ICRA-2024), NOT the CLIP goal-cosine: CLIP is measured flat on HM3D sim renders (separation 0.020 against a 0.05 bar, three independent measurements) and is retired.
+The headline memory delta is **S3+ − S1+**; the absolute-number claim is **S1+ vs S1**.
+_Avoid_: baseline (unqualified — say which of S1/S1+). _Avoid_: "Study 1" as a name (it reads as S1 — see the study names below).
+
+**Memory-boundary study / Controller-and-audio study**:
+The two sub-studies. Named, never numbered: "Study 1" and "S1" are different things and the collision has already caused a misread.
 
 **Realizable localization**:
 Reaching the anomaly source using only live binaural energy-gradient climb + L/R level sign + visual confirmation — no oracle source xyz. A/B'd against the oracle-source arm (the disclosed upper bound). Ceiling ~1 grid cell (~1 m), sim is level-only.
@@ -62,4 +67,21 @@ _Avoid_: context-free gate (the retired audio-only `is_anomaly`).
 
 **Room-normal distractor**:
 A discrete benign sound that is normal for the current room and must be IGNORED (no interrupt). Its correct rejection is what makes scene-conditioned discrimination load-bearing rather than decorative.
+This is the ONLY thing discrimination is claimed on (ADR-0004).
 _Avoid_: background bed (the continuous diotic noise floor — a different thing).
+
+**Background bed**:
+The continuous diotic noise floor present in every scene. It must sit BELOW `onset_rms` at every grid cell, so it is never the interrupt trigger (ADR-0004).
+`bg_gain` is calibrated against the bed, never hand-picked.
+_Avoid_: mixture (say bed, or say bed + anomaly).
+
+**False interrupt**:
+An onset that fired on anything other than the anomaly. Diagnosed by **onset provenance**, not by the interrupt count.
+
+**Onset provenance**:
+`onset_step` compared to `t_anom`. An onset before `t_anom` cannot be the anomaly, because the anomaly is not playing yet.
+This is the one check that distinguishes a working interrupt from a vacuum cleaner, and it is invisible in `summary.json` — it lives in the `[audio] onset @step` log line.
+_Avoid_: reading `n_audio_onset_fired` as evidence the anomaly was heard (it counts onsets, not causes), and reading `n_audio_gate_rejected=0` as "the gate had nothing to reject" (onset is one-shot, so 0 means the gate ACCEPTED the first over-threshold tick).
+
+**Floor-constrained source**:
+The anomaly source sits on the primary goal's floor (`|Δy| < ~1.0 m`). Off-floor sources produce fabricated audio, because the RIR grid is rendered on one floor and `nearest` resolves by xz (ADR-0003).

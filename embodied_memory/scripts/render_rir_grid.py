@@ -354,6 +354,11 @@ def main() -> int:
         sample_rate=args.sample_rate,
         scene_id=scene_id,
         cell_geodesics=np.asarray(valid_geos, dtype=np.float32),
+        # ADR-0003: cells sit at navmesh_y + ear_height, but a runtime agent pose
+        # carries navmesh y. Persist the offset or the live floor guard has no way
+        # to tell a same-floor pose from one a storey up (both are ~ear_height
+        # away in raw y) and cannot engage at all.
+        ear_height_m=float(args.ear_height),
     )
     energies = [float(np.sum(np.square(ir, dtype=np.float64))) for ir in valid_irs]
     print(f"GREEN: rendered {len(valid_cells)} cells (dropped {n_zero}) "

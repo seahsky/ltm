@@ -28,6 +28,7 @@ from .audio import (
     AMBIGUOUS_CLASSES,
     ANOMALY_CLASSES,
     CLASS_TO_OBJECT,
+    OutOfCoverageError,
     RIRGrid,
     classify_anomaly,
     diotic_collapse,
@@ -96,6 +97,14 @@ class AudioTaskConfig:
     # byte-identical single-source render. Set at the RENDER config in habitat_env
     # (NOT the runner config — the render seam reads _audio_render_cfg).
     bg_gain: float = 0.0
+    # ADR-0003 floor guard: the RIR grid covers ONE floor, so a pose on another
+    # floor has no cell describing it. When set, the render resolves cells only
+    # within this |Δy| of the agent's floor and returns SILENCE otherwise, rather
+    # than snapping to an xz-near cell a storey away and fabricating audio.
+    # None (default) => the legacy y-ignoring lookup => byte-identical for
+    # objectnav / audiogoal / revisit, where the source is co-located with the
+    # goal so an off-floor lookup cannot arise. Needs a grid with ear_height_m.
+    max_dy: Optional[float] = None
 
 
 @dataclass
@@ -220,9 +229,23 @@ def render_step_audio(
     discrete onset, and the bed's diotic-ness keeps the anomaly's lateral cue.
     ``bg_gain == 0.0`` or ``bg_clip_norm is None`` => byte-identical to the
     single-source path. habitat_env calls this; it never touches the audio sim.
+
+    Floor guard (ADR-0003, ``cfg.max_dy``): the grid covers ONE floor, so a pose
+    on another floor has no cell describing it and the honest render is silence
+    — for the bed as much as the anomaly, since both go through the same grid.
+    ``cfg.max_dy is None`` (default) => the probe is skipped entirely => the
+    legacy path is byte-identical.
     """
     if grid is None or clip_norm is None:
         return None
+    # Coverage is a property of the POSE, not of either clip, so probe once up
+    # front rather than per-source. The probe is an argmin, free next to a convolve.
+    max_dy = getattr(cfg, "max_dy", None)
+    if max_dy is not None:
+        try:
+            grid.nearest(agent_pos, max_dy=max_dy)
+        except OutOfCoverageError:
+            return None
     has_bed = float(getattr(cfg, "bg_gain", 0.0)) > 0.0 and bg_clip_norm is not None
     if not has_bed:
         if int(step_idx) < int(cfg.t_anom):

@@ -1,5 +1,12 @@
 # Anomaly-Response Build Plan — post-powered-matrix redesign (2026-07-12)
 
+> **SUPERSEDED by `anomaly_response_buildplan_2026-07-16.md`.**
+> Kept for provenance. Three rows below are known stale:
+> **G0.2** lists a gate that had already fired HOLD (CLIP separation 0.020 vs the 0.05 bar, measured three times);
+> the branch invariant says land on `lifelong-revisit-eval`, but `main` has been primary since 2026-07-12;
+> and the whole plan is built on the n=64 controller census, which the 2026-07-16 session found to be measuring
+> bed-triggered interrupts on partly cross-floor geometry (ADR-0003, ADR-0004).
+
 Sequenced from the grilling session that checked the project against the 16-item requirement list.
 The powered val matrix (`anommxv`, n=64) already gave two answers: the controller is a strong systems result (86% full investigate+resume), and the memory soft-SPL delta is an honest null at scale (+0.020, n=48, n.s.).
 This plan builds the pieces that were on the requirement list but missing, and hardens the two claims the paper actually makes.

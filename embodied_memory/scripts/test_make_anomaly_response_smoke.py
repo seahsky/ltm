@@ -88,6 +88,50 @@ def case_source_rejects_too_close():
     assert src["anomaly_object"] == "bed" and src["object_id"] == "bed_1", src
 
 
+def case_source_rejects_other_floor():
+    # ADR-0003, from the real TEEsavR23oF failure: the bed is upstairs (y=3.16),
+    # the chair is on the ground floor (y=0.16) and 3.56 m away in xz — so it
+    # SAILED past the xz-only bar and was picked. The RIR grid then renders on the
+    # source's floor only, and the upstairs starts "hear" it through the ceiling.
+    # A nearer-in-xz cross-floor object must now LOSE to a same-floor one.
+    goals = {
+        "0_bed": [_inst("bed_0", [[0.0, 3.163, 0.0]])],
+        "0_chair": [_inst("chair_0", [[-0.09, 0.163, -3.61]])],    # downstairs, xz 3.61
+        "0_sofa": [_inst("sofa_0", [[8.0, 3.163, 0.0]])],          # same floor, xz 8.0
+    }
+    src = n3.pick_anomaly_source(goals, ["bed", "chair", "sofa"], "bed",
+                                 [0.0, 3.163, 0.0], min_sep_m=3.0)
+    assert src["anomaly_object"] == "sofa", \
+        f"a cross-floor source must be rejected even though it is nearer in xz; got {src}"
+
+
+def case_source_raises_when_only_other_floor():
+    # No same-floor candidate → the cell cannot be decoupled honestly, so SKIP it
+    # rather than emit geometry whose audio would be fabricated.
+    goals = {
+        "0_bed": [_inst("bed_0", [[0.0, 3.163, 0.0]])],
+        "0_chair": [_inst("chair_0", [[-0.09, 0.163, -3.61]])],
+    }
+    try:
+        n3.pick_anomaly_source(goals, ["bed", "chair"], "bed", [0.0, 3.163, 0.0],
+                               min_sep_m=3.0)
+        assert False, "only-cross-floor candidates must raise (cell is unbuildable)"
+    except ValueError:
+        pass
+
+
+def case_source_floor_band_is_tunable_and_off_by_default_matches_1m():
+    # The band matches the render path's own same-floor tolerance
+    # (render_rir_grid._nearest_same_floor, y_tol=1.0) so builder and render agree.
+    goals = {
+        "0_bed": [_inst("bed_0", [[0.0, 0.0, 0.0]])],
+        "0_chair": [_inst("chair_0", [[5.0, 0.9, 0.0]])],   # 0.9 m up: a ramp/step, same floor
+    }
+    src = n3.pick_anomaly_source(goals, ["bed", "chair"], "bed", [0.0, 0.0, 0.0],
+                                 min_sep_m=3.0)
+    assert src["anomaly_object"] == "chair", f"0.9 m is within the 1.0 m band; got {src}"
+
+
 def case_source_falls_back_to_other_instance_same_category():
     # only bed instances present → decouple by a DIFFERENT instance of bed.
     goals = {"0_bed": [_inst("bed_0", [[0.0, 0.0, 0.0]]), _inst("bed_1", [[6.0, 0.0, 0.0]])]}
@@ -253,6 +297,41 @@ def case_pick_two_rooms_finds_both_polarities():
     assert pair["anomalous"]["anomaly_object"] == "chair", pair     # living_room → anomalous
 
 
+def case_pick_two_rooms_rejects_other_floor():
+    # ADR-0003 applies to BOTH polarities: each family renders its own single-source
+    # grid at its own source, so an off-floor source fabricates audio for that whole
+    # family. A downstairs toilet must lose to an upstairs one even though it is
+    # nearer in xz — otherwise the discrimination arm (which ADR-0004 makes the
+    # paper's entire discrimination claim) measures a sound heard through a ceiling.
+    goals = {
+        "0_bed": [_inst("bed_0", [[0.0, 3.163, 0.0]])],                 # primary, upstairs
+        "0_toilet": [_inst("toilet_down", [[4.0, 0.163, 0.0]]),         # downstairs, xz 4
+                     _inst("toilet_up", [[7.0, 3.163, 0.0]])],          # upstairs,   xz 7
+        "0_chair": [_inst("chair_0", [[4.0, 3.163, 0.0]])],             # upstairs
+    }
+    pair = n3.pick_two_rooms_sources(goals, ["bed", "toilet", "chair"], "bed",
+                                     [0.0, 3.163, 0.0], "running_water", min_sep_m=3.0)
+    assert pair["normal"]["object_id"] == "toilet_up", \
+        f"the nearer toilet is a floor down and must be rejected; got {pair['normal']}"
+    assert pair["anomalous"]["anomaly_object"] == "chair", pair
+
+
+def case_pick_two_rooms_raises_when_a_polarity_is_only_off_floor():
+    # The only room-normal object is downstairs → this cell cannot exercise the
+    # two-rooms test honestly → SKIP, rather than build it on fabricated audio.
+    goals = {
+        "0_bed": [_inst("bed_0", [[0.0, 3.163, 0.0]])],
+        "0_toilet": [_inst("toilet_down", [[4.0, 0.163, 0.0]])],   # normal, wrong floor
+        "0_chair": [_inst("chair_0", [[4.0, 3.163, 0.0]])],        # anomalous, same floor
+    }
+    try:
+        n3.pick_two_rooms_sources(goals, ["bed", "toilet", "chair"], "bed",
+                                  [0.0, 3.163, 0.0], "running_water", min_sep_m=3.0)
+        assert False, "a polarity available only off-floor must raise (cell unbuildable)"
+    except ValueError:
+        pass
+
+
 def case_pick_two_rooms_raises_without_a_normal_source():
     # no bathroom/kitchen object → running water is anomalous everywhere → no normal
     goals = {"0_bed": [_inst("bed_0", [[0.0, 0.0, 0.0]])],
@@ -344,6 +423,9 @@ def main() -> int:
         case_source_nearest_among_qualifying_other_category,
         case_source_uses_valid_viewpoint_when_top_iou_lacks_position,
         case_source_raises_when_no_decoupled_candidate,
+        case_source_rejects_other_floor,
+        case_source_raises_when_only_other_floor,
+        case_source_floor_band_is_tunable_and_off_by_default_matches_1m,
         case_issues_clean_ok,
         case_issues_permit_anomaly_object_differs,
         case_issues_fail_source_co_located_with_goal,
@@ -355,6 +437,8 @@ def main() -> int:
         case_build_source_decoupled_from_goal,
         case_expected_interrupt_flips_on_room,
         case_pick_two_rooms_finds_both_polarities,
+        case_pick_two_rooms_rejects_other_floor,
+        case_pick_two_rooms_raises_when_a_polarity_is_only_off_floor,
         case_pick_two_rooms_raises_without_a_normal_source,
         case_two_rooms_builds_both_families_same_clip,
         case_two_rooms_construction_issues_clean,

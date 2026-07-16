@@ -107,6 +107,13 @@ NORMAL_PROMPTS: Tuple[str, ...] = (
 # ----------------------------------------------------------------------
 
 
+class OutOfCoverageError(LookupError):
+    """The RIR grid has no cell describing this pose, so there is no audio to
+    render. Raised only by the ``nearest`` floor guard (ADR-0003). Callers on the
+    live path map it to silence; it is an expected condition, not a bug — unlike
+    the ``ValueError`` raised when the guard itself is misconfigured."""
+
+
 class RIRGrid:
     """A precomputed binaural RIR grid for one (scene, source).
 
@@ -121,10 +128,16 @@ class RIRGrid:
         source (``None`` on legacy grids saved before this field existed). Lets
         the non-LOS seed picker detect "around-a-corner" cells (geodesic ≫ the
         straight-line distance) without re-opening the sim.
+    ear_height_m : float | None       the listener height the cells were rendered
+        at, i.e. ``cell_y == navmesh_y + ear_height_m`` (``None`` on legacy grids).
+        Required by the ``nearest`` floor guard: a runtime agent pose carries the
+        NAVMESH y, so only ``agent_y + ear_height_m`` is comparable to ``cell_y``.
+        Without it a same-floor pose and a one-floor-up pose are both ~1.5 m from
+        a cell in y and cannot be told apart (ADR-0003).
     """
 
     def __init__(self, cell_positions, source_position, irs, sample_rate, scene_id,
-                 cell_geodesics=None):
+                 cell_geodesics=None, ear_height_m=None):
         self.cell_positions = np.asarray(cell_positions, dtype=np.float32).reshape(-1, 3)
         self.source_position = np.asarray(source_position, dtype=np.float32).reshape(3)
         self.irs = np.asarray(irs, dtype=np.float32)
@@ -145,6 +158,7 @@ class RIRGrid:
                     f"cell_geodesics length {cg.shape[0]} != "
                     f"{self.cell_positions.shape[0]} cells")
             self.cell_geodesics = cg
+        self.ear_height_m = None if ear_height_m is None else float(ear_height_m)
 
     def __len__(self) -> int:
         return int(self.cell_positions.shape[0])
@@ -155,9 +169,27 @@ class RIRGrid:
         a monotone proxy for "how audible the source is" at each cell."""
         return np.sum(np.square(self.irs, dtype=np.float64), axis=(1, 2))
 
-    def nearest(self, agent_pos) -> Tuple[np.ndarray, int, float]:
-        """Nearest cell to ``agent_pos`` by 2-D (x, z) distance — y is ignored
-        (HM3D floors differ in y; the listener grid is at one ear height).
+    def nearest(self, agent_pos, *, max_dy: Optional[float] = None
+                ) -> Tuple[np.ndarray, int, float]:
+        """Nearest cell to ``agent_pos`` by 2-D (x, z) distance.
+
+        ``max_dy=None`` (default): y is ignored entirely — the legacy behaviour,
+        byte-identical for objectnav / audiogoal / revisit, where the source is
+        co-located with the goal so an off-floor lookup cannot arise.
+
+        ``max_dy`` set: only cells on the agent's FLOOR are eligible, i.e. those
+        with ``|agent_y + ear_height_m - cell_y| <= max_dy``. This is not
+        cosmetic. The grid is rendered on ONE floor, so an off-floor pose has no
+        cell that describes it, and resolving one anyway FABRICATES audio — the
+        agent "hears" a source through a storey of concrete (ADR-0003; the
+        render path already guards this via ``_nearest_same_floor``). The ear
+        offset is load-bearing: with a 1.5 m ear height and a 3.0 m storey, a
+        same-floor and a one-floor-up pose are BOTH 1.5 m from the cell in raw y.
+
+        Raises ``OutOfCoverageError`` when guarded and no cell is on the agent's
+        floor (the caller should render silence), and ``ValueError`` when the
+        guard is requested on a grid with no ``ear_height_m`` — a guard that
+        silently no-ops is the failure this exists to prevent.
 
         Returns ``(ir (2, T), cell_idx, distance_m)``.
         """
@@ -166,6 +198,23 @@ class RIRGrid:
             else np.array([p[0], p[1]], dtype=np.float32)
         cxz = self.cell_positions[:, [0, 2]]
         d = np.linalg.norm(cxz - axz[None, :], axis=1)
+        if max_dy is not None:
+            if self.ear_height_m is None:
+                raise ValueError(
+                    "nearest(max_dy=...) needs the grid's ear_height_m to compare a "
+                    "navmesh-y agent pose against ear-height cells; this grid has none "
+                    "(re-render it, or drop the guard). See ADR-0003.")
+            if p.shape[0] < 3:
+                raise ValueError("nearest(max_dy=...) needs a 3-D agent position")
+            ear_y = float(p[1]) + float(self.ear_height_m)
+            on_floor = np.abs(self.cell_positions[:, 1] - ear_y) <= float(max_dy)
+            if not bool(on_floor.any()):
+                raise OutOfCoverageError(
+                    f"no RIR cell within {max_dy} m of the agent's floor "
+                    f"(agent ear y={ear_y:.3f}, grid cell y="
+                    f"{float(self.cell_positions[0, 1]):.3f}); the grid does not "
+                    f"cover this floor, so there is no audio to render.")
+            d = np.where(on_floor, d, np.inf)
         idx = int(np.argmin(d))
         return self.irs[idx], idx, float(d[idx])
 
@@ -173,6 +222,7 @@ class RIRGrid:
     def load(cls, path: str) -> "RIRGrid":
         raw = np.load(path)  # plain arrays only → no allow_pickle
         cg = raw["cell_geodesics"] if "cell_geodesics" in raw.files else None
+        eh = float(raw["ear_height_m"]) if "ear_height_m" in raw.files else None
         return cls(
             cell_positions=raw["cell_positions"],
             source_position=raw["source_position"],
@@ -180,6 +230,7 @@ class RIRGrid:
             sample_rate=int(raw["sample_rate"]),
             scene_id=str(raw["scene_id"]),
             cell_geodesics=cg,
+            ear_height_m=eh,
         )
 
 
@@ -192,6 +243,7 @@ def save_rir_grid(
     sample_rate: int,
     scene_id: str,
     cell_geodesics=None,
+    ear_height_m=None,
 ) -> None:
     """Serialize an RIR grid to a plain ``.npz`` (no object arrays).
 
@@ -203,6 +255,11 @@ def save_rir_grid(
     ``cell_geodesics`` (optional ``(N,)``) persists each cell's geodesic-to-source
     distance for the non-LOS seed picker; omitting it keeps the legacy on-disk
     format (``RIRGrid.load`` reads ``cell_geodesics`` as ``None`` when absent).
+
+    ``ear_height_m`` (optional scalar) persists the listener height the cells were
+    rendered at, which the ``nearest`` floor guard needs to compare a navmesh-y
+    agent pose against an ear-height cell (ADR-0003). Omitting it likewise keeps
+    the legacy on-disk format and leaves the guard unusable on that grid.
     """
     cell_positions = np.asarray(cell_positions, dtype=np.float32).reshape(-1, 3)
     source_position = np.asarray(source_position, dtype=np.float32).reshape(3)
@@ -230,6 +287,8 @@ def save_rir_grid(
                 f"cell_geodesics length {cg.shape[0]} != "
                 f"{cell_positions.shape[0]} cells")
         extra["cell_geodesics"] = cg
+    if ear_height_m is not None:
+        extra["ear_height_m"] = np.float32(float(ear_height_m))
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     np.savez_compressed(

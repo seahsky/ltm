@@ -70,6 +70,11 @@ write_dataset = mk.write_dataset
 _T_ANOM_COLD_DEFAULT = ag._T_ANOM_COLD_DEFAULT   # 10000 (silent)
 _T_ANOM_WARM_DEFAULT = ag._T_ANOM_WARM_DEFAULT   # 30    (fires)
 _MIN_SOURCE_SEP_DEFAULT = 3.0                    # source >= this (xz) from the goal vp
+# ADR-0003: source within this |dy| of the goal = the SAME FLOOR. Matches the
+# render path's own band (render_rir_grid._nearest_same_floor, y_tol=1.0) and the
+# runtime guard's default (run_hm3d_pol._MAX_DY_DEFAULT), so builder, render and
+# runtime all agree on what a floor is.
+_MAX_SOURCE_DY_DEFAULT = 1.0
 # A warm t_anom above this is treated as "never fires during search" (FAIL); a
 # cold t_anom at/below it is "not silent" (FAIL). Matches the audiogoal gate.
 _FIRE_T_BOUND = 100
@@ -82,10 +87,24 @@ def pick_anomaly_source(
     primary_goal_pos: List[float],
     *,
     min_sep_m: float = _MIN_SOURCE_SEP_DEFAULT,
+    max_source_dy_m: float = _MAX_SOURCE_DY_DEFAULT,
 ) -> Dict[str, Any]:
     """Choose the DECOUPLED anomaly source: a real, navmesh-validated goal
-    view_point of a DIFFERENT object, ``>= min_sep_m`` (xz) from the primary goal
-    view_point ``primary_goal_pos``.
+    view_point of a DIFFERENT object, ``>= min_sep_m`` (xz) AND within
+    ``max_source_dy_m`` in y (the SAME FLOOR) of the primary goal view_point
+    ``primary_goal_pos``.
+
+    The floor constraint is not cosmetic (ADR-0003). The RIR grid is rendered on
+    the SOURCE's floor only, and the live lookup resolves cells by xz, so an
+    off-floor source hands every on-goal-floor start a fabricated impulse
+    response — the agent "hears" the sound through a storey of concrete. Worse,
+    the xz-only bar SYSTEMATICALLY PREFERS cross-floor sources: they are xz-near
+    (so they win the nearest-first tie-break) while still clearing ``min_sep_m``.
+    That is precisely what happened in TEEsavR23oF (bed upstairs at y≈3.16, chair
+    picked downstairs at y≈0.16, 3.56 m away in xz), where it also made the
+    detour a stair-climb no investigate budget could fund. The band matches the
+    render path's own same-floor tolerance (``render_rir_grid._nearest_same_floor``,
+    ``y_tol=1.0``) so the builder and the render agree on what a floor is.
 
     Preference order: a DIFFERENT category first (so ``anomaly_object`` differs
     from the find-target — the genuinely-decoupled regime), else a DIFFERENT
@@ -119,10 +138,20 @@ def pick_anomaly_source(
             d = _xz_dist(pos, primary_goal_pos)
             if d is None or d < min_sep_m:
                 continue
+            # ADR-0003: same floor as the goal, else the grid rendered at this
+            # source cannot describe the goal's floor and every on-goal-floor
+            # start hears fabricated audio. Checked BEFORE the nearest-first
+            # tie-break, which would otherwise actively prefer the cross-floor
+            # candidate for being xz-near.
+            if len(pos) < 3 or len(primary_goal_pos) < 3:
+                continue
+            if abs(float(pos[1]) - float(primary_goal_pos[1])) > max_source_dy_m:
+                continue
             candidates.append((d, gkey == primary_gkey, cat, list(pos), inst.get("object_id")))
     if not candidates:
         raise ValueError(
-            f"no object >= {min_sep_m}m (xz) from the primary '{primary_category}' "
+            f"no object >= {min_sep_m}m (xz) and within {max_source_dy_m}m in y "
+            f"(same floor, ADR-0003) of the primary '{primary_category}' "
             f"goal to decouple the anomaly source (single-object scene?)")
     # different category (False) before same category (True); then NEAREST first.
     candidates.sort(key=lambda t: (t[1], t[0]))
@@ -162,14 +191,22 @@ def pick_two_rooms_sources(
     ambiguous_class: str,
     *,
     min_sep_m: float = _MIN_SOURCE_SEP_DEFAULT,
+    max_source_dy_m: float = _MAX_SOURCE_DY_DEFAULT,
 ) -> Dict[str, Dict[str, Any]]:
     """Pick a room-NORMAL and a room-ANOMALOUS decoupled source for the SAME
     ``ambiguous_class``. Each is a real navmesh-valid goal view_point of an object
     whose room (from ``expected_interrupt``) has the required polarity, ``>=
-    min_sep_m`` (xz) from the primary goal, NEAREST-first (reachability discipline,
-    like ``pick_anomaly_source``). Returns ``{"normal": src, "anomalous": src}``.
+    min_sep_m`` (xz) from the primary goal, on the goal's FLOOR (within
+    ``max_source_dy_m`` in y), NEAREST-first (reachability discipline, like
+    ``pick_anomaly_source``). Returns ``{"normal": src, "anomalous": src}``.
     Raises ``ValueError`` if EITHER polarity has no qualifying object (the scene
-    cannot exercise the two-rooms test → skip the cell)."""
+    cannot exercise the two-rooms test → skip the cell).
+
+    The floor constraint applies per-polarity (ADR-0003): each family renders its
+    OWN single-source grid at its OWN source, so an off-floor source fabricates
+    the audio for that whole family — and this arm carries the paper's entire
+    discrimination claim (ADR-0004), which would then be measuring a sound heard
+    through a ceiling."""
     normal: List[Dict[str, Any]] = []
     anomalous: List[Dict[str, Any]] = []
     for cat in all_categories:
@@ -187,14 +224,20 @@ def pick_two_rooms_sources(
             d = _xz_dist(pos, primary_goal_pos)
             if d is None or d < min_sep_m:
                 continue
+            if len(pos) < 3 or len(primary_goal_pos) < 3:
+                continue
+            if abs(float(pos[1]) - float(primary_goal_pos[1])) > max_source_dy_m:
+                continue      # different floor → this family's grid would fabricate
             rec = {"position": list(pos), "anomaly_object": cat,
                    "object_id": inst.get("object_id"), "_d": float(d)}
             (anomalous if pol else normal).append(rec)
     if not normal or not anomalous:
         raise ValueError(
             f"two-rooms needs BOTH a room-normal and a room-anomalous source for "
-            f"'{ambiguous_class}' (normal={len(normal)}, anomalous={len(anomalous)}); "
-            "the scene lacks the required room diversity")
+            f"'{ambiguous_class}' on the goal's floor, >= {min_sep_m}m (xz) and "
+            f"within {max_source_dy_m}m in y (normal={len(normal)}, "
+            f"anomalous={len(anomalous)}); the scene lacks the required room "
+            "diversity on one floor")
     normal.sort(key=lambda r: r["_d"])
     anomalous.sort(key=lambda r: r["_d"])
     return {"normal": normal[0], "anomalous": anomalous[0]}
@@ -223,6 +266,7 @@ def build_two_rooms_dataset(
     *,
     ambiguous_class: str,
     min_source_sep_m: float = _MIN_SOURCE_SEP_DEFAULT,
+    max_source_dy_m: float = _MAX_SOURCE_DY_DEFAULT,
     t_anom_cold: int = _T_ANOM_COLD_DEFAULT,
     t_anom_warm: int = _T_ANOM_WARM_DEFAULT,
     background_class: Optional[str] = None,
@@ -260,7 +304,8 @@ def build_two_rooms_dataset(
         try:
             pair = pick_two_rooms_sources(
                 goals_by_category, all_cats, cat, cold_pose["position"],
-                ambiguous_class, min_sep_m=min_source_sep_m)
+                ambiguous_class, min_sep_m=min_source_sep_m,
+                max_source_dy_m=max_source_dy_m)
         except ValueError:
             continue
 
@@ -321,6 +366,7 @@ def build_dataset(
     *,
     anomaly_class: Optional[str] = None,
     min_source_sep_m: float = _MIN_SOURCE_SEP_DEFAULT,
+    max_source_dy_m: float = _MAX_SOURCE_DY_DEFAULT,
     t_anom_cold: int = _T_ANOM_COLD_DEFAULT,
     t_anom_warm: int = _T_ANOM_WARM_DEFAULT,
     background_class: Optional[str] = None,
@@ -365,7 +411,7 @@ def build_dataset(
         try:
             source = pick_anomaly_source(
                 goals_by_category, all_cats, cat, cold_pose["position"],
-                min_sep_m=min_source_sep_m)
+                min_sep_m=min_source_sep_m, max_source_dy_m=max_source_dy_m)
         except ValueError:
             continue   # cannot decouple in this scene/category → skip (not a crash)
 
@@ -463,6 +509,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="the context-dependent sound for --two-rooms (running_water / appliance_hum)")
     ap.add_argument("--background-class", default=None)
     ap.add_argument("--min-source-sep", type=float, default=_MIN_SOURCE_SEP_DEFAULT)
+    ap.add_argument("--max-source-dy", type=float, default=_MAX_SOURCE_DY_DEFAULT,
+                    help="ADR-0003: source must be within this |dy| of the goal (same floor). "
+                         "An off-floor source makes the single-floor RIR grid fabricate audio "
+                         "for every on-goal-floor start. Matches render_rir_grid y_tol=1.0.")
     ap.add_argument("--min-dist", type=float, default=2.0)
     ap.add_argument("--t-anom-warm", type=int, default=_T_ANOM_WARM_DEFAULT)
     ap.add_argument("--out-dir", required=True)
@@ -481,6 +531,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         content = build_two_rooms_dataset(
             src_content, args.categories, args.n_warm, min_dist=args.min_dist,
             ambiguous_class=args.ambiguous_class, min_source_sep_m=args.min_source_sep,
+            max_source_dy_m=args.max_source_dy,
             t_anom_warm=args.t_anom_warm, background_class=args.background_class)
         issues = (two_rooms_construction_issues(content)
                   + anomaly_response_construction_issues(content, min_source_sep_m=args.min_source_sep))
@@ -488,6 +539,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         content = build_dataset(
             src_content, args.categories, args.n_warm, min_dist=args.min_dist,
             anomaly_class=args.anomaly_class, min_source_sep_m=args.min_source_sep,
+            max_source_dy_m=args.max_source_dy,
             t_anom_warm=args.t_anom_warm, background_class=args.background_class)
         issues = anomaly_response_construction_issues(content, min_source_sep_m=args.min_source_sep)
 

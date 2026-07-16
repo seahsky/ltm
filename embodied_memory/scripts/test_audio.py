@@ -438,6 +438,100 @@ def case_grid_load_legacy_without_geodesics():
     print("  case grid_load_legacy_without_geodesics: OK")
 
 
+def _floor_grid():
+    """A single-floor grid at ear height 1.5 over a navmesh at y=0.163 — the
+    TEEsavR23oF geometry that exposed ADR-0003. An upstairs navmesh sits at
+    y=3.163, i.e. exactly 3.0 m above this floor.
+    """
+    cells = np.array([[0.0, 1.663, 0.0], [2.0, 1.663, 0.0]], dtype=np.float32)
+    irs = np.stack([_binaural_for_azimuth(0.0) for _ in range(2)], axis=0)
+    return audio.RIRGrid(cells, np.array([0.0, 1.663, 0.0], np.float32), irs,
+                         _SR, "TEEsavR23oF", ear_height_m=1.5)
+
+
+def case_nearest_guard_discriminates_floors():
+    # The trap (ADR-0003): a same-floor agent (navmesh y=0.163) and a one-floor-up
+    # agent (y=3.163) are BOTH exactly 1.5 m from a cell at y=1.663. Only
+    # |agent_y + ear_height - cell_y| separates them: 0.0 vs 3.0.
+    g = _floor_grid()
+    _, idx, _ = g.nearest(np.array([1.9, 0.163, 0.0], np.float32), max_dy=1.0)
+    assert idx == 1, f"same-floor pose must resolve; got {idx}"
+    try:
+        g.nearest(np.array([1.9, 3.163, 0.0], np.float32), max_dy=1.0)
+        assert False, "a pose one floor up must NOT resolve to a ground-floor cell"
+    except audio.OutOfCoverageError:
+        pass
+    print("  case nearest_guard_discriminates_floors: OK")
+
+
+def case_nearest_guard_needs_ear_height():
+    # Asking for the guard on a grid that cannot support it must RAISE, never
+    # silently fall back to the unguarded lookup — a silent no-op guard is the
+    # exact failure mode ADR-0003 exists to prevent.
+    cells = np.array([[0.0, 1.663, 0.0]], dtype=np.float32)
+    irs = np.stack([_binaural_for_azimuth(0.0)], axis=0)
+    legacy = audio.RIRGrid(cells, np.zeros(3, np.float32), irs, _SR, "s")
+    assert legacy.ear_height_m is None
+    try:
+        legacy.nearest(np.array([0.0, 0.163, 0.0], np.float32), max_dy=1.0)
+        assert False, "max_dy on an ear-height-less grid must raise"
+    except ValueError:
+        pass
+    print("  case nearest_guard_needs_ear_height: OK")
+
+
+def case_grid_ear_height_roundtrips():
+    # The listener grid sits at EAR height (navmesh_y + ear_height); the runtime
+    # agent pose is at navmesh y. Without the offset a same-floor pose and a
+    # one-floor-up pose are BOTH ~1.5 m from a cell in y and are indistinguishable
+    # (ADR-0003). So the grid must carry the ear height it was rendered at.
+    cells = np.array([[0.0, 1.663, 0.0], [2.0, 1.663, 0.0]], dtype=np.float32)
+    irs = np.stack([_binaural_for_azimuth(0.0) for _ in range(2)], axis=0)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "g.npz")
+        audio.save_rir_grid(path, cell_positions=cells,
+                            source_position=np.zeros(3, np.float32), irs=irs,
+                            sample_rate=_SR, scene_id="s", ear_height_m=1.5)
+        g = audio.RIRGrid.load(path)
+    assert g.ear_height_m is not None, "ear_height_m must survive the round-trip"
+    assert abs(g.ear_height_m - 1.5) < 1e-6, g.ear_height_m
+    print("  case grid_ear_height_roundtrips: OK")
+
+
+def case_grid_load_legacy_without_ear_height():
+    # a grid saved WITHOUT ear height still loads → ear_height_m is None, and the
+    # on-disk format is unchanged (mirrors cell_geodesics). A None ear height means
+    # the floor guard CANNOT engage, which is what keeps legacy grids byte-identical.
+    cells = np.array([[0.0, 1.5, 0.0]], dtype=np.float32)
+    irs = np.stack([_binaural_for_azimuth(0.0)], axis=0)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "g.npz")
+        audio.save_rir_grid(path, cell_positions=cells,
+                            source_position=np.zeros(3, np.float32), irs=irs,
+                            sample_rate=_SR, scene_id="s")
+        raw = np.load(path)
+        assert "ear_height_m" not in raw.files, \
+            f"legacy save must not add keys; got {raw.files}"
+        g = audio.RIRGrid.load(path)
+    assert g.ear_height_m is None
+    print("  case grid_load_legacy_without_ear_height: OK")
+
+
+def case_render_rir_grid_persists_ear_height():
+    # $0 static source guard (the test_active_goal_noop pattern): render_rir_grid
+    # is a soundspaces-env script we cannot execute here, but if it does not pass
+    # ear_height_m to save_rir_grid then EVERY grid loads with ear_height_m=None
+    # and the ADR-0003 floor guard can never engage — it would raise ValueError
+    # on a grid that looks fine. The guard is only as real as the render that
+    # feeds it.
+    src = (_EMB_DIR / "scripts" / "render_rir_grid.py").read_text()
+    assert "--ear-height" in src, "render_rir_grid must still take --ear-height"
+    assert "ear_height_m=" in src, (
+        "render_rir_grid must persist ear_height_m via save_rir_grid, or no "
+        "rendered grid can ever support the ADR-0003 floor guard")
+    print("  case render_rir_grid_persists_ear_height: OK")
+
+
 def main() -> int:
     cases = [
         case_grid_nearest_lookup,
@@ -447,6 +541,11 @@ def main() -> int:
         case_rirgrid_cell_energies_from_irs,
         case_grid_save_load_geodesics_roundtrip,
         case_grid_load_legacy_without_geodesics,
+        case_grid_ear_height_roundtrips,
+        case_grid_load_legacy_without_ear_height,
+        case_nearest_guard_discriminates_floors,
+        case_nearest_guard_needs_ear_height,
+        case_render_rir_grid_persists_ear_height,
         case_render_shape_and_convolution,
         case_render_rms_monotone_with_distance,
         case_doa_recovers_right_and_left,

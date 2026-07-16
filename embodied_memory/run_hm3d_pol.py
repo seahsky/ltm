@@ -37,6 +37,11 @@ from .perception import CLIPKeyframeEncoder, SemanticCaptioner
 from . import audio_task
 from .remembr_backbone import ReMEmbRBuilder, ReMEmbRConfig, ReMEmbRPlanner
 
+# ADR-0003 floor-guard default: the same-floor y band. Matches the render path's
+# own band (render_rir_grid._nearest_same_floor, y_tol=1.0) so the runtime lookup
+# and the render agree on what "same floor" means.
+_MAX_DY_DEFAULT = 1.0
+
 
 # ----------------------------------------------------------------------
 # encoder factory (text side)
@@ -82,6 +87,22 @@ def _resolve_episodes_path_for_split(split: str) -> Optional[str]:
         if os.path.exists(p):
             return p
     return None
+
+
+def _resolve_max_dy(args) -> Optional[float]:
+    """The ADR-0003 floor-guard tolerance for the RIR lookup, or ``None`` (the
+    legacy y-ignoring path) for every task that cannot land off-floor.
+
+    Only ``anomaly_response`` puts the source somewhere other than the goal, so
+    only it can put the agent on a floor the single-floor grid never rendered.
+    ``--audio-max-dy 0`` disables the guard explicitly (for A/B'ing against the
+    fabricated-audio behaviour); the default matches the render path's own
+    same-floor band (``render_rir_grid._nearest_same_floor``, ``y_tol=1.0``).
+    """
+    if str(getattr(args, "task", "objectnav")) != "anomaly_response":
+        return None
+    v = float(getattr(args, "audio_max_dy", _MAX_DY_DEFAULT))
+    return None if v <= 0.0 else v
 
 
 def _build_source(args):
@@ -150,6 +171,11 @@ def _build_source(args):
             getattr(args, "background_clip", None),
             getattr(args, "background_dir", audio_task._ANOMALY_CLIP_DIR_DEFAULT)),
         bg_gain=getattr(args, "bg_gain", 0.0),
+        # ADR-0003 floor guard. Same SOURCE-ctor rule as bg_gain above: it must
+        # reach _audio_render_cfg, not the runner audio_cfg. Only anomaly_response
+        # decouples the source from the goal, so only it can land off-floor; every
+        # other task keeps None => the legacy lookup => byte-identical.
+        max_dy=_resolve_max_dy(args),
     )
 
 
@@ -371,6 +397,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--bg-gain", type=float, default=0.0,
                         help="audiogoal: linear gain on the background bed (0.0 => silent bed / "
                              "byte-identical default). Gate-0b RECOMMEND_BG_GAIN=1.00 clears onset_rms.")
+    parser.add_argument("--audio-max-dy", type=float, default=_MAX_DY_DEFAULT,
+                        help="anomaly_response: ADR-0003 floor guard. The RIR grid covers ONE "
+                             "floor; a pose more than this |dy| off it renders SILENCE instead "
+                             "of snapping to an xz-near cell a storey away and fabricating "
+                             "audio. 0 disables (the pre-ADR-0003 behaviour). Ignored by every "
+                             "other task. Needs a grid rendered with ear_height_m persisted.")
     parser.add_argument("--t-anom", type=int, default=30,
                         help="audiogoal: step index the anomaly begins (silence before).")
     parser.add_argument("--audio-onset-rms", type=float, default=0.05,
