@@ -63,8 +63,32 @@ def episode_row(ep_log: Dict[str, Any], name: str) -> Dict[str, Any]:
     }
 
 
+def onset_provenance(row: Dict[str, Any]) -> str:
+    """WHAT fired this episode's interrupt: ``ANOMALY`` / ``FALSE_FIRE`` /
+    ``NO_ONSET`` / ``UNKNOWN``.
+
+    An onset BEFORE ``t_anom`` cannot be the anomaly — the anomaly is not playing
+    yet, so something else (the background bed) tripped the threshold. This is the
+    only signal that distinguishes a working interrupt from a vacuum cleaner:
+    ``n_audio_onset_fired`` counts onsets rather than causes, and
+    ``n_audio_gate_rejected == 0`` means the gate ACCEPTED the first
+    over-threshold tick (onset is one-shot), not that it had nothing to reject.
+
+    Missing fields read ``UNKNOWN``, never ``ANOMALY``: archived summaries predate
+    these fields, and the entire point is refusing to certify what we cannot see.
+    """
+    if not int(row.get("n_audio_onset_fired") or 0):
+        return "NO_ONSET"
+    step = row.get("audio_onset_step")
+    t_anom = row.get("audio_t_anom")
+    if step is None or t_anom is None:
+        return "UNKNOWN"
+    return "ANOMALY" if int(step) >= int(t_anom) else "FALSE_FIRE"
+
+
 def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     reps = [r for r in rows if r.get("has_report")]
+    prov = [onset_provenance(r) for r in rows]
 
     def _rate(key: str) -> Optional[float]:
         vals = [bool(r[key]) for r in reps if r.get(key) is not None]
@@ -81,6 +105,11 @@ def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "resume_rate": _rate("resumed"),
         "primary_completed_rate": _rate("primary_completed"),
         "primary_completed_1m_rate": _rate("primary_completed_1m"),
+        # Onset provenance — WHAT fired the interrupts (see onset_provenance).
+        "n_onset_anomaly": prov.count("ANOMALY"),
+        "n_onset_false_fire": prov.count("FALSE_FIRE"),
+        "n_onset_unknown": prov.count("UNKNOWN"),
+        "n_onset_none": prov.count("NO_ONSET"),
     }
 
 
@@ -146,6 +175,19 @@ def verdict(agg: Dict[str, Any]) -> Tuple[str, str]:
                 "Reports present but the agent NEVER left SEARCH (onset never "
                 "fired / no source cue). The controller was inert — check "
                 "diagnose_audio_onset (gate/energy).")
+    # Provenance FIRST: a loop is only a loop if the ANOMALY started it. When every
+    # interrupt predates t_anom the machine ran on a false trigger (the background
+    # bed), and certifying that is exactly how runs/anomresp-bed-s{1,3} reported
+    # CONTROLLER_RAN while the alarm never fired anything. Requires at least one
+    # observed false fire, so archived runs (all UNKNOWN) keep the old behaviour.
+    if agg.get("n_onset_false_fire", 0) > 0 and agg.get("n_onset_anomaly", 0) == 0:
+        return ("FALSE_FIRE",
+                f"{agg['n_onset_false_fire']} interrupt(s) fired BEFORE t_anom and "
+                "none after — the anomaly was not playing yet, so something else "
+                "(the background bed) tripped the onset. The controller may have "
+                "run, but it ran on a false trigger: this run does not measure "
+                "anomaly response. Check bg_gain vs onset_rms (ADR-0004) and "
+                "`grep '[audio] onset' the log.")
     if agg["n_full"] > 0:
         return ("CONTROLLER_RAN",
                 f"{agg['n_full']} episode(s) ran onset -> INVESTIGATE -> CHECK -> "
@@ -179,20 +221,33 @@ def _fmt(v: Any) -> str:
 
 
 def _rows_for_dir(run_dir: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """Load one run dir's episode rows + its per-episode onset cross-ref."""
+    """Load one run dir's episode rows + its per-episode onset cross-ref.
+
+    The controller's own ``anomaly_report`` (in episode_*.json) says what the
+    machine DID; only ``summary.episodes`` says what fired it (onset_step vs
+    t_anom). Merge the provenance in, keyed by episode id, so ``aggregate`` can
+    refuse to certify a run whose interrupts predate the sound. Archived summaries
+    lack the fields → the keys stay absent → onset_provenance reads UNKNOWN.
+    """
     summary = _load_json(os.path.join(run_dir, "summary.json")) or {}
     onset_by_id: Dict[str, int] = {}
+    prov_by_id: Dict[str, Dict[str, Any]] = {}
     for ep in (summary.get("episodes") or []):
+        prov = {k: ep[k] for k in ("n_audio_onset_fired", "audio_onset_step",
+                                   "audio_t_anom") if k in ep}
         for k in (ep.get("episode_id"), ep.get("episode_idx")):
             if k is not None:
                 onset_by_id[str(k)] = int(ep.get("n_audio_onset_fired", 0) or 0)
+                prov_by_id[str(k)] = prov
     ep_files = [f for f in sorted(glob.glob(os.path.join(run_dir, "episode_*.json")))
                 if not f.endswith("_error.json")]
     rows = []
     for f in ep_files:
         ep = _load_json(f)
         if ep is not None:
-            rows.append(episode_row(ep, os.path.basename(f)))
+            row = episode_row(ep, os.path.basename(f))
+            row.update(prov_by_id.get(row["episode_id"], {}))
+            rows.append(row)
     return rows, onset_by_id
 
 
@@ -204,14 +259,20 @@ def _print_dir_table(run_dir: str, rows: List[Dict[str, Any]], onset_by_id: Dict
     print(f"=== diagnose_anomaly_controller: {run_dir} ===")
     print(f"  episodes: {len(rows)}")
     print()
-    print(f"  {'episode':<8} {'steps':>5} {'onset':>5} {'inves':>5} {'resum':>5} "
-          f"{'abort':>5} {'compl':>5} {'compl1m':>7} {'benign':>6} {'succ1m':>6} {'class':>7}")
+    # step@ / t_anom / fired: the provenance columns. Reading them side by side is
+    # the whole check — step@ < t_anom means the anomaly wasn't playing yet.
+    print(f"  {'episode':<8} {'steps':>5} {'onset':>5} {'step@':>5} {'t_anom':>6} "
+          f"{'fired':>10} {'inves':>5} {'resum':>5} {'abort':>5} {'compl1m':>7} "
+          f"{'benign':>6} {'succ1m':>6} {'class':>7}")
     for r in rows:
         onset = onset_by_id.get(r["episode_id"], onset_by_id.get(
             r["name"].replace("episode_", "").replace(".json", "").lstrip("0") or "0"))
+        prov = onset_provenance(r)
         print(f"  {r['episode_id']:<8} {_fmt(r['n_steps']):>5} {_fmt(onset):>5} "
+              f"{_fmt(r.get('audio_onset_step')):>5} {_fmt(r.get('audio_t_anom')):>6} "
+              f"{prov:>10} "
               f"{_fmt(r['investigated']):>5} {_fmt(r['resumed']):>5} "
-              f"{_fmt(r['investigate_aborted']):>5} {_fmt(r['primary_completed']):>5} "
+              f"{_fmt(r['investigate_aborted']):>5} "
               f"{_fmt(r['primary_completed_1m']):>7} {_fmt(r['n_benign_ignored']):>6} "
               f"{_fmt(r['success_1m']):>6} {_fmt(r['anomaly_class']):>7}")
 
@@ -224,6 +285,10 @@ def _print_agg(agg: Dict[str, Any], label: str = "") -> None:
           f"aborted={agg['n_aborted']}  full(inv+res)={agg['n_full']}")
     print(f"  primary_completed@0.1m rate={_pct(agg['primary_completed_rate'])}  "
           f"@1.0m rate={_pct(agg['primary_completed_1m_rate'])}")
+    print(f"  onset provenance: anomaly={agg.get('n_onset_anomaly', 0)}  "
+          f"FALSE_FIRE={agg.get('n_onset_false_fire', 0)}  "
+          f"none={agg.get('n_onset_none', 0)}  unknown={agg.get('n_onset_unknown', 0)}"
+          "   [FALSE_FIRE = onset fired BEFORE t_anom => not the anomaly]")
 
 
 def _print_discrimination(rows: List[Dict[str, Any]], label: str = "") -> None:

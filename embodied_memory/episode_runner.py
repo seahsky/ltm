@@ -124,6 +124,18 @@ class RunSummary:
     n_audio_writes: int = 0
     n_audio_event_recalled: int = 0
     n_query_expanded: int = 0         # times the query-side instance fix re-queried (LTM_QUERY_EXPANSION)
+    # ONSET PROVENANCE — the ONLY fields that say WHAT fired the interrupt.
+    # n_audio_onset_fired counts onsets, not causes; n_audio_gate_rejected==0 means
+    # the gate ACCEPTED the first over-threshold tick (onset is one-shot), not that
+    # it had nothing to reject. An onset BEFORE t_anom cannot be the anomaly — the
+    # anomaly is not playing yet. That comparison caught a run where all 8 onsets
+    # fired on the background bed at step 0-10 vs t_anom=30 while every counter,
+    # the controller verdict and a p=0.000 delta all read green. onset_step lived
+    # only in the keyframe-sparse ep_log["steps"], whose sparsity had already
+    # defeated diagnose_audio_onset once, so it has to be here.
+    # None (not 0) when no onset: step 0 is a REAL — and the worst — onset step.
+    audio_onset_step: Optional[int] = None
+    audio_t_anom: Optional[int] = None
     modules_invoked: Dict[str, bool] = field(default_factory=dict)
     ablation: Dict[str, Any] = field(default_factory=dict)
     pass_conditions: Dict[str, bool] = field(default_factory=dict)
@@ -168,6 +180,8 @@ class RunSummary:
             "n_audio_writes": self.n_audio_writes,
             "n_audio_event_recalled": self.n_audio_event_recalled,
             "n_query_expanded": self.n_query_expanded,
+            "audio_onset_step": self.audio_onset_step,
+            "audio_t_anom": self.audio_t_anom,
             "modules_invoked": self.modules_invoked,
             "ablation": self.ablation,
             "pass_conditions": self.pass_conditions,
@@ -957,6 +971,13 @@ class EpisodeRunner:
                 # attempted? why skipped?) — turns a 0-write smoke into a one-row
                 # verdict (see the decision table).
                 "n_audio_onset_fired": int(ep_metrics.get("n_audio_onset_fired", 0)),
+                # ONSET PROVENANCE: onset_step < t_anom => the anomaly wasn't
+                # playing => whatever fired the interrupt, it wasn't the anomaly.
+                # Both must be per-EPISODE: t_anom differs cold (silent, 10000)
+                # vs warm (fires, 30), so the run-level ablation.t_anom cannot
+                # answer this. None when no onset (0 is a real onset step).
+                "audio_onset_step": ep_metrics.get("audio_onset_step"),
+                "audio_t_anom": ep_metrics.get("audio_t_anom"),
                 "audio_energy_max": float(ep_metrics.get("audio_energy_max", 0.0)),
                 "n_audio_energy_over_onset": int(ep_metrics.get("n_audio_energy_over_onset", 0)),
                 "n_audio_gate_rejected": int(ep_metrics.get("n_audio_gate_rejected", 0)),
@@ -1211,6 +1232,10 @@ class EpisodeRunner:
             "audio_energy_max": 0.0,
             "n_audio_energy_over_onset": 0,
             "n_audio_gate_rejected": 0,
+            # ONSET PROVENANCE (see RunSummary.audio_onset_step): WHAT fired, not
+            # just whether something did. None until an onset actually fires.
+            "audio_onset_step": None,
+            "audio_t_anom": None,
             "n_audio_write_attempts": 0,
             "audio_write_skip_reason": None,
         }
@@ -1389,6 +1414,11 @@ class EpisodeRunner:
                         ep_metrics_counters["n_audio_gate_rejected"] += 1
                 if _adiag.get("onset_fired"):
                     ep_metrics_counters["n_audio_onset_fired"] += 1
+                    # Provenance: stamp WHEN it fired against the t_anom in force
+                    # for THIS episode. Onset is one-shot, so this records the
+                    # first (and only) firing.
+                    ep_metrics_counters["audio_onset_step"] = int(step.step_idx)
+                    ep_metrics_counters["audio_t_anom"] = int(self._audio_cfg.t_anom)
                     # Show BOTH the heard-class affordance (CLASS_TO_OBJECT, the
                     # 'heard->' field) AND the RESOLVED retrieval target that
                     # propose_memory_candidates actually queries. In onset-trigger
