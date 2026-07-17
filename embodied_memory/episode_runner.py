@@ -21,7 +21,7 @@ import json
 import os
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
@@ -133,6 +133,7 @@ class RunSummary:
     # n_scored high AND spread 0.0 is the vacuous arm the driver must FATAL on.
     n_semantic_scored: int = 0        # frontier candidates that got a semantic blend
     semantic_spread_max: float = 0.0  # max (max-min) semantic_value over one propose()
+    n_frontier_navmesh_dropped: int = 0  # frontier candidates dropped as navmesh-unreachable (REMEMBR_NAVMESH_FRONTIER)
     # ONSET PROVENANCE — the ONLY fields that say WHAT fired the interrupt.
     # n_audio_onset_fired counts onsets, not causes; n_audio_gate_rejected==0 means
     # the gate ACCEPTED the first over-threshold tick (onset is one-shot), not that
@@ -191,6 +192,7 @@ class RunSummary:
             "n_query_expanded": self.n_query_expanded,
             "n_semantic_scored": self.n_semantic_scored,
             "semantic_spread_max": self.semantic_spread_max,
+            "n_frontier_navmesh_dropped": self.n_frontier_navmesh_dropped,
             "audio_onset_step": self.audio_onset_step,
             "audio_t_anom": self.audio_t_anom,
             "modules_invoked": self.modules_invoked,
@@ -440,6 +442,41 @@ def _consume_memory_applies(multion: bool, task: str, consume_singlegoal: bool) 
     only when ``REMEMBR_CONSUME_SINGLEGOAL`` is set (default-OFF → the guards stay
     ``multion``-only → byte-identical for objectnav/revisit/multion/audiogoal)."""
     return bool(multion or (task == "audiogoal" and consume_singlegoal))
+
+
+def _navmesh_reachable_frontiers(candidates, agent_pos, snap_point, geodesic):
+    """Return the frontier candidates the navmesh can route to from ``agent_pos``,
+    each snapped to its navmesh point; drop the rest.
+
+    The R1 spin: the frontier planner scores clusters on the noisy depth-derived
+    occupancy grid, which disagrees with the navmesh, so it proposes waypoints the
+    follower can never reach (behind a wall / on a disconnected island). The
+    un-gated snap-escape only band-aids individual bad waypoints. This drops them
+    at the source: a frontier is kept only if ``geodesic(agent, snap(wp))`` is
+    finite, and its ``world_xy`` is replaced (``dataclasses.replace`` — inputs are
+    never mutated) with the reachable navmesh point so the follower routes cleanly.
+
+    ``snap_point(xyz)->xyz`` and ``geodesic(a_xyz, b_xyz)->float|None`` are the sim
+    callables, injected so this is testable without Habitat. ``agent_pos`` is 3-D.
+    Returns ``[]`` when every candidate drops — the caller owns the never-strand
+    fallback (an empty pool must never reach the reranker)."""
+    ax, ay, az = float(agent_pos[0]), float(agent_pos[1]), float(agent_pos[2])
+    a3 = np.array([ax, ay, az], dtype=np.float32)
+    out: List[FrontierCandidate] = []
+    for c in candidates:
+        wx, wz = float(c.world_xy[0]), float(c.world_xy[1])
+        sp = snap_point([wx, ay, wz])
+        if sp is None:
+            continue
+        sp = np.asarray(sp, dtype=np.float32).reshape(-1)
+        if sp.shape[0] < 3 or not bool(np.all(np.isfinite(sp))):
+            continue
+        geo = geodesic(a3, sp)
+        if geo is None or not np.isfinite(float(geo)):
+            continue
+        out.append(replace(
+            c, world_xy=np.array([float(sp[0]), float(sp[2])], dtype=np.float32)))
+    return out
 
 
 def _antithrash_applies(multion: bool, antithrash_singlegoal: bool) -> bool:
@@ -877,6 +914,13 @@ class EpisodeRunner:
         # (default-OFF -> byte-identical; unlike the consume flag this is not
         # audiogoal-scoped, since the spin is a single-goal-search property).
         self._antithrash_singlegoal: bool = bool(os.environ.get("REMEMBR_ANTITHRASH_SINGLEGOAL"))
+        # Navmesh-aware frontier filter (R1 deep fix): the escape only band-aids
+        # bad committed waypoints; the ROOT is the planner proposing navmesh-
+        # unreachable frontiers (grid disagrees with the navmesh). When on, drop
+        # frontier candidates the navmesh can't route to at proposal time.
+        # Default-OFF -> byte-identical (the filter method returns its input).
+        self._navmesh_frontier: bool = bool(os.environ.get("REMEMBR_NAVMESH_FRONTIER"))
+        self._n_frontier_navmesh_dropped: int = 0
         # Windowed no-progress escape (full2 ep4, forward-into-wall): when
         # >= MIN of the last WINDOW ticks were no-progress forwards, blacklist
         # the committed waypoint, drop it, and force a re-propose. The
@@ -1088,6 +1132,7 @@ class EpisodeRunner:
         # these come off the runner's own accumulation (_accumulate_semantic_diag).
         summary.n_semantic_scored = int(self._n_semantic_scored)
         summary.semantic_spread_max = float(self._semantic_spread_max)
+        summary.n_frontier_navmesh_dropped = int(self._n_frontier_navmesh_dropped)
         summary.ablation = {
             **bridge_stats.get("ablation", {}),
             **{k: v for k, v in self.run_config.items() if k not in {"setting"}},
@@ -2680,6 +2725,40 @@ class EpisodeRunner:
         if sp is not None:
             self._semantic_spread_max = max(self._semantic_spread_max, float(sp))
 
+    def _apply_navmesh_frontier_filter(self, frontier_cands, agent_pos):
+        """Drop navmesh-unreachable frontier candidates (env REMEMBR_NAVMESH_FRONTIER).
+
+        Wires ``self.source.get_sim()`` into ``_navmesh_reachable_frontiers``.
+        OFF (default), no sim, or empty input -> returns the input object
+        unchanged (byte-identical). Never strands: if EVERY frontier is
+        unreachable, falls back to the input rather than an empty pool.
+        Accumulates the drop count so a run can show the filter fired."""
+        if not self._navmesh_frontier or not frontier_cands:
+            return frontier_cands
+        sim = self.source.get_sim()
+        if sim is None:
+            return frontier_cands
+
+        def _snap(xyz):
+            try:
+                p = sim.pathfinder.snap_point(np.asarray(xyz, dtype=np.float32))
+                return [float(p[0]), float(p[1]), float(p[2])]
+            except Exception:
+                return None
+
+        def _geo(a, b):
+            try:
+                return sim.geodesic_distance(a, b)
+            except Exception:
+                return None
+
+        reachable = _navmesh_reachable_frontiers(
+            frontier_cands, agent_pos, _snap, _geo)
+        if not reachable:
+            return frontier_cands  # never strand: all unreachable -> keep input
+        self._n_frontier_navmesh_dropped += len(frontier_cands) - len(reachable)
+        return reachable
+
     def _propose_candidates(
         self, step: Step, ep, goal_override: Optional[str] = None
     ) -> List[FrontierCandidate]:
@@ -2728,6 +2807,10 @@ class EpisodeRunner:
         )
         for fc in frontier_cands:
             fc.source = "frontier"
+        # Navmesh-aware filter (R1 deep fix): drop frontiers the follower can't
+        # route to before they enter the pool. No-op unless REMEMBR_NAVMESH_FRONTIER.
+        frontier_cands = self._apply_navmesh_frontier_filter(
+            frontier_cands, step.agent_state.position)
 
         # De-dup: drop frontier candidates within MIN_WAYPOINT_DIST of any LLM
         # candidate, so identical "1.5 m forward" picks don't crowd the pool.

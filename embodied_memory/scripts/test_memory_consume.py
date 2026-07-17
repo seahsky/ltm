@@ -558,6 +558,105 @@ def case_snap_once_then_blacklist():
     print("  case_snap_once_then_blacklist: OK")
 
 
+def _frontier(cid, xy):
+    return er.FrontierCandidate(
+        candidate_id=cid, world_xy=np.array(xy, dtype=np.float32),
+        grid_rc=(0, 0), distance_m=float(np.hypot(*xy)), bearing_rad=0.0,
+        cluster_size=1, raw_score=0.5, source="frontier", metadata={})
+
+
+class _MixedSimSource(_StubSource):
+    """Sim where the frontier at x=2 is navmesh-reachable (finite geodesic) and
+    everything else is unreachable (inf) — the grid-vs-navmesh disagreement."""
+
+    def get_sim(self):
+        return SimpleNamespace(
+            pathfinder=SimpleNamespace(
+                snap_point=lambda g: np.array([float(g[0]), 0.0, float(g[2])],
+                                              dtype=np.float32)),
+            geodesic_distance=lambda a, b: (3.0 if abs(float(b[0]) - 2.0) < 1e-6
+                                            else float("inf")))
+
+
+class _UnreachSimSource(_StubSource):
+    """Sim where EVERY frontier is navmesh-unreachable (geodesic inf)."""
+
+    def get_sim(self):
+        return SimpleNamespace(
+            pathfinder=SimpleNamespace(
+                snap_point=lambda g: np.array([float(g[0]), 0.0, float(g[2])],
+                                              dtype=np.float32)),
+            geodesic_distance=lambda a, b: float("inf"))
+
+
+def case_navmesh_keeps_reachable_drops_unreachable():
+    # The core fix: a frontier the navmesh can route to (finite geodesic) is
+    # kept and snapped to its navmesh point; one it can't (behind a wall /
+    # disconnected island — the R1 spin source) is dropped. Pure: sim callables
+    # injected, no Habitat.
+    cands = [_frontier(1, (2.0, 0.0)), _frontier(2, (5.0, 5.0))]
+    snap = lambda xyz: [float(xyz[0]), 0.0, float(xyz[2])]
+    geo = lambda a, b: 3.0 if abs(float(b[0]) - 2.0) < 1e-6 else float("inf")
+    out = er._navmesh_reachable_frontiers(cands, np.zeros(3, np.float32), snap, geo)
+    assert [c.candidate_id for c in out] == [1], [c.candidate_id for c in out]
+    assert abs(float(out[0].world_xy[0]) - 2.0) < 1e-6
+    # input NOT mutated (dataclasses.replace, not in-place)
+    assert cands[0] is not out[0] and cands[0].source == "frontier"
+    print("  case_navmesh_keeps_reachable_drops_unreachable: OK")
+
+
+def case_navmesh_all_unreachable_returns_empty():
+    cands = [_frontier(1, (5.0, 5.0)), _frontier(2, (6.0, 6.0))]
+    out = er._navmesh_reachable_frontiers(
+        cands, np.zeros(3, np.float32),
+        lambda xyz: [float(xyz[0]), 0.0, float(xyz[2])], lambda a, b: float("inf"))
+    assert out == [], out
+    print("  case_navmesh_all_unreachable_returns_empty: OK")
+
+
+def case_navmesh_nonfinite_snap_dropped():
+    cands = [_frontier(1, (2.0, 0.0))]
+    out = er._navmesh_reachable_frontiers(
+        cands, np.zeros(3, np.float32),
+        lambda xyz: [float("nan"), 0.0, 0.0], lambda a, b: 3.0)
+    assert out == [], out
+    print("  case_navmesh_nonfinite_snap_dropped: OK")
+
+
+def case_navmesh_filter_off_byte_identical():
+    # Default (flag unset): the wiring method returns the input UNCHANGED (same
+    # object) — byte-identical for every existing run.
+    runner = _mk_runner(_MixedSimSource(seq=None), _FarFrontierPlanner())
+    cands = [_frontier(1, (2.0, 0.0)), _frontier(2, (5.0, 5.0))]
+    out = runner._apply_navmesh_frontier_filter(cands, np.zeros(3, np.float32))
+    assert out is cands, "flag OFF must return the input object unchanged"
+    print("  case_navmesh_filter_off_byte_identical: OK")
+
+
+def case_navmesh_filter_on_drops_unreachable():
+    def run():
+        runner = _mk_runner(_MixedSimSource(seq=None), _FarFrontierPlanner())
+        cands = [_frontier(1, (2.0, 0.0)), _frontier(2, (5.0, 5.0))]
+        return runner._apply_navmesh_frontier_filter(cands, np.zeros(3, np.float32))
+
+    out = _with_env({"REMEMBR_NAVMESH_FRONTIER": 1}, run)
+    assert [c.candidate_id for c in out] == [1], [c.candidate_id for c in out]
+    print("  case_navmesh_filter_on_drops_unreachable: OK")
+
+
+def case_navmesh_filter_never_strands():
+    # All frontiers unreachable + flag ON: fall back to the input (never strand
+    # the agent with an empty pool).
+    def run():
+        runner = _mk_runner(_UnreachSimSource(seq=None), _FarFrontierPlanner())
+        cands = [_frontier(1, (5.0, 5.0)), _frontier(2, (6.0, 6.0))]
+        return runner._apply_navmesh_frontier_filter(cands, np.zeros(3, np.float32)), cands
+
+    out, cands = _with_env({"REMEMBR_NAVMESH_FRONTIER": 1}, run)
+    assert out is cands, "all-unreachable must fall back to the input (never strand)"
+    print("  case_navmesh_filter_never_strands: OK")
+
+
 def case_antithrash_applies_helper():
     # The gate that ungates the unreachable-blacklist + snap-escape for ANY
     # single-goal task (REMEMBR_ANTITHRASH_SINGLEGOAL). Unlike the consume gate
@@ -616,6 +715,12 @@ def case_consume_applies_helper():
 
 def main() -> int:
     print("memory-consumption sanity tests")
+    case_navmesh_keeps_reachable_drops_unreachable()
+    case_navmesh_all_unreachable_returns_empty()
+    case_navmesh_nonfinite_snap_dropped()
+    case_navmesh_filter_off_byte_identical()
+    case_navmesh_filter_on_drops_unreachable()
+    case_navmesh_filter_never_strands()
     case_antithrash_applies_helper()
     case_single_goal_unreachable_no_escape_default()
     case_single_goal_unreachable_escape_with_flag()
