@@ -558,6 +558,47 @@ def case_snap_once_then_blacklist():
     print("  case_snap_once_then_blacklist: OK")
 
 
+def case_antithrash_applies_helper():
+    # The gate that ungates the unreachable-blacklist + snap-escape for ANY
+    # single-goal task (REMEMBR_ANTITHRASH_SINGLEGOAL). Unlike the consume gate
+    # this is task-agnostic (R1 is objectnav, not audiogoal). Default-OFF must
+    # be byte-identical (multion-only).
+    f = er._antithrash_applies
+    assert f(True, False) is True    # multion always, flag irrelevant
+    assert f(True, True) is True
+    assert f(False, False) is False  # single-goal OFF by default => byte-identical
+    assert f(False, True) is True    # flag ungates single-goal (any task)
+    print("  case_antithrash_applies_helper: OK")
+
+
+def case_single_goal_unreachable_no_escape_default():
+    # The R1 spin, reproduced: single-goal (multion=False) with a frontier the
+    # follower rejects every tick. The unreachable blacklist + snap-escape are
+    # multion-gated, so by DEFAULT the escape never fires and the agent counts
+    # unreachables to the step cap (n_waypoint_unreachable high, escape 0) — the
+    # byte-identical legacy behaviour behind R1's min_d2g 8 m / turn-forever.
+    runner = _mk_runner(_SameSnapSimSource(seq=None), _OnlyUnreachablePlanner(),
+                        cls=_UnreachableAt55Runner)
+    ep_log, metrics = runner._run_episode(0)
+    assert ep_log["n_unreachable_escape"] == 0, ep_log["n_unreachable_escape"]
+    assert ep_log["n_waypoint_unreachable"] >= 5, ep_log["n_waypoint_unreachable"]
+    print("  case_single_goal_unreachable_no_escape_default: OK")
+
+
+def case_single_goal_unreachable_escape_with_flag():
+    # REMEMBR_ANTITHRASH_SINGLEGOAL=1 ungates the SAME escape for single-goal:
+    # the snap-escape now fires, breaking the turn-forever loop. Same stubs as
+    # the multion case_snap_once_then_blacklist, only single-goal + the flag.
+    def run():
+        runner = _mk_runner(_SameSnapSimSource(seq=None), _OnlyUnreachablePlanner(),
+                            cls=_UnreachableAt55Runner)
+        return runner._run_episode(0)
+
+    ep_log, metrics = _with_env({"REMEMBR_ANTITHRASH_SINGLEGOAL": 1}, run)
+    assert ep_log["n_unreachable_escape"] >= 1, ep_log["n_unreachable_escape"]
+    print("  case_single_goal_unreachable_escape_with_flag: OK")
+
+
 def case_consume_applies_helper():
     # The gate that ungates consumption for single-goal AudioGoal
     # (REMEMBR_CONSUME_SINGLEGOAL). Default-OFF must be byte-identical.
@@ -575,6 +616,9 @@ def case_consume_applies_helper():
 
 def main() -> int:
     print("memory-consumption sanity tests")
+    case_antithrash_applies_helper()
+    case_single_goal_unreachable_no_escape_default()
+    case_single_goal_unreachable_escape_with_flag()
     case_consume_applies_helper()
     case_follower_reached_memory_consumed()
     case_distance_trigger_memory_consumed()

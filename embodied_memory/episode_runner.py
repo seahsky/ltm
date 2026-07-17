@@ -442,6 +442,20 @@ def _consume_memory_applies(multion: bool, task: str, consume_singlegoal: bool) 
     return bool(multion or (task == "audiogoal" and consume_singlegoal))
 
 
+def _antithrash_applies(multion: bool, antithrash_singlegoal: bool) -> bool:
+    """Whether the unreachable-waypoint blacklist + snap-escape run this episode.
+
+    Always for MultiON. For single-goal (ANY task — R1 is objectnav) only when
+    ``REMEMBR_ANTITHRASH_SINGLEGOAL`` is set. Default-OFF → ``multion``-only →
+    byte-identical. The escape converts a follower-unreachable frontier into a
+    reachable navmesh point; without it a single-goal agent that picks an
+    unreachable frontier re-proposes the same cluster forever (the R1 val_mini
+    turn-forever spin: n_waypoint_unreachable 60-99/ep, min_d2g stuck ~8 m).
+    Task-agnostic (unlike ``_consume_memory_applies``) because the spin is a
+    property of single-goal search, not of AudioGoal."""
+    return bool(multion or antithrash_singlegoal)
+
+
 def _filter_candidates_near_points(
     cands: List[FrontierCandidate],
     points,
@@ -856,6 +870,13 @@ class EpisodeRunner:
         # ungates the SAME consumption/filter machinery for single-goal audiogoal
         # (default-OFF -> every guard byte-identical; only audiogoal is affected).
         self._consume_singlegoal: bool = bool(os.environ.get("REMEMBR_CONSUME_SINGLEGOAL"))
+        # The unreachable-blacklist + snap-escape are ALSO MultiON-gated, so a
+        # single-goal search (R1 objectnav, memory-off) that picks a follower-
+        # unreachable frontier has no recovery and spins to the step cap.
+        # REMEMBR_ANTITHRASH_SINGLEGOAL=1 ungates that escape for single-goal
+        # (default-OFF -> byte-identical; unlike the consume flag this is not
+        # audiogoal-scoped, since the spin is a single-goal-search property).
+        self._antithrash_singlegoal: bool = bool(os.environ.get("REMEMBR_ANTITHRASH_SINGLEGOAL"))
         # Windowed no-progress escape (full2 ep4, forward-into-wall): when
         # >= MIN of the last WINDOW ticks were no-progress forwards, blacklist
         # the committed waypoint, drop it, and force a re-propose. The
@@ -1289,6 +1310,10 @@ class EpisodeRunner:
             subgoal_seq = [str(ep.target_category)]
         n_subgoals = len(subgoal_seq)
         multion = n_subgoals > 1 and not is_oracle
+        # Whether the unreachable-blacklist + snap-escape run this episode
+        # (multion, or single-goal with REMEMBR_ANTITHRASH_SINGLEGOAL). Default
+        # single-goal is False => the escape gate below is byte-identical.
+        antithrash = _antithrash_applies(multion, self._antithrash_singlegoal)
         subgoal_idx = 0
         active_category: str = subgoal_seq[0]
         # E4: single mutable "currently-active goal" — for every non-anomaly task
@@ -2084,7 +2109,7 @@ class EpisodeRunner:
                                 dtype=np.float32))
                             ep_metrics_counters["n_memory_consumed"] += 1
                     if (
-                        multion
+                        antithrash
                         and _outcome == "unreachable"
                         and current_candidate is not None
                     ):
