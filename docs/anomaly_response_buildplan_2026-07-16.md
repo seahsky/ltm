@@ -121,10 +121,12 @@ It was a pipeline smoke, run as a raw `run_hm3d_pol` call — **not** the R1 dri
 - **D2 — the exit-code semantics are now setting-aware.**
   A memory-off `--setting 1` run passes on `no_crash` alone; memory-ON settings keep the strict full gate.
   This kills the false ❌ that trains the operator to ignore ❌ on baselines (the inverse of the open-risk-#5 alarm-fatigue failure). Landed (below).
-- **D3 — R1 is blocked on a benchmark-comparable SPL.**
-  The harness scores native `spl` at the 0.1 m ring (localization-bound) and `success_1m` is STOP-independent; there is no path-weighted SPL@1.0 m.
-  R1 must report benchmark SPL at VLFM's success ring, or the "44% looks weak" answer compares our SPL@0.1 m (~0) against VLFM's benchmark number and makes the backbone look catastrophically weak.
-  See **ADR-0005**; glossary term `Benchmark SPL` added to `CONTEXT.md`.
+- **D3 — R1 headlines native SPL@0.1 m (ring verified 2026-07-17).**
+  The suspected ring gap was checked and does **not** exist: `race-r1-preflight.sh` read `success_distance: 0.1` from the canonical `objectnav_hm3d.yaml`, the standard HM3D ObjectNav ring VLFM's 0.304 / VLingNav's 0.429 report on.
+  So the harness's native binary `spl` / SR@0.1 m are already cross-quotable and are R1's Table-1 headline — **no metric wiring is needed**.
+  This **reverses** the earlier plan to add a 1.0 m `spl_1m` headline: a 1.0 m SPL is a *relaxed* ring that would OVERSTATE us against VLFM's 0.1 m number. The arc's "the benchmark uses 1.0 m" belief was wrong (it conflated the self-invented `success_1m` reach diagnostic with the benchmark).
+  The residual R1 risk is now **capability, not metric**: native SPL@0.1 m is localization-bound (the smoke shows native mean SPL ≈ 0.05–0.15 << 0.304), and S1+ upgrades frontier choice, not STOP-localization, so it may not close the gap. D5 already commits us to shipping the honest number.
+  See **ADR-0005** (rewritten with the verification); glossary term `Benchmark SPL` corrected in `CONTEXT.md`.
 - **D4 — pre-register `w=0.5`** for the S1+ semantic-frontier weight.
   No sweep on val / val_mini (that is tuning on a subset of R1's own test set); tune on **train** only if at all, freeze, then run full val.
   Disclose in the paper that `w` was pre-registered, not fit.
@@ -139,16 +141,20 @@ It was a pipeline smoke, run as a raw `run_hm3d_pol` call — **not** the R1 dri
   `embodied_memory/pass_gate.py` — `required_pass_conditions(setting)` + `run_passed(...)` (pure, dependency-free).
   `run_hm3d_pol.main()` now gates the exit code on the setting-appropriate subset while printing per-condition PASS/FAIL honestly.
   Tests: `embodied_memory/scripts/test_pass_conditions.py` (8 cases, incl. the `r1nav-s1` regression; s2/None/no_strict_pass stay strict).
-- **Benchmark-SPL math (D3, headline core).**
+- **Benchmark-SPL math (now a RELAXED-ring diagnostic, not the headline).**
   `embodied_memory/metrics.py` — `compute_benchmark_spl(stopped, dist_at_stop, geodesic_optimal, path_len_taken, success_radius=1.0)` (pure).
   Tests: `embodied_memory/scripts/test_metrics.py` (8 cases).
-  Verified locally by direct file-load (the package `__init__` imports faiss, absent on this laptop; both modules are import-clean so the math runs standalone).
+  Retained as an optional ring-parameterized reach diagnostic; the ring check (D3) demoted it from the R1 headline. Verified locally by direct file-load and on the V100.
+- **`race-r1-preflight.sh`** — $0 R1 preflight: pull, env, run the two test suites, read the SPL success ring, and verdict the 0.1-vs-1.0 m question. It answered D3.
 
-### Staged for the VM (needs habitat to verify end-to-end)
+### Ring verification result (2026-07-17, V100)
 
-The `spl_1m` **runner wiring** is deliberately not done blind — a silently-wrong headline metric is the exact failure ADR-0005 guards against.
-On the V100:
-1. **Verify the ring first ($0):** read `success_distance` in `benchmark/nav/objectnav/objectnav_hm3d.yaml` and confirm the ring VLFM's 0.304 is reported at. If native `spl` is already at the benchmark ring, `spl_1m` is a free cross-check; if not, it is the new headline.
-2. **Wire `compute_benchmark_spl` into `episode_runner`:** compute `geodesic_optimal` for **single-goal** episodes too (it is currently multion-only — call `source.nearest_category_viewpoint(start_pos, target_category)` once at episode start), capture the terminal-STOP flag and the geodesic distance at STOP, then emit `spl_1m` / `success_1m_benchmark` into `ep_log` + `RunSummary` (additive; default path byte-identical).
-3. **Surface in `analyze_ablation`:** add `spl_1m` to `METRIC_SPECS` so Table 1 reports it as the headline.
-4. Run the driver-level smoke (D1), then the BLIP-2 VRAM preflight, then full-val R1 at `w=0.5`, and interpret per D5.
+`race-r1-preflight.sh` → `success_distance: 0.1` on the canonical `objectnav_hm3d.yaml`; both test suites green (metrics 8/8, pass_gate 8/8).
+**Outcome: native `spl`/SR@0.1 m ARE the VLFM-comparable Table-1 headline; no `spl_1m` wiring.** See D3 / ADR-0005.
+
+### Next actions (unblocked)
+
+1. **Driver-level smoke (D1):** `race-r1-objectnav.sh --tag r1smoke --split val_mini --n-episodes 20` — exercises S1+, BLIP-2, the vacuous-arm gate, the paired analysis.
+2. **BLIP-2 VRAM preflight:** `race-blip2-frontier.sh --tag r1pre --skip-ab --planner Qwen/Qwen2.5-7B-Instruct`.
+3. **Full-val R1** at `w=0.5`; report native binary SPL@0.1 m + SR@0.1 m vs VLFM 0.304 / VLingNav 0.429; interpret per D5.
+   Face the capability risk (D3): if S1+ native SPL stays ≈ S1 (localization bound), the honest finding is that the frontier is not the bottleneck — STOP-localization is (cf. the closed L3 detector arc).

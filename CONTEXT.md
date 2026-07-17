@@ -35,9 +35,10 @@ Graded path efficiency; the primary science metric for the memory delta (warm pa
 _Avoid_: SPL (unqualified — binary SPL is a separate, localization-bound number).
 
 **Benchmark SPL**:
-The cross-quotable ObjectNav number R1 (Table 1) must report to answer "44% looks weak": binary success (STOP called within the benchmark radius of a goal viewpoint) weighted by the geodesic path ratio, reported at the SAME success ring VLFM's 0.304 is measured at.
-Distinct from the harness's native `spl` (scored at the 0.1 m ring, localization-bound) and from `success_1m` (a STOP-INDEPENDENT reach diagnostic — closest approach < 1.0 m at any step — that over-counts vs a STOP-gated benchmark).
-_Avoid_: SPL (unqualified); success_1m as a success number (it has no STOP requirement); soft-SPL for R1 (VLFM/VLingNav do not report it).
+The harness's native binary `spl`: STOP called within `success_distance` (**verified 0.1 m** in the canonical `objectnav_hm3d.yaml`) of a goal viewpoint, weighted by the geodesic path ratio.
+This IS the standard HM3D ObjectNav ring VLFM's 0.304 and VLingNav's 0.429 are measured at, so native `spl` / SR@0.1 m are R1's cross-quotable Table-1 headline (ADR-0005), with no metric wiring needed.
+A 1.0 m SPL is a RELAXED reach diagnostic, NOT the benchmark: quoting it against VLFM would overstate. `success_1m` (closest approach < 1.0 m at any step) is STOP-INDEPENDENT and never a success number.
+_Avoid_: calling a 1.0 m SPL "benchmark"; the retired belief that "the benchmark uses 1.0 m"; success_1m as a success rate; soft-SPL for R1 (VLFM/VLingNav do not report it).
 
 **Cost**:
 Steps-to-complete (primary) and/or wall-clock. The efficiency-of-effort axis distinct from soft-SPL.
