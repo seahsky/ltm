@@ -116,6 +116,27 @@ fi
 N_SCENES=$(ls "$CONTENT_DIR"/*.json.gz 2>/dev/null | wc -l | tr -d ' ')
 echo "  split=$SPLIT scenes=$N_SCENES n_episodes=$N_EPISODES"
 
+banner "[4b/7] MESH PREFLIGHT — every split scene must have a .basis.glb"
+# r1v1 burned 3m53s crashing 100/100 episodes because `--split val` references 20
+# scenes but only the 2 minival-overlap scenes have meshes (val->minival symlink);
+# every missing-mesh episode dies at sim init with ESP_CHECK. Fail fast HERE with
+# the fix, before any GPU spend, instead of per-episode crashes → 0 completed →
+# FATAL. USABLE_SCENES lets a partial run proceed only when explicitly intended.
+INV="$(python embodied_memory/scripts/inventory_hm3d_meshes.py --split "$SPLIT")" \
+  || { echo "FATAL: mesh inventory failed"; exit 1; }
+echo "$INV"
+N_MISSING=$(printf '%s\n' "$INV" | sed -n 's/^split=.*missing=\([0-9]*\).*/\1/p')
+if [ "${N_MISSING:-0}" -gt 0 ]; then
+  echo "FATAL: $N_MISSING/${N_SCENES} scenes in split '$SPLIT' have NO mesh — R1 needs the"
+  echo "  full split, so this is NOT a runnable Table-1 baseline. Download the full mesh"
+  echo "  split on the VM (needs the Matterport token in .env):"
+  echo "    rm -f data/hm3d/scene_datasets/hm3d/val   # drop the val->minival symlink"
+  echo "    HM3D_SCENE_GROUP=hm3d_val_full bash embodied_memory/scripts/download_hm3d.sh"
+  echo "  Or run the de-risking smoke on the scenes that DO have meshes:"
+  echo "    bash scripts/race-r1-objectnav.sh --tag r1smoke --split val_mini"
+  exit 1
+fi
+
 # Both arms share these. --setting 1 = memory OFF; --scene all discovers every
 # scene in the split; --target any disables the per-episode category filter.
 COMMON=(--mode live --backbone remembr --setting 1 --split "$SPLIT"

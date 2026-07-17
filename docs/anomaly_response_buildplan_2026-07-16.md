@@ -60,8 +60,25 @@ Plain HM3D ObjectNav, **full val split**, all 20 scenes, no anomaly, no decoupli
 Arms: **S1 (geometric frontier) vs S1+ (BLIP-2 ITM frontier)**.
 Touches none of the three broken things, so it can occupy the V100 while Phase F lands.
 Comparable to VLFM's SPL 0.304 and the ~0.43 published SOTA; it is the direct answer to "44% Find-SR looks weak".
-Meshes and episodes are already on disk (`20 content files, 20 with a usable mesh`).
 Guardrail from the backbone memory: the renorm branch is required or `n_memory_chosen` silently collapses. Assert it fires.
+
+**R1 is BLOCKED on the val mesh split (2026-07-17, VERIFIED).** The buildplan's
+"20 content files, 20 with a usable mesh" was **wrong**: only **2 of 20** val scenes
+have a mesh on the VM (`TEEsavR23oF`, `wcojb4TFT35` — the val_mini pair). The download
+defaults to `hm3d_minival_full` (10 scenes) + a `val -> minival` symlink, so the other
+**18 val scenes have no `.basis.glb`** and crash at sim init (`ESP_CHECK ... No Stage
+Attributes`). That is what killed `r1v1`: the pinned group-by-scene iterator put all 100
+requested episodes on the first missing-mesh scene (`4ok3usBNeis`) → 0 completed → driver
+FATAL in 3m53s. **Unblock:** download the full mesh split on the VM (needs the Matterport
+token in `.env`, no GPU):
+```
+rm -f data/hm3d/scene_datasets/hm3d/val            # drop the val->minival symlink
+HM3D_SCENE_GROUP=hm3d_val_full bash embodied_memory/scripts/download_hm3d.sh
+```
+**Guard added:** `inventory_hm3d_meshes.py` (+5 TDD) reports usable/missing meshes per
+split; `race-r1-objectnav.sh` step **[4b]** now FATALs in seconds with this fix instead of
+burning GPU on per-episode crashes. Until the download lands, the only runnable ObjectNav is
+**val_mini (2 scenes)** — enough to de-risk the S1+/BLIP-2 path (D1), not enough to face VLFM.
 
 **R2 — Table 2, the contribution.**
 Anomaly-response matrix on **rebuilt** datasets and grids, after Phase F. Arms **S1+ vs S3+**.
