@@ -25,12 +25,17 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 from typing import List, Optional
 
 import numpy as np
 
-from embodied_memory.habitat_env import HabitatObjectNavSource
+# Runnable standalone (bare `python embodied_memory/scripts/diagnose_*.py`) with
+# no pre-set PYTHONPATH, matching the test files' self-insert.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from embodied_memory.habitat_env import HabitatObjectNavSource  # noqa: E402
 from embodied_memory.run_hm3d_pol import (
     _resolve_episodes_path_for_split,
     _resolve_scene_list,
