@@ -744,14 +744,20 @@ def main(argv: Optional[list] = None) -> int:
     summary = runner.run(args.n_episodes)
     source.close()
 
+    # Setting-aware exit code: --setting 1 is memory-OFF, so the memory-liveness
+    # conditions can only fail there — they do not gate a baseline's exit code
+    # (grilling 2026-07-17). Per-condition PASS/FAIL stays honest; only the
+    # gating SET is setting-aware.
+    from .pass_gate import required_pass_conditions, run_passed
+    _required = set(required_pass_conditions(args.setting))
     print("\n=== Pass conditions ===")
     for k, v in summary.pass_conditions.items():
         marker = "PASS" if v else "FAIL"
-        print(f"  [{marker}] {k}")
+        note = "" if k in _required else "  (n/a — memory-off setting)"
+        print(f"  [{marker}] {k}{note}")
     print(f"\nSummary: {json.dumps(summary.to_dict(), indent=2, default=str)}")
 
-    all_pass = all(summary.pass_conditions.values())
-    if all_pass or args.no_strict_pass:
+    if run_passed(summary.pass_conditions, args.setting, args.no_strict_pass):
         return 0
     return 1
 

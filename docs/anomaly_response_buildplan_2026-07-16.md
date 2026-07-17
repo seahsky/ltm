@@ -103,3 +103,52 @@ F1 + F2 + F3 ──► rebuild datasets + grids ──► R2 (S1+ vs S3+)
 - **BLIP-2 VRAM is on the knife edge** (~31–33 GB estimated against ~31.7 usable, and the driver's budget predates CLAP). May need the KV cap trimmed.
 - **Deadline unverified.** ICRA 2027 (Seoul, May 24–28) has no CFP posted. ~Sep 15 is extrapolated from ICRA 2026, not confirmed.
 - **`onset_step` is invisible in `summary.json`.** Three findings hid behind a green exit code and a `CONTROLLER_RAN` verdict. Onset provenance belongs in the summary and in the controller census verdict, or this recurs.
+
+---
+
+## Grilling addendum — R1 smoke read (2026-07-17)
+
+Grilling session over the `runs/r1nav-s1` "FAILED" email (`b78d2c0`, riftvm).
+The run is **not** a failure: 30/30 episodes completed, `no_crash` passed, mean soft-SPL 0.1587.
+The `❌ exit 1` is the memory-liveness pass-gate firing on a `--setting 1` memory-off run, where those gates can only fail.
+It was a pipeline smoke, run as a raw `run_hm3d_pol` call — **not** the R1 driver — so it exercised only the S1 (geometric-frontier) arm on val_mini.
+
+### Decisions
+
+- **D1 — the smoke de-risked only the safe half.**
+  It validated the shared substrate (env, episode loop over val scenes, soft-SPL, throughput) but never touched R1's novel surface: BLIP-2 ITM loading + co-fitting the 7B in VRAM, the S1+ arm producing non-flat spread, the vacuous-arm gate, the paired analysis.
+  Next step is a **driver-level** smoke: `race-r1-objectnav.sh --tag r1smoke --split val_mini --n-episodes 20`.
+- **D2 — the exit-code semantics are now setting-aware.**
+  A memory-off `--setting 1` run passes on `no_crash` alone; memory-ON settings keep the strict full gate.
+  This kills the false ❌ that trains the operator to ignore ❌ on baselines (the inverse of the open-risk-#5 alarm-fatigue failure). Landed (below).
+- **D3 — R1 is blocked on a benchmark-comparable SPL.**
+  The harness scores native `spl` at the 0.1 m ring (localization-bound) and `success_1m` is STOP-independent; there is no path-weighted SPL@1.0 m.
+  R1 must report benchmark SPL at VLFM's success ring, or the "44% looks weak" answer compares our SPL@0.1 m (~0) against VLFM's benchmark number and makes the backbone look catastrophically weak.
+  See **ADR-0005**; glossary term `Benchmark SPL` added to `CONTEXT.md`.
+- **D4 — pre-register `w=0.5`** for the S1+ semantic-frontier weight.
+  No sweep on val / val_mini (that is tuning on a subset of R1's own test set); tune on **train** only if at all, freeze, then run full val.
+  Disclose in the paper that `w` was pre-registered, not fit.
+- **D5 — R1 interpretation rule, fixed before the number is seen.**
+  Report S1 and S1+ benchmark SPL as-measured against VLFM 0.304 / VLingNav 0.429.
+  Claim "strong baseline" only if S1+ ≥ ~0.25 (within ~20 % of VLFM, allowing for our un-fine-tuned 2B stack); below that, R1 still ships with the baseline-strength language calibrated down to the measured value.
+  R1 does **not** gate R2 either way. No post-hoc reframing.
+
+### Code landed (2026-07-17, TDD)
+
+- **Setting-aware pass-gate (D2).**
+  `embodied_memory/pass_gate.py` — `required_pass_conditions(setting)` + `run_passed(...)` (pure, dependency-free).
+  `run_hm3d_pol.main()` now gates the exit code on the setting-appropriate subset while printing per-condition PASS/FAIL honestly.
+  Tests: `embodied_memory/scripts/test_pass_conditions.py` (8 cases, incl. the `r1nav-s1` regression; s2/None/no_strict_pass stay strict).
+- **Benchmark-SPL math (D3, headline core).**
+  `embodied_memory/metrics.py` — `compute_benchmark_spl(stopped, dist_at_stop, geodesic_optimal, path_len_taken, success_radius=1.0)` (pure).
+  Tests: `embodied_memory/scripts/test_metrics.py` (8 cases).
+  Verified locally by direct file-load (the package `__init__` imports faiss, absent on this laptop; both modules are import-clean so the math runs standalone).
+
+### Staged for the VM (needs habitat to verify end-to-end)
+
+The `spl_1m` **runner wiring** is deliberately not done blind — a silently-wrong headline metric is the exact failure ADR-0005 guards against.
+On the V100:
+1. **Verify the ring first ($0):** read `success_distance` in `benchmark/nav/objectnav/objectnav_hm3d.yaml` and confirm the ring VLFM's 0.304 is reported at. If native `spl` is already at the benchmark ring, `spl_1m` is a free cross-check; if not, it is the new headline.
+2. **Wire `compute_benchmark_spl` into `episode_runner`:** compute `geodesic_optimal` for **single-goal** episodes too (it is currently multion-only — call `source.nearest_category_viewpoint(start_pos, target_category)` once at episode start), capture the terminal-STOP flag and the geodesic distance at STOP, then emit `spl_1m` / `success_1m_benchmark` into `ep_log` + `RunSummary` (additive; default path byte-identical).
+3. **Surface in `analyze_ablation`:** add `spl_1m` to `METRIC_SPECS` so Table 1 reports it as the headline.
+4. Run the driver-level smoke (D1), then the BLIP-2 VRAM preflight, then full-val R1 at `w=0.5`, and interpret per D5.

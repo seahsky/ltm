@@ -34,6 +34,11 @@ _Avoid_: mission success, controller success (say which loop states are required
 Graded path efficiency; the primary science metric for the memory delta (warm paired S3−S1).
 _Avoid_: SPL (unqualified — binary SPL is a separate, localization-bound number).
 
+**Benchmark SPL**:
+The cross-quotable ObjectNav number R1 (Table 1) must report to answer "44% looks weak": binary success (STOP called within the benchmark radius of a goal viewpoint) weighted by the geodesic path ratio, reported at the SAME success ring VLFM's 0.304 is measured at.
+Distinct from the harness's native `spl` (scored at the 0.1 m ring, localization-bound) and from `success_1m` (a STOP-INDEPENDENT reach diagnostic — closest approach < 1.0 m at any step — that over-counts vs a STOP-gated benchmark).
+_Avoid_: SPL (unqualified); success_1m as a success number (it has no STOP requirement); soft-SPL for R1 (VLFM/VLingNav do not report it).
+
 **Cost**:
 Steps-to-complete (primary) and/or wall-clock. The efficiency-of-effort axis distinct from soft-SPL.
 _Avoid_: time (say steps or wall-clock).
