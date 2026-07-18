@@ -61,6 +61,13 @@ MAX_STEPS="500"                                # HM3D ObjectNav v1 benchmark bud
                                                # ~50% of episodes were still exploring at the cap,
                                                # so 250 both understates reach and is not cross-
                                                # quotable to VLFM's 0.304 (measured at 500).
+ANTISPIN="1"                                   # enable the anti-spin fixes (default ON for R1).
+                                               # r1smoke/r1b500 ran with BOTH default-OFF, so the
+                                               # follower spun on navmesh-unreachable frontiers
+                                               # (n_waypoint_unreachable 440+/ep, n_unreachable_
+                                               # escape=0, success 2/30 at BOTH 250 and 500 steps).
+                                               # A searcher that cannot route to its own waypoints
+                                               # is not a fair baseline. --no-antispin to A/B it.
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -71,6 +78,7 @@ while [ $# -gt 0 ]; do
     --prompt)       PROMPT="$2"; shift 2 ;;
     --n-episodes)   N_EPISODES="$2"; shift 2 ;;
     --max-steps)    MAX_STEPS="$2"; shift 2 ;;
+    --no-antispin)  ANTISPIN=""; shift ;;
     --min-spread)   MIN_SPREAD="$2"; shift 2 ;;
     --blip2-cpu)    BLIP2_CPU=1; shift ;;
     -h|--help)      sed -n '1,48p' "$0"; exit 0 ;;
@@ -148,6 +156,18 @@ fi
 COMMON=(--mode live --backbone remembr --setting 1 --split "$SPLIT"
         --scene all --target any --n-episodes "$N_EPISODES" --max-steps "$MAX_STEPS")
 echo "  max_steps=$MAX_STEPS (HM3D ObjectNav benchmark budget; VLFM 0.304 is at 500)"
+
+# Anti-spin: both arms are navigation-quality fixes orthogonal to the frontier-value
+# A/B, so they apply to S1 AND S1+. NAVMESH_FRONTIER drops unreachable frontiers at
+# proposal; ANTITHRASH_SINGLEGOAL adds the blacklist + snap-escape when the follower
+# reports unreachable. Set once here so both arm subprocesses inherit them.
+if [ -n "$ANTISPIN" ]; then
+  export REMEMBR_ANTITHRASH_SINGLEGOAL=1 REMEMBR_NAVMESH_FRONTIER=1
+  echo "  anti-spin ON (REMEMBR_ANTITHRASH_SINGLEGOAL + REMEMBR_NAVMESH_FRONTIER)"
+else
+  unset REMEMBR_ANTITHRASH_SINGLEGOAL REMEMBR_NAVMESH_FRONTIER
+  echo "  anti-spin OFF (legacy spin behaviour — for the A/B against r1b500)"
+fi
 S1_DIR="runs/${TAG}-s1"
 S1PLUS_DIR="runs/${TAG}-s1plus"
 
