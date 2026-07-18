@@ -56,6 +56,11 @@ PROMPT="Seems like there is a {goal} ahead."   # VLFM value prompt
 N_EPISODES=""                                  # empty => all episodes in the split
 MIN_SPREAD="0.01"                              # vacuous-arm floor (below = flat like CLIP)
 BLIP2_CPU=""                                   # --blip2-cpu => value model on CPU (OOM hatch)
+MAX_STEPS="500"                                # HM3D ObjectNav v1 benchmark budget. run_hm3d_pol
+                                               # defaults to 250 (HALF); r1smoke ran at 250 and
+                                               # ~50% of episodes were still exploring at the cap,
+                                               # so 250 both understates reach and is not cross-
+                                               # quotable to VLFM's 0.304 (measured at 500).
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -65,6 +70,7 @@ while [ $# -gt 0 ]; do
     --value-model)  VALUE_MODEL="$2"; shift 2 ;;
     --prompt)       PROMPT="$2"; shift 2 ;;
     --n-episodes)   N_EPISODES="$2"; shift 2 ;;
+    --max-steps)    MAX_STEPS="$2"; shift 2 ;;
     --min-spread)   MIN_SPREAD="$2"; shift 2 ;;
     --blip2-cpu)    BLIP2_CPU=1; shift ;;
     -h|--help)      sed -n '1,48p' "$0"; exit 0 ;;
@@ -140,7 +146,8 @@ fi
 # Both arms share these. --setting 1 = memory OFF; --scene all discovers every
 # scene in the split; --target any disables the per-episode category filter.
 COMMON=(--mode live --backbone remembr --setting 1 --split "$SPLIT"
-        --scene all --target any --n-episodes "$N_EPISODES")
+        --scene all --target any --n-episodes "$N_EPISODES" --max-steps "$MAX_STEPS")
+echo "  max_steps=$MAX_STEPS (HM3D ObjectNav benchmark budget; VLFM 0.304 is at 500)"
 S1_DIR="runs/${TAG}-s1"
 S1PLUS_DIR="runs/${TAG}-s1plus"
 
