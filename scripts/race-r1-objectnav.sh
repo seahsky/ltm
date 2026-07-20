@@ -91,11 +91,24 @@ case "$SPLIT" in val|val_mini|train) ;; *) echo "FATAL: --split must be val|val_
 
 banner() { printf '\n========== %s ==========\n' "$1"; }
 
-banner "[1/7] git pull --ff-only"
+banner "[1/7] git pull --ff-only (+ self-heal the 2nd-invocation gotcha)"
 [ -x "$MINICONDA/bin/conda" ] || { echo "FATAL: $MINICONDA/bin/conda missing"; exit 1; }
 if git rev-parse --git-dir >/dev/null 2>&1; then
+  # bash executes the body loaded at launch; `git pull` here updates the file on
+  # DISK but not the RUNNING body, so a driver edit only takes effect on the 2nd
+  # invocation. That silently wasted a 10h run (r1spin ran the pre-anti-spin body
+  # at commit 32b3493, n_unreachable_escape=0). Self-heal: if the pull changed
+  # THIS script, re-exec the new body once.
+  _self_before="$(md5sum "$0" 2>/dev/null | awk '{print $1}')"
   git pull --ff-only || { echo "FATAL: git pull failed"; exit 1; }
+  _self_after="$(md5sum "$0" 2>/dev/null | awk '{print $1}')"
+  if [ -n "$_self_before" ] && [ "$_self_before" != "$_self_after" ] && [ -z "${_R1_REEXEC:-}" ]; then
+    echo ">> driver self-updated on pull ($_self_before -> $_self_after); re-exec'ing the new body once."
+    export _R1_REEXEC=1
+    exec bash "$0" "$@"
+  fi
 fi
+echo "  running commit: $(git rev-parse --short HEAD 2>/dev/null || echo '?')  antispin=${ANTISPIN:-off}"
 
 banner "[2/7] conda setup (source scripts/race-setup.sh → $LTM_ENV; keeps the 7B planner)"
 set +u; source scripts/race-setup.sh || { echo "FATAL: race-setup.sh failed"; exit 1; }; set -u
