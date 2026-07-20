@@ -219,7 +219,16 @@ python embodied_memory/scripts/analyze_ablation.py "$S1_DIR" "$S1PLUS_DIR" \
     2>&1 | tee "runs/${TAG}-r1-analysis.log"
 
 echo
-echo "DONE. R1 / Table 1 for split=$SPLIT ($N_SCENES scenes, $N_EPISODES episodes)."
+# Only the FULL val split is Table 1. A val_mini run is the de-risk smoke — a
+# 2-scene absolute number is indefensible against VLFM and never enters the table
+# (CONTEXT.md "R1 de-risk smoke vs Table 1"; ADR-0006).
+if [ "$SPLIT" = "val" ]; then
+  echo "DONE. R1 / Table 1 for split=$SPLIT ($N_SCENES scenes, $N_EPISODES episodes)."
+  echo "  Compare mean SPL to VLFM 0.304 / VLingNav 0.429. Analysis: runs/${TAG}-r1-analysis.log"
+else
+  echo "DONE. R1 DE-RISK SMOKE for split=$SPLIT ($N_SCENES scenes, $N_EPISODES episodes) — NOT Table 1."
+  echo "  A 2-scene absolute number is not quotable against VLFM 0.304 / VLingNav 0.429."
+  echo "  This de-risks the S1+ path + gate + paired analysis only. Analysis: runs/${TAG}-r1-analysis.log"
+fi
 echo "  S1 (geometric) vs S1+ (BLIP-2 ITM frontier), memory OFF, 7B planner (cross-quotable)."
-echo "  Compare mean SPL to VLFM 0.304 / VLingNav 0.429. Analysis: runs/${TAG}-r1-analysis.log"
 exit 0

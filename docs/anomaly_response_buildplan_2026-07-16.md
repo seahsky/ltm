@@ -175,3 +175,40 @@ It was a pipeline smoke, run as a raw `run_hm3d_pol` call — **not** the R1 dri
 2. **BLIP-2 VRAM preflight:** `race-blip2-frontier.sh --tag r1pre --skip-ab --planner Qwen/Qwen2.5-7B-Instruct`.
 3. **Full-val R1** at `w=0.5`; report native binary SPL@0.1 m + SR@0.1 m vs VLFM 0.304 / VLingNav 0.429; interpret per D5.
    Face the capability risk (D3): if S1+ native SPL stays ≈ S1 (localization bound), the honest finding is that the frontier is not the bottleneck — STOP-localization is (cf. the closed L3 detector arc).
+
+---
+
+## Grilling addendum — R1 val_mini smoke read (2026-07-20)
+
+Grilling session over the `r1spin2` run email (`45246a7`, riftvm, exit 0, 5h27m).
+The capability risk D3 pre-registered materialized: the smoke settled the S1+ question and, with it, the 2026-07-16 "competitive absolute numbers" bet.
+Durable decision record: **ADR-0006**; glossary updated in `CONTEXT.md` (S1+ demoted; new "R1 de-risk smoke vs Table 1" term).
+
+### What the smoke showed
+
+`r1spin2` is the **D1 de-risk smoke** on `val_mini` (2 scenes, 30 episodes), memory OFF both arms, 7B planner, anti-spin ON, 500-step budget — **not** Table 1 (full val is still blocked on the 18 missing meshes on riftvm).
+
+1. **BLIP-2 semantic frontier (S1+) does not lift the number.** Paired SPL −0.0175 (CI [−0.053, 0], slightly hurts), soft-SPL +0.010 (n.s.), succ@1m identical 0.233. Vacuous-arm gate GREEN (13,405 scores, spread 0.45) ⇒ inert, not un-fired. 4th independent non-lift of a semantic frontier.
+2. **The backbone is a weak searcher.** S1 SPL 0.031 / S1+ 0.014, soft-SPL ~0.14, SR@0.1 m 0.067/0.033, reach-within-1 m 0.233 — vs VLFM 0.304 and the plan target (SPL ~0.3, Find-SR@1m 0.6–0.7). ~10x under on SPL, ~3x under on the 1 m reach, at the full 500-step budget (capability, not timeout).
+3. **Spin reduced, not dead.** With anti-spin ON: ep25 = 298 turns / 0 STOP; ep29 = forward 0 / replan_stuck 23 / unreachable_escape fired 10× yet stuck.
+
+### Decisions
+
+- **A — Full-val R1 still runs, reframed.** Purpose changes from "prove competitive" to "the honest Table-1 baseline the paper needs." Full val won't 10x a fixed backbone; you still need the 20-scene number (a 2-scene number is not quotable). Keeps **S1 vs S1+** so the BLIP-2 negative is powered.
+- **B — S1+ demoted to a documented negative; geometric S1/S3 are the paper's spine.** Headline memory delta reverts to **S3 − S1**. **R2 drops the "+" arms** and runs S1 vs S3: S1+ ≈ S1 so "+" adds only overhead, it removes the BLIP-2 VRAM knife-edge on the V100, and S1/S3 stay cross-quotable to the whole prior arc. S1+ earns its keep only as the rebuttal to "re-run S1 with a real explorer" (VLFM's own head doesn't beat geometric here).
+- **C — Retreat accepted; backbone/STOP-localization spend ruled out.** The contribution returns to the stable 06-30 anchor: controller-as-working-system + LTM honest negative, on a frozen, honestly-weak backbone whose absolute capability is out of scope. STOP-localization is the measured bottleneck but every realizable proxy failed and a real policy destroys the candidate-pool thesis — do not spend on it.
+- **D — Bounded, diagnose-first spin fix into the frozen R1/R2 backbone.** Spin is a fairness + R2-integrity issue (a spinning agent aborts the investigate detour on the step cap → corrupts the controller census), *not* the ruled-out backbone spend. Diagnose on the existing per-episode JSONs first ($0), one targeted fix, land it in **both** R1 and R2 (one frozen backbone), or disclose the spin rate as a limitation.
+- **E — The paper leads with the controller as a system.** The LTM negative is a strong supporting section; the weak backbone is disclosed as a scoping choice, not apologized for. Consequence: **R2 (re-earning the ADR-0003/0004-invalidated n=64 census on Phase-F data) is now the single most important run in the project.** Headline positive is Find-SR ≈ 0.44, defended on internal validity + detour-cost, not a leaderboard.
+
+### Revised run config (supersedes the S3+ − S1+ headline in the body)
+
+- **R1 (Table 1):** full val, **S1 vs S1+**, memory OFF, 7B, anti-spin ON, `w=0.5` pre-registered. Report SR/SPL@0.1 m vs VLFM/VLingNav + soft-SPL as a ring-independent companion. S1+ reported as the powered semantic-frontier negative.
+- **R2 (contribution):** anomaly-response matrix on Phase-F-rebuilt data, **S1 vs S3** (no "+"). Headline = controller census (Anomaly-response SR, Find-SR@1 m, cost) + memory delta S3 − S1.
+
+### Next actions (sequenced)
+
+1. **Spin diagnosis ($0, no re-run):** `diagnose_spin.py` on the `r1spin2` per-episode JSONs on RACE — quantify the spin rate, split the ep25 (propose/turn-forever) vs ep29 (unreachable-escape-not-converging) signatures.
+2. **Bounded spin fix** (if the diagnosis points to one), landed into the frozen anti-spin backbone; verify; else disclose the rate.
+3. **Download the 18 missing full-val meshes on riftvm:** `HM3D_SCENE_GROUP=hm3d_val_full bash embodied_memory/scripts/download_hm3d.sh` (Matterport token in `.env`, no GPU; the `[4b]` mesh preflight FATALs until this lands).
+4. **Full-val R1** (S1 vs S1+) on the fixed backbone → the honest Table-1 number.
+5. **Phase F** (F1/F2/F3) → rebuild datasets + grids → **R2** (S1 vs S3) = the critical run.
