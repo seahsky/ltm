@@ -40,6 +40,10 @@ This IS the standard HM3D ObjectNav ring VLFM's 0.304 and VLingNav's 0.429 are m
 A 1.0 m SPL is a RELAXED reach diagnostic, NOT the benchmark: quoting it against VLFM would overstate. `success_1m` (closest approach < 1.0 m at any step) is STOP-INDEPENDENT and never a success number.
 _Avoid_: calling a 1.0 m SPL "benchmark"; the retired belief that "the benchmark uses 1.0 m"; success_1m as a success rate; soft-SPL for R1 (VLFM/VLingNav do not report it).
 
+**R1 de-risk smoke vs Table 1**:
+Table 1 (a.k.a. R1) is the **full-val** (20-scene) ObjectNav baseline, the only number quotable against VLFM 0.304 / VLingNav 0.429. A **val_mini** (2-scene) run is the **de-risk smoke**: it exercises the S1+ path, the vacuous-arm gate, and the paired analysis, but a 2-scene absolute number is indefensible and never enters the table.
+_Avoid_: calling a val_mini run "R1" or "Table 1" (the driver's `R1 / Table 1 for split=val_mini` banner was a mislabel, corrected 2026-07-20; ADR-0006).
+
 **Cost**:
 Steps-to-complete (primary) and/or wall-clock. The efficiency-of-effort axis distinct from soft-SPL.
 _Avoid_: time (say steps or wall-clock).
@@ -49,8 +53,8 @@ _Avoid_: time (say steps or wall-clock).
 **S1 / S1+ / S2 / S3 / S3+**:
 Memory-off geometric-frontier baseline / memory-off **semantic-frontier** baseline / STM-only / full LTM on the geometric frontier / full LTM on the semantic frontier.
 The semantic frontier is a **BLIP-2 ITM** match probability (VLFM, ICRA-2024), NOT the CLIP goal-cosine: CLIP is measured flat on HM3D sim renders (separation 0.020 against a 0.05 bar, three independent measurements) and is retired.
-The headline memory delta is **S3+ − S1+**; the absolute-number claim is **S1+ vs S1**.
-_Avoid_: baseline (unqualified — say which of S1/S1+). _Avoid_: "Study 1" as a name (it reads as S1 — see the study names below).
+**S1+ is a documented negative, not the strong baseline** (ADR-0006): the BLIP-2 semantic frontier is inert-to-harmful (r1spin2 paired SPL −0.0175, soft-SPL +0.010 n.s.), the 4th independent non-lift of a semantic frontier. So the paper's spine is the **geometric** backbone, the headline memory delta reverts to **S3 − S1**, and **R2 drops the "+" arms**; S1+ survives only in R1 as a powered negative ("no cheap explorer, including VLFM's own head, beats geometric here").
+_Avoid_: baseline (unqualified — say which of S1/S1+); calling S1+ "the strong baseline"; "Study 1" as a name (it reads as S1 — see the study names below).
 
 **Memory-boundary study / Controller-and-audio study**:
 The two sub-studies. Named, never numbered: "Study 1" and "S1" are different things and the collision has already caused a misread.
