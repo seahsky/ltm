@@ -190,7 +190,7 @@ Durable decision record: **ADR-0006**; glossary updated in `CONTEXT.md` (S1+ dem
 
 1. **BLIP-2 semantic frontier (S1+) does not lift the number.** Paired SPL −0.0175 (CI [−0.053, 0], slightly hurts), soft-SPL +0.010 (n.s.), succ@1m identical 0.233. Vacuous-arm gate GREEN (13,405 scores, spread 0.45) ⇒ inert, not un-fired. 4th independent non-lift of a semantic frontier.
 2. **The backbone is a weak searcher.** S1 SPL 0.031 / S1+ 0.014, soft-SPL ~0.14, SR@0.1 m 0.067/0.033, reach-within-1 m 0.233 — vs VLFM 0.304 and the plan target (SPL ~0.3, Find-SR@1m 0.6–0.7). ~10x under on SPL, ~3x under on the 1 m reach, at the full 500-step budget (capability, not timeout).
-3. **Spin reduced, not dead.** With anti-spin ON: ep25 = 298 turns / 0 STOP; ep29 = forward 0 / replan_stuck 23 / unreachable_escape fired 10× yet stuck.
+3. **No spin — anti-spin is working (corrected 2026-07-20 by `diagnose_spin`).** The initial tail-read ("ep25 298 turns / ep29 stuck") was wrong: **spin_timeout = 0%** in both arms. ep29 actually STOPped (a stop_miss at step 33), ep25 kept translating (an explore_timeout). The ~0.03 SPL is **stop_miss ~50%** (STOP fires in the wrong place — reach@1m only ~0.30 within that bucket) + **explore_timeout ~45%** (never reaches the goal) + **success ~5%**. Both caps are the decision-C backbone levers, not a controller bug.
 
 ### Decisions
 
@@ -198,6 +198,7 @@ Durable decision record: **ADR-0006**; glossary updated in `CONTEXT.md` (S1+ dem
 - **B — S1+ demoted to a documented negative; geometric S1/S3 are the paper's spine.** Headline memory delta reverts to **S3 − S1**. **R2 drops the "+" arms** and runs S1 vs S3: S1+ ≈ S1 so "+" adds only overhead, it removes the BLIP-2 VRAM knife-edge on the V100, and S1/S3 stay cross-quotable to the whole prior arc. S1+ earns its keep only as the rebuttal to "re-run S1 with a real explorer" (VLFM's own head doesn't beat geometric here).
 - **C — Retreat accepted; backbone/STOP-localization spend ruled out.** The contribution returns to the stable 06-30 anchor: controller-as-working-system + LTM honest negative, on a frozen, honestly-weak backbone whose absolute capability is out of scope. STOP-localization is the measured bottleneck but every realizable proxy failed and a real policy destroys the candidate-pool thesis — do not spend on it.
 - **D — Bounded, diagnose-first spin fix into the frozen R1/R2 backbone.** Spin is a fairness + R2-integrity issue (a spinning agent aborts the investigate detour on the step cap → corrupts the controller census), *not* the ruled-out backbone spend. Diagnose on the existing per-episode JSONs first ($0), one targeted fix, land it in **both** R1 and R2 (one frozen backbone), or disclose the spin rate as a limitation.
+  **RESOLVED 2026-07-20:** `diagnose_spin` returned **0% spin_timeout** in both arms — anti-spin (already ON) works; there is nothing to fix. D collapses into C. No spin rate to disclose; instead the R1 write-up reports the stop_miss ~50% / explore_timeout ~45% anatomy.
 - **E — The paper leads with the controller as a system.** The LTM negative is a strong supporting section; the weak backbone is disclosed as a scoping choice, not apologized for. Consequence: **R2 (re-earning the ADR-0003/0004-invalidated n=64 census on Phase-F data) is now the single most important run in the project.** Headline positive is Find-SR ≈ 0.44, defended on internal validity + detour-cost, not a leaderboard.
 
 ### Revised run config (supersedes the S3+ − S1+ headline in the body)
@@ -207,8 +208,7 @@ Durable decision record: **ADR-0006**; glossary updated in `CONTEXT.md` (S1+ dem
 
 ### Next actions (sequenced)
 
-1. **Spin diagnosis ($0, no re-run):** `diagnose_spin.py` on the `r1spin2` per-episode JSONs on RACE — quantify the spin rate, split the ep25 (propose/turn-forever) vs ep29 (unreachable-escape-not-converging) signatures.
-2. **Bounded spin fix** (if the diagnosis points to one), landed into the frozen anti-spin backbone; verify; else disclose the rate.
-3. **Download the 18 missing full-val meshes on riftvm:** `HM3D_SCENE_GROUP=hm3d_val_full bash embodied_memory/scripts/download_hm3d.sh` (Matterport token in `.env`, no GPU; the `[4b]` mesh preflight FATALs until this lands).
-4. **Full-val R1** (S1 vs S1+) on the fixed backbone → the honest Table-1 number.
-5. **Phase F** (F1/F2/F3) → rebuild datasets + grids → **R2** (S1 vs S3) = the critical run.
+1. ~~Spin diagnosis + fix~~ **DONE / DROPPED (2026-07-20):** `diagnose_spin` → 0% spin in both arms (finding #3 / decision D). No fix; the anti-spin backbone is already fair. The critical path shortens by two steps.
+2. **Download the 18 missing full-val meshes on riftvm:** `HM3D_SCENE_GROUP=hm3d_val_full bash embodied_memory/scripts/download_hm3d.sh` (Matterport token in `.env`, no GPU; the `[4b]` mesh preflight FATALs until this lands).
+3. **Full-val R1** (S1 vs S1+) → the honest Table-1 number + the stop_miss/explore_timeout anatomy.
+4. **Phase F** (F1/F2/F3) → rebuild datasets + grids → **R2** (S1 vs S3) = the critical run.
