@@ -11,8 +11,20 @@
 #   * whether the run is still advancing or has stalled (age of the newest
 #     episode file measured against the recent rate).
 #
-# No GPU, no conda, no python — safe to run repeatedly while the job holds the
-# card. Never writes to the run directories.
+# The rate/ETA above come from file MTIMES, so they only hold on the box that
+# wrote them (a copied or rsynced run dir carries copy times). The metrics block
+# below re-derives wall-clock from each episode's own `finished_at`, which
+# travels with the JSON — if the two disagree, trust `finished_at`.
+#
+# Then the partial metrics via progress_metrics.py — CONTEXT.md's headline set:
+# Cost (steps + wall-clock), Benchmark SPL @0.1 m with SR, soft-SPL, Find-SR, and
+# Anomaly-response SR, plus the reach@1m diagnostic labelled as NOT a success
+# rate. Metrics absent on this task print n/a, never 0.0.
+#
+# No GPU and no conda (progress_metrics.py is stdlib-only and runs on a bare
+# system python3; without one, the metrics block is skipped and progress still
+# prints). Never writes to the run directories, so it is safe to run repeatedly
+# while the job holds the card.
 #
 #   bash scripts/run-progress.sh --tag r1v1
 #   bash scripts/run-progress.sh --tag r1v1 --total 2000 --arms 2
@@ -38,7 +50,7 @@ while [ $# -gt 0 ]; do
     --arms)       ARMS="$2"; shift 2 ;;
     --recent)     RECENT="$2"; shift 2 ;;
     --log-lines)  LOG_LINES="$2"; shift 2 ;;
-    -h|--help)    sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,34p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown arg '$1' (see --help)"; exit 1 ;;
   esac
 done
@@ -100,7 +112,7 @@ for d in $ARM_DIRS; do
       rec     = (t[NR] - t[NR - k]) / 60 / k
       age     = (now - t[NR]) / 60
 
-      printf "                               %.1f h elapsed | %.2f min/ep overall | %.2f min/ep last %d\n",
+      printf "                               %.1f h elapsed | %.2f min/ep overall | %.2f min/ep last %d  (file mtimes)\n",
              span / 3600, overall, rec, k
       if (rec > 0 && age > stale_mult * rec)
         printf "                               STALLED? newest episode is %.0f min old (>%dx the recent rate)\n",
@@ -134,6 +146,18 @@ if [ -n "$TOTAL" ]; then
       if (unstarted > 0)
         printf "  includes %d arm(s) not started yet, %d episodes each\n", unstarted, total
     }' "$TMP/left"
+fi
+
+banner "metrics so far (CONTEXT.md headline set)"
+PY=""
+for c in python3 python; do command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }; done
+if [ -n "$PY" ]; then
+  # progress_metrics.py is stdlib-only and is invoked as a FILE, so it never
+  # imports embodied_memory/__init__.py (numpy/habitat) — no conda env needed.
+  # shellcheck disable=SC2086
+  "$PY" embodied_memory/scripts/progress_metrics.py $ARM_DIRS
+else
+  echo "  (no python3 on PATH — metrics block skipped)"
 fi
 
 banner "process"
