@@ -1,7 +1,7 @@
 # 05 — RACE box inventory
 
 Type: task
-Status: claimed
+Status: resolved
 Assignee: Sky
 Blocked by: none
 
@@ -29,6 +29,53 @@ Record, concretely:
 - the `soundspaces-spike` build dir state
 
 Deliverable: a short inventory file in the new tree, plus a keep/rebuild/delete call on each item.
+
+## Answer
+
+**Ran on `riftvm` 2026-08-01, exit 0 in 21s** (`python3 .scratch/ss2-clean-room/probes/box_inventory.py`, repo at `e334285`). Full report: `runs/ss2-box-inventory/inventory.{json,md}` on the box.
+
+Nothing blocks the map. Every load-bearing assumption held, one long-standing problem turns out to be already fixed, and two other tickets get real evidence.
+
+| | |
+| --- | --- |
+| GLIBC | **2.39** (>= 2.29) — the prebuilt `.so` loads. The map called this load-bearing and it had never been measured. |
+| CPU | **4 cores** — confirms ticket 04's cut of `threadCount` to a ~4x ceiling. |
+| GPU | Tesla V100-SXM3-32GB, driver **580.159.03**, driver max CUDA **13.0**, `nvcc` absent |
+| VRAM | **8249 MiB free of 32768** — see the one loose end below |
+| Disk | **680.1G free of 773.9G** — the reset has no disk-pressure justification |
+| HM3D val meshes | **20/20** |
+
+### Envs
+
+| env | python | numpy | habitat_sim | torch |
+| --- | --- | --- | --- | --- |
+| `ss2` | 3.9.19 | 1.23.5 | 0.2.2 **audio=True** | 2.0.1+cu117, cuda=True |
+| `soundspaces-spike` | 3.9.19 | 1.23.5 | 0.2.2 audio=True | none |
+| `ltm-embodied` | 3.9.23 | 1.26.4 | 0.3.3 audio=False | **2.8.0+cu128, cuda=True** |
+| `miniconda3` (base) | 3.13.13 | absent | absent | none |
+
+`ss2` is intact and is the env ticket 06's sweep runs in, so that probe can go now.
+
+### Three findings that matter beyond this ticket
+
+1. **HM3D val mesh coverage is 20/20.** The prior record has this at **2 of 20** — it is why `race-scaleup-matrix.sh` grew a mesh preflight and why the R1 smoke ran on `val_mini`. That constraint is gone. `val` holds 100 `.basis.glb` / 36 `.semantic.glb` at 9.3G, `minival` 10 / 4 at 1.1G. Goes to **ticket 08**.
+2. **The box already runs a modern torch on this V100.** `ltm-embodied` carries **torch 2.8.0+cu128 with `cuda=True`**, and the driver's max CUDA is 13.0. Ticket 13's recommended option (a) "bump torch" was argued from the driver version; this is the same claim measured on the same GPU. Goes to **ticket 13**, with a sharpened risk noted there.
+3. **No MP3D anywhere on the box.** Every listed split is HM3D. Moving datasets means a fresh download, not a re-point. Goes to **ticket 08**.
+
+### Keep / rebuild / delete
+
+- **keep** — GLIBC, HM3D val meshes, disk, GPU.
+- **keep** — `ss2`. Ticket 04 built it clean and it is the map's execution env.
+- **ticket 10's call** — `soundspaces-spike` (env + 5.5G `~/soundspaces-build`), `ltm-embodied`, `~/.cache/pip` 5.7G, `~/.cache/huggingface` 23.9G, `runs/` 880.3M. This inventory deletes nothing and recommends nothing here beyond reporting the sizes.
+- **inferred, worth a look** — `data/` is 19.9G and its splits total ~19.7G with `val` and `versioned_data` **both** reporting 9.3G at 100/36. If those were hardlinked, the parent `du` would have counted them once and read ~10.4G, so this reads as a genuine **~9.3G duplicate copy**. Stated as an inference off `du` arithmetic, not a verified fact — ticket 10 should confirm before acting, and with 680G free there is no urgency.
+
+### One loose end
+
+**Only 8.2 GB of 32 GB VRAM is free** with nothing meant to be running. Not blocking anything in this map — the destination needs CLAP at ~600 MB and an EGL context, and memory (the 7B planner, the VLM) is out of scope — but ~24 GB is held by something unaccounted for. Worth an `nvidia-smi` before any run that wants real VRAM, and it belongs on ticket 10's list.
+
+### Honest note on ordering
+
+Both this ticket and ticket 04 argued this should run **first**, worth ~1 hour. It ran after — `ss2` already exists with torch installed, so 04 had already paid the full build. No harm done (04 went GREEN), and the ordering argument was sound; it simply was not followed. The CUDA finding still lands, just on ticket 13 rather than on 04's wheel choice.
 
 ## Comments
 

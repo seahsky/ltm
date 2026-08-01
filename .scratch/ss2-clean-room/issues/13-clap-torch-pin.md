@@ -43,3 +43,13 @@ GREEN = one env, audio probe still passing, and a real `ClapModel` forward pass 
 ## Note
 
 Cheap to fold into whatever box session runs next rather than paying a separate 25-minute build — the gate is idempotent and skips the habitat-sim build when an audio-capable `habitat_sim` already imports, so this is a pip layer and a probe, not a rebuild.
+
+## Note added by ticket 05 (resolved) — option (a) now has direct evidence, and a sharper risk
+
+**Take option (a), bump torch.** This ticket argued it from the driver version. The inventory measured it on the same box: the `ltm-embodied` env runs **torch 2.8.0+cu128 with `cuda=True` on this exact V100**, and the driver's max supported CUDA is **13.0**. So "a modern torch runs here" stops being an inference about driver compatibility and becomes an observation. Option (b), pinning transformers down, would freeze the stack around a torch pin that is now positively known to be unnecessary.
+
+**But do not copy `ltm-embodied`'s torch version.** That env also carries **numpy 1.26.4**, which is above the `<1.24` pin the whole 2022-era habitat-sim tree depends on. The box's proof-of-modern-torch arrives bundled with exactly the numpy that would kill `ss2`. So the real question this ticket answers is narrower than "does torch 2.8 work here" — it is **the highest torch that still resolves against numpy 1.23.5**, which is what the existing `numpy<1.24` constraint file has to be asserted against after the install, not assumed.
+
+That points at the torch 2.1–2.4 range this ticket already named, for the reason it named (>= 2.1 satisfies transformers, and the V100's compute 7.0 is inside the supported arch list) rather than at the newest wheel available. `nvcc` is absent on the box, which is fine — these are binary wheels and habitat-sim's audio build never needed it.
+
+Also relevant to the GREEN check: only **8.2 GB of 32 GB VRAM was free** at inventory time. CLAP is ~600 MB so this does not threaten the forward pass, but if the `--load-clap` probe OOMs, check `nvidia-smi` before suspecting the pin.
