@@ -43,6 +43,8 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 
 - [05 — RACE box inventory](issues/05-race-box-inventory.md) — **Nothing blocks the map.** GLIBC **2.39** (the map's load-bearing assumption, never previously measured), 4 cores, V100-32GB, **680 GB disk free**, and `ss2` intact so ticket 06's sweep can run. Three findings travel: **HM3D val mesh coverage is 20/20**, not the 2/20 that forced earlier work onto `val_mini` (→ 08); **the box already runs torch 2.8.0+cu128 with CUDA on this V100**, so ticket 13's "bump torch" is measured rather than argued — though that env's numpy 1.26.4 sharpens the risk (→ 13); and **no MP3D is on the box at all** (→ 08). Loose ends for 10: a suspected ~9.3 GB duplicate in `data/`, and ~24 GB of VRAM held by something unaccounted for.
 
+- [08 — Scene dataset: stay on HM3D or move?](issues/08-scene-dataset.md) — **HM3D stays; materials permanently off; MP3D out of scope** (ADR `docs/adr/0007`). MP3D is the better acoustic dataset and loses anyway, because the room character it buys is a property no result consumes — and the materials-off path is SoundSpaces' *own* HM3D reference configuration. Corrects two of this ticket's own arguments: cross-quotability is **weaker** than stated (ADR-0006 retired competitive absolute numbers, so it is the secondary reason, not the load-bearing one), and the "2 of 20 meshes" argument for moving is **dead** (05: val coverage is 20/20). Knock-ons: 12 loses its probe and keeps its guard, 06 runs the HM3D arm only, semantic annots stay on 10's keep list, nothing is downloaded.
+
 - [03 — Do acoustic materials resolve on HM3D?](issues/03-materials-on-hm3d.md) — Materials are matched by **substring** against the Habitat semantic category name (only 13 of the 30 shipped materials are even reachable). For HM3D: **no by default, degraded at best**, behind three independent gates — `enableMaterials` is constructed `false`, plain HM3D has no semantic scene, and v0.2's *texture-based* semantics appear to hand the audio sensor an **empty mesh** (new ticket 12). The degraded path is confirmed as **no material database at all**, and it is what SoundSpaces itself runs on HM3D. Acceptable for us: the gradient's load-bearing terms are geometric, so uniform absorption costs **contrast, not structure**. Also: geometry uploads **once per context**, not per step (good news for 06).
 
 ## Not yet specified
@@ -51,9 +53,11 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
   What the simulator wrapper, audio sensor wrapper, controller, and runner look like as deep modules. Waits on 07 (what the rebuilt agent is) and 09 (task spec).
   Four concrete requirements to carry in, all now settled and none of them waiting on 07 or 09:
   1. **Loud invariant assertions at context creation** (03): non-empty audio mesh, key validation, every `RLRA_Error` checked — both the empty-mesh trap and the swallowed-key trap fail silently while still producing plausible audio.
+     **Now owned by ticket 12**, which 08 rescoped from a probe into exactly this guard. This entry stays as the specification; 12 is where it gets built and tested.
   2. **The key validator goes on `AudioSensorSpec` and nowhere else** (04, measured not predicted): the spec swallows unknown keys, `acousticsConfig` raises.
   3. **No fixed-width IR buffer** (04): the IR is trimmed to actual decay, not to `maxIRLength` — 1.64 s came back against a 4.0 s cap, so width is scene- and pose-dependent.
   4. **The runner drives `habitat_sim` directly and does not need habitat-lab** (04, verified on the box), so the new tree owns three small pieces habitat-lab used to supply — ObjectNav `.json.gz` episode loading, `sim.make_greedy_follower()` steering, and the SPL/SoftSPL arithmetic. Only the first has any weight.
+  5. **One box-only fact the episode loader must settle** (08): whether `objectnav_hm3d` v1 loads against `hm3d_basis.scene_dataset_config.json` or requires `hm3d_annotated_basis.scene_dataset_config.json`. The old `habitat_env.py` reaches for the annotated one, which is suggestive, not proof. Not its own ticket — it is one line inside the loader — but it is why ticket 10 keeps the 9.3 G of semantic annotations rather than deleting them.
 - **How the STM/LTM calculation is carried across.**
   Copied, vendored, or imported; what interface it sits behind; whether the consolidation math is lifted verbatim. Waits on the package layout.
 - **Smoke-green acceptance criteria.**
@@ -64,7 +68,7 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 - **How far the clean room is willing to fork habitat-sim.**
   02 found the first patch worth carrying (multi-source), and 04 built patch-capable and confirmed the trap is real on the binary (`multi-source surface: none`) while shipping **stock, no patches applied**. If more follow, the tree owns a habitat-sim fork with a maintenance cost and a reproducibility story, which is a different commitment from "we build upstream with a flag". Revisit once 06 has priced multi-source and 09 has said whether the patch is taken.
   **Refined by 06 (2026-08-01): 06 prices the sequential *upper bound* only, not the patched cost.** Concurrent sources need the patch, and the patch decision was routed through 06's sweep — a loop, broken by ordering. The patch only earns a rebuild in the narrow band where one render fits the budget and three sequential renders do not; outside that band the fork question is decided on onset-provenance merit alone, not on cost. So this entry no longer waits on a patched measurement.
-  03 found a second, much smaller candidate: `RLRA_WriteIRMetrics` (RT60, EDT, DRR, C80, C50, D50, TS per frequency band) exists in the engine but is **not bound to Python** on this branch. It would settle acoustic questions directly instead of by proxy. Ticket 12 only takes it if the cheaper OBJ-colour proxy is ambiguous.
+  03 found a second, much smaller candidate: `RLRA_WriteIRMetrics` (RT60, EDT, DRR, C80, C50, D50, TS per frequency band) exists in the engine but is **not bound to Python** on this branch. ~~Ticket 12 only takes it if the cheaper OBJ-colour proxy is ambiguous.~~ **Withdrawn by 08 (2026-08-01):** it was only ever a tie-break for ticket 12's material-characterisation probe, and that probe is dropped with materials. So multi-source is once again the *only* patch candidate, and the fork question is decided on onset-provenance merit alone.
 
 ## Out of scope
 
@@ -76,3 +80,12 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
   `dialogue_memory/` is deleted as part of the reset; the MSC benchmark arc is not resumed.
 - **Running the simulator on this Mac.**
   Structurally impossible (Linux-x64-only audio binary), not merely deprioritised.
+
+- **MP3D, and any other scene dataset.**
+  Ruled out by [08 — Scene dataset: stay on HM3D or move?](issues/08-scene-dataset.md) (ADR `docs/adr/0007`): the acoustic-material fidelity MP3D buys is a property no result in this experiment consumes, and moving would cost the whole prior record, a fresh multi-GB download, and a redrawn destination.
+  Ruled out **unconditionally**, not parked behind ticket 06's gradient number — a flat gradient would be a source-placement or gain problem, since materials are off in the MP3D reference configuration too.
+  This also closes the **split** option (HM3D for benchmark numbers, MP3D for an audio-realism figure) and any audio-realism demonstration.
+
+- **Acoustic materials, on any dataset.**
+  Same decision. `enableMaterials` stays `false` and the new tree carries no material-database path.
+  The consequence is a stated limitation, not a hidden one: uniform absorption, room-scale RT60 variation preserved via `V/S`, furnishing-dependent variation absent.

@@ -43,3 +43,19 @@ A grilling session producing a literal checklist: paths, order of operations, th
 Nothing is deleted until this ticket is resolved and the smoke is green.
 
 Deliverable: the checklist, approved, plus whatever knowledge extraction it identifies as a prerequisite.
+
+## Note added by ticket 08 (resolved 2026-08-01) — the dataset half of the keep list is settled
+
+**HM3D stays; MP3D is out of scope** (`docs/adr/0007-hm3d-stays-mp3d-out-of-scope.md`). So the scene-asset side of this ticket's keep/rebuild/delete list no longer needs deciding:
+
+**KEEP, all of it:**
+
+- HM3D `val` — 100 `.basis.glb` / 36 `.semantic.glb`, 9.3 G
+- HM3D `minival` — 10 / 4, 1.1 G
+- the ObjectNav episode datasets for both splits
+
+**DOWNLOAD: nothing.** No MP3D, now or later in this effort.
+
+**The semantic annotations are explicitly KEPT, and the reasoning should not be re-derived.** They look like dead weight — materials are off so the audio never reads them, and HM3D's semantic sensor is a known all-zeros dead end. They stay anyway because **it is not established on the box whether the ObjectNav episode dataset loads against `hm3d_basis.scene_dataset_config.json` or requires `hm3d_annotated_basis.scene_dataset_config.json`**. The old `habitat_env.py` reaches for the annotated config, which is suggestive but not proof. 9.3 G against 680 G free is not worth a re-download over ssh if the answer turns out to be "required". The new tree settles it at runtime; until then, deleting them is the only irreversible move available.
+
+This does **not** touch this ticket's other two loose ends from ticket 05 — the suspected ~9.3 G duplicate in `data/`, and the ~24 GB of VRAM held by something unaccounted for. Both are still open here.

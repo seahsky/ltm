@@ -1,8 +1,10 @@
 # 08 — Scene dataset: stay on HM3D or move?
 
 Type: grilling
-Status: open
-Blocked by: 03
+Status: resolved
+Assignee: Sky
+Blocked by: 03 (resolved)
+Resolved: 2026-08-01 — see the Answer section. ADR: `docs/adr/0007-hm3d-stays-mp3d-out-of-scope.md`
 
 ## Question
 
@@ -57,3 +59,47 @@ Weigh in particular:
 
 One measurement is still outstanding and could move this: ticket 06 now owns a gradient-contrast measurement under HM3D materials-off versus MP3D materials-on.
 Decide whether this grilling wants that number first, or whether the comparability argument settles it regardless.
+
+## Answer
+
+**HM3D stays. MP3D is out of scope for this effort — no fallback, no split, no audio-realism demonstration figure. Acoustic materials are permanently off.**
+
+Recorded as `docs/adr/0007-hm3d-stays-mp3d-out-of-scope.md`, in the existing `docs/adr/` sequence rather than in the new tree, because the new tree's root is still fog and a made decision should not sit unrecorded waiting on it.
+
+### The decision in one line
+
+Ticket 03's framing — *benchmark comparability on acoustics with no room character, versus acoustic fidelity on a dataset that breaks every external number* — resolves because **the room character MP3D buys is a property no result in this experiment consumes**, so the left-hand side costs nothing.
+
+MP3D is genuinely the better acoustic dataset (85.7 % vocabulary coverage against 51.5 % of HM3D instances, one ambiguous tie against eight on a single scene, and a mesh representation the audio sensor can actually read). That was never in dispute and the ADR says so plainly. It loses on relevance, not on quality.
+
+Three things carried the decision:
+
+1. **The degraded path is the reference configuration.** `sound-spaces` sets `enableMaterials = False` at every entry point and `PanoIR/render_panoIR.py` excludes HM3D from the material-JSON load. The SoundSpaces authors render HM3D with no material database. We are not choosing a broken variant, we are choosing theirs.
+2. **The audio channel's load-bearing terms are geometric.** Onset, a climbable energy gradient, and onset provenance all come from direct-path spreading, occlusion and diffraction — material-independent. Uniform absorption costs contrast, not structure. Ticket 04 already rendered a non-silent IR (`ir_peak_abs` 0.163, `ray_efficiency` 0.548, 392,356 verts) with no material database in the context at all.
+3. **Moving costs the entire prior record** plus a fresh multi-GB download (ticket 05: no MP3D anywhere on the box), plus redrawing this map's destination, which names HM3D in its own text.
+
+### One argument this ticket overstated, corrected
+
+The ticket's pro-HM3D case leaned on VLFM 0.304 / VLingNav 0.429 cross-quotability. **ADR-0006 already retired the "competitive absolute numbers" ambition**, so that argument is weaker than the ticket assumed. It is not dead — R1 survives as the honest Table-1 baseline and is quotable only on HM3D at the 0.1 m ring (ADR-0005) — but the decision rests primarily on the materials delta buying nothing, and only secondarily on comparability. Anyone re-reading this ticket should not treat comparability as the load-bearing reason.
+
+### One argument this ticket understated, corrected
+
+The ticket lists "a prior run found meshes present for only 2 of 20 HM3D val scenes" as an argument *for moving*. Ticket 05 killed it: **val mesh coverage is 20/20**. The HM3D asset situation is clean, and the constraint that forced earlier work onto `val_mini` is gone.
+
+### The risk we accepted, named
+
+MP3D was ruled fully out rather than parked as a conditional fallback behind ticket 06's gradient-contrast number. If 06 reports a flat gradient, the map has no pre-agreed answer. That was chosen knowingly: **a flat gradient is a source-placement or gain problem, not a dataset problem**, since materials are off in the MP3D reference config too — switching datasets would not fix it.
+
+### What this changes elsewhere
+
+- **Ticket 12 shrinks to its guard half.** The semantic-mesh probe now measures a path the clean room never takes; dropped. The assertion survives and matters more, not less.
+- **Ticket 06 runs the HM3D arm only.** No MP3D materials-on/off arm. Its gradient-contrast number is now a source-placement gate, not a dataset gate.
+- **Ticket 10 keep list:** HM3D `val` (100 basis / 36 semantic, 9.3 G) + `minival` (10 / 4, 1.1 G) + the ObjectNav episode datasets. **Semantic annotations are KEPT** — 9.3 G against 680 G free, and it is not established on the box whether the ObjectNav dataset needs `hm3d_annotated_basis.scene_dataset_config.json` or loads against the plain basis config. Keeping them means either answer works. **Download nothing.**
+- **Ticket 09** loses one of its three blockers (02 and 06 remain).
+- **The map's destination is unchanged.**
+
+### The limitation, for whoever writes the paper
+
+If an acoustic-realism claim is ever made, HM3D cannot back it, and the claim gets dropped rather than the dataset changed. Ticket 03's wording: **uniform absorption; room-scale RT60 variation preserved via `V/S`; furnishing-dependent variation absent.**
+
+This is recorded as a guard on what the paper is *permitted* to claim, not as an assertion about what it currently claims — the grilling did not settle whether any realism claim is intended, and the v0.2 draft treats audio as trigger and gate while explicitly disclaiming localization.
