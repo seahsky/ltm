@@ -1,7 +1,8 @@
 # 04 — One-env feasibility: can the audio build hold the rest of the stack?
 
 Type: task
-Status: claimed
+Status: resolved
+Assignee: Sky
 Blocked by: none
 
 ## Question
@@ -40,6 +41,84 @@ GREEN = one process, all imports, GPU visible, audio sensor constructible.
 RED = the printed blocker list is the deliverable, and ticket 07 has to be re-scoped around whatever cannot coexist.
 
 Do not reuse the existing `soundspaces-spike` env. It is a spike artifact with unknown drift; build clean so the result is trustworthy.
+
+## Answer
+
+**GREEN. One env holds it.** `nrun bash .scratch/ss2-clean-room/probes/oneenv_gate.sh` on `riftvm`, 2026-08-01, exit 0 in 24m50s. Env `ss2` at `/home/riftuser/miniconda3/envs/ss2`.
+
+The two-env split is dead. habitat-sim-with-audio, torch-on-GPU and the CLAP stack coexist in one interpreter, the audio sensor renders a non-silent IR in a real HM3D scene, and **the numpy pin held through every layer** (1.23.5 after habitat-sim, after torch, and after transformers+scipy) — which was the actual question, and the one `race-soundspaces-spike.sh` never asked.
+
+| | |
+| --- | --- |
+| python / numpy | 3.9.19 / 1.23.5, pin held after all three layers |
+| habitat_sim | 0.2.2, audio-capable, all five branch-generation methods present |
+| torch | 2.0.1+cu117, CUDA available, **Tesla V100-SXM3-32GB**, cap 7.0, 31.73 GB, alloc smoke OK |
+| transformers / scipy | 4.57.6 / 1.13.1 |
+| habitat-lab | not importable — **as designed**, it was excluded from the gate and merely measured |
+| GLIBC | 2.39 (>= 2.29, so the prebuilt `.so` loads) |
+| cores | **4** |
+
+**Provenance** (this is what makes tickets 01/11's parameter sheet falsifiable):
+`habitat-sim RLRAudioPropagationUpdate @ 4f61e321477708fa606fbd8f42b4bef41d67c672`, `rlr-audio-propagation @ 4fd446b4abb5c71fb7a232a083bbddd65f25fc6f`. No patches applied — stock branch.
+
+### The defaults, measured
+
+Every number below came out of a freshly constructed `AudioSensorSpec` on the real build. Tickets 01 and 11 quoted these from docs; the docs were reading a different branch generation and no value was verified. **Ticket 06 blocks on this table.**
+
+```
+diffraction 1        directRayCount 500     directSHOrder 3      direct 1
+frequencyBands 4     globalVolume 1.0       indirect 1           indirectRayCount 5000
+indirectRayDepth 200 indirectSHOrder 1      maxDiffractionOrder 10
+maxIRLength 4.0      meshSimplification 0   sampleRate 44100.0
+sourceRayCount 200   sourceRayDepth 10      temporalCoherence 0  threadCount 1
+transmission 1       unitScale 1.0
+channelLayout: Binaural, channelCount 2   |   layouts available: Mono, Binaural, Ambisonics
+```
+
+Four things this settles that were open:
+
+1. **`transmission` defaults to `1` (ON).** The three primary sources contradicted each other at the same commit; the header comment was right, the pybind docstring and `AUDIO.md` were wrong. **This is not cosmetic** — ticket 03's argument that the energy gradient survives uniform materials leans on doorway occlusion contrast, and transmission-on with a uniform default leaks energy through walls and reduces exactly that contrast. Ticket 09 inherits this.
+2. **`enableMaterials` prints `False`**, on the spec, exactly as ticket 03 predicted from the constructor. The build is what we think it is.
+3. **`maxIRLength` present, `irTime` absent**, `directRayCount` present — ticket 11's rename confirmed against the binary rather than the header.
+4. **The `dynamic_attr` trap, measured not restated**: the **spec** swallows unknown keys (`True`), `acousticsConfig` does **not** (`False`). Ticket 03 was right to split ticket 11's warning. **The new tree's key validator belongs on `AudioSensorSpec` specifically**, and nowhere else.
+
+`multi-source surface: none` — ticket 02's source read confirmed against the built binary. The ~40-line patch is still the only route to concurrent sources, and this build is stock, so it is not taken yet (ticket 09's call).
+
+### One render, and an early warning for ticket 06
+
+`first_render_s = 0.6013`, `ir_shape = [2, 72300]`, non-silent (`ir_peak_abs` 0.163), `ray_efficiency` 0.548, on `minival/00800-TEEsavR23oF`. Mesh: 392,356 verts / 1,185,054 indices.
+
+Two readings worth carrying into ticket 06, both flagged for what they are:
+
+- **Inferred, not measured:** the geometry upload is a small fraction of that 0.60 s. The log timestamps put `createAudioSimulator` → `loadMesh` vertex count at ~17 ms, which would leave **~0.58 s in the Monte-Carlo simulate itself**. If that is the steady-state per-step cost, a 500-step episode is ~5 minutes of pure audio — which is ticket 06's own "forces the throttled variant" case, not its tolerable one. Ticket 06 must measure steady-state directly; do not take this inference as the number.
+- **`threadCount` is a much weaker lever than assumed.** The map calls it "a free speed knob currently set to 1". This box has **4 cores**, so the ceiling is ~4x, not the order of magnitude that framing implies. The real levers are `indirectRayCount` (5000), `indirectRayDepth` (200), `maxIRLength` (4.0) and `temporalCoherence` (0, i.e. off).
+
+Also a concrete design fact for the new tree: **the IR is trimmed to its actual decay, not to `maxIRLength`.** 72,300 samples at 44.1 kHz is 1.64 s against a 4.0 s `maxIRLength` (176,400). Anything downstream that assumes a fixed-width IR buffer is wrong.
+
+### The one crack in the GREEN: CLAP cannot actually run
+
+The gate reports `clap_symbols_importable: True`, but transformers printed its own verdict immediately above that line:
+
+```
+Disabling PyTorch because PyTorch >= 2.1 is required but found 2.0.1+cu117
+None of PyTorch, TensorFlow >= 2.0, or Flax have been found. Models won't be
+available and only tokenizers, configuration and file/data utilities can be used.
+```
+
+**transformers 4.57.6 has disabled its PyTorch backend**, so `ClapModel` is a dummy object. The symbol imports; the model cannot instantiate. This is precisely the false-positive class the gate was designed to avoid elsewhere (issue #2340: probe the member, not the class) — the CLAP check probed importability, which a dummy passes.
+
+Precisely what is and is not established: the quoted message is transformers' own primary output, so the backend is definitively off. It was **not** directly exercised — `--load-clap` was not passed, so no `from_pretrained` call was made.
+
+The `transformers>=4.30,<5` pin guarded the wrong end. The upper bound was set to stop a major bump changing the API; the failure came from the **lower** bound being loose enough to resolve 4.57, which requires `torch>=2.1` against a `torch==2.0.1` that this ticket's own comment flagged as an unverified V100-*era* guess.
+
+**This does not retract the GREEN.** The coexistence question — the hard part, and the thing the whole map hangs off — is answered yes. This is a pin mismatch between two layers that both installed fine, not an architecture problem. It is ticket 13.
+
+### What this unblocks
+
+- **06** (blocked by 04 + 11, both now resolved) — joins the frontier with the real defaults table and the ~0.58 s warning.
+- **07** and **12** — unblocked.
+- **12 gets a free anchor**: this run took the *non-semantic* path (`enableMaterials=False`, and the scene has no semantics on disk — neither `.basis.scn` nor `info_semantic.json`, "The active scene does not contain semantic annotations"). So it does **not** test the empty-mesh trap, but it establishes the control: **392,356 verts on the non-semantic path**. If the semantic path yields zero, the trap is confirmed by direct comparison.
+- **05** is partly answered incidentally — GLIBC 2.39, 4 cores, V100-32GB, driver 580.159.03. Its remaining value is the *existing-state* half: envs, disk, HM3D mesh coverage, weights, spike dir.
 
 ## Note added by ticket 02
 

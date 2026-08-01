@@ -57,3 +57,28 @@ What replaces it:
   Ticket 03 argues from the engine's physics that a uniform-absorption world still yields a climbable gradient, because every load-bearing term (direct-path spreading, occlusion, diffraction) is geometric and material-independent. What it cannot argue is **contrast**: a reflective built-in default flattens the within-room field and compresses the final-metres gradient.
   That number is the one thing section 7 of ticket 03 could not settle from source, and it belongs here because it is the same walk the timing sweep already does.
 - Run it under HM3D materials-off, and under MP3D materials-on/off if ticket 08 keeps MP3D in play.
+
+## Note added by ticket 04 (now resolved — this ticket is unblocked)
+
+**Step 0 is done. The defaults are measured, so the sweep has a real baseline:**
+
+```
+diffraction 1        directRayCount 500     directSHOrder 3      direct 1
+frequencyBands 4     globalVolume 1.0       indirect 1           indirectRayCount 5000
+indirectRayDepth 200 indirectSHOrder 1      maxDiffractionOrder 10
+maxIRLength 4.0      meshSimplification 0   sampleRate 44100.0
+sourceRayCount 200   sourceRayDepth 10      temporalCoherence 0  threadCount 1
+transmission 1       unitScale 1.0
+channelLayout Binaural / channelCount 2
+```
+
+Provenance for the sweep to quote: habitat-sim `RLRAudioPropagationUpdate @ 4f61e321`, `rlr-audio-propagation @ 4fd446b4`, stock (no patches).
+
+Four things that change how this ticket should be run:
+
+1. **The single timing is worse than this ticket's tolerable case.** `first_render_s = 0.6013` on `minival/00800-TEEsavR23oF` (392,356 verts). Ticket 03's note above is right that geometry uploads once — and the log timestamps put that upload at only **~17 ms**, which would leave **~0.58 s in `RLRA_Simulate` itself**. *That is an inference off log timestamps, not a measurement* — settling it is this ticket's first job. But if it holds, live-every-step at defaults is ~5 min/episode of pure audio, which is this ticket's "forces the throttled variant" case. **Measure steady-state before assuming the destination is affordable.**
+2. **`threadCount` is a weaker lever than the map assumes.** The map calls it "a free speed knob currently set to 1"; the box has **4 cores**, so the ceiling is ~4x, not an order of magnitude. The real levers are `indirectRayCount` (5000), `indirectRayDepth` (200), `maxIRLength` (4.0) and `temporalCoherence` (currently **0**, i.e. off — so it is a pure win to test, nothing is being given up by enabling it).
+3. **`transmission` defaults to ON (`1`).** It is a cost knob *and* a contrast knob: it leaks energy through walls, which works directly against the gradient-contrast measurement ticket 03 added above. Sweep it on both axes, not just for speed.
+4. **The IR is trimmed to actual decay, not to `maxIRLength`.** The gate returned `ir_shape [2, 72300]` = 1.64 s at 44.1 kHz against a 4.0 s `maxIRLength` (176,400 samples). So IR width is *scene- and pose-dependent*: any fixed-width buffer downstream is wrong, and `maxIRLength` is a cap rather than a size. Worth recording IR width alongside ms/step, since a shorter IR is part of how a cheaper preset pays for itself.
+
+Two readouts are confirmed present on the built binary and free to use: `getRayEfficiency()` (the gate measured 0.548 at defaults) and `sourceIsVisible()` (measured `False` for that pose — a non-LOS, diffraction-dominated sample, which is the expensive case).

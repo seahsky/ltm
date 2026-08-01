@@ -29,7 +29,7 @@ Two constraints that are already load-bearing and were not obvious:
 - `data/`, `runs/`, `models/` are gitignored.
   The clean-room rebuild is a source-tree operation and does not touch 1.2 GB of HM3D or any downloaded weights.
 - The old two-env split existed because the audio build (Python 3.9, numpy < 1.24, a 2022-era habitat-sim branch) could not hold the VLM stack.
-  "Purely SoundSpaces 2.0" means collapsing that split, so proving the collapse is possible is the gate the whole map hangs off.
+  "Purely SoundSpaces 2.0" means collapsing that split, so proving the collapse is possible is the gate the whole map hangs off. **Gate PASSED 2026-08-01 — see ticket 04.**
 
 Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/prototype`.
 
@@ -39,14 +39,19 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 - [02 — Can one audio sensor render simultaneous sources?](issues/02-simultaneous-sources.md) — No in habitat-sim (one source, hardcoded index 0), but **yes in the engine underneath**: `RLRA_AddSource` / `RLRA_ClearSources` / per-source IRs keyed `(listenerIndex, sourceIndex)`, one `RLRA_Simulate` for all. A ~40-line wrapper patch to files ticket 04 already compiles reaches it at zero extra renders per step, and per-source IRs make onset provenance structural. Cost of N sources is unmeasurable from source (closed `.so`) and moves to ticket 06.
 - [11 — Reconcile the parameter sheet against the branch we actually build](issues/11-parameter-sheet-branch-reconcile.md) — `irTime` → **`maxIRLength`**; `updateDt`, `dumpWaveFiles`, `writeIrToFile`, `outputDirectory` gone; `enableMaterials` moved to the spec and defaults **false**; `directRayCount` + an HRTF basis are new; channel layouts narrowed to Mono/Binaural/Ambisonics. `transmission`, `diffraction`, `temporalCoherence` and the ray counts all survive, so 06 and 09 stand. **Every numeric default is unverified** — they live in the closed `.so`, so 04 must print them. Unknown config keys are silently swallowed (`py::dynamic_attr`), so the new tree's wrapper must validate keys and check every `RLRA_Error`.
 
+- [04 — One-env feasibility: can the audio build hold the rest of the stack?](issues/04-one-env-feasibility.md) — **GREEN, the two-env split is dead.** One env (`ss2`) holds habitat-sim(audio, `RLRAudioPropagationUpdate @ 4f61e321`) + torch 2.0.1/cu117 on the V100-32GB + the CLAP stack, and the `numpy<1.24` pin held through every layer. The audio sensor renders a non-silent IR in a real HM3D scene. **The 23-knob parameter sheet is now MEASURED, not quoted** — `transmission` defaults **ON**, `enableMaterials` **False**, `maxIRLength` 4.0 (no `irTime`), and the `dynamic_attr` trap lives on the **spec** only. Two cracks: **CLAP cannot instantiate** (transformers 4.57 disabled its torch backend against torch 2.0.1 → ticket 13), and the single render was **0.60 s**, which is ticket 06's *unaffordable* case rather than its tolerable one.
+
 - [03 — Do acoustic materials resolve on HM3D?](issues/03-materials-on-hm3d.md) — Materials are matched by **substring** against the Habitat semantic category name (only 13 of the 30 shipped materials are even reachable). For HM3D: **no by default, degraded at best**, behind three independent gates — `enableMaterials` is constructed `false`, plain HM3D has no semantic scene, and v0.2's *texture-based* semantics appear to hand the audio sensor an **empty mesh** (new ticket 12). The degraded path is confirmed as **no material database at all**, and it is what SoundSpaces itself runs on HM3D. Acceptable for us: the gradient's load-bearing terms are geometric, so uniform absorption costs **contrast, not structure**. Also: geometry uploads **once per context**, not per step (good news for 06).
 
 ## Not yet specified
 
 - **The new package's module layout and seams.**
   What the simulator wrapper, audio sensor wrapper, controller, and runner look like as deep modules. Waits on 07 (what the rebuilt agent is) and 09 (task spec).
-  Ticket 03 added a concrete requirement to carry in: the wrapper needs **loud invariant assertions at context creation** (non-empty audio mesh, key validation on `AudioSensorSpec` specifically, every `RLRA_Error` checked), because both the empty-mesh trap and the swallowed-key trap fail silently while still producing plausible audio.
-  Ticket 04's source read (in progress, box half pending) added a second: the runner **drives `habitat_sim` directly and does not need habitat-lab**, so the new tree owns three small pieces habitat-lab used to supply — ObjectNav `.json.gz` episode loading, `sim.make_greedy_follower()` steering, and the SPL/SoftSPL arithmetic. Only the first has any weight.
+  Four concrete requirements to carry in, all now settled and none of them waiting on 07 or 09:
+  1. **Loud invariant assertions at context creation** (03): non-empty audio mesh, key validation, every `RLRA_Error` checked — both the empty-mesh trap and the swallowed-key trap fail silently while still producing plausible audio.
+  2. **The key validator goes on `AudioSensorSpec` and nowhere else** (04, measured not predicted): the spec swallows unknown keys, `acousticsConfig` raises.
+  3. **No fixed-width IR buffer** (04): the IR is trimmed to actual decay, not to `maxIRLength` — 1.64 s came back against a 4.0 s cap, so width is scene- and pose-dependent.
+  4. **The runner drives `habitat_sim` directly and does not need habitat-lab** (04, verified on the box), so the new tree owns three small pieces habitat-lab used to supply — ObjectNav `.json.gz` episode loading, `sim.make_greedy_follower()` steering, and the SPL/SoftSPL arithmetic. Only the first has any weight.
 - **How the STM/LTM calculation is carried across.**
   Copied, vendored, or imported; what interface it sits behind; whether the consolidation math is lifted verbatim. Waits on the package layout.
 - **Smoke-green acceptance criteria.**
@@ -54,10 +59,8 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 - **Test strategy for a Linux-only stack from a Mac.**
   Which layers stay pure enough to unit-test locally, and what has to be a box-only integration test.
   Dropping habitat-lab (above) helps here rather than hurting: episode loading becomes a gzipped-JSON parse the Mac can unit-test, where `habitat.Env` was box-only by construction.
-- **Whether the geometric frontier searcher is rebuilt or replaced.**
-  ADR-0006 retreated to the geometric spine after four non-lifts of a semantic frontier, but a clean room reopens the question. Waits on 04 (what models can even run in the one env).
 - **How far the clean room is willing to fork habitat-sim.**
-  02 found the first patch worth carrying (multi-source), and 04 now builds patch-capable. If more follow, the tree owns a habitat-sim fork with a maintenance cost and a reproducibility story, which is a different commitment from "we build upstream with a flag". Revisit once 06 and 09 have said whether the multi-source patch is actually taken.
+  02 found the first patch worth carrying (multi-source), and 04 built patch-capable and confirmed the trap is real on the binary (`multi-source surface: none`) while shipping **stock, no patches applied**. If more follow, the tree owns a habitat-sim fork with a maintenance cost and a reproducibility story, which is a different commitment from "we build upstream with a flag". Revisit once 06 has priced multi-source and 09 has said whether the patch is taken.
   03 found a second, much smaller candidate: `RLRA_WriteIRMetrics` (RT60, EDT, DRR, C80, C50, D50, TS per frequency band) exists in the engine but is **not bound to Python** on this branch. It would settle acoustic questions directly instead of by proxy. Ticket 12 only takes it if the cheaper OBJ-colour proxy is ambiguous.
 
 ## Out of scope
