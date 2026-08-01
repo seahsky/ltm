@@ -39,10 +39,13 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 - [02 — Can one audio sensor render simultaneous sources?](issues/02-simultaneous-sources.md) — No in habitat-sim (one source, hardcoded index 0), but **yes in the engine underneath**: `RLRA_AddSource` / `RLRA_ClearSources` / per-source IRs keyed `(listenerIndex, sourceIndex)`, one `RLRA_Simulate` for all. A ~40-line wrapper patch to files ticket 04 already compiles reaches it at zero extra renders per step, and per-source IRs make onset provenance structural. Cost of N sources is unmeasurable from source (closed `.so`) and moves to ticket 06.
 - [11 — Reconcile the parameter sheet against the branch we actually build](issues/11-parameter-sheet-branch-reconcile.md) — `irTime` → **`maxIRLength`**; `updateDt`, `dumpWaveFiles`, `writeIrToFile`, `outputDirectory` gone; `enableMaterials` moved to the spec and defaults **false**; `directRayCount` + an HRTF basis are new; channel layouts narrowed to Mono/Binaural/Ambisonics. `transmission`, `diffraction`, `temporalCoherence` and the ray counts all survive, so 06 and 09 stand. **Every numeric default is unverified** — they live in the closed `.so`, so 04 must print them. Unknown config keys are silently swallowed (`py::dynamic_attr`), so the new tree's wrapper must validate keys and check every `RLRA_Error`.
 
+- [03 — Do acoustic materials resolve on HM3D?](issues/03-materials-on-hm3d.md) — Materials are matched by **substring** against the Habitat semantic category name (only 13 of the 30 shipped materials are even reachable). For HM3D: **no by default, degraded at best**, behind three independent gates — `enableMaterials` is constructed `false`, plain HM3D has no semantic scene, and v0.2's *texture-based* semantics appear to hand the audio sensor an **empty mesh** (new ticket 12). The degraded path is confirmed as **no material database at all**, and it is what SoundSpaces itself runs on HM3D. Acceptable for us: the gradient's load-bearing terms are geometric, so uniform absorption costs **contrast, not structure**. Also: geometry uploads **once per context**, not per step (good news for 06).
+
 ## Not yet specified
 
 - **The new package's module layout and seams.**
   What the simulator wrapper, audio sensor wrapper, controller, and runner look like as deep modules. Waits on 07 (what the rebuilt agent is) and 09 (task spec).
+  Ticket 03 added a concrete requirement to carry in: the wrapper needs **loud invariant assertions at context creation** (non-empty audio mesh, key validation on `AudioSensorSpec` specifically, every `RLRA_Error` checked), because both the empty-mesh trap and the swallowed-key trap fail silently while still producing plausible audio.
 - **How the STM/LTM calculation is carried across.**
   Copied, vendored, or imported; what interface it sits behind; whether the consolidation math is lifted verbatim. Waits on the package layout.
 - **Smoke-green acceptance criteria.**
@@ -53,6 +56,7 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
   ADR-0006 retreated to the geometric spine after four non-lifts of a semantic frontier, but a clean room reopens the question. Waits on 04 (what models can even run in the one env).
 - **How far the clean room is willing to fork habitat-sim.**
   02 found the first patch worth carrying (multi-source), and 04 now builds patch-capable. If more follow, the tree owns a habitat-sim fork with a maintenance cost and a reproducibility story, which is a different commitment from "we build upstream with a flag". Revisit once 06 and 09 have said whether the multi-source patch is actually taken.
+  03 found a second, much smaller candidate: `RLRA_WriteIRMetrics` (RT60, EDT, DRR, C80, C50, D50, TS per frequency band) exists in the engine but is **not bound to Python** on this branch. It would settle acoustic questions directly instead of by proxy. Ticket 12 only takes it if the cheaper OBJ-colour proxy is ambiguous.
 
 ## Out of scope
 

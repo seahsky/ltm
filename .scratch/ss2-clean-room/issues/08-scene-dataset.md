@@ -31,3 +31,27 @@ A grilling session after ticket 03 lands, weighing acoustic fidelity against ben
 Include the option of a split: HM3D for anything quoted against VLFM, MP3D for the audio-realism demonstration.
 
 Deliverable: a decision recorded as an ADR in the new tree, plus the concrete asset work it implies for ticket 05's keep/rebuild list.
+
+## Note added by ticket 03 — this ticket is now unblocked, with its evidence in hand
+
+Ticket 03 resolved, and it sharpens both sides of this decision rather than settling it.
+
+**Against HM3D, on materials specifically.** The material path is a hard no by default and degraded at best.
+Three independent gates close it: `enableMaterials` is constructed `false` on this branch, plain HM3D ships no semantic scene, and HM3D-Semantics v0.2's texture-based annotation appears to hand the audio sensor an **empty** mesh (ticket 12).
+Even if reachable, HM3D's free-text labels match the MP3D-authored material database on only **51.5 % of object instances**, with 8 ambiguous ties on a single scene.
+MP3D feeds mpcat40 names straight in and matches **85.7 %** of its vocabulary, with 1 tie across the whole set, through a mesh representation the audio sensor can actually consume.
+
+**For HM3D, and this is the stronger argument than it looks.** The degraded path is not a corner case, it is the reference configuration.
+`sound-spaces` sets `enableMaterials = False` at every entry point, and `PanoIR/render_panoIR.py` has an explicit `hm3d` branch that is deliberately excluded from the material-JSON load.
+The SoundSpaces authors render HM3D with no material database.
+And ticket 03's physics argument says the loss is realism this experiment does not consume: the energy gradient's load-bearing terms are geometric, so uniform absorption costs contrast, not structure.
+
+**So the honest framing for the grilling is no longer "does HM3D work".** It is: *we are choosing between benchmark comparability on a dataset whose acoustics carry no room character, and acoustic fidelity on a dataset that breaks every external number we quote against.*
+Weigh in particular:
+
+- Does the paper make any acoustic-realism claim at all? If it does not, the materials delta costs nothing and HM3D wins on comparability outright.
+- Is the split option real? HM3D for anything quoted against VLFM, MP3D for an audio-realism demonstration figure. Ticket 03's evidence makes the MP3D side of that split genuinely better, not just different.
+- If HM3D stays, the "room character" limitation must be **stated** in the paper, not discovered by a reviewer. Ticket 03 gives the precise wording: uniform absorption, room-scale RT60 variation preserved via `V/S`, furnishing-dependent variation absent.
+
+One measurement is still outstanding and could move this: ticket 06 now owns a gradient-contrast measurement under HM3D materials-off versus MP3D materials-on.
+Decide whether this grilling wants that number first, or whether the comparability argument settles it regardless.

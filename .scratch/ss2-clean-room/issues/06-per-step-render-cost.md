@@ -39,3 +39,21 @@ Note two readouts ticket 02 found on the branch that this sweep should use:
 Take the knob names and defaults from ticket 11, not ticket 01 — ticket 01 was researched against a different branch.
 
 Deliverable: a table of ms/step against setting, a recommended preset, and an explicit verdict on whether live-every-step holds or whether the map's destination needs amending to the throttled variant.
+
+## Note added by ticket 03
+
+**Good news for the budget: scene geometry is uploaded once, not per step.**
+The whole mesh upload in `AudioSensor::runSimulation` is wrapped in `if (newInitialization_)`, so `loadMesh` / `loadSemanticMesh` run on the first simulation after `createAudioSimulator` and never again.
+Only `RLRA_Simulate` re-runs per step.
+Measure the two separately: first-call cost (geometry upload plus simulate) against steady-state cost (simulate only).
+The ticket's affordability verdict hangs on the steady-state number, and the first-call number is a per-episode constant.
+
+**The materials A/B this ticket was asked to run is now mostly answered, and its scope changes.**
+Ticket 03 established that materials are off by default on this branch, that plain HM3D has no semantic scene at all, and that HM3D-Semantics v0.2 appears to break the semantic mesh path entirely (ticket 12).
+So "render with `enableMaterials` off and on and compare" is not a meaningful A/B on HM3D.
+What replaces it:
+
+- **Add a gradient-contrast measurement to the sweep.** Fix a source, walk a navmesh path toward it, record broadband IR energy per step. Report the Spearman correlation between energy and negative geodesic distance, plus the far-to-near dynamic range in dB.
+  Ticket 03 argues from the engine's physics that a uniform-absorption world still yields a climbable gradient, because every load-bearing term (direct-path spreading, occlusion, diffraction) is geometric and material-independent. What it cannot argue is **contrast**: a reflective built-in default flattens the within-room field and compresses the final-metres gradient.
+  That number is the one thing section 7 of ticket 03 could not settle from source, and it belongs here because it is the same walk the timing sweep already does.
+- Run it under HM3D materials-off, and under MP3D materials-on/off if ticket 08 keeps MP3D in play.
