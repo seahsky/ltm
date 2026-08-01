@@ -46,12 +46,14 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 - **The new package's module layout and seams.**
   What the simulator wrapper, audio sensor wrapper, controller, and runner look like as deep modules. Waits on 07 (what the rebuilt agent is) and 09 (task spec).
   Ticket 03 added a concrete requirement to carry in: the wrapper needs **loud invariant assertions at context creation** (non-empty audio mesh, key validation on `AudioSensorSpec` specifically, every `RLRA_Error` checked), because both the empty-mesh trap and the swallowed-key trap fail silently while still producing plausible audio.
+  Ticket 04's source read (in progress, box half pending) added a second: the runner **drives `habitat_sim` directly and does not need habitat-lab**, so the new tree owns three small pieces habitat-lab used to supply — ObjectNav `.json.gz` episode loading, `sim.make_greedy_follower()` steering, and the SPL/SoftSPL arithmetic. Only the first has any weight.
 - **How the STM/LTM calculation is carried across.**
   Copied, vendored, or imported; what interface it sits behind; whether the consolidation math is lifted verbatim. Waits on the package layout.
 - **Smoke-green acceptance criteria.**
   What exactly counts as "one episode end to end". Waits on 09.
 - **Test strategy for a Linux-only stack from a Mac.**
   Which layers stay pure enough to unit-test locally, and what has to be a box-only integration test.
+  Dropping habitat-lab (above) helps here rather than hurting: episode loading becomes a gzipped-JSON parse the Mac can unit-test, where `habitat.Env` was box-only by construction.
 - **Whether the geometric frontier searcher is rebuilt or replaced.**
   ADR-0006 retreated to the geometric spine after four non-lifts of a semantic frontier, but a clean room reopens the question. Waits on 04 (what models can even run in the one env).
 - **How far the clean room is willing to fork habitat-sim.**
