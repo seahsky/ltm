@@ -79,6 +79,23 @@ This is not cosmetic. Ticket 03's argument that the energy gradient survives uni
 Also worth confirming while probing: `enableMaterials` should print **`False`**, because the constructor overwrites the header's `= true` initialiser under `#ifdef ESP_BUILD_WITH_AUDIO`.
 If it prints `True`, the build is not what we think it is.
 
+## Note added by ticket 05
+
+**Run ticket 05's inventory before this gate.** It is ~2 minutes and read-only:
+
+```
+nrun python3 .scratch/ss2-clean-room/probes/box_inventory.py
+```
+
+Not a blocking edge — this gate runs fine without it — but the order is worth ~1 hour:
+
+- `SS2_TORCH_SPEC=torch==2.0.1` / cu117 here is a V100-*era* guess, and this ticket's own comment says it is overridable pending ticket 05. The inventory reads the driver's max supported CUDA, which is what actually settles the wheel.
+- If an audio-capable build already exists on the box and is sound, the build step below is minutes rather than the full hour.
+- GLIBC < 2.29 or short disk would fail this gate an hour in, on facts readable in two minutes. (GLIBC has never actually been measured on the box; the map treats >= 2.29 as an assumption.)
+
+The inventory also opportunistically dumps `AudioSensorSpec` defaults if an audio-capable env already exists.
+That does **not** substitute for the dump below — an existing env is exactly the "unknown drift" this ticket refuses to trust — but agreement is a strong prior and disagreement is a finding in itself.
+
 ## Comments
 
 ### 2026-08-01 — item 4 answered from source; items 1–3 handed to the box
