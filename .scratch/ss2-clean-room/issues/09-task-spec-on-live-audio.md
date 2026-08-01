@@ -58,3 +58,30 @@ The agent is decided (`docs/adr/0008-clean-room-agent-architecture.md`): a candi
 - **The report's content.** `build_report` returns a structured dict today (`primary_completed`, `investigated`, `investigate_aborted`, `resumed`, `anomaly_class`, `source_xyz`, `n_benign_ignored`). Dropping the LLM costs nothing here, since nothing in it was ever generated text. Whether the destination's "and reports" wants more than this is a task-spec question.
 
 One thing this ticket must **state** rather than assume, for the smoke-green criteria: the smoke runs an **oracle STOP**, so it does not exercise goal detection at all. `diagnose_spin` decomposed the 0.031 benchmark SPL as stop_miss ~50% + explore_timeout ~45% + success ~5%, and an oracle STOP deletes the stop_miss half outright. Smoke find numbers are therefore not capability numbers and must not be quoted as such.
+
+## Note added by ticket 10 (resolved 2026-08-01) — the audio module carry line is yours
+
+Ticket 10 settled the reset spec: what is deleted, what carries, and the four-phase order with the deletion gated on this ticket's smoke-green criteria plus a hermeticity re-run.
+
+It ruled on every carry question **except one**, and left it here on purpose.
+
+**The audio module carry line is owned by this ticket.** Three files are unresolved:
+
+- `embodied_memory/audio.py` (719 LOC)
+- `embodied_memory/audio_task.py` (402 LOC)
+- `embodied_memory/perception.py` (506 LOC — the CLIP image/text encoders)
+
+The split inside them is real and this ticket has to draw it:
+
+- The **precomputed-grid convolve path** (`render_rir_grid` lookup, `fftconvolve`, `cached_source`) is dead by chart-time decision — audio renders live in-sim every step, no grid.
+- The **durable wins** are not: the CLAP open-set normal-vs-anomaly gate (`audio.is_anomaly`, whose calibration ran GO with perfect separation, EER 0.00), the onset detector and its calibration (`onset_rms` 0.065), and `resolve_anomaly_clip` / the ESC-50 fetch. These are mechanisms this ticket's spec will either keep, recalibrate, or replace — and it cannot say which until it has decided level calibration and onset provenance.
+- `perception.py` is entirely conditional on **your** ADR-0002 call. Ticket 07 removed CLIP from the agent; the room classifier is the only route by which CLIP returns to the tree, and 07 routed that decision here.
+
+Ticket 10 did not rule on these because doing so would have decided this ticket by accident — the same trap ticket 07 avoided when it declined to amend the controller's localization policy.
+
+**The ordering holds and nothing is blocked.** You resolve before the smoke; the smoke gates the deletion. Whatever carry line you draw simply lands on ticket 10's phase-1 port list.
+
+Two further inputs from ticket 10, for the record:
+
+- **`metrics.py` (55 LOC, `compute_benchmark_spl`) is ported near-verbatim.** So when this ticket restates the metric set against `CONTEXT.md`, the arithmetic it is restating against already exists and is Mac-testable.
+- **The smoke's oracle STOP is confirmed**, not just proposed: ticket 10's carry list ships `OracleDetector` (what the smoke runs) and `CaptionDetector` (what R2 runs) behind ADR-0008's `detects()` seam, with the OWLv2 backend dropped as a measured noise-floor negative. This ticket still owes the smoke-green criteria the statement 07 asked for — that smoke find numbers are not capability numbers.
