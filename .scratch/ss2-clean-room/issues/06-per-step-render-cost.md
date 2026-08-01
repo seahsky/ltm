@@ -1,8 +1,9 @@
 # 06 — What does live-every-step audio actually cost?
 
 Type: task
-Status: open
-Blocked by: 04, 11
+Status: claimed
+Assignee: Sky
+Blocked by: 04, 11 (both resolved — unblocked)
 
 ## Question
 
@@ -82,3 +83,129 @@ Four things that change how this ticket should be run:
 4. **The IR is trimmed to actual decay, not to `maxIRLength`.** The gate returned `ir_shape [2, 72300]` = 1.64 s at 44.1 kHz against a 4.0 s `maxIRLength` (176,400 samples). So IR width is *scene- and pose-dependent*: any fixed-width buffer downstream is wrong, and `maxIRLength` is a cap rather than a size. Worth recording IR width alongside ms/step, since a shorter IR is part of how a cheaper preset pays for itself.
 
 Two readouts are confirmed present on the built binary and free to use: `getRayEfficiency()` (the gate measured 0.548 at defaults) and `sourceIsVisible()` (measured `False` for that pose — a non-LOS, diffraction-dominated sample, which is the expensive case).
+
+## Comments
+
+### 2026-08-01 — probe built and handed to the box; two decisions taken off-box first
+
+The measurement half of this ticket has no off-box component — it is a wall-clock
+number on a V100 and nothing else. So this session built the probe and settled the
+two questions that had to be answered *before* the box time was worth spending.
+
+```
+nrun bash .scratch/ss2-clean-room/probes/rendercost_sweep.sh
+```
+
+~10–20 min. Reuses the `ss2` env ticket 04 built; installs nothing, builds nothing,
+applies no patches. Writes `runs/ss2-render-cost/report.json`.
+**Resolve this ticket by pasting the verdict block back here.**
+
+- `.scratch/ss2-clean-room/probes/rendercost_probe.py` — the measurement
+- `.scratch/ss2-clean-room/probes/rendercost_sweep.sh` — the driver
+
+#### Decision 1 — the multi-source sweep is deferred, and that is not a dodge
+
+Item 5 asks to sweep source count 1 → 2 → 3. On the **stock** build that cannot be
+done: ticket 04 confirmed `multi-source surface: none` against the built binary, so
+concurrent sources need ticket 02's ~40-line patch, and ticket 02's own note routes
+the decision to take that patch through *this* ticket's cost sweep. That is a loop.
+
+It is broken by ordering rather than by patching:
+
+1. **The sequential upper bound is measurable now, unpatched.** N sources as N
+   renders (ticket 02's workaround 2) needs no patch and no rebuild, and it brackets
+   the answer — the patched single-`RLRA_Simulate` cost cannot be worse than N
+   sequential renders, and cannot be better than one. The probe measures it.
+2. **If one render at the cheapest admissible preset is already over budget, the
+   patch is moot** — the task is throttled regardless of how well multi-source
+   amortises, and writing ~40 lines of C++ plus a rebuild to learn that would be
+   backwards.
+3. **If the sequential 3x is affordable, the patch is also moot for the budget** and
+   becomes purely an onset-provenance argument, which is ticket 09's call on its
+   merits rather than on cost.
+
+So the patch only earns a rebuild in the narrow band where 1x fits and 3x does not.
+The probe reports exactly the numbers needed to see whether we are in that band.
+**The fork-cost question in the map's Not yet specified is unchanged by this** — it
+just gets a cheaper input than a rebuild.
+
+#### Decision 2 — the verdict thresholds are pre-registered
+
+Written into the probe *before* any number came back, so pasting the report resolves
+this ticket instead of opening a fresh argument about what the number means:
+
+| verdict | steady-state ms/step | per 500-step episode |
+| --- | --- | --- |
+| `LIVE_EVERY_STEP_HOLDS` | ≤ 50 | ≤ 25 s |
+| `LIVE_EVERY_STEP_TOLERABLE` | ≤ 150 | ≤ 75 s |
+| `THROTTLE_REQUIRED` | > 150 | destination gets amended |
+
+Every one of those is **gated on the gradient still being climbable** — Spearman(energy,
+geodesic distance) ≤ −0.70 and a far-to-near dynamic range ≥ 6 dB. A preset that is
+fast and flat does not count, per this ticket's own item 3. Cost is quoted at the
+**worst** scene measured, and a config only counts as admissible if it is admissible
+in **every** scene, so the recommendation is not read off the friendliest geometry.
+
+#### A correction to this ticket's own framing: the 0.6013 s is not an audio number
+
+Ticket 04 timed `get_sensor_observations()` on a **default agent config, which carries
+an RGB camera**, and that call renders *every* attached sensor. So 0.6013 s is audio
+**plus** a visual render, and the "~0.58 s left in `RLRA_Simulate`" inference is
+subtracting the geometry upload from a total that also contains something else
+entirely. The scary number may be materially smaller than it looks.
+
+The probe configures the agent with **no camera sensors**, so its steady-state figure
+is audio alone, and `--with-camera-delta` re-measures one config with the camera
+attached so the confound becomes a number rather than an argument. This does not
+overturn ticket 04's warning — it may well still be slow — but the warning should not
+be quoted as an audio cost until this run reports one.
+
+#### What the probe measures, and why it is one walk
+
+Everything is derived from a single **walk**: fix a source, drop the listener several
+metres away, step it along the navmesh path toward the source, and time every render.
+One walk yields all five of this ticket's items at once — first-call vs steady-state,
+ms/step per knob, gradient monotonicity, cost-vs-distance, and LOS/non-LOS split via
+`sourceIsVisible()`. `getRayEfficiency()` and IR sample width are recorded per step,
+so the ray-count sweep has a quality readout that does not rest on eyeballing.
+
+The cheap preset is **derived from the measurements, not guessed** — every knob that
+was both faster and gradient-admissible is combined, and the combination is then
+measured too, because these effects are not additive.
+
+One addition beyond the ticket text: **the non-LOS gradient is scored separately**
+(`rho_nlos`). A config can post a healthy overall gradient purely from its
+line-of-sight samples while being flat wherever a wall is in the way — and climbing
+toward a source it cannot see is the entire premise of the anomaly response. Ticket 09
+needs that number specifically to decide `transmission` and `diffraction`.
+
+#### Four bugs found in local verification, all of which would have produced plausible wrong numbers
+
+Verified against a stub `habitat_sim` (the Mac cannot run the real one), to the bar
+tickets 04 and 05 set. The stub run was not ceremony — it caught four defects, and
+every one of them would have returned a *confident, well-formatted, wrong* answer:
+
+1. **Sensor accumulation.** `walk_config` attached a new audio sensor per config to
+   one simulator, and `get_sensor_observations()` renders every attached sensor — so
+   config *k* paid for *k* renders. The stub's cost curve rose monotonically with
+   sweep position regardless of the knob, with `diffraction=0` measured as the
+   **slowest** config. Fixed: one fresh simulator per config.
+2. **Walk truncation.** Sampling at fixed spacing and slicing `[:walk_steps]` covered
+   only the first 4 m of a 13.6 m path — the far end, where the gradient is shallowest.
+   Every config scored FLAT, and the final metres that ticket 03 explicitly asked about
+   were never sampled. Fixed: samples are spread evenly across the whole path.
+3. **The verdict mixed scenes.** It took the cheapest admissible row across all scenes,
+   so it reported a config as a clean win while that same config was flat in the other
+   scene. Fixed: admissible-everywhere, costed at the worst scene.
+4. **The cheap preset auto-adopted physics knobs.** `transmission` and `diffraction`
+   are cheaper when off and still scored "climbable" on a mostly-LOS walk, so they were
+   being folded into a preset labelled *cheap* — smuggling a task-design decision in as
+   a performance tweak. They are the non-line-of-sight audio path, and ticket 09 owns
+   them. Fixed: swept and reported, never auto-adopted.
+
+Also verified: the walk poses are computed once and replayed into every config, so
+knob comparisons are over identical journeys; unknown `acousticsConfig` keys raise
+rather than being silently swallowed (ticket 04 measured that the **spec** swallows
+them, so a typo'd knob name would otherwise time the *default* value and look fine);
+and a machine with no `habitat_sim` still writes a valid report whose blocker list is
+the deliverable, rather than crashing.

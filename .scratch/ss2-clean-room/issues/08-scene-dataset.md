@@ -15,6 +15,8 @@ Everything SoundSpaces-shaped points at MP3D: the audio tutorial runs MP3D, the 
 
 Arguments for staying on HM3D:
 - 1.2 GB already downloaded, episode datasets already in place, and it is gitignored so the reset does not touch it.
+  **Corrected by ticket 05 (2026-08-01): it is 19.9 GB, and the mesh-coverage problem is gone.** The box holds `val` at 100 `.basis.glb` / 36 `.semantic.glb` (9.3G) plus `minival` at 10 / 4 (1.1G), and **val mesh coverage is 20/20**, not the 2/20 that forced the R1 smoke onto `val_mini` and put a mesh preflight in `race-scaleup-matrix.sh`. So the "already downloaded" argument is considerably stronger than this ticket assumed, and the constraint that made full-val work awkward no longer applies.
+  Ticket 05 also found **no MP3D anywhere on the box** — every split present is HM3D. Moving to MP3D is a fresh multi-GB download, not a re-point at data already there. Disk is not the obstacle (680 GB free); time and re-derivation are.
 - Every prior number in the paper arc is on HM3D. Changing dataset makes the new results non-comparable to the record.
 - VLFM 0.304 and VLingNav 0.429, the only external numbers we quote against, are HM3D ObjectNav.
 
