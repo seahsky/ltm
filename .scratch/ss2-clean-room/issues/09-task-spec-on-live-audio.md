@@ -46,3 +46,15 @@ Two things this ticket can now take as given:
 - **The `val_mini` constraint is gone.** Ticket 05 measured HM3D `val` mesh coverage at 20/20, not the 2/20 that forced earlier work onto `val_mini`. The smoke stays on `minival` because it is small and ticket 04 already loaded a scene from it, but a task spec is free to assume full `val` is available downstream.
 
 Ticket 06 remains the live blocker: whether audio renders live at every step, or the spec has to be written against a throttled variant.
+
+## Note added by ticket 07 (resolved 2026-08-01) — three things land in this ticket's lap
+
+The agent is decided (`docs/adr/0008-clean-room-agent-architecture.md`): a candidate-pool frontier explorer, one `GoalDetector.detects(obj)` seam serving both the primary STOP and the anomaly CHECK, the anomaly controller ported near-verbatim, no LLM and no CLIP in the agent.
+
+07 deliberately did **not** decide the following, because they are task-spec questions and deciding them there would have decided this ticket by accident:
+
+- **The ADR-0002 room classifier.** 07 removed CLIP from the agent, and the room classifier is now the *only* route by which CLIP returns to the tree. If scene-conditioned normality survives ticket 02's multi-source answer, this ticket owns whether CLIP comes back for it, and on what evidence — CLIP is measured flat on HM3D sim renders (separation 0.020 against a 0.05 bar, three times), though that was frontier value at distance, not room typing.
+- **Whether the controller's localization policy is amended for live audio.** 07 ported it verbatim on purpose. Its `(energy_history, lateral_sign, visual_confirm)` inputs were shaped by the precomputed grid — quantised energy, ADR-0001's ~1 m ceiling — and continuous receiver positions may make the gradient climb genuinely climbable. Amending it is this ticket's call, not a port decision.
+- **The report's content.** `build_report` returns a structured dict today (`primary_completed`, `investigated`, `investigate_aborted`, `resumed`, `anomaly_class`, `source_xyz`, `n_benign_ignored`). Dropping the LLM costs nothing here, since nothing in it was ever generated text. Whether the destination's "and reports" wants more than this is a task-spec question.
+
+One thing this ticket must **state** rather than assume, for the smoke-green criteria: the smoke runs an **oracle STOP**, so it does not exercise goal detection at all. `diagnose_spin` decomposed the 0.031 benchmark SPL as stop_miss ~50% + explore_timeout ~45% + success ~5%, and an oracle STOP deletes the stop_miss half outright. Smoke find numbers are therefore not capability numbers and must not be quoted as such.
