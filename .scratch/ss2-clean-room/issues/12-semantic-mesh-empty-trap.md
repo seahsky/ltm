@@ -1,10 +1,16 @@
-# 12 — Does the HM3D semantic path hand the audio sensor an empty mesh?
+# 12 — The audio context must never silently accept an empty mesh
 
 Type: task
 Status: open
-Blocked by: 04
+Blocked by: none (04 discharged; rescoped by 08 — no longer box-gated)
+
+**Rescoped 2026-08-01 by ticket 08.** Originally "does the HM3D semantic path hand the audio sensor an empty mesh?" — a probe of the `enableMaterials=True` path. Materials are now permanently off (ADR-0007), so the probe is dropped and only the guard survives. The original question and its evidence are kept below for provenance; **read the ticket-08 note at the bottom first — it is the live scope.**
 
 ## Question
+
+What must the new tree's audio wrapper assert at context creation so that a zero-geometry audio context, a swallowed config key, or an unchecked `RLRA_Error` is impossible rather than merely unlikely?
+
+## Original question (superseded, kept for provenance)
 
 On HM3D-Semantics v0.2 with `enableMaterials=True`, does `joinSemanticHierarchy` fail its cast and give the audio context zero scene geometry, and does forcing the vertex-colour path fix it?
 
@@ -82,3 +88,30 @@ The active scene does not contain semantic annotations : activeSemanticSceneID_ 
 ```
 
 So on this box, that minival scene cannot exercise the trap — with no semantic asset there is nothing to mis-cast, and `enableMaterials=True` would fall through to the same default-material path. **This ticket needs a scene that actually has HM3D-Semantics v0.2 annotations present**, which is exactly what ticket 05's inventory counts (`semantic_glb` / `semantic_txt` per split). Confirm the data exists before concluding anything about the code path.
+
+## Note added by ticket 08 (resolved 2026-08-01) — THIS TICKET IS RESCOPED
+
+**HM3D stays and acoustic materials are permanently off** (`docs/adr/0007-hm3d-stays-mp3d-out-of-scope.md`). MP3D is out of scope entirely.
+
+That guts the probe half of this ticket and sharpens the guard half.
+
+**DROPPED — do not run:**
+
+- Probe 1, the `enableMaterials=True` reachability check on HM3D-Semantics v0.2. It measures a path the clean room has now decided never to take. Whether the cast fails is no longer a decision input for anyone.
+- Probe 2, the per-vertex-colour check, which was conditional on probe 1.
+- Probe 3's MP3D materials-on arm — MP3D is out of scope.
+- The `RLRA_WriteIRMetrics` wrapper patch. It was only ever a tie-break for probe 3.
+
+**KEPT, and now the whole ticket:** the invariant this ticket already named as its durable output.
+
+The audio wrapper must fail loudly at context creation on all three of:
+
+1. **Non-empty audio mesh.** Ticket 04's control is `Vertex count : 392356 , Index count : 1185054` on the non-semantic path for `minival/00800-TEEsavR23oF`, printed at `AudioSensor.cpp(499)`. Nothing currently checks it.
+2. **Every `RLRA_Error` checked.** The engine's failures are bare returns, not exceptions.
+3. **Unknown spec keys rejected.** Per ticket 04, measured: `AudioSensorSpec` silently swallows unknown keys (`py::dynamic_attr`) while `acousticsConfig` raises — so the validator goes on the **spec** and nowhere else.
+
+**Why this matters more under the materials-off decision, not less.** The path the clean room actually runs is the non-semantic one, and a zero-geometry context on *that* path still returns plausible-looking audio with no error. That is the same failure class that invalidated the `anommxv` headline, where the interrupt fired on the background bed for a whole matrix before anyone noticed. Materials being off removes the *cause* this ticket originally investigated; it does not remove the *state*.
+
+**Type changes from `task` to a build item.** There is no longer a measurement to take, so this is no longer box-gated: it is the assertion suite the new tree's audio wrapper ships with. It overlaps the map's *Not yet specified* requirement 1 by design — that entry is the specification, this ticket is where it gets built and tested.
+
+`Blocked by: 04` is discharged either way; nothing here needs the box before the package layout exists.

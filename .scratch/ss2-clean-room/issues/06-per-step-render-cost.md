@@ -209,3 +209,14 @@ rather than being silently swallowed (ticket 04 measured that the **spec** swall
 them, so a typo'd knob name would otherwise time the *default* value and look fine);
 and a machine with no `habitat_sim` still writes a valid report whose blocker list is
 the deliverable, rather than crashing.
+
+## Note added by ticket 08 (resolved 2026-08-01) — run the HM3D arm only
+
+**HM3D stays; MP3D is out of scope; acoustic materials are permanently off** (`docs/adr/0007-hm3d-stays-mp3d-out-of-scope.md`).
+
+Two changes to this ticket, both narrowing it:
+
+1. **Drop the MP3D arms.** Ticket 03's note asked for gradient contrast under "HM3D materials-off, and under MP3D materials-on/off if ticket 08 keeps MP3D in play". It does not. Run **HM3D materials-off only** — which is the configuration the clean room ships, so the sweep now measures exactly the deployed path and nothing else. No MP3D download is authorised.
+2. **The gradient-contrast number is no longer a dataset gate.** It was framed as the measurement that could reopen the HM3D-vs-MP3D question. It cannot: 08 ruled MP3D out unconditionally, on the reasoning that materials are off in the MP3D reference configuration too, so a flat gradient would not be fixed by switching datasets. **If the gradient comes back flat, the lever is source placement or source gain, not the dataset.** Report the number the same way; only its consequence changed.
+
+Everything else in this ticket stands unchanged — the timing sweep, the `transmission` on/off axis, the sequential multi-source upper bound, and the steady-state-versus-first-call split are all untouched by 08.

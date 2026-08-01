@@ -2,7 +2,7 @@
 
 Type: grilling
 Status: open
-Blocked by: 02, 06, 08
+Blocked by: 06 (02, 08 resolved)
 
 ## Question
 
@@ -35,3 +35,14 @@ A grilling session, after 02, 06 and 08 land, covering:
 - Which ADRs are superseded, and by what.
 
 Deliverable: the task spec for the new tree, plus superseding ADRs for whichever of 0001 to 0004 no longer hold.
+
+## Note added by ticket 08 (resolved 2026-08-01) — the dataset is fixed, and one option is closed
+
+**HM3D, `minival` for the smoke, acoustic materials permanently off** (`docs/adr/0007-hm3d-stays-mp3d-out-of-scope.md`). MP3D is out of scope, so any task-spec option that leaned on material-dependent room character is closed before this ticket starts.
+
+Two things this ticket can now take as given:
+
+- **The acoustic world is uniform-absorption.** Room-scale RT60 variation survives via `V/S`; furnishing-dependent variation does not exist. A task spec must not depend on the agent distinguishing a carpeted room from a tiled one by ear.
+- **The `val_mini` constraint is gone.** Ticket 05 measured HM3D `val` mesh coverage at 20/20, not the 2/20 that forced earlier work onto `val_mini`. The smoke stays on `minival` because it is small and ticket 04 already loaded a scene from it, but a task spec is free to assume full `val` is available downstream.
+
+Ticket 06 remains the live blocker: whether audio renders live at every step, or the spec has to be written against a throttled variant.
