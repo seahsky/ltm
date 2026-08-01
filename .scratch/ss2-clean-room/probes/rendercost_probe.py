@@ -305,20 +305,29 @@ def build_sim(scene: str, with_camera: bool):
     return sim
 
 
-def attach_audio(sim, cfg: Dict[str, Any], uuid: str, sample_rate: Optional[int]) -> Any:
+def attach_audio(sim, cfg: Dict[str, Any], sample_rate: Optional[int]
+                 ) -> Tuple[Any, str]:
     """Attach an audio sensor whose acousticsConfig carries `cfg`.
 
-    Every key is validated against the live field list before assignment.
-    ``AudioSensorSpec`` is bound ``py::dynamic_attr`` (ticket 04 measured this:
-    the spec swallows unknown keys, ``acousticsConfig`` raises), so a typo'd knob
-    name would otherwise attach a Python attribute, never be read, and produce a
-    perfectly plausible timing for the *default* value. That failure mode would
-    silently invalidate this entire sweep.
+    Returns the sensor and **the uuid it actually got**, which is deliberately
+    not a caller's choice. `AudioSensorSpec` ships `uuid = "audio_sensor"` from
+    its C++ constructor, and assigning a different one does not fully take: the
+    Python-side `_sensors` dict picks up the new name while the C++ sensor suite
+    keeps the old, so `get_sensor_observations()` fails an internal cross-lookup
+    with `KeyError('audio_sensor')`. That is what killed the source-count stage
+    on the first box run — the sweep survived only because it happened to pass
+    the default name. Read the uuid back, never assume it.
+
+    Every acousticsConfig key is validated against the live field list before
+    assignment. `AudioSensorSpec` is bound `py::dynamic_attr` (ticket 04 measured
+    this: the spec swallows unknown keys, `acousticsConfig` raises), so a typo'd
+    knob name would otherwise attach a Python attribute, never be read, and
+    produce a perfectly plausible timing for the *default* value. That failure
+    mode would silently invalidate the entire sweep.
     """
     import habitat_sim
 
     spec = habitat_sim.AudioSensorSpec()
-    spec.uuid = uuid
     spec.enableMaterials = False
     spec.channelLayout.type = habitat_sim.sensor.RLRAudioPropagationChannelLayoutType.Binaural
     spec.channelLayout.channelCount = 2
@@ -334,7 +343,13 @@ def attach_audio(sim, cfg: Dict[str, Any], uuid: str, sample_rate: Optional[int]
         setattr(spec.acousticsConfig, key, value)
 
     sim.add_sensor(spec)
-    return sim.get_agent(0)._sensors[uuid]
+    uuid = str(spec.uuid)
+    sensors = sim.get_agent(0)._sensors
+    if uuid not in sensors:
+        raise RuntimeError(
+            "audio sensor registered under an unexpected uuid: spec says {!r}, "
+            "agent has {}".format(uuid, sorted(sensors)))
+    return sensors[uuid], uuid
 
 
 def render_once(sim, sensor, uuid: str, listener: np.ndarray, source: np.ndarray
@@ -355,7 +370,7 @@ def render_once(sim, sensor, uuid: str, listener: np.ndarray, source: np.ndarray
     return elapsed, np.asarray(obs, dtype=np.float32)
 
 
-def walk_config(sim, cfg: Dict[str, Any], label: str, uuid: str,
+def walk_config(sim, cfg: Dict[str, Any], label: str,
                 source: np.ndarray, waypoints: List[np.ndarray],
                 sample_rate: Optional[int], source_height: float,
                 score_gradient: bool = True) -> Dict[str, Any]:
@@ -372,7 +387,7 @@ def walk_config(sim, cfg: Dict[str, Any], label: str, uuid: str,
     not one. (Caught in local verification against a stub, where ``diffraction=0``
     measured as the *slowest* config.)
     """
-    sensor = attach_audio(sim, cfg, uuid, sample_rate)
+    sensor, uuid = attach_audio(sim, cfg, sample_rate)
     src = np.asarray(source, dtype=np.float32).copy()
     src[1] = src[1] + source_height
 
@@ -551,7 +566,7 @@ def measure_config(scene: str, cfg: Dict[str, Any], label: str, geom: Dict[str, 
     """
     sim = build_sim(scene, with_camera=with_camera)
     try:
-        return walk_config(sim, cfg, label, "audio_sensor", geom["source"],
+        return walk_config(sim, cfg, label, geom["source"],
                            geom["waypoints"], sample_rate, source_height,
                            score_gradient=score_gradient)
     finally:
@@ -760,14 +775,14 @@ def probe_source_count(scenes: List[str], repeats: int, sample_rate: Optional[in
         out: Dict[str, Any] = {"scene": scene}
         try:
             source, start, _ = pick_source_and_start(sim, min_dist)
-            sensor = attach_audio(sim, {}, "audio_multi", sample_rate)
+            sensor, uuid = attach_audio(sim, {}, sample_rate)
             src = np.asarray(source, dtype=np.float32).copy()
             src[1] += source_height
             offsets = [np.zeros(3, dtype=np.float32),
                        np.array([1.5, 0.0, 0.0], dtype=np.float32),
                        np.array([0.0, 0.0, 1.5], dtype=np.float32)]
 
-            render_once(sim, sensor, "audio_multi", start, src)  # warm the context
+            render_once(sim, sensor, uuid, start, src)  # warm the context
             counts: Dict[str, Any] = {}
             for n in (1, 2, 3):
                 times = []

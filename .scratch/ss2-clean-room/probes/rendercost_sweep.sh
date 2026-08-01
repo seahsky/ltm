@@ -87,8 +87,12 @@ print("  {}".format(v.get("reason", "")))
 best = v.get("best_admissible")
 if best:
     print("\n  cheapest gradient-admissible preset:")
-    for k in ("scene", "label", "steady_ms", "episode_s", "rho", "dr_db"):
-        print("    {:<12} {}".format(k, best.get(k)))
+    for k in ("label", "steady_ms_worst", "episode_s_worst", "scenes",
+              "admissible_everywhere", "rho_worst"):
+        print("    {:<22} {}".format(k, best.get(k)))
+    cheap = rep.get("02_sweep", {}).get("cheap_preset")
+    if cheap:
+        print("    {:<22} {}".format("cheap_preset config", cheap))
 sc = rep.get("03_source_count", {}).get("per_scene", [{}])
 if sc and sc[0].get("scaling_vs_1"):
     print("\n  sequential source scaling (upper bound, stock build): {}".format(
