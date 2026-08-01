@@ -59,3 +59,22 @@ Add two things to the GREEN check, both nearly free:
 - **Dump every `acousticsConfig` field from a freshly constructed `AudioSensorSpec`.** The defaults live inside the closed `.so` via `RLRA_ContextConfigurationDefault`, so no default value in tickets 01 or 11 is verified. Three lines here converts the entire defaults column from hearsay into measurement, and ticket 06 needs it before it can sweep anything.
 
 One gotcha this makes concrete: `AudioSensorSpec` is bound `py::dynamic_attr()`, so assigning a field name that does not exist on this branch (say `irTime`, which was renamed to `maxIRLength`) **silently attaches a new Python attribute and is never read**. There is no error. Whatever wrapper the new tree puts around this should validate config keys against the real field list and raise.
+
+## Note added by ticket 03
+
+Two things for the GREEN check, and one warning.
+
+**Do not use `examples/tutorials/audio_agent.py` as the reference.** It is broken on this branch.
+Line 39 does `acoustics_config.enableMaterials = True`, but on `RLRAudioPropagationUpdate` that field lives on `AudioSensorSpec`, and `RLRAudioPropagationConfiguration` is bound **without** `py::dynamic_attr()` (`SensorBindings.cpp:293-295`), so the line raises `AttributeError` rather than being swallowed.
+`docs/AUDIO.md` on the same branch is stale too, documenting `irTime`, `updateDt`, `dumpWaveFiles`, `writeIrToFile`, `outputDirectory` and the Stereo/Quad/Surround layouts, none of which exist in the branch's own header.
+Read the constructor and the bindings, not the docs.
+
+**Ticket 11's swallowing warning needs splitting.** `AudioSensorSpec` **does** carry `py::dynamic_attr()` (`SensorBindings.cpp:395`), so bad keys there are silently attached and never read, exactly as warned.
+`RLRAudioPropagationConfiguration` **does not**, so bad keys there raise.
+The wrapper's key validation belongs on the **spec** object specifically.
+
+**Add `transmission` to the defaults dump as a called-out item.** Its default is contradictory across three primary sources at the same commit: the header comment says `true` (`RLRAudioPropagation.h:154`), the pybind docstring says `false` (`SensorBindings.cpp:349`), and `docs/AUDIO.md` says `false`.
+This is not cosmetic. Ticket 03's argument that the energy gradient survives uniform materials leans on doorway occlusion contrast, and transmission-on with a uniform default leaks energy through walls and reduces exactly that contrast.
+
+Also worth confirming while probing: `enableMaterials` should print **`False`**, because the constructor overwrites the header's `= true` initialiser under `#ifdef ESP_BUILD_WITH_AUDIO`.
+If it prints `True`, the build is not what we think it is.
