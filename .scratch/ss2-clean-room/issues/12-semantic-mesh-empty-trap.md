@@ -57,3 +57,28 @@ That invariant is the durable output; the probe result is the input to it.
 This does **not** block ticket 08.
 Ticket 03 already supplies 08's fidelity evidence, and the MP3D-versus-HM3D vocabulary delta (85.7 % against 51.5 %) holds either way.
 If 08 chooses to keep HM3D and accept the degraded path, this ticket stops being a decision input and becomes purely a guard, which is still worth doing.
+
+## Note added by ticket 04 (now resolved — this ticket is unblocked)
+
+**The gate did not test this trap, but it handed the experiment its control arm.**
+
+Ticket 04's live render took the non-semantic path end to end, and logged the mesh it fed the audio context:
+
+```
+[Audio] Semantic scene does not exist or materials are disabled, will use default material
+[Audio] Loading non-semantic mesh
+Vertex count : 392356 , Index count : 1185054
+```
+
+So the control is **392,356 verts / 1,185,054 indices** on `minival/00800-TEEsavR23oF`, and it renders a non-silent IR (`ir_peak_abs` 0.163, `ray_efficiency` 0.548).
+That converts this ticket's question from a source-reading argument into a **direct comparison**: run the same scene with `enableMaterials=True` on HM3D-Semantics v0.2 and read the vertex count off the same log line. Zero verts confirms the cast failure and the bare `return`; a non-zero count refutes it.
+That is a much cheaper first move than the OBJ-colour proxy, and it needs no new instrumentation — the count is already printed at `AudioSensor.cpp(499)`.
+
+**One complication, and it is the reason to check the data before the code.** The scene the gate ran has no semantics on disk at all:
+
+```
+SSD File Naming Issue! Neither ... TEEsavR23oF.basis.scn nor ... info_semantic.json exist on disk
+The active scene does not contain semantic annotations : activeSemanticSceneID_ = 0
+```
+
+So on this box, that minival scene cannot exercise the trap — with no semantic asset there is nothing to mis-cast, and `enableMaterials=True` would fall through to the same default-material path. **This ticket needs a scene that actually has HM3D-Semantics v0.2 annotations present**, which is exactly what ticket 05's inventory counts (`semantic_glb` / `semantic_txt` per split). Confirm the data exists before concluding anything about the code path.
