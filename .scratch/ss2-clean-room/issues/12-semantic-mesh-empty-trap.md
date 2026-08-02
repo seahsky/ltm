@@ -1,7 +1,7 @@
 # 12 — The audio context must never silently accept an empty mesh
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: none (04 discharged; rescoped by 08 — no longer box-gated)
 
 **Rescoped 2026-08-01 by ticket 08.** Originally "does the HM3D semantic path hand the audio sensor an empty mesh?" — a probe of the `enableMaterials=True` path. Materials are now permanently off (ADR-0007), so the probe is dropped and only the guard survives. The original question and its evidence are kept below for provenance; **read the ticket-08 note at the bottom first — it is the live scope.**
@@ -115,3 +115,111 @@ The audio wrapper must fail loudly at context creation on all three of:
 **Type changes from `task` to a build item.** There is no longer a measurement to take, so this is no longer box-gated: it is the assertion suite the new tree's audio wrapper ships with. It overlaps the map's *Not yet specified* requirement 1 by design — that entry is the specification, this ticket is where it gets built and tested.
 
 `Blocked by: 04` is discharged either way; nothing here needs the box before the package layout exists.
+
+## Answer
+
+**Built, unit-tested on the Mac, and the ticket's own framing corrected in three places.**
+`probes/audio_guard.py` (the guard), `probes/test_audio_guard.py` (**27 tests, all green on this
+Mac**, no habitat_sim), `probes/audioguard_probe.py` (the box verification, not yet run — ticket 16).
+It ports verbatim into the new tree at reset phase 1; nothing about it depends on the layout ticket
+09 has yet to decide.
+
+### Three corrections, all read from source at the pinned commit `4f61e321`
+
+**1. It cannot assert "at context creation" — the mesh does not exist yet.**
+`createAudioSimulator()` sets `newInitialization_`; the **first `runSimulation()`** consumes it and
+only then calls `loadMesh`/`loadSemanticMesh`. An assertion at construction would pass over nothing,
+which is this ticket's own failure mode wearing a different hat. So `arm_audio_context` **performs
+the first render itself** rather than asking the caller to sequence one correctly — the ordering
+constraint is discharged by the interface, not documented in a comment.
+
+**2. `RLRA_Error` is already checked — and then thrown away before Python.**
+The ticket says "the engine's failures are bare returns, not exceptions", which is right about the
+consequence and wrong about the cause. habitat-sim *does* compare every `RLRA_*` call against
+`RLRA_Success` (`RLRA_CreateContext`, `RLRA_AddListener`, `RLRA_AddSource`, `RLRA_AddMeshVertices`,
+`RLRA_AddMeshIndices`, `RLRA_AddObject`, `RLRA_FinalizeObjectMesh`, `RLRA_Simulate`). The handler is
+`ESP_ERROR() << ...; return;` and `runSimulation` is `void`. So the error is detected in C++ and
+**discarded before the binding** — no return code, no exception, no flag.
+
+*"Check every `RLRA_Error`" is therefore not a thing a Python wrapper can do.* There are exactly two
+routes: read the log, or patch the bindings. This ships the first and names the second.
+
+And the log route has its own trap: habitat-sim logs from C++ to **file descriptor 2**, which
+`contextlib.redirect_stderr` does not touch — it rebinds `sys.stderr`, a Python object the C++ logger
+never sees. A guard built that way captures nothing and **passes vacuously**, which is precisely the
+bug class this ticket exists to remove. Hence `capture_fd_stderr` (`os.dup2` on fd 2) plus a
+**canary**: if the capture comes back without any recognisable habitat-sim audio line, the guard
+raises saying invariant 2 is *unverified, not satisfied*.
+
+**3. `vars(spec)` detects the `dynamic_attr` trap exactly, not heuristically.**
+`def_readwrite` installs a data descriptor on the type, so a real field never reaches the instance
+`__dict__`; `py::dynamic_attr` puts everything else there. So `vars(spec)` **is** the set of
+swallowed keys — no allowlist needed for detection, and it stays correct across branch renames. The
+allowlist is still used for *rejection* (`apply_audio_config` validates before writing, so a typo
+cannot half-apply a config), and it is derived by introspecting `dir()` rather than hardcoded, so
+ticket 11's `irTime` → `maxIRLength` rename surfaces as a rejected key instead of a silent no-op.
+
+### The shape
+
+```python
+pin_habitat_logging()                      # before importing habitat_sim, or it raises
+spec = apply_audio_config(AudioSensorSpec(), cfg)   # invariant 3
+report = arm_audio_context(audio_sensor, render)    # invariants 1 + 2, owns the first render
+```
+
+`arm_audio_context` runs **every** check before raising and puts all failures in one
+`AudioContextError` — a broken context usually trips several and the first is rarely the diagnosis.
+That mirrors `oneenv_probe.py`'s "one failing stage must not hide the four behind it".
+
+| invariant | mechanism | strength |
+| --- | --- | --- |
+| 1. non-empty mesh | `writeSceneMeshOBJ` → count `v ` lines → floor | **load-bearing** — reads the geometry the *engine* holds (`RLRA_WriteSceneMeshOBJ(...) == RLRA_Success`), not what habitat thinks it sent |
+| 2. RLRA errors | fd-2 capture + fatal substrings + severity regex + canary | breadth; the only Python-visible channel |
+| 3. unknown keys | `vars(spec)` sweep + introspected allowlist | **exact** |
+
+**Invariant 1 is the backstop for invariant 2's whole class**: every way the upload can fail —
+`RLRA_AddMeshVertices` failing, `joinSemanticHierarchy`'s cast returning bare — ends in a short
+vertex count, whether or not the log scan sees the reason.
+
+`getRayEfficiency()` and `sourceIsVisible()` are **recorded and never asserted**. Their values over a
+zero-geometry context are unknown (the `.so` is closed), so there is no honest threshold; ticket 04's
+0.548 is one sample on one healthy scene. With no geometry nothing occludes, so `sourceIsVisible()`
+would read True everywhere — a good diagnostic against a known-occluded pair, not a gate.
+
+### The floor is 10,000 verts, not `> 0`
+
+`> 0` is the literal invariant and it would pass a degenerate three-vertex mesh, which produces the
+same direct-path-only IR as an empty one. 10,000 is two orders of magnitude below ticket 04's
+measured control (392,356) — far enough below any real HM3D scene never to fire spuriously, far
+enough above zero to catch the degenerate case. The OBJ dump runs **every episode**: one ~25 MB
+write against ~0.58 s × 500 steps of audio is well under 1% (an estimate; the probe prices it).
+
+### Measured vs inferred, stated plainly
+
+- **Verified** (source at `4f61e321`, and corroborated — the 20 `acousticsConfig` field names read
+  off `SensorBindings.cpp` match ticket 04's measured dump exactly): lazy mesh upload, the
+  `ESP_ERROR`+bare-return handler, `writeSceneMeshOBJ`'s bool contract, `py::dynamic_attr` on the
+  spec and not on `acousticsConfig`, `HABITAT_SIM_LOG`'s grammar and levels.
+- **Inferred, and the probe measures rather than assumes**: `HABITAT_SIM_LOG_PIN =
+  "Sensor,Assets=Debug"` (the subsystem an `ESP_DEBUG` resolves to comes from its C++ namespace) and
+  `DEFAULT_SEVERITY_RE = r"\[Error\]"` (habitat-sim's prefix format was never read verbatim). Both
+  are defaults with a comment saying so; a probe mismatch is a finding about the constant.
+- **Open, and the probe answers it**: whether a stock construct-and-configure leaves `vars(spec)`
+  empty. If some legitimate dynamic attribute exists on this branch it must go on
+  `assert_no_swallowed_keys(allowed=...)` permanently, or invariant 3 is a false positive forever.
+
+### What this does not do
+
+- It does not prove a genuinely empty audio mesh is *detectable on the box* — only that the assertion
+  fires. Producing a real zero-geometry context would need the `enableMaterials=True` semantic path
+  that ADR-0007 has permanently closed, so the negative control is a forced floor instead. This is
+  the honest limit of a guard for a state we have deliberately made unreachable by other means.
+- It does not close the `RLRA_Error` channel properly. That needs a bindings patch of the same class
+  as ticket 02's multi-source one — **a second patch candidate, where the map currently says
+  multi-source is the only one.** Cheaper than 02's (~returning the enum from `runSimulation`), and
+  it converts invariant 2 from log-scraping into a return code. Routed to ticket 09's fork call.
+
+### Follow-on
+
+**Ticket 16** — run `audioguard_probe.py` on the box. Three negative controls, the two calibration
+constants, the `vars(spec)` question, and the real OBJ-write cost.
