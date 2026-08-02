@@ -52,11 +52,33 @@ NP_CONSTRAINT="$BUILD_ROOT/np-constraint.txt"
 
 # V100 is compute 7.0 / CUDA 11.x era. Overridable because ticket 05's inventory
 # may find a driver that wants a different wheel.
-TORCH_SPEC="${SS2_TORCH_SPEC:-torch==2.0.1}"
-TORCH_INDEX="${SS2_TORCH_INDEX:-https://download.pytorch.org/whl/cu117}"
-# ClapModel/ClapProcessor landed in transformers 4.27; cap below 5 so a major
-# bump cannot silently change the API under us.
-TRANSFORMERS_SPEC="${SS2_TRANSFORMERS_SPEC:-transformers>=4.30,<5}"
+#
+# Ticket 13 moved this pin UP from torch==2.0.1+cu117, which was an unverified
+# guess that transformers then silently refused to run against. 2.2.2+cu118,
+# because:
+#   - transformers gates `is_torch_available()` on `>= 2.1.0` (source-verified),
+#     so 2.2.x clears it with headroom instead of sitting on the boundary;
+#   - torch declares NO numpy dependency, so this install physically cannot move
+#     the `numpy<1.24` pin the 2022-era habitat-sim tree depends on;
+#   - 2.2.x predates numpy 2.0, so numpy 1.23.x is its NATIVE ABI, not a
+#     tolerated downgrade — which is why we take the OLD end of the 2.1-2.6 band
+#     that has cp39+cu118 wheels, not the new end. Nothing here needs torch 2.3+;
+#   - cu118 is the last CUDA line where the V100's sm_70 is a first-class target.
+# Ticket 05 measured torch 2.8.0+cu128 running on this exact V100, so the driver
+# was never the constraint. The numpy floor is, and it argues downward.
+TORCH_SPEC="${SS2_TORCH_SPEC:-torch==2.2.2}"
+TORCH_INDEX="${SS2_TORCH_INDEX:-https://download.pytorch.org/whl/cu118}"
+# transformers' hard floor for enabling its torch backend. Kept as a variable
+# because it is the number the whole pin choice above is derived from.
+TORCH_MIN="${SS2_TORCH_MIN:-2.1}"
+# ClapModel/ClapProcessor landed in transformers 4.27.
+# NOTE (ticket 13): the `<5` cap is INERT on this env — transformers 5.x declares
+# `requires_python >= 3.10` and the SoundSpaces pin is Python 3.9, so the
+# interpreter already caps resolution at the 4.x line. The floor is what matters,
+# and it is raised here so a resolver cannot drift DOWN to a pre-CLAP release
+# either. The real protection is not this range at all: it is stage 05 of the
+# probe, which now fails loudly when the resolved pair does not actually work.
+TRANSFORMERS_SPEC="${SS2_TRANSFORMERS_SPEC:-transformers>=4.40,<5}"
 
 APT_LINE="sudo apt-get install -y --no-install-recommends libjpeg-dev libglm-dev libgl1 libglx-mesa0 libegl1-mesa-dev mesa-utils xorg-dev freeglut3-dev libglvnd-dev"
 
@@ -285,9 +307,26 @@ layer_check "habitat-sim" || exit 1
 
 # --- 5. torch on top, in the SAME env --------------------------------------
 banner "[5/9] torch ($TORCH_SPEC from $TORCH_INDEX)"
-if python -c "import torch" 2>/dev/null; then
-  echo "  torch already installed — skipping"
+# Ticket 13: this skip used to be `python -c "import torch"`, i.e. version-blind.
+# The box's ss2 env ALREADY has torch 2.0.1 installed, so a bare importability
+# check would have skipped the layer and made the pin bump a silent no-op — the
+# gate would re-run, skip, and reproduce the exact failure it was fixing.
+# Gate on the version that transformers actually requires.
+if python - "$TORCH_MIN" <<'PY'
+import sys
+try:
+    import torch
+except Exception:
+    sys.exit(1)
+have = tuple(int(p) for p in torch.__version__.split("+")[0].split(".")[:2])
+need = tuple(int(p) for p in sys.argv[1].split("."))
+print("  found torch {} (need >= {})".format(torch.__version__, sys.argv[1]))
+sys.exit(0 if have >= need else 2)
+PY
+then
+  echo "  torch already satisfies the transformers backend gate — skipping"
 else
+  echo "  installing $TORCH_SPEC (replacing any older torch in this env)"
   pip install -q "$TORCH_SPEC" --index-url "$TORCH_INDEX" -c "$NP_CONSTRAINT" \
     || { echo "FATAL: torch install failed (wrong CUDA wheel for this driver? override SS2_TORCH_SPEC / SS2_TORCH_INDEX)"; exit 1; }
 fi
@@ -300,6 +339,23 @@ banner "[6/9] CLAP stack ($TRANSFORMERS_SPEC + scipy)"
 pip install -q "$TRANSFORMERS_SPEC" scipy soundfile -c "$NP_CONSTRAINT" \
   || { echo "FATAL: transformers/scipy install failed"; exit 1; }
 layer_check "clap-stack" || exit 1
+
+# Ticket 13: assert the numpy pin, do not assume it. The constraint file applies
+# to every install above, but the whole 2022-era habitat-sim tree dies on numpy
+# 2.x, and a later pip layer quietly resolving numpy up is the single most likely
+# way this env breaks. `ltm-embodied` on this same box carries numpy 1.26.4, so
+# the failure is one careless `pip install` away, not hypothetical.
+python - <<'PY' || exit 1
+import sys
+import numpy
+parts = tuple(int(p) for p in numpy.__version__.split(".")[:2])
+if parts >= (1, 24):
+    print("  FATAL: numpy {} >= 1.24 — a pip layer defeated the constraint file."
+          "\n  The 2022-era habitat-sim tree cannot run on this. Find the layer that"
+          "\n  pulled it and constrain that install.".format(numpy.__version__))
+    sys.exit(1)
+print("  numpy pin held: {}".format(numpy.__version__))
+PY
 
 # --- 7. THE CORE VERDICT (written to disk before habitat-lab can rot it) ----
 banner "[7/9] core probe — this is the ticket-04 gate"
@@ -389,6 +445,19 @@ print("    directRayCount      = {}".format(d.get("has_directRayCount")))
 trap = d.get("dynamic_attr_trap", {})
 print("    spec swallows unknown keys = {} (validator must live on the SPEC)".format(
     trap.get("spec_swallows_unknown_key")))
+
+# Ticket 13: a GREEN must never again be ambiguous about what it proved of CLAP.
+c = core.get("05_clap", {})
+print("\n  CLAP (ticket 13):")
+print("    transformers {} / torch backend enabled = {}".format(
+    c.get("transformers"), c.get("torch_backend_available")))
+print("    ClapModel is a dummy object = {}".format(c.get("clap_is_dummy")))
+if c.get("clap_weights_loaded"):
+    print("    forward pass: logits {} finite={} on {} => PROVEN".format(
+        c.get("clap_logits_shape"), c.get("clap_logits_finite"), c.get("clap_device")))
+else:
+    print("    forward pass: NOT RUN — backend checked only.")
+    print("    ticket 13 GREEN needs the logit: re-run with SS2_LOAD_CLAP=1")
 
 r = core.get("07_live_render", {})
 print("\n  first render: {} s, IR shape {}, non-silent {}".format(
