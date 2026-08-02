@@ -1,9 +1,10 @@
 # 13 — CLAP cannot run in the `ss2` env: which pin moves?
 
 Type: task
-Status: claimed
+Status: resolved
 Assignee: Sky
 Blocked by: none
+Resolved: 2026-08-02 — GREEN on the box (`riftvm`, commit `fa700f3`, exit 0, 1m49s). See the Answer section.
 
 ## Question
 
@@ -106,3 +107,62 @@ nrun bash .scratch/ss2-clean-room/probes/oneenv_gate.sh
 with `SS2_LOAD_CLAP=1` exported, since ticket-13 GREEN is the logit. **Remember the self-update gotcha** — the script git-pulls itself, so the first invocation after this commit runs the *old* copy; it needs a second invocation to take effect.
 
 Expected: step 5 reports `found torch 2.0.1+cu117 (need >= 2.1)` then installs 2.2.2+cu118; steps 6–7 confirm numpy still 1.23.x, the audio probe still passes, and CLAP returns three finite logits. If `--load-clap` OOMs, check `nvidia-smi` first — CLAP is 600 MB against the 8.2 GB that was free, so an OOM points at ticket 15's unaccounted VRAM, not at the pin.
+
+## Answer — GREEN. Torch up to 2.2.2+cu118; CLAP infers; the env held.
+
+Box run on `riftvm`, commit `fa700f3`, **exit 0 in 1m49s** (no rebuild — the idempotent skip held: *"audio-capable habitat_sim already importable — skipping build"*). Every prediction above landed, including the failure the prediction was about.
+
+**The classifier now exists and produces a logit** (`05_clap`, with the weights actually loaded):
+
+```
+transformers             4.57.6          <- the SAME version that was broken
+torch_backend_available  True            <- was False; this is the whole ticket
+clap_is_dummy            False
+clap_weights_loaded      True   (153.5 M params)
+clap_device              cuda
+clap_logits_shape        [1, 3]   finite=True
+clap_logits              [-0.9028, 5.5718, 3.6204]
+clap_peak_vram_gb        0.713
+```
+
+transformers did not move — it is 4.57.6 both before and after. **Only torch changed**, which makes this a clean single-variable A/B and confirms the diagnosis exactly: the break was never in transformers, it was in what transformers found underneath it.
+
+**The version-blind skip was a real bug, and it fired.** Step 5 printed:
+
+```
+found torch 2.0.1+cu117 (need >= 2.1)
+installing torch==2.2.2 (replacing any older torch in this env)
+```
+
+That is the box confirming the `ss2` env really did already carry torch 2.0.1. Under the original `if python -c "import torch"` this run would have printed *"torch already installed — skipping"*, left 2.0.1 in place, and reproduced the identical failure while reporting a fix had been applied. **The pin change alone would have done nothing.**
+
+**The env held, asserted rather than assumed.** numpy stayed 1.23.5 through every layer — interpreter, post-habitat-sim, post-torch, post-CLAP-stack — and the new assertion printed `numpy pin held: 1.23.5`. The audio probe passed after both the torch and CLAP layers (`habitat_sim 0.2.2 audio-capable`). This is the predicted consequence of torch declaring no numpy dependency: installing 2.2.2 could not, and did not, touch the pin.
+
+`04_torch` confirms the wheel choice on the metal: `torch 2.2.2+cu118`, cuda build 11.8, `Tesla V100-SXM3-32GB`, **capability [7, 0]**, `alloc_smoke_ok True`. sm_70 on cu118, as reasoned.
+
+### Two details worth carrying forward
+
+- **`clap_processor_kwarg` came back `audio`** — the forward-compat fallback picked the *new* keyword, so on 4.57.6 the `audios=` deprecation path is not exercised. The fallback still earns its keep for the older half of the `>=4.40,<5` band, but the current resolution is already on the post-rename API and will survive the 4.59 removal untouched.
+- **Peak VRAM 0.713 GB**, against the 8.2 GB free that ticket 05 flagged. The OOM worry did not materialise and ticket 15's unaccounted VRAM never came into play here.
+
+Anecdote, explicitly **not** a measurement: the highest logit is *"a smoke alarm beeping"* (5.57) for a 1 kHz tone plus noise, which is a sane ranking for that stimulus. n=1 on a synthetic probe tone — it says the model is not returning garbage, and nothing more. Classification accuracy belongs to the anomaly gate.
+
+### The first fully-known-good version set
+
+Nothing has recorded this before, and the fog patch this ticket added to the map wants it:
+
+| | |
+|---|---|
+| python | 3.9.19 |
+| numpy | 1.23.5 |
+| torch | 2.2.2+cu118 (cuda build 11.8) |
+| transformers | 4.57.6 |
+| scipy | 1.13.1 |
+| habitat-sim | 0.2.2 @ `4f61e321` (`RLRAudioPropagationUpdate`, stock, no patches) |
+| rlr-audio-propagation | `4fd446b4` |
+
+### What this does not settle
+
+- **habitat-lab is still not importable** (`No module named 'habitat_sim.robots'`). Unchanged by this ticket and already discharged by ticket 04 — the clean room drives `habitat_sim` directly.
+- **First render 0.6579 s**, consistent with ticket 04's 0.60 s. Still ticket 06's *unaffordable* case; nothing here moves it.
+- **The env is still resolver-reproduced, not pinned.** The table above is a record of what worked once, not a lockfile. That is the map's fog patch, not this ticket.
