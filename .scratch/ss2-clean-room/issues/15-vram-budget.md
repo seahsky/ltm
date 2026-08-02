@@ -1,7 +1,8 @@
 # 15 — What holds 24 GB of VRAM, and what is the clean room's VRAM budget?
 
 Type: task
-Status: open
+Status: claimed
+Assignee: Sky
 Blocked by: none
 
 ## Question
