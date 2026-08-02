@@ -23,11 +23,19 @@ runs, the clean room's loudest safety property is unexercised.
 
 ```
 conda activate ss2
+mkdir -p runs/ss2-audioguard
+pip freeze > runs/ss2-audioguard/freeze.txt          # stage 0, ticket 17
 nrun python3 .scratch/ss2-clean-room/probes/audioguard_probe.py \
     --out runs/ss2-audioguard/report.json
 ```
 
-Three stages, ~2 minutes, read-only. Paste `report.json` back here.
+Four stages, ~2 minutes, read-only. Paste `report.json` **and** `freeze.txt` back here.
+
+**Stage 0 — the `pip freeze`, for ticket 17.**
+Not part of the guard at all; it rides along because this is a read-only box trip that was already going to happen.
+Ticket 17 pinned the `ss2` env behind a nine-line constraints file, and **five of those nine versions are recorded nowhere in this repo**: `soundfile`, `numpy-quaternion`, `huggingface-hub`, `tokenizers`, `safetensors`.
+The freeze supplies them, and it is also the forensic artifact ticket 17 asks the bootstrap to keep — the thing a future ticket-13 diagnosis diffs against.
+Takes ~5 seconds and blocks nothing here; if the guard stages fail, the freeze is still the deliverable.
 
 **Stage 1 — the key validator against the real `AudioSensorSpec`.**
 Answers the one question ticket 12 left genuinely open: does a stock construct-and-configure leave
