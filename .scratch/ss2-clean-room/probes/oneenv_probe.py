@@ -361,13 +361,47 @@ def probe_torch() -> Dict[str, Any]:
 def probe_clap(load_weights: bool = False) -> Dict[str, Any]:
     import scipy
     import transformers
-    from transformers import ClapModel, ClapProcessor  # noqa: F401
 
     info = {
         "transformers": transformers.__version__,
         "scipy": scipy.__version__,
-        "clap_symbols_importable": True,
     }
+
+    # --- ticket 13: probe the capability, not the symbol -------------------
+    # `from transformers import ClapModel` succeeds even when the torch backend
+    # is disabled: transformers substitutes a DummyObject that only raises when
+    # you instantiate it. Ticket 04 recorded that bare import as
+    # `clap_symbols_importable: True` and went GREEN with a CLAP that could not
+    # exist. That is the same class of false positive habitat-sim #2340 taught
+    # this probe to avoid for the audio sensor (check the enum member, not the
+    # class); the lesson simply was not applied here.
+    #
+    # `is_torch_available()` IS the flag that was silently False — transformers
+    # gates it on `version.parse(torch) >= 2.1.0` and only logs a warning.
+    try:
+        from transformers.utils import is_torch_available
+    except Exception:  # very old layouts export it at top level
+        is_torch_available = transformers.is_torch_available  # type: ignore[attr-defined]
+    info["torch_backend_available"] = bool(is_torch_available())
+
+    from transformers import ClapModel, ClapProcessor
+
+    info["clap_model_module"] = ClapModel.__module__
+    info["clap_is_dummy"] = "dummy" in ClapModel.__module__
+
+    if not info["torch_backend_available"] or info["clap_is_dummy"]:
+        import torch
+
+        raise RuntimeError(
+            "transformers {} has DISABLED its torch backend against torch {} "
+            "(it requires >= 2.1.0), so ClapModel is {} and the anomaly "
+            "classifier cannot instantiate. This is ticket 13: move the torch "
+            "pin up (SS2_TORCH_SPEC / SS2_TORCH_INDEX), do not pin transformers "
+            "down.".format(
+                transformers.__version__, torch.__version__, ClapModel.__module__
+            )
+        )
+
     # scipy.signal.resample_poly is the resampler the CLAP path uses; prove it
     # works under the pinned numpy rather than just that scipy imports.
     import numpy as np
@@ -376,14 +410,87 @@ def probe_clap(load_weights: bool = False) -> Dict[str, Any]:
     resampled = resample_poly(np.zeros(4800, dtype=np.float32), 10, 1)
     info["resample_poly_ok"] = int(resampled.shape[0]) == 48000
 
-    if load_weights:
-        model = ClapModel.from_pretrained("laion/clap-htsat-fused")
-        info["clap_weights_loaded"] = True
-        info["clap_param_count_m"] = round(sum(p.numel() for p in model.parameters()) / 1e6, 1)
-        del model
-    else:
+    if not load_weights:
         info["clap_weights_loaded"] = False
-        info["note"] = "weights not downloaded (pass --load-clap to fetch ~600 MB)"
+        info["note"] = (
+            "backend verified, forward pass NOT run "
+            "(pass --load-clap to fetch ~600 MB and prove a logit)"
+        )
+        for k, v in info.items():
+            print("  {:<24} {}".format(k, v), flush=True)
+        return info
+
+    # --- the real proof: a forward pass that returns a finite logit --------
+    # GREEN for ticket 13 is a logit, not an import. Shaped as the 3-way
+    # zero-shot anomaly classification the destination actually needs, so this
+    # exercises the code path the anomaly gate will use rather than a toy one.
+    # NOTE: finiteness and shape only — classification ACCURACY is the anomaly
+    # gate's problem, not this pin ticket's.
+    import torch
+
+    model = ClapModel.from_pretrained("laion/clap-htsat-fused").eval()
+    processor = ClapProcessor.from_pretrained("laion/clap-htsat-fused")
+    info["clap_weights_loaded"] = True
+    info["clap_param_count_m"] = round(sum(p.numel() for p in model.parameters()) / 1e6, 1)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    info["clap_device"] = device
+    model = model.to(device)
+
+    # A real waveform, not zeros: an all-zero buffer can survive a broken
+    # normalisation silently, which is the failure mode this stage exists to
+    # catch. Deterministic (fixed seed) so a re-run is comparable.
+    rng = np.random.RandomState(0)
+    sr = 48000  # CLAP's audio branch rate
+    t = np.arange(sr * 2, dtype=np.float32) / sr
+    wave = (0.5 * np.sin(2 * np.pi * 1000.0 * t)
+            + 0.05 * rng.randn(t.shape[0])).astype(np.float32)
+
+    labels = ["a baby crying", "a smoke alarm beeping", "glass breaking"]
+    # `audios=` is deprecated for removal in transformers 4.59 in favour of
+    # `audio=`, but `audio=` does not exist in the older half of our
+    # `>=4.40,<5` band. Try the new name, fall back to the old, so the probe
+    # spans the whole range the resolver can legally pick.
+    kw = dict(text=labels, sampling_rate=sr, return_tensors="pt", padding=True)
+    try:
+        inputs = processor(audio=[wave], **kw)
+        info["clap_processor_kwarg"] = "audio"
+    except TypeError:
+        inputs = processor(audios=[wave], **kw)
+        info["clap_processor_kwarg"] = "audios"
+    inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+
+    try:
+        with torch.no_grad():
+            out = model(**inputs)
+        logits = out.logits_per_audio
+    except RuntimeError as exc:
+        if "out of memory" in str(exc).lower():
+            raise RuntimeError(
+                "CLAP forward pass OOM'd. CLAP is only ~600 MB, so check "
+                "`nvidia-smi` for the unaccounted VRAM (ticket 15) BEFORE "
+                "suspecting the torch pin."
+            ) from exc
+        raise
+
+    info["clap_logits_shape"] = list(logits.shape)
+    info["clap_logits_finite"] = bool(torch.isfinite(logits).all().item())
+    info["clap_logits"] = [round(float(x), 4) for x in logits.flatten().tolist()]
+    if device == "cuda":
+        info["clap_peak_vram_gb"] = round(
+            torch.cuda.max_memory_allocated() / (1024 ** 3), 3)
+
+    if not info["clap_logits_finite"]:
+        raise RuntimeError("CLAP forward pass returned non-finite logits: {}".format(
+            info["clap_logits"]))
+    if list(logits.shape) != [1, len(labels)]:
+        raise RuntimeError("CLAP logits shape {} != [1, {}] — the 3-way anomaly "
+                           "classifier head is not wired as expected".format(
+                               list(logits.shape), len(labels)))
+
+    del model
+    if device == "cuda":
+        torch.cuda.empty_cache()
 
     for k, v in info.items():
         print("  {:<24} {}".format(k, v), flush=True)
