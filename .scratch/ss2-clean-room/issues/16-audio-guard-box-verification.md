@@ -77,3 +77,19 @@ proven live, the state itself is not reproduced.
 Expect `canary_seen_on_second_render` to be **False**. The mesh uploads once per context
 (`newInitialization_`), so the `Vertex count` line is a first-render artefact. It is recorded to make
 explicit *why* `arm_audio_context` owns the first render rather than running later.
+
+---
+
+## Note from ticket 15 (2026-08-03) — stage 1 is already answered, and stage 0 is not
+
+Ticket 15's budget run stood up a real sim + `AudioSensorSpec` on the box and hit this ticket's stage-1 question head-on.
+
+**Stage 1 is resolved: `vars(spec)` is NOT empty on the real binary.** A stock construct-and-configure leaves `__noise_model_kwargs` in the instance `__dict__` — a genuine attribute set by the real constructor, distinct from the bound `noise_model_kwargs` field. Unfixed, `assert_no_swallowed_keys` raises on *every healthy spec*, which is exactly the "false positive forever" this ticket predicted. It now lives in `audio_guard.KNOWN_DYNAMIC_ATTRS`, subtracted on top of any caller-supplied `allowed` so a caller cannot re-open it. Three tests added (30 green), one asserting a real typo like `irTime` still fails alongside it, so the exclusion did not blunt the guard.
+
+This vindicates the ticket's premise more than it shortens it: 27 tests were green against fakes that did not reproduce the one behaviour that mattered.
+
+**Stages 2 and 3 still stand** — `arm_audio_context` itself, the 392,356-vertex floor, the OBJ write cost, and the negative controls are all still unexercised. What ticket 15 proved incidentally is only that a sim + audio sensor configured through `apply_audio_config` renders a real IR (`[2, 72300]`, binaural, 1.506 s at 48 kHz).
+
+**Stage 0's `pip freeze` was NOT taken.** Ticket 17 still needs it, and it is still the cheapest thing on this trip.
+
+**One bug removed from this ticket's path.** `audioguard_probe.py`'s `_find_scene` globbed `data/scene_datasets/hm3d/...`, which does not exist on the box — the canonical root is `data/hm3d/scene_datasets/hm3d/<split>`. It would have failed at stage 2 before touching the guard. Fixed; both roots are now tried.

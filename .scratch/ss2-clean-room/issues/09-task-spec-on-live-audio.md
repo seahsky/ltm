@@ -85,3 +85,24 @@ Two further inputs from ticket 10, for the record:
 
 - **`metrics.py` (55 LOC, `compute_benchmark_spl`) is ported near-verbatim.** So when this ticket restates the metric set against `CONTEXT.md`, the arithmetic it is restating against already exists and is Mac-testable.
 - **The smoke's oracle STOP is confirmed**, not just proposed: ticket 10's carry list ships `OracleDetector` (what the smoke runs) and `CaptionDetector` (what R2 runs) behind ADR-0008's `detects()` seam, with the OWLv2 backend dropped as a measured noise-floor negative. This ticket still owes the smoke-green criteria the statement 07 asked for — that smoke find numbers are not capability numbers.
+
+---
+
+## Note from ticket 15 (2026-08-03) — reviving CLIP now has a measured price
+
+This ticket owns whether ADR-0002's scene-conditioned room classifier survives, and that is the only route by which CLIP returns to the tree (ADR-0008 dropped it). Ticket 15 tried to price CLIP and **could not load it at all**:
+
+```
+ValueError: Due to a serious vulnerability issue in `torch.load`, even with `weights_only=True`,
+we now require users to upgrade torch to at least v2.6 ... does not apply when loading files with safetensors.
+```
+
+transformers 4.57.6 refuses `torch.load` below torch 2.6 (CVE-2025-32434), the cached `openai/clip-vit-base-patch32` is a `.bin`, and **ticket 13 pinned torch at 2.2.2+cu118 deliberately** for this V100. Qwen2-VL-2B loaded without complaint because it ships safetensors.
+
+So "keep the room classifier" is no longer a free choice. It costs one of:
+
+- a safetensors re-fetch of CLIP (cheap, but it makes the env pin's model layer load-bearing — ticket 17's problem), or
+- a torch bump past 2.6, which ticket 13's pin forbids on this card, or
+- a different room-classification route that avoids CLIP entirely.
+
+**VRAM is not the constraint** — ticket 15 measured 26 GiB of margin with the captioner resident, so there is room for CLIP many times over. The blocker is purely the pin.

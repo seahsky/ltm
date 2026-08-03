@@ -59,8 +59,12 @@ It matters because the depth-derived occupancy grid disagrees with the navmesh, 
 
 ## Why this is decided on evidence rather than on freed VRAM
 
-Ticket 04's GREEN measured 31.73 GB free on the box with the audio build loaded, so capacity does not force any of this.
+Capacity does not force any of this, and ticket 15 has now measured that rather than asserted it: the clean room's full stack (simulator with RGB/depth, live audio, CLAP, and the Qwen2-VL-2B captioner) is **5.547 GiB co-resident against a 31.73 GiB usable card** — a 26 GiB margin. Even re-adding the dropped 7B planner's ~15 GB would still fit.
 The note on ticket 07 was explicit that reopening ADR-0006 needs a better reason than "we have the VRAM now", because VRAM was never why the semantic frontier failed.
+
+**Corrected 2026-08-03 (ticket 15).** This paragraph previously read "Ticket 04's GREEN measured 31.73 GB free on the box with the audio build loaded."
+That figure is `props.total_memory` (`oneenv_probe.py:341`) — the card's ECC-adjusted *capacity*, not free memory, and it equals free only when the GPU is idle, which it was not on 2026-08-01 (8.2 GB free, held by a live 13.7-day R1 run).
+The correction does not change this section's conclusion: the measured margin is large enough that capacity was never binding either way.
 
 Each drop above rests on a measurement already in the record:
 

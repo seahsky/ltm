@@ -220,3 +220,17 @@ Two changes to this ticket, both narrowing it:
 2. **The gradient-contrast number is no longer a dataset gate.** It was framed as the measurement that could reopen the HM3D-vs-MP3D question. It cannot: 08 ruled MP3D out unconditionally, on the reasoning that materials are off in the MP3D reference configuration too, so a flat gradient would not be fixed by switching datasets. **If the gradient comes back flat, the lever is source placement or source gain, not the dataset.** Report the number the same way; only its consequence changed.
 
 Everything else in this ticket stands unchanged — the timing sweep, the `transmission` on/off axis, the sequential multi-source upper bound, and the steady-state-versus-first-call split are all untouched by 08.
+
+---
+
+## Note from ticket 15 (2026-08-03) — two things this sweep needs to know
+
+**1. The box was contended from ~2026-07-20 to 2026-08-03.** A live `nrun` job (`race-r1-objectnav.sh --tag r1v1`, wrapper elapsed 13-17:28) held 24.4 GB of VRAM and ran at 73–74% GPU utilisation on a **4-core** box. It has been torn down; the card now reads 0 MiB used.
+
+Any timing taken inside that window is contended. The effect is not uniform, so it is worth being specific rather than discarding everything:
+
+- The **`threadCount=1` baseline** is the least affected — RLR propagation is CPU path tracing, and one competitor on 4 cores usually leaves it a core.
+- The **`threadCount` → 4 arm is the one to re-take.** It is measured against a competitor for exactly the cores it wants, so it will *understate* the speedup, which is the direction that matters for the affordability verdict.
+- Anything touching **GPU** (the render loop's visual sensors) was sharing a card at ~74% utilisation.
+
+**2. VRAM is not a variable in this sweep.** Ticket 15 measured the audio sensor at **exactly 0.000 GiB**, both at spec-add and at first render, with a real IR returned. RLR propagation is entirely CPU-side. So the cost of "live audio every step" is CPU and wall-clock only — there is no memory term to trade off, and the multi-source sweep (item 5) cannot be VRAM-bound either.

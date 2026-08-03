@@ -58,6 +58,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 __all__ = [
     "AudioContextError",
     "AudioContextReport",
+    "KNOWN_DYNAMIC_ATTRS",
     "MIN_SCENE_VERTICES",
     "apply_audio_config",
     "arm_audio_context",
@@ -212,6 +213,17 @@ def bound_field_names(obj: Any) -> frozenset:
     return frozenset(names)
 
 
+# MEASURED on the box 2026-08-03 (ticket 15's budget run, which is what surfaced
+# it — this is the answer to ticket 16's stage-1 question). A stock
+# `AudioSensorSpec()` does NOT leave `vars(spec)` empty: the real constructor
+# attaches `__noise_model_kwargs` as a genuine instance attribute, while
+# `noise_model_kwargs` is a separate bound field. Without this exclusion the
+# guard raises on every healthy spec, so invariant 3 would be a false positive
+# forever. The unit-test fakes do not reproduce it, which is precisely the class
+# of gap ticket 16 exists to close.
+KNOWN_DYNAMIC_ATTRS: Tuple[str, ...] = ("__noise_model_kwargs",)
+
+
 def assert_no_swallowed_keys(spec: Any, allowed: Iterable[str] = ()) -> None:
     """Fail if anything was attached to the spec that is not a bound field.
 
@@ -220,10 +232,11 @@ def assert_no_swallowed_keys(spec: Any, allowed: Iterable[str] = ()) -> None:
     of keys ``py::dynamic_attr`` swallowed.
 
     ``allowed`` exists because a legitimate dynamic attribute on this branch would
-    otherwise be a permanent false positive. It is empty by default and
-    ``audioguard_probe.py`` measures whether it needs to stay that way.
+    otherwise be a permanent false positive. ``KNOWN_DYNAMIC_ATTRS`` is always
+    excluded on top of it, so a caller passing its own ``allowed`` cannot
+    accidentally re-open a false positive that has already been measured.
     """
-    stray = sorted(set(vars(spec)) - set(allowed))
+    stray = sorted(set(vars(spec)) - set(allowed) - set(KNOWN_DYNAMIC_ATTRS))
     if stray:
         raise AudioContextError(
             "AudioSensorSpec swallowed {} unknown key(s): {}. py::dynamic_attr attaches "

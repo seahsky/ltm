@@ -238,6 +238,32 @@ class TestKeyValidation(unittest.TestCase):
         spec.someLegitimateAttr = 1
         assert_no_swallowed_keys(spec, allowed=("someLegitimateAttr",))
 
+    def test_real_constructor_attribute_is_not_a_swallowed_key(self):
+        """The box's stock AudioSensorSpec() leaves __noise_model_kwargs in vars().
+
+        Measured 2026-08-03. The fakes never reproduced it, so the guard raised on
+        every healthy spec until KNOWN_DYNAMIC_ATTRS was populated.
+        """
+        spec = FakeSpec()
+        setattr(spec, "__noise_model_kwargs", {})
+        assert_no_swallowed_keys(spec)
+
+    def test_known_dynamic_attrs_survive_a_caller_supplied_allowed(self):
+        """A caller passing its own `allowed` must not re-open a measured false positive."""
+        spec = FakeSpec()
+        setattr(spec, "__noise_model_kwargs", {})
+        spec.someLegitimateAttr = 1
+        assert_no_swallowed_keys(spec, allowed=("someLegitimateAttr",))
+
+    def test_a_real_typo_still_fails_alongside_the_known_attr(self):
+        spec = FakeSpec()
+        setattr(spec, "__noise_model_kwargs", {})
+        spec.irTime = 4.0
+        with self.assertRaises(AudioContextError) as ctx:
+            assert_no_swallowed_keys(spec)
+        self.assertIn("irTime", str(ctx.exception))
+        self.assertNotIn("__noise_model_kwargs", str(ctx.exception))
+
 
 class TestArmAudioContext(unittest.TestCase):
     def test_healthy_context_passes(self):
