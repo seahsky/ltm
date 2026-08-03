@@ -606,18 +606,30 @@ def budget(scene: Optional[str], sample_rate: float, with_captioner: bool,
     report["clap"]["allocator_peak_gib"] = round(torch.cuda.max_memory_allocated() / GIB, 3)
     ledger.mark("CLAP forward", "activations on top of weights")
 
+    # The two optional loads are non-fatal on purpose. They price components the
+    # smoke does not run (ADR-0008: oracle STOP, CLIP gone unless ticket 09
+    # revives ADR-0002), so a transformers/dtype failure here must not destroy a
+    # ledger that already holds the measured sim + audio + CLAP rows.
     if with_clip:
-        from transformers import CLIPModel  # noqa: E402
         clip_id = "openai/clip-vit-base-patch32"
-        CLIPModel.from_pretrained(clip_id).to("cuda").eval()
-        ledger.mark("CLIP", "{} — only in the stack if ticket 09 keeps ADR-0002".format(clip_id))
+        try:
+            from transformers import CLIPModel  # noqa: E402
+            CLIPModel.from_pretrained(clip_id).to("cuda").eval()
+            ledger.mark("CLIP", "{} — only in the stack if ticket 09 keeps ADR-0002".format(clip_id))
+        except Exception as exc:
+            report["clip_error"] = "{}: {}".format(type(exc).__name__, exc)
+            print("  CLIP FAILED (recorded, not fatal): {}".format(report["clip_error"]))
 
     if with_captioner:
-        from transformers import AutoModelForVision2Seq  # noqa: E402
-        cap = AutoModelForVision2Seq.from_pretrained(
-            captioner_model, torch_dtype=torch.float16).to("cuda").eval()
-        del cap
-        ledger.mark(captioner_model, "R2 only — the smoke runs an oracle STOP (ADR-0008)")
+        try:
+            from transformers import AutoModelForVision2Seq  # noqa: E402
+            cap = AutoModelForVision2Seq.from_pretrained(
+                captioner_model, torch_dtype=torch.float16).to("cuda").eval()
+            del cap
+            ledger.mark(captioner_model, "R2 only — the smoke runs an oracle STOP (ADR-0008)")
+        except Exception as exc:
+            report["captioner_error"] = "{}: {}".format(type(exc).__name__, exc)
+            print("  captioner FAILED (recorded, not fatal): {}".format(report["captioner_error"]))
 
     report["ledger"] = ledger.rows
     resident_gib = round((ledger.baseline - _free_bytes_driver()) / GIB, 3)
