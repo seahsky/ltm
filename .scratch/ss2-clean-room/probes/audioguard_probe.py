@@ -14,11 +14,13 @@ is the three things a fake cannot settle, each of which is currently an inferenc
 2. **Does the guard actually fire?** A guard that has only ever passed is indistinguishable
    from a guard that cannot fail. Four negative controls, each provoking a different
    invariant on the real objects.
-3. **Are the two calibrated constants right?** ``HABITAT_SIM_LOG_PIN`` (the subsystem a
-   given ESP_DEBUG resolves to is inferred from its C++ namespace) and
-   ``DEFAULT_SEVERITY_RE`` (habitat-sim's log prefix format was never read verbatim).
-   Both are defaults this probe measures rather than assumes; a mismatch is a finding
-   about the constant, not about the run.
+3. **Are the calibrated constants right?** Ticket 16 settled both from source before this
+   probe ever ran — ``HABITAT_SIM_LOG_PIN`` is correct (``AudioSensor.cpp`` opens
+   ``namespace esp::sensor``, so its macros resolve to ``Subsystem::sensor``), and the old
+   ``DEFAULT_SEVERITY_RE = r"\\[Error\\]"`` was not merely miscalibrated but structurally
+   dead: ``buildMessagePrefix`` emits no severity tag, so it could never match. It is
+   replaced by ``HABITAT_LOG_PREFIX_RE``, which tests *provenance*, with severity taken
+   from the stream. This probe now confirms that on the binary rather than deriving it.
 
 It also answers the one question ``assert_no_swallowed_keys`` is currently guessing at:
 whether a stock construct-and-configure leaves ``vars(spec)`` empty, or whether some
@@ -43,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # MUST precede habitat_sim: HABITAT_SIM_LOG is read at import time, and the whole
 # point of invariant 2 is that this cannot be skipped.
 from audio_guard import (  # noqa: E402
-    DEFAULT_SEVERITY_RE,
+    HABITAT_LOG_PREFIX_RE,
     HABITAT_SIM_LOG_PIN,
     MIN_SCENE_VERTICES,
     AudioContextError,
@@ -51,7 +53,7 @@ from audio_guard import (  # noqa: E402
     arm_audio_context,
     assert_no_swallowed_keys,
     bound_field_names,
-    capture_fd_stderr,
+    capture_habitat_logs,
     pin_habitat_logging,
 )
 
@@ -143,21 +145,61 @@ def _build_sim(scene_path: str, sample_rate: float):
     return sim, spec
 
 
-def _place(sim) -> None:
+PLACEMENT_SEED = 20260803
+# A source drawn independently of the listener can land across the scene, and the guard
+# asserts a non-silent IR — so an unlucky draw fails the healthy path for a reason that
+# has nothing to do with the audio context. Bound the separation instead. Euclidean, not
+# geodesic, deliberately: no extra API surface, and the point is only to stay in
+# earshot.
+SOURCE_MIN_M = 1.0
+SOURCE_MAX_M = 8.0
+SOURCE_DRAW_TRIES = 64
+
+
+def _place(sim) -> Dict[str, Any]:
+    """Seat the listener and the source, reproducibly.
+
+    Returns the placement so a RED report says where it was standing. Both stages seed
+    identically, so stage 3's negative controls run against stage 2's geometry.
+    """
     import numpy as np
 
     audio_sensor = sim.get_agent(0)._sensors["audio_sensor"]
+    placement: Dict[str, Any] = {"seeded": False, "draws": 0, "fallback": False}
     if sim.pathfinder.is_loaded:
+        # Without this the probe is not re-runnable: a RED report could not be
+        # reproduced, which is exactly what a negative control needs.
+        if hasattr(sim.pathfinder, "seed"):
+            sim.pathfinder.seed(PLACEMENT_SEED)
+            placement["seeded"] = True
         listener = sim.pathfinder.get_random_navigable_point()
-        source = sim.pathfinder.get_random_navigable_point()
+        source = None
+        for attempt in range(SOURCE_DRAW_TRIES):
+            candidate = sim.pathfinder.get_random_navigable_point()
+            separation = float(np.linalg.norm(np.asarray(candidate) - np.asarray(listener)))
+            placement["draws"] = attempt + 1
+            if SOURCE_MIN_M <= separation <= SOURCE_MAX_M:
+                source = candidate
+                placement["separation_m"] = round(separation, 3)
+                break
+        if source is None:
+            # Small or oddly-shaped navmesh: take the last draw rather than fail here.
+            # The guard's silent-IR check is then the honest report of what happened.
+            source = candidate
+            placement["fallback"] = True
+            placement["separation_m"] = round(separation, 3)
     else:
         listener = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         source = np.array([1.0, 0.0, 1.0], dtype=np.float32)
+        placement["navmesh_loaded"] = False
     agent = sim.get_agent(0)
     state = agent.get_state()
     state.position = listener
     agent.set_state(state)
     audio_sensor.setAudioSourceTransform(np.asarray(source, dtype=np.float32))
+    placement["listener"] = [round(float(v), 3) for v in np.asarray(listener).tolist()]
+    placement["source"] = [round(float(v), 3) for v in np.asarray(source).tolist()]
+    return placement
 
 
 # ----------------------------------------------------------------------
@@ -226,7 +268,8 @@ def probe_healthy_path(scene: Optional[str], sample_rate: float) -> Dict[str, An
     sim, spec = _build_sim(scene_path, sample_rate)
     info: Dict[str, Any] = {"scene": scene_path}
     try:
-        _place(sim)
+        info["placement"] = _place(sim)
+        print("  placement: {}".format(info["placement"]), flush=True)
         audio_sensor = sim.get_agent(0)._sensors["audio_sensor"]
 
         t0 = time.time()
@@ -269,7 +312,7 @@ def probe_negative_controls(scene: Optional[str], sample_rate: float) -> Dict[st
     sim, _spec = _build_sim(scene_path, sample_rate)
     info: Dict[str, Any] = {}
     try:
-        _place(sim)
+        info["placement"] = _place(sim)
         audio_sensor = sim.get_agent(0)._sensors["audio_sensor"]
         render = lambda: sim.get_sensor_observations()["audio_sensor"]  # noqa: E731
 
@@ -285,9 +328,14 @@ def probe_negative_controls(scene: Optional[str], sample_rate: float) -> Dict[st
             info["floor_message"] = str(exc)[:300]
             print("  impossible floor fires OK", flush=True)
 
-        # (b) Provoke a real ESP_ERROR and see whether DEFAULT_SEVERITY_RE matches it.
-        # This is the only way to validate the pattern — habitat-sim's prefix format was
-        # never read verbatim, so it is a default, not a measurement.
+        # (b) Provoke a real ESP_ERROR and confirm two things the source predicts but
+        # only the binary can settle: that it lands on fd 2 (Corrade routes Error to
+        # std::cerr) and that HABITAT_LOG_PREFIX_RE matches the rendered prefix.
+        # `setListenerHRTF` is the reliable one — AudioSensor.cpp:181 logs
+        # ESP_ERROR unconditionally on a bad path. The other two are recorded for
+        # contrast: setAudioMaterialsJSON only ESP_DEBUGs the path it stored (:169), so
+        # it is EXPECTED on fd 1, and it is the cleanest demonstration that the stream
+        # split is real rather than an artefact of one call.
         provocations = [
             ("setListenerHRTF", lambda: audio_sensor.setListenerHRTF("/nonexistent/hrtf.wav")),
             ("setAudioMaterialsJSON", lambda: audio_sensor.setAudioMaterialsJSON("/nonexistent/m.json")),
@@ -296,38 +344,53 @@ def probe_negative_controls(scene: Optional[str], sample_rate: float) -> Dict[st
         samples: List[Dict[str, Any]] = []
         for name, call in provocations:
             raised = None
-            with capture_fd_stderr() as captured:
+            with capture_habitat_logs() as captured:
                 try:
                     call()
                 except Exception as exc:  # a raising binding is a finding, not a failure
                     raised = repr(exc)
-            text = captured.text
-            matched = [ln.strip() for ln in text.splitlines() if DEFAULT_SEVERITY_RE.search(ln)]
+            on_stderr = [ln.strip() for ln in captured.stderr.splitlines()
+                         if HABITAT_LOG_PREFIX_RE.search(ln)]
+            on_stdout = [ln.strip() for ln in captured.stdout.splitlines()
+                         if HABITAT_LOG_PREFIX_RE.search(ln)]
             samples.append({
                 "provocation": name,
                 "raised": raised,
-                "captured_chars": len(text),
-                "severity_re_matched": bool(matched),
-                "matched_lines": matched[:3],
-                "raw_tail": text[-600:],
+                "stdout_chars": len(captured.stdout),
+                "stderr_chars": len(captured.stderr),
+                "prefix_re_matched_on_stderr": bool(on_stderr),
+                "prefix_re_matched_on_stdout": bool(on_stdout),
+                "stderr_matched_lines": on_stderr[:3],
+                "stdout_matched_lines": on_stdout[:3],
+                # Both tails, so a pattern mismatch is fixable from the report rather
+                # than costing a second box trip.
+                "stdout_tail": captured.stdout[-600:],
+                "stderr_tail": captured.stderr[-600:],
             })
-            print("  {:<24} captured {:>6} chars, severity_re matched: {}".format(
-                name, len(text), bool(matched)), flush=True)
+            print("  {:<24} out {:>5}c / err {:>5}c, prefix on stderr: {}".format(
+                name, len(captured.stdout), len(captured.stderr), bool(on_stderr)), flush=True)
         info["provocations"] = samples
-        info["severity_re_validated"] = any(s["severity_re_matched"] for s in samples)
-        if not info["severity_re_validated"]:
-            print("  *** DEFAULT_SEVERITY_RE matched nothing — read raw_tail and fix the "
-                  "pattern; invariant 2's generic arm is currently blind", flush=True)
+        # The claim under test: a real ESP_ERROR reaches fd 2 AND the prefix pattern
+        # matches it. If this is False the generic arm of invariant 2 is blind again and
+        # only FATAL_LOG_SUBSTRINGS is load-bearing.
+        info["prefix_re_validated_on_stderr"] = any(
+            s["prefix_re_matched_on_stderr"] for s in samples
+        )
+        if not info["prefix_re_validated_on_stderr"]:
+            print("  *** no habitat-prefixed line reached fd 2 — read stderr_tail and fix "
+                  "HABITAT_LOG_PREFIX_RE; invariant 2's generic arm is blind", flush=True)
 
         # (c) The canary. Turning the capture off entirely is not possible here, so
-        # instead confirm the healthy path DOES see the canary — a False here means the
-        # log pin is wrong and the cheap arm of invariant 2 is disarmed.
-        with capture_fd_stderr() as captured:
+        # instead record which stream carries it — the whole reason stage 2 could have
+        # failed spuriously is that this is fd 1, not fd 2.
+        with capture_habitat_logs() as captured:
             render()
-        info["canary_seen_on_second_render"] = any(
-            m in captured.text for m in ("Vertex count", "[Audio]")
-        )
-        info["second_render_log_chars"] = len(captured.text)
+        canary = ("Vertex count", "[Audio]")
+        info["canary_seen_on_second_render"] = any(m in captured.text for m in canary)
+        info["canary_on_stdout"] = any(m in captured.stdout for m in canary)
+        info["canary_on_stderr"] = any(m in captured.stderr for m in canary)
+        info["second_render_stdout_chars"] = len(captured.stdout)
+        info["second_render_stderr_chars"] = len(captured.stderr)
         # Expected False: the mesh uploads once per context (newInitialization_), so the
         # "Vertex count" line is a FIRST-render artefact. Recorded to make that explicit
         # — it is why the guard owns the first render rather than running later.
@@ -354,6 +417,9 @@ def main() -> int:
     print("HABITAT_SIM_LOG pinned to {!r}".format(PINNED_LOG), flush=True)
     print("MIN_SCENE_VERTICES = {}".format(MIN_SCENE_VERTICES), flush=True)
     print("HABITAT_SIM_LOG_PIN = {!r}".format(HABITAT_SIM_LOG_PIN), flush=True)
+    print("HABITAT_LOG_PREFIX_RE = {!r}".format(HABITAT_LOG_PREFIX_RE.pattern), flush=True)
+    REPORT["habitat_log_prefix_re"] = HABITAT_LOG_PREFIX_RE.pattern
+    REPORT["placement_seed"] = PLACEMENT_SEED
 
     probe_key_validator()
     probe_healthy_path(args.scene, args.sample_rate)

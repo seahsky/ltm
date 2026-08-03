@@ -12,9 +12,22 @@ the guard depends on, because those behaviours are the whole subject:
 - ``FakeAcoustics`` has slots and no ``__dict__``, so an unknown name raises — the
   ``RLRAudioPropagationConfiguration`` semantics.
 
-``FakeRender`` writes to file descriptor 2 with ``os.write`` rather than to
-``sys.stderr``, because that is how habitat-sim's C++ logger writes and a capture that
-only sees ``sys.stderr`` is the vacuous-pass this ticket exists to prevent.
+``make_render`` writes with ``os.write`` rather than to ``sys.stderr``/``sys.stdout``,
+because that is how habitat-sim's C++ logger writes and a capture that only sees the
+Python objects is the vacuous-pass this ticket exists to prevent.
+
+**Ticket 16 corrected these fakes on two points, both from source, before the probe ran.**
+They used to write the whole log to fd 2 and to fabricate a ``[Error]`` severity tag —
+and 30 tests passed against both. Neither is true of the binary:
+
+- ``ESP_DEBUG`` is a ``Corrade::Utility::Debug``, whose ``defaultOutput()`` is
+  ``&std::cout`` (Corrade ``Debug.cpp:525``), so the ``Vertex count`` canary is on
+  **fd 1**. ``ESP_WARNING``/``ESP_ERROR`` go to ``&std::cerr`` (``:526-527``).
+- ``buildMessagePrefix`` (``Logging.cpp:149-152``) renders
+  ``"[HH:MM:SS:uuuuuu]:[Subsystem] file(line)::func : "`` and Corrade adds no severity
+  tag, so **no** ``[Error]`` substring exists to match. Severity is the stream.
+
+The fakes now reproduce both, which is what makes the suite worth anything here.
 """
 
 from __future__ import annotations
@@ -27,12 +40,13 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from audio_guard import (  # noqa: E402
+    HABITAT_LOG_PREFIX_RE,
     AudioContextError,
     apply_audio_config,
     arm_audio_context,
     assert_no_swallowed_keys,
     bound_field_names,
-    capture_fd_stderr,
+    capture_habitat_logs,
     count_obj_vertices,
     pin_habitat_logging,
 )
@@ -124,17 +138,32 @@ class FakeAudioSensor:
         return self._visible
 
 
+# Every line here is ESP_DEBUG, so all of it lands on fd 1 on the real binary.
 HEALTHY_LOG = (
-    "[Audio] Semantic scene does not exist or materials are disabled, "
-    "will use default material\n[Audio] Loading non-semantic mesh\n"
-    "Vertex count : 392356 , Index count : 1185054\n"
+    "[11:02:14:481200]:[Sensor] AudioSensor.cpp(135)::runSimulation : [Audio] Semantic "
+    "scene does not exist or materials are disabled, will use default material\n"
+    "[11:02:14:481355]:[Sensor] AudioSensor.cpp(495)::loadMesh : [Audio] Loading "
+    "non-semantic mesh\n"
+    "[11:02:14:481420]:[Sensor] AudioSensor.cpp(499)::loadMesh : Vertex count : 392356 "
+    ", Index count : 1185054\n"
+)
+
+# A real ESP_ERROR, rendered exactly as buildMessagePrefix formats it — note there is no
+# severity marker anywhere in the text. AudioSensor.cpp:181.
+ERROR_LOG = (
+    "[11:02:14:482010]:[Sensor] AudioSensor.cpp(181)::setListenerHRTF : Couldn't load "
+    "custom audio listener HRTF\n"
 )
 
 
-def make_render(log=HEALTHY_LOG, ir=((0.0, 0.163), (0.02, -0.09))):
+def make_render(log=HEALTHY_LOG, err="", ir=((0.0, 0.163), (0.02, -0.09))):
+    """``log`` goes to fd 1 (ESP_DEBUG), ``err`` to fd 2 (ESP_WARNING/ESP_ERROR)."""
+
     def render():
         if log:
-            os.write(2, log.encode())
+            os.write(1, log.encode())
+        if err:
+            os.write(2, err.encode())
         return ir
 
     return render
@@ -145,25 +174,63 @@ def make_render(log=HEALTHY_LOG, ir=((0.0, 0.163), (0.02, -0.09))):
 
 class TestFdCapture(unittest.TestCase):
     def test_captures_writes_to_fd_2(self):
-        with capture_fd_stderr() as captured:
+        with capture_habitat_logs() as captured:
             os.write(2, b"from the C++ side\n")
-        self.assertIn("from the C++ side", captured.text)
+        self.assertIn("from the C++ side", captured.stderr)
 
-    def test_restores_fd_2_after_an_exception(self):
-        before = os.dup(2)
+    def test_captures_writes_to_fd_1(self):
+        """ESP_DEBUG goes to std::cout, so fd 1 is where the canary actually lands."""
+        with capture_habitat_logs() as captured:
+            os.write(1, b"Vertex count : 392356\n")
+        self.assertIn("Vertex count", captured.stdout)
+        self.assertIn("Vertex count", captured.text)
+
+    def test_keeps_the_two_streams_apart(self):
+        """The split IS the severity signal — merging them would discard it."""
+        with capture_habitat_logs() as captured:
+            os.write(1, b"debug line\n")
+            os.write(2, b"error line\n")
+        self.assertIn("debug line", captured.stdout)
+        self.assertNotIn("error line", captured.stdout)
+        self.assertIn("error line", captured.stderr)
+        self.assertNotIn("debug line", captured.stderr)
+
+    def test_restores_both_fds_after_an_exception(self):
+        saved_out, saved_err = os.dup(1), os.dup(2)
         try:
             with self.assertRaises(ValueError):
-                with capture_fd_stderr():
+                with capture_habitat_logs():
+                    os.write(1, b"noise\n")
                     os.write(2, b"noise\n")
                     raise ValueError("boom")
-            os.write(2, b"")  # fd 2 is still a valid descriptor
+            os.write(1, b"")  # both are still valid descriptors
+            os.write(2, b"")
         finally:
-            os.close(before)
+            os.close(saved_out)
+            os.close(saved_err)
 
     def test_does_not_swallow_the_exception(self):
         with self.assertRaises(KeyError):
-            with capture_fd_stderr():
+            with capture_habitat_logs():
                 raise KeyError("k")
+
+
+class TestHabitatLogPrefix(unittest.TestCase):
+    def test_matches_a_real_rendered_prefix(self):
+        self.assertTrue(HABITAT_LOG_PREFIX_RE.search(ERROR_LOG))
+
+    def test_does_not_match_third_party_stderr(self):
+        """Anything else on fd 2 is not habitat-sim and must not count as a severity event."""
+        for noise in (
+            "UserWarning: torch.cuda is deprecated\n",
+            "libGL error: MESA-LOADER: failed to open swrast\n",
+            "  File \"/x/y.py\", line 3, in <module>\n",
+        ):
+            self.assertIsNone(HABITAT_LOG_PREFIX_RE.search(noise), noise)
+
+    def test_no_severity_tag_exists_to_match(self):
+        """The regression guard on the old `[Error]` pattern, which matched nothing."""
+        self.assertNotIn("[Error]", ERROR_LOG)
 
 
 class TestObjVertexCount(unittest.TestCase):
@@ -275,6 +342,36 @@ class TestArmAudioContext(unittest.TestCase):
         self.assertAlmostEqual(report.ray_efficiency, 0.548, places=6)
         self.assertEqual(report.fatal_log_lines, [])
 
+    def test_a_healthy_render_logs_only_to_stdout(self):
+        """The shape of a good run: all fd 1, empty fd 2. This is the case the old
+        fd-2-only capture would have failed."""
+        report = arm_audio_context(FakeAudioSensor(), make_render())
+        self.assertGreater(report.stdout_chars, 0)
+        self.assertEqual(report.stderr_chars, 0)
+        self.assertEqual(report.log_chars, report.stdout_chars)
+
+    def test_habitat_prefixed_line_on_stderr_is_fatal(self):
+        """No substring in FATAL_LOG_SUBSTRINGS matches this — the stream is what damns it."""
+        with self.assertRaises(AudioContextError) as ctx:
+            arm_audio_context(FakeAudioSensor(), make_render(err=ERROR_LOG))
+        self.assertIn("Couldn't load custom audio listener HRTF", str(ctx.exception))
+
+    def test_the_same_line_on_stdout_is_not_fatal(self):
+        """ESP_DEBUG echoes plenty of scary-looking text; only fd 2 carries severity."""
+        report = arm_audio_context(
+            FakeAudioSensor(), make_render(log=HEALTHY_LOG + ERROR_LOG)
+        )
+        self.assertEqual(report.fatal_log_lines, [])
+
+    def test_third_party_stderr_noise_is_not_fatal(self):
+        """A numpy warning on fd 2 must not fail a healthy audio context."""
+        report = arm_audio_context(
+            FakeAudioSensor(),
+            make_render(err="UserWarning: builtin type SwigPyPacked has no __module__\n"),
+        )
+        self.assertEqual(report.fatal_log_lines, [])
+        self.assertGreater(report.stderr_chars, 0)
+
     def test_the_obj_is_cleaned_up(self):
         sensor = FakeAudioSensor(n_vertices=20000)
         arm_audio_context(sensor, make_render())
@@ -302,11 +399,14 @@ class TestArmAudioContext(unittest.TestCase):
             arm_audio_context(FakeAudioSensor(), make_render(log=log))
         self.assertIn("GenericSemanticMeshData", str(ctx.exception))
 
-    def test_severity_marker_fails(self):
-        log = HEALTHY_LOG + "[12:00:00]:[Error]:[Sensor] AudioSensor.cpp(512) : something\n"
-        with self.assertRaises(AudioContextError) as ctx:
-            arm_audio_context(FakeAudioSensor(), make_render(log=log))
-        self.assertIn("AudioSensor.cpp(512)", str(ctx.exception))
+    def test_fatal_substring_is_caught_on_either_stream(self):
+        """ResourceManager's cast failure is ESP_ERROR, but the substring rule must not
+        depend on which stream a future habitat-sim routes it to."""
+        for kwargs in ({"log": HEALTHY_LOG + "Could not get the GenericSemanticMeshData\n"},
+                       {"err": "Could not get the GenericSemanticMeshData\n"}):
+            with self.assertRaises(AudioContextError) as ctx:
+                arm_audio_context(FakeAudioSensor(), make_render(**kwargs))
+            self.assertIn("GenericSemanticMeshData", str(ctx.exception))
 
     def test_missing_canary_fails_rather_than_passing_vacuously(self):
         """A capture that saw nothing has not verified invariant 2."""

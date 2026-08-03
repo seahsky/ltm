@@ -1,7 +1,8 @@
 # 16 — Verify the audio guard against the real binary
 
 Type: task
-Status: open
+Status: claimed
+Assignee: Sky
 Blocked by: none (12 resolved; needs the box)
 
 ## Question
@@ -93,3 +94,125 @@ This vindicates the ticket's premise more than it shortens it: 27 tests were gre
 **Stage 0's `pip freeze` was NOT taken.** Ticket 17 still needs it, and it is still the cheapest thing on this trip.
 
 **One bug removed from this ticket's path.** `audioguard_probe.py`'s `_find_scene` globbed `data/scene_datasets/hm3d/...`, which does not exist on the box — the canonical root is `data/hm3d/scene_datasets/hm3d/<split>`. It would have failed at stage 2 before touching the guard. Fixed; both roots are now tried.
+
+---
+
+## Pre-flight, 2026-08-03: the guard was reading the wrong file descriptor
+
+Before spending a box trip, the two constants this ticket calls inferences were read at
+the branch itself (`facebookresearch/habitat-sim @ RLRAudioPropagationUpdate`, plus
+`mosra/corrade`). One is right, one could never have worked, and a third thing turned up
+that would have failed stage 2 outright. All three are source citations, not predictions.
+
+### 1. `ESP_DEBUG` writes to stdout, and the guard only captured stderr (BLOCKING, fixed)
+
+The chain, verbatim:
+
+| where | what it says |
+| --- | --- |
+| `Logging.h:326` | `ESP_DEBUG(...)` expands to `Corrade::Utility::Debug{__VA_ARGS__}` |
+| Corrade `Debug.cpp:525` | `std::ostream* Debug::defaultOutput() { return &std::cout; }` |
+| Corrade `Debug.cpp:526-527` | `Warning::defaultOutput()` and `Error::defaultOutput()` both return `&std::cerr` |
+| `AudioSensor.cpp:499` | `ESP_DEBUG() << "Vertex count : " << sceneMesh->vbo.size()` |
+| `AudioSensor.h:45` | `logHeader_ = "[Audio] "`, prefixed onto `ESP_DEBUG` lines |
+
+So **both** canary substrings, `"Vertex count"` and `"[Audio]"`, arrive on **fd 1**.
+`capture_fd_stderr` captured fd 2 only. On a healthy first render fd 2 is empty, so
+`log_canary_seen` would have been `False`, `require_log_canary` defaults `True`, and
+`arm_audio_context` would have raised. **Stage 2 would have come back RED on a perfectly
+good audio context**, and stage 3's floor control would have "fired" partly for the wrong
+reason, since the canary failure rides in the same exception.
+
+The unit tests could not catch it: `make_render` wrote the whole fake log to fd 2 with
+`os.write(2, ...)`, and the module docstring asserted "habitat-sim logs from C++ to file
+descriptor 2" as settled fact. The fake encoded the assumption it was meant to test.
+
+### 2. `DEFAULT_SEVERITY_RE` was structurally dead, not miscalibrated (fixed)
+
+`buildMessagePrefix` (`Logging.cpp:149-152`) formats exactly:
+
+```
+[{HH}:{MM}:{SS}:{uuuuuu}]:[{Subsystem}] {file}({line})::{function} :
+```
+
+Corrade prepends no severity tag of its own. There is **no `[Error]` substring anywhere in
+a rendered habitat-sim log line**, so `re.compile(r"\[Error\]")` matched nothing, ever, and
+the generic arm of invariant 2 was silently blind. It read as breadth and delivered none.
+Only `FATAL_LOG_SUBSTRINGS` was load-bearing.
+
+The test that "proved" it worked, `test_severity_marker_fails`, fed the guard a fabricated
+line containing `[Error]` in a format the binary does not produce.
+
+**Severity is not recoverable from the text at all. It is carried entirely by the stream**,
+because Corrade routes Warning and Error to `std::cerr` and Debug to `std::cout`, which is
+the same fact as finding 1 seen from the other side.
+
+### 3. `HABITAT_SIM_LOG_PIN = "Sensor,Assets=Debug"` is correct (confirmed, no change)
+
+`ESP_DEBUG` resolves its subsystem through C++ namespace lookup on `espLoggingSubsystem()`
+(`Logging.h:312`), and `ESP_ADD_SUBSYSTEM_FN(sensor)` installs that function in
+`esp::sensor`, which is the namespace `AudioSensor.cpp` opens at `:12-13`. So its macros do
+resolve to `Subsystem::sensor`, rendered `"Sensor"` by `subsystemNames`. `ResourceManager.cpp`
+is `esp::assets`, rendered `"Assets"`. The inference held.
+
+Also worth recording: `LoggingContext::DEFAULT_LEVEL` is already `Verbose` (`Logging.h:167`),
+so on an untouched env the pin changes nothing. Its only job is surviving an operator who
+turned logging down, which is exactly what its comment claimed.
+
+### What changed in the code
+
+`audio_guard.py`
+
+- `capture_fd_stderr` becomes **`capture_habitat_logs`**, capturing fd 1 and fd 2 into
+  separate buffers. `.stdout`, `.stderr` and a combined `.text` are exposed. Python's own
+  buffers are flushed on both entry and exit, so the caller's `print()` output cannot leak
+  into the capture.
+- `DEFAULT_SEVERITY_RE` becomes **`HABITAT_LOG_PREFIX_RE`**, built from the `subsystemNames`
+  array and the `buildMessagePrefix` format string. Its job changed from severity to
+  **provenance**: on fd 2 the severity is already known, so the only open question is
+  whether the line came from habitat-sim or from some third party that also writes there.
+- Fatal now has two arms. `FATAL_LOG_SUBSTRINGS` on either stream, unchanged and still the
+  load-bearing rule, plus **any habitat-prefixed line on fd 2**, which is new and general.
+- The report gains `stdout_chars` and `stderr_chars` alongside `log_chars`.
+
+`audioguard_probe.py`
+
+- Stage 3 records both streams per provocation, both raw tails, and which stream the
+  prefix matched on. `setListenerHRTF` is the reliable ESP_ERROR (`AudioSensor.cpp:181`);
+  `setAudioMaterialsJSON` only `ESP_DEBUG`s the path it stored (`:169`), so it is *expected*
+  on fd 1 and is the cleanest live demonstration that the split is real.
+- Stage 3's canary check now reports `canary_on_stdout` / `canary_on_stderr` separately.
+- **Placement is seeded and bounded.** `get_random_navigable_point()` was drawn twice
+  independently and unseeded, so the source could land across the scene and the guard's
+  non-silent-IR assertion would fail for a reason unrelated to the audio context, on a run
+  nobody could reproduce. Now `pathfinder.seed(20260803)` plus a source redrawn until it is
+  1.0 m to 8.0 m from the listener, with the placement recorded in the report.
+
+`test_audio_guard.py`: **30 tests to 39, all green on the Mac.** The fakes now write
+`ESP_DEBUG` to fd 1 and `ESP_ERROR` to fd 2 using the real rendered prefix. New cases cover
+the stream split, a habitat-prefixed line on fd 2 being fatal, the same line on fd 1 not
+being fatal, third-party stderr noise not being fatal, and a regression guard asserting no
+`[Error]` tag exists to match.
+
+### Two things checked and cleared, so they do not need the box
+
+- **C++ buffering does not eat the capture.** `std::cout` is fully buffered when piped, so
+  logs could have sat in the C++ buffer across the fd restore. Corrade's `Debug::newline`
+  uses `std::endl` specifically "to force a flush" (`Debug.cpp:359-366`), per line. Nothing
+  is left behind.
+- **`writeSceneMeshOBJ` really returns `bool`** (`AudioSensor.h:118`), so
+  `... is True` is safe rather than a `None`-versus-`True` trap.
+- `_peak_abs` over a real `[2, 72300]` IR costs **0.062 s** in pure Python, so the
+  numpy-free implementation is not a cost worth removing.
+
+### What this does and does not settle
+
+It closes the ticket's third bullet, "are the two calibrated constants right", from source:
+one confirmed, one replaced. It does **not** close the ticket. Stages 0, 2 and 3 still need
+the box, and the ticket's own premise is the reason: a guard that has only ever passed is
+indistinguishable from one that cannot fail, and reading the source is not running it. What
+the box now measures is a guard whose two known-wrong assumptions have already been removed,
+so a RED comes back about the audio context rather than about the plumbing.
+
+**Status stays claimed. The run command is unchanged** (`--out runs/ss2-audioguard/report.json`),
+and `freeze.txt` for ticket 17 still rides along.
