@@ -528,7 +528,8 @@ class Ledger:
 
 
 def budget(scene: Optional[str], sample_rate: float, with_captioner: bool,
-           with_clip: bool, captioner_model: str, clap_model: str) -> Dict[str, Any]:
+           with_clip: bool, captioner_model: str, clap_model: str,
+           res_h: int, res_w: int) -> Dict[str, Any]:
     banner("stage 3 — VRAM budget (needs the ss2 env)")
     report: Dict[str, Any] = {"stage": "budget", "timestamp": time.time()}
 
@@ -566,12 +567,42 @@ def budget(scene: Optional[str], sample_rate: float, with_captioner: bool,
 
     backend_cfg = habitat_sim.SimulatorConfiguration()
     backend_cfg.scene_id = scene_path
-    for field, value in (("load_semantic_mesh", False), ("enable_physics", False)):
+    for field, value in (("load_semantic_mesh", False), ("enable_physics", False),
+                         ("gpu_device_id", 0), ("create_renderer", True)):
         if hasattr(backend_cfg, field):
             setattr(backend_cfg, field, value)
+
+    # Visual sensors are not optional for a budget. With none attached habitat-sim
+    # logs "CreateSceneInstance success ... without renderer" and allocates ZERO
+    # VRAM — the first run of this probe measured exactly that and reported
+    # +0.000 GiB for the simulator. ADR-0008's runner reads images (the detector
+    # seam and the frontier proposer both do), so headless prices a configuration
+    # the clean room never runs.
     agent_cfg = habitat_sim.agent.AgentConfiguration()
+    sensors = []
+    for uuid, stype in (("rgb", habitat_sim.SensorType.COLOR),
+                        ("depth", habitat_sim.SensorType.DEPTH)):
+        cam = habitat_sim.CameraSensorSpec()
+        cam.uuid = uuid
+        cam.sensor_type = stype
+        cam.resolution = [res_h, res_w]
+        sensors.append(cam)
+    agent_cfg.sensor_specifications = sensors
+    report["resolution"] = [res_h, res_w]
+
     sim = habitat_sim.Simulator(habitat_sim.Configuration(backend_cfg, [agent_cfg]))
-    ledger.mark("habitat_sim + HM3D scene", "GL context, scene mesh and textures")
+    ledger.mark("habitat_sim + scene + RGB/depth", "GL context, scene mesh and textures")
+
+    obs0 = sim.get_sensor_observations()
+    report["visual_obs"] = {k: list(getattr(v, "shape", [])) for k, v in obs0.items()}
+    row = ledger.mark("first RGB/depth render", "framebuffers, {}x{}".format(res_h, res_w))
+    if row["cumulative_gib"] <= 0.4:
+        # 0.4 GiB is the CUDA context alone; anything at or below it means the
+        # renderer never came up and the simulator row is not a real measurement.
+        report["renderer_warning"] = (
+            "simulator consumed no VRAM beyond the CUDA context — the renderer "
+            "did not come up, so the sim row is not a valid measurement")
+        print("  WARNING: {}".format(report["renderer_warning"]))
 
     spec = habitat_sim.AudioSensorSpec()
     apply_audio_config(
@@ -692,6 +723,8 @@ def main() -> int:
     ap.add_argument("--captioner-model", default="Qwen/Qwen2-VL-2B-Instruct")
     ap.add_argument("--clap-model", default="laion/clap-htsat-fused",
                     help="must match the cached model ticket 13 measured")
+    ap.add_argument("--resolution", default="480x640",
+                    help="HxW for the RGB/depth sensors the budget prices")
     ap.add_argument("--with-clip", action="store_true",
                     help="price CLIP (only if ticket 09 keeps the ADR-0002 room classifier)")
     ap.add_argument("--out", default=None, help="write the report JSON here")
@@ -699,6 +732,11 @@ def main() -> int:
 
     if not (args.attribute or args.release or args.budget):
         ap.error("pick at least one of --attribute / --release / --budget")
+
+    try:
+        res_h, res_w = (int(x) for x in args.resolution.lower().split("x"))
+    except ValueError:
+        ap.error("--resolution must look like 480x640, got {!r}".format(args.resolution))
 
     protect = tuple(args.protect) if args.protect else DEFAULT_PROTECT
     report: Dict[str, Any] = {
@@ -715,7 +753,8 @@ def main() -> int:
         if args.budget:
             report["budget"] = budget(args.scene, args.sample_rate,
                                       args.with_captioner, args.with_clip,
-                                      args.captioner_model, args.clap_model)
+                                      args.captioner_model, args.clap_model,
+                                      res_h, res_w)
     except Exception as exc:  # recorded, then re-raised through the exit code
         report["error"] = "{}: {}".format(type(exc).__name__, exc)
         print("\nFAILED: {}".format(report["error"]), file=sys.stderr, flush=True)
