@@ -456,20 +456,42 @@ def _free_bytes_driver() -> int:
     return int(out.splitlines()[0].strip()) * MIB
 
 
+# The canonical root, verified: box_inventory.py counted the 100 val / 10 minival
+# meshes from data/hm3d/scene_datasets/hm3d. The bare data/scene_datasets form is
+# a legacy layout this project has also used, so both are tried.
+_SCENE_ROOTS = (
+    "data/hm3d/scene_datasets/hm3d",
+    "data/scene_datasets/hm3d",
+    "data/hm3d/scene_datasets",
+    "data/scene_datasets",
+)
+
+
 def _find_scene(explicit: Optional[str]) -> str:
     if explicit:
         return explicit
-    patterns = [
-        "data/scene_datasets/hm3d/minival/**/*.basis.glb",
-        "data/scene_datasets/hm3d/minival/**/*.glb",
-        "data/scene_datasets/hm3d/val/**/*.basis.glb",
-    ]
-    for pattern in patterns:
-        hits = [p for p in glob.glob(pattern, recursive=True)
-                if "semantic" not in os.path.basename(p)]
-        if hits:
-            return sorted(hits)[0]
-    raise RuntimeError("no HM3D .glb found — pass --scene explicitly")
+    tried: List[str] = []
+    for root in _SCENE_ROOTS:
+        for split in ("minival", "val", ""):
+            base = os.path.join(root, split) if split else root
+            for leaf in ("**/*.basis.glb", "**/*.glb"):
+                pattern = os.path.join(base, leaf)
+                tried.append(pattern)
+                hits = [p for p in glob.glob(pattern, recursive=True)
+                        if "semantic" not in os.path.basename(p)]
+                if hits:
+                    return sorted(hits)[0]
+    # Fail diagnostically: a bare "not found" costs a whole box round trip.
+    listing = []
+    for d in ("data", "data/hm3d", "data/hm3d/scene_datasets", "data/scene_datasets"):
+        if os.path.isdir(d):
+            listing.append("  {}/ -> {}".format(d, sorted(os.listdir(d))[:12]))
+    raise RuntimeError(
+        "no HM3D .glb found under {}.\nTried patterns:\n  {}\nWhat exists:\n{}\n"
+        "Pass --scene <path/to/scene.basis.glb> explicitly.".format(
+            os.getcwd(), "\n  ".join(tried[:6]),
+            "\n".join(listing) or "  (no data/ directory at all)")
+    )
 
 
 class Ledger:
@@ -506,7 +528,7 @@ class Ledger:
 
 
 def budget(scene: Optional[str], sample_rate: float, with_captioner: bool,
-           with_clip: bool, captioner_model: str) -> Dict[str, Any]:
+           with_clip: bool, captioner_model: str, clap_model: str) -> Dict[str, Any]:
     banner("stage 3 — VRAM budget (needs the ss2 env)")
     report: Dict[str, Any] = {"stage": "budget", "timestamp": time.time()}
 
@@ -588,7 +610,10 @@ def budget(scene: Optional[str], sample_rate: float, with_captioner: bool,
     report["clap"] = {}
     from transformers import ClapModel, ClapProcessor  # noqa: E402
 
-    clap_id = "laion/clap-htsat-unfused"
+    # Must match what ticket 13 measured (0.713 GB, allocator view) and what the
+    # HF cache already holds, or the driver-vs-allocator comparison is comparing
+    # two different models and the cache miss downloads a third.
+    clap_id = clap_model
     clap = ClapModel.from_pretrained(clap_id).to("cuda").eval()
     ledger.mark("CLAP weights", clap_id)
     wave = np.zeros(int(48000 * 1.0), dtype=np.float32)
@@ -665,6 +690,8 @@ def main() -> int:
     ap.add_argument("--with-captioner", action="store_true",
                     help="price Qwen2-VL-2B (R2 only; the smoke uses an oracle STOP)")
     ap.add_argument("--captioner-model", default="Qwen/Qwen2-VL-2B-Instruct")
+    ap.add_argument("--clap-model", default="laion/clap-htsat-fused",
+                    help="must match the cached model ticket 13 measured")
     ap.add_argument("--with-clip", action="store_true",
                     help="price CLIP (only if ticket 09 keeps the ADR-0002 room classifier)")
     ap.add_argument("--out", default=None, help="write the report JSON here")
@@ -688,7 +715,7 @@ def main() -> int:
         if args.budget:
             report["budget"] = budget(args.scene, args.sample_rate,
                                       args.with_captioner, args.with_clip,
-                                      args.captioner_model)
+                                      args.captioner_model, args.clap_model)
     except Exception as exc:  # recorded, then re-raised through the exit code
         report["error"] = "{}: {}".format(type(exc).__name__, exc)
         print("\nFAILED: {}".format(report["error"]), file=sys.stderr, flush=True)

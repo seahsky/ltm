@@ -93,7 +93,13 @@ def stage(name: str):
 def _find_scene(explicit: Optional[str]) -> str:
     if explicit:
         return explicit
+    # Canonical root is data/hm3d/scene_datasets/hm3d/<split> — verified, it is
+    # what box_inventory.py counted the 100 val / 10 minival meshes from. The
+    # bare data/scene_datasets form is a legacy layout, kept as a fallback.
     patterns = [
+        "data/hm3d/scene_datasets/hm3d/minival/**/*.basis.glb",
+        "data/hm3d/scene_datasets/hm3d/minival/**/*.glb",
+        "data/hm3d/scene_datasets/hm3d/val/**/*.basis.glb",
         "data/scene_datasets/hm3d/minival/**/*.basis.glb",
         "data/scene_datasets/hm3d/minival/**/*.glb",
         "data/scene_datasets/hm3d/val/**/*.basis.glb",
