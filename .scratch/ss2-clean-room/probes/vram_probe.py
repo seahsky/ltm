@@ -13,6 +13,10 @@ different environment requirements.
 ``--budget``     needs the ``ss2`` env (torch + habitat_sim). Loads the clean
                  room's stack in the order the runner will and records the
                  driver-visible cost of each component.
+``--summarize``  stdlib-only, reads a report back and prints the numbers a
+                 decision is made on: smoke vs full subtotals and margins, an
+                 audio verdict that distinguishes "free" from "never ran", a
+                 renderer check, and the allocator-vs-driver undercount.
 
 Why the stages are split rather than one script:
 
@@ -34,6 +38,8 @@ Usage on the box::
         --out runs/ss2-vram/release.json
     python3 .scratch/ss2-clean-room/probes/vram_probe.py --budget \
         --out runs/ss2-vram/budget.json
+    python3 .scratch/ss2-clean-room/probes/vram_probe.py \
+        --summarize runs/ss2-vram/budget.json
 """
 
 from __future__ import annotations
@@ -704,6 +710,123 @@ def budget(scene: Optional[str], sample_rate: float, with_captioner: bool,
 
 
 # ----------------------------------------------------------------------
+# stage 4 — summarize a report that has already been produced
+# ----------------------------------------------------------------------
+
+# Ticket 13 measured CLAP with torch.cuda.max_memory_allocated(), the allocator
+# view. Kept here so the driver-vs-allocator gap is computed, not asserted.
+TICKET13_CLAP_ALLOCATOR_GIB = 0.713
+
+# Rows the smoke never loads: ADR-0008 runs an oracle STOP, and CLIP returns only
+# if ticket 09 revives ADR-0002.
+def _is_r2_only(component: str) -> bool:
+    c = component.lower()
+    return "clip" in c or "qwen" in c or "caption" in c
+
+
+def summarize(path: str) -> Dict[str, Any]:
+    """Turn a budget report into the numbers a decision is actually made on."""
+    with open(path) as fh:
+        raw = json.load(fh)
+    b = raw.get("budget", raw)
+    if "ledger" not in b:
+        raise RuntimeError(
+            "{} has no budget ledger — is it an --attribute report?".format(path))
+
+    banner("VRAM budget summary")
+    print("  scene      : {}".format(b.get("scene")))
+    print("  resolution : {}".format(b.get("resolution")))
+    print("  torch      : {}".format(b.get("torch_version")))
+    print("  baseline   : {} GiB free".format(b.get("baseline_free_gib")))
+    if b.get("contended"):
+        print("  WARNING: measured under contention — margins are not the clean room's")
+    print()
+
+    rows = b["ledger"]
+    print("  {:<34} {:>8} {:>8}".format("component", "delta", "cum"))
+    smoke_cum = 0.0
+    for r in rows:
+        marker = "  (R2 only)" if _is_r2_only(r["component"]) else ""
+        if not _is_r2_only(r["component"]):
+            smoke_cum = r["cumulative_gib"]
+        print("  {:<34} {:>8.3f} {:>8.3f}{}".format(
+            r["component"][:34], r["delta_gib"], r["cumulative_gib"], marker))
+
+    full_cum = b.get("resident_gib", rows[-1]["cumulative_gib"] if rows else 0.0)
+    total = b.get("total_gib", 0.0)
+    out: Dict[str, Any] = {
+        "smoke_stack_gib": round(smoke_cum, 3),
+        "full_stack_gib": round(full_cum, 3),
+        "smoke_margin_gib": round(total - smoke_cum, 3),
+        "full_margin_gib": round(total - full_cum, 3),
+    }
+    print()
+    print("  smoke stack (sim + audio + CLAP)  : {:>7.3f} GiB   margin {:>7.3f} GiB".format(
+        out["smoke_stack_gib"], out["smoke_margin_gib"]))
+    print("  full stack (+ CLIP / captioner)   : {:>7.3f} GiB   margin {:>7.3f} GiB".format(
+        out["full_stack_gib"], out["full_margin_gib"]))
+
+    # --- did the audio path actually run, or is 0.000 a silent no-op? --------
+    audio_rows = [r for r in rows if "audio" in r["component"].lower()]
+    audio_delta = sum(r["delta_gib"] for r in audio_rows)
+    ir = b.get("ir_shape") or []
+    ir_samples = ir[0] if ir else 0
+    print()
+    if not audio_rows:
+        verdict = "ABSENT — no audio row in the ledger"
+    elif not ir:
+        verdict = ("INCONCLUSIVE — audio cost 0.000 GiB but no IR shape was recorded, "
+                   "so this cannot distinguish 'free' from 'never ran'")
+    elif ir_samples < 2:
+        verdict = ("SUSPECT — IR shape {} is degenerate; a direct-path-only or empty "
+                   "result looks identical to a healthy one on cost alone".format(ir))
+    elif audio_delta == 0.0:
+        verdict = ("CONFIRMED VRAM-FREE — IR shape {} came back non-trivial and the "
+                   "audio rows cost exactly 0.000 GiB, so RLR propagation is entirely "
+                   "CPU-side and the live-audio budget is ticket 06's, not VRAM".format(ir))
+    else:
+        verdict = "audio cost {:.3f} GiB, IR shape {}".format(audio_delta, ir)
+    out["audio_verdict"] = verdict
+    print("  audio      : {}".format(verdict))
+
+    # --- did the renderer come up? -----------------------------------------
+    vis = b.get("visual_obs") or {}
+    sim_delta = sum(r["delta_gib"] for r in rows
+                    if "habitat" in r["component"].lower() or "render" in r["component"].lower())
+    if b.get("renderer_warning"):
+        r_verdict = "NOT MEASURED — {}".format(b["renderer_warning"])
+    elif vis and sim_delta > 0:
+        r_verdict = "up — {} at {:.3f} GiB".format(
+            ", ".join("{}{}".format(k, tuple(v)) for k, v in sorted(vis.items())), sim_delta)
+    else:
+        r_verdict = "UNVERIFIED — no visual observations recorded"
+    out["renderer_verdict"] = r_verdict
+    print("  renderer   : {}".format(r_verdict))
+
+    # --- allocator vs driver ------------------------------------------------
+    clap_driver = sum(r["delta_gib"] for r in rows if "clap" in r["component"].lower())
+    ctx = next((r["delta_gib"] for r in rows if "context" in r["component"].lower()), 0.0)
+    if clap_driver:
+        out["clap_driver_gib"] = round(clap_driver, 3)
+        out["clap_allocator_gib"] = TICKET13_CLAP_ALLOCATOR_GIB
+        out["allocator_undercount_gib"] = round(clap_driver + ctx - TICKET13_CLAP_ALLOCATOR_GIB, 3)
+        print()
+        print("  CLAP driver view {:.3f} GiB vs ticket 13's allocator {:.3f} GiB".format(
+            clap_driver, TICKET13_CLAP_ALLOCATOR_GIB))
+        print("  + {:.3f} GiB CUDA context the allocator never sees".format(ctx))
+        print("  => any budget summed from max_memory_allocated() is {:.3f} GiB optimistic".format(
+            out["allocator_undercount_gib"]))
+
+    for key, label in (("clip_error", "CLIP"), ("captioner_error", "captioner")):
+        if b.get(key):
+            print()
+            print("  {} FAILED: {}".format(label, b[key]))
+            out[key] = b[key]
+
+    return out
+
+
+# ----------------------------------------------------------------------
 
 
 def main() -> int:
@@ -712,6 +835,8 @@ def main() -> int:
     ap.add_argument("--attribute", action="store_true", help="stage 1, read-only, any env")
     ap.add_argument("--release", action="store_true", help="stage 2, DESTRUCTIVE")
     ap.add_argument("--budget", action="store_true", help="stage 3, needs the ss2 env")
+    ap.add_argument("--summarize", metavar="REPORT.json", default=None,
+                    help="stage 4: read a budget report back and print the decision numbers")
     ap.add_argument("--yes", action="store_true", help="arm stage 2; without it, dry run")
     ap.add_argument("--protect", action="append", default=None,
                     help="cmdline substring to never signal (repeatable)")
@@ -730,8 +855,8 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="write the report JSON here")
     args = ap.parse_args()
 
-    if not (args.attribute or args.release or args.budget):
-        ap.error("pick at least one of --attribute / --release / --budget")
+    if not (args.attribute or args.release or args.budget or args.summarize):
+        ap.error("pick at least one of --attribute / --release / --budget / --summarize")
 
     try:
         res_h, res_w = (int(x) for x in args.resolution.lower().split("x"))
@@ -755,6 +880,8 @@ def main() -> int:
                                       args.with_captioner, args.with_clip,
                                       args.captioner_model, args.clap_model,
                                       res_h, res_w)
+        if args.summarize:
+            report["summary"] = summarize(args.summarize)
     except Exception as exc:  # recorded, then re-raised through the exit code
         report["error"] = "{}: {}".format(type(exc).__name__, exc)
         print("\nFAILED: {}".format(report["error"]), file=sys.stderr, flush=True)
