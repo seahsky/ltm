@@ -159,6 +159,17 @@ HABITAT_LOG_PREFIX_RE = re.compile(
 # "Vertex count" is AudioSensor.cpp:499 and "[Audio] " is its `logHeader_` (AudioSensor.h:45).
 LOG_CANARY_SUBSTRINGS: Tuple[str, ...] = ("Vertex count", "[Audio]")
 
+# `AudioSensor.cpp:499` logs the vertex count habitat SUBMITTED. Invariant 1 counts what
+# the engine WROTE BACK via writeSceneMeshOBJ. They are two different numbers either side
+# of the upload, and on the box they differ (ticket 16: 392,356 submitted vs 392,364 in
+# the OBJ), so recording both makes the seam visible instead of a puzzle. Recorded, never
+# asserted: the engine is free to add geometry of its own and the closed .so does not say.
+SUBMITTED_VERTEX_RE = re.compile(r"Vertex count\s*:\s*(\d+)")
+
+# How much of the captured log to keep on the report. Enough to diagnose a surprise from
+# the artifact rather than paying for a second box trip; small enough to paste.
+LOG_TAIL_CHARS = 2000
+
 
 # ----------------------------------------------------------------------
 # fd-level log capture
@@ -371,6 +382,31 @@ def count_obj_vertices(path: str) -> int:
     return count
 
 
+def _shape_of(ir: Any) -> Optional[Sequence[int]]:
+    """The IR's dimensions, without requiring numpy.
+
+    MEASURED on the box (ticket 16): the audio observation is **not** a numpy array, so
+    the earlier ``getattr(ir, "shape", None)`` recorded ``None`` over a perfectly good
+    ``[2, 72300]`` IR. Callers that reach for numpy get a shape; this module cannot, so
+    it walks the nesting instead. ``.shape`` is still preferred when present.
+    """
+    shape = getattr(ir, "shape", None)
+    if shape is not None:
+        return tuple(int(n) for n in shape)
+    dims: List[int] = []
+    node = ir
+    while not isinstance(node, (str, bytes)):
+        try:
+            length = len(node)
+        except TypeError:
+            break
+        dims.append(length)
+        if length == 0:
+            break
+        node = node[0]
+    return tuple(dims) or None
+
+
 def _peak_abs(ir: Any) -> float:
     """Largest absolute sample in an IR, without requiring numpy."""
     try:
@@ -402,6 +438,7 @@ class AudioContextReport:
     """What the guard measured. Log this per episode — it is the audit trail."""
 
     n_vertices: int = 0
+    submitted_n_vertices: Optional[int] = None
     obj_written: bool = False
     ir_peak_abs: float = 0.0
     ir_shape: Optional[Sequence[int]] = None
@@ -412,10 +449,13 @@ class AudioContextReport:
     stderr_chars: int = 0
     log_canary_seen: bool = False
     fatal_log_lines: List[str] = field(default_factory=list)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "n_vertices": self.n_vertices,
+            "submitted_n_vertices": self.submitted_n_vertices,
             "obj_written": self.obj_written,
             "ir_peak_abs": self.ir_peak_abs,
             "ir_shape": list(self.ir_shape) if self.ir_shape is not None else None,
@@ -429,6 +469,10 @@ class AudioContextReport:
             "stderr_chars": self.stderr_chars,
             "log_canary_seen": self.log_canary_seen,
             "fatal_log_lines": list(self.fatal_log_lines),
+            # Kept so a surprise in the numbers above is diagnosable from the report
+            # rather than from a second box trip.
+            "stdout_tail": self.stdout_tail,
+            "stderr_tail": self.stderr_tail,
         }
 
 
@@ -465,6 +509,11 @@ def arm_audio_context(
     report.stdout_chars = len(captured.stdout)
     report.stderr_chars = len(captured.stderr)
     report.log_chars = report.stdout_chars + report.stderr_chars
+    report.stdout_tail = captured.stdout[-LOG_TAIL_CHARS:]
+    report.stderr_tail = captured.stderr[-LOG_TAIL_CHARS:]
+    submitted = SUBMITTED_VERTEX_RE.search(captured.text)
+    if submitted:
+        report.submitted_n_vertices = int(submitted.group(1))
 
     # --- invariant 2: the log scan, and whether it proved anything --------------
     # The canary is ESP_DEBUG output and lands on fd 1; the scan is over both streams
@@ -535,7 +584,7 @@ def arm_audio_context(
                 pass
 
     # --- corroboration: the render did something --------------------------------
-    report.ir_shape = getattr(ir, "shape", None)
+    report.ir_shape = _shape_of(ir)
     report.ir_peak_abs = _peak_abs(ir)
     if report.ir_peak_abs <= 0.0:
         failures.append("first render returned a silent IR (peak abs 0.0)")

@@ -165,8 +165,9 @@ r = s2.get("report") or {}
 # of Nones under it reads like measurements that came back empty.
 if r:
     print("\n  stage 2 — the healthy path")
-    print("    n_vertices                 : {} (ticket 04 control 392356: {})".format(
-        r.get("n_vertices"), s2.get("matches_ticket_04_control")))
+    print("    n_vertices  engine / logged: {} / {}  (delta {})".format(
+        r.get("n_vertices"), r.get("submitted_n_vertices"),
+        s2.get("submitted_vs_engine_delta")))
     print("    ir_shape / peak            : {} / {}".format(r.get("ir_shape"), r.get("ir_peak_abs")))
     print("    log split  stdout / stderr : {} / {} chars".format(
         r.get("stdout_chars"), r.get("stderr_chars")))

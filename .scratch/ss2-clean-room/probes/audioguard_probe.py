@@ -293,8 +293,15 @@ def probe_healthy_path(scene: Optional[str], sample_rate: float) -> Dict[str, An
             pass
         print("  obj write cost: {} s / {} bytes".format(info["obj_write_s"], info.get("obj_bytes")), flush=True)
 
-        # Ticket 04's control, for a direct comparison rather than a recollection.
+        # Ticket 04's control, for a direct comparison rather than a recollection. Note
+        # this compares against what habitat SUBMITTED, which is not what the guard
+        # counts — see submitted_vs_engine_delta below.
         info["matches_ticket_04_control"] = report.n_vertices == 392356
+        if report.submitted_n_vertices is not None:
+            info["submitted_vs_engine_delta"] = report.n_vertices - report.submitted_n_vertices
+            print("  submitted {} verts, engine holds {} (delta {})".format(
+                report.submitted_n_vertices, report.n_vertices,
+                info["submitted_vs_engine_delta"]), flush=True)
         info["vars_after_render"] = sorted(vars(spec))
     finally:
         sim.close()
@@ -391,11 +398,15 @@ def probe_negative_controls(scene: Optional[str], sample_rate: float) -> Dict[st
         info["canary_on_stderr"] = any(m in captured.stderr for m in canary)
         info["second_render_stdout_chars"] = len(captured.stdout)
         info["second_render_stderr_chars"] = len(captured.stderr)
-        # Expected False: the mesh uploads once per context (newInitialization_), so the
-        # "Vertex count" line is a FIRST-render artefact. Recorded to make that explicit
-        # — it is why the guard owns the first render rather than running later.
-        print("  canary on 2nd render: {} (expected False — mesh uploads once)".format(
-            info["canary_seen_on_second_render"]), flush=True)
+        # MEASURED True, and the ticket's "expect False" prediction was wrong for a
+        # reason worth keeping. "Vertex count" IS a first-render artefact (the mesh
+        # uploads once, via newInitialization_) — but the other canary substring is
+        # `logHeader_`, and runSimulation logs "[Audio] Running the audio simulator"
+        # (AudioSensor.cpp:130) on EVERY render. So the canary stays armed for the whole
+        # episode rather than only at arm time, which is strictly better than predicted.
+        print("  canary on 2nd render: {} (expected True — logHeader_ is on every "
+              "runSimulation, not just the first)".format(
+                  info["canary_seen_on_second_render"]), flush=True)
     finally:
         sim.close()
 
