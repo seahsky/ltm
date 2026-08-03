@@ -17,6 +17,13 @@
 #   THROTTLE_REQUIRED          otherwise -> the map's destination gets amended
 # ...and every one of those is gated on the config still producing a CLIMBABLE
 # energy gradient. A fast preset with a flat field does not count as a win.
+#
+# The ticket is RESOLVED (2026-08-01, LIVE_EVERY_STEP_HOLDS at 27.2 ms/step).
+# What is left for this driver is the ~9 min confirming re-run of the source-count
+# stage, which crashed on the first trip. That run is seeded (ticket 16's fix, so
+# it is comparable to later runs) and arms ticket 12's audio guard once per scene
+# before any timing, because a silently-failed render is a FAST one. Override with
+# SS2_EXTRA_ARGS="--seed 0" or "--no-guard" only deliberately.
 
 set -uo pipefail
 
@@ -93,6 +100,15 @@ if best:
     cheap = rep.get("02_sweep", {}).get("cheap_preset")
     if cheap:
         print("    {:<22} {}".format("cheap_preset config", cheap))
+prov = v.get("provenance")
+if prov:
+    print("\n  provenance:")
+    print("    seed              {}  (applied on {} scene(s))".format(
+        prov.get("seed"), prov.get("seeded_scenes")))
+    print("    audio guard       {}  (armed on {} scene(s))".format(
+        "on" if prov.get("guard_enabled") else "OFF", prov.get("guarded_scenes")))
+    if prov.get("duplicate_scenes_dropped"):
+        print("    duplicates dropped {}".format(prov["duplicate_scenes_dropped"]))
 sc = rep.get("03_source_count", {}).get("per_scene", [{}])
 if sc and sc[0].get("scaling_vs_1"):
     print("\n  sequential source scaling (upper bound, stock build): {}".format(

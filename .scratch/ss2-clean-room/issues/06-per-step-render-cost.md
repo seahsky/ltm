@@ -300,3 +300,76 @@ Any timing taken inside that window is contended. The effect is not uniform, so 
 - Anything touching **GPU** (the render loop's visual sensors) was sharing a card at ~74% utilisation.
 
 **2. VRAM is not a variable in this sweep.** Ticket 15 measured the audio sensor at **exactly 0.000 GiB**, both at spec-add and at first render, with a real IR returned. RLR propagation is entirely CPU-side. So the cost of "live audio every step" is CPU and wall-clock only — there is no memory term to trade off, and the multi-source sweep (item 5) cannot be VRAM-bound either.
+
+---
+
+## Post-resolution: four probe fixes, for the confirming re-run (2026-08-03)
+
+The ticket is resolved and none of this reopens it. It exists because the resolution
+left one thing pending — **the ~9 minute confirming re-run of the source-count stage**,
+which crashed on the first trip and whose fix has never been exercised on the binary.
+If that run happens, it should not be the run that discovers a fifth defect.
+
+**A defect that could have mattered, and provably did not.**
+`energy_db` floors an all-zero IR at **-200 dB** via its `1e-20` epsilon, which clears the
+`-300` guard written for the empty-IR `-inf`. So a silent render entered the Spearman as a
+real measurement sitting far below every genuine sample — and since the silent steps are
+the **far** ones, that manufactures a steep gradient out of a dead field. A broken config
+could have scored *climbable*, which is the admissibility gate the whole verdict hangs on.
+
+It did not touch this ticket's answer, and that is checkable from the numbers already
+reported here rather than from the box: the cheap preset came back with a dynamic range of
+**16.8 / 24.2 dB**, and a single -200 dB sentinel in the series would have put it past 100.
+Silent rows are now excluded from both the overall and non-LOS series (`scorable`) and
+counted in `n_silent_samples`.
+
+**Three more, all aimed at the re-run being trustworthy and comparable:**
+
+1. **The navmesh draw is seeded** (`--seed`, default `20260803` — ticket 16's value).
+   Unseeded, the confirming run is a fresh sample rather than a re-measurement, so it
+   cannot be read against the numbers above at all. `seed_applied` is reported per scene
+   rather than assumed, because a run that claims a reproducibility it does not have is
+   the silent-failure class ticket 17 named.
+2. **Ticket 12's audio guard is armed once per scene, before any timing.** Ticket 16
+   measured that `RLRA_SetListenerHRTF` can fail, print only to fd 2, and still return
+   `RLRA_Success` — and **a broken context renders FAST**. A silent failure here does not
+   look like a failure, it looks like good news. The per-step `ir_nonzero` flag is not
+   cover: ticket 16's HRTF failure still produced a plausible IR. A scene whose guard
+   raises now contributes no timing and lands in the blocker list.
+3. **Duplicate scene copies are dropped.** Ticket 05 suspected a ~9.3 GB duplicate under
+   `data/`, and `build_verdict` keys scenes by basename — so two copies of one room would
+   satisfy "admissible in EVERY scene" off a single room.
+
+**The box already corrected one of these while it was being written.** The guard was first
+given its own sensor uuid so it could never be confused with a timing sensor; this ticket's
+own `KeyError('audio_sensor')` finding says that does not work, since a non-default uuid
+does not take. The guard now reads its uuid back like everything else, and isolation comes
+from the sim instead — it runs on the throwaway geometry sim, which is closed before any
+timing sim is built.
+
+**Two ordering constraints, both from ticket 16.** The guard is armed **after** the source
+is picked (it asserts a non-silent IR, so an unplaced source fails it for reasons unrelated
+to the audio context), and nothing may print between the arm call and its return, because
+the guard redirects fd 1 **and** fd 2 around the render it owns.
+
+**Disclosed bias, not fixed:** the guard needs `HABITAT_SIM_LOG` pinned to Debug, the pin is
+process-wide, and habitat reads it at import — so every timed render also logs. Ticket 16
+measured ~916 chars/render and Corrade flushes per line, which is a handful of `write(2)`
+calls inside a window whose floor is 50 ms: **sub-0.1% by arithmetic, not measured**, and
+pessimistic. `SS2_EXTRA_ARGS=--no-guard` turns the arithmetic into a number if it ever
+matters.
+
+**The stub is committed this time** — `probes/test_rendercost_probe.py`, **30 tests**, green
+on the Mac (`/opt/anaconda3/envs/habitat/bin/python`, no `habitat_sim` needed). The original
+four defects were caught by a stub that was then thrown away, so nothing held those fixes in
+place; the walk-truncation and worst-scene rules now have tests. Ticket 16's warning is
+repeated in the file header and applies in full: **a green fake-based suite licenses nothing
+about binding behaviour.**
+
+One thing the re-run gets for free that the first trip did not: ticket 15's note above says
+the box was contended until 2026-08-03, so **the `threadCount=4` arm's ~2.4x understates
+itself**. A re-run now lands on a quiet card.
+
+New report keys: `_verdict.provenance` (seed, guarded scenes, duplicates dropped),
+`audio_context` per scene (the guard's `AudioContextReport`), and
+`n_silent_samples` / `n_scored_samples` per config.

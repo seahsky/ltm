@@ -52,8 +52,26 @@ except Exception as exc:  # pragma: no cover - environment probe
 
 import numpy as np
 
+# Ticket 12's audio-context guard, verified against the real binary by ticket 16.
+# Imported from this directory rather than copied, so a fix to the guard reaches
+# this probe on the next `git pull`. It imports no habitat_sim of its own.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from audio_guard import AudioContextError, arm_audio_context, pin_habitat_logging
+    _GUARD_OK = True
+    _GUARD_ERR = None
+except Exception as exc:  # pragma: no cover - environment probe
+    _GUARD_OK = False
+    _GUARD_ERR = repr(exc)
+
 
 REPORT: Dict[str, Any] = {}
+
+# Ticket 16 seeded its navmesh draw and this repeats the fix. Unseeded, a second
+# run of this sweep is a fresh sample rather than a re-measurement, so a knob
+# effect and a new geometry draw are indistinguishable. Same value as ticket 16,
+# so the two probes walk comparable geometry.
+DEFAULT_SEED = 20260803
 
 # Ticket 04's measured defaults, on habitat-sim RLRAudioPropagationUpdate
 # @ 4f61e321, rlr-audio-propagation @ 4fd446b4, stock. Every sweep variant is
@@ -159,6 +177,28 @@ def energy_db(ir: np.ndarray) -> float:
     return round(float(10.0 * math.log10(float(np.sum(ir.astype(np.float64) ** 2)) + 1e-20)), 3)
 
 
+def scorable(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The rows a gradient may be scored over. Silent renders are not among them.
+
+    ``energy_db`` floors an all-zero IR at -200 dB via its 1e-20 epsilon, which
+    clears the -300 guard meant for the empty-IR ``-inf``. So a silent render
+    enters the Spearman as a real measurement sitting far below every genuine
+    sample — and because the silent steps are the far ones, it manufactures a
+    steep gradient out of a dead field: a broken config scoring as climbable.
+
+    They are excluded here and counted in ``n_silent_samples``, so a half-dead
+    walk is visible in the report rather than flattered by it.
+
+    Found off-box on 2026-08-03, after the run that resolved this ticket. It did
+    not touch that verdict: the cheap preset's dynamic range came back 16.8 and
+    24.2 dB, and one -200 dB sentinel in the series would have put it past 100.
+    """
+    return [r for r in rows
+            if math.isfinite(r["geodesic_m"])
+            and r["energy_db"] > -300
+            and r["ir_nonzero"]]
+
+
 def summarize(values: List[float]) -> Dict[str, Any]:
     if not values:
         return {"n": 0}
@@ -198,7 +238,23 @@ def find_scenes(explicit: List[str], limit: int) -> List[str]:
             break
     if not hits:
         raise RuntimeError("no HM3D .glb found — pass --scene explicitly")
-    return sorted(hits)[:limit]
+
+    # Ticket 05 found a suspected ~9.3 GB duplicate under `data/`, and a duplicate
+    # is invisible to `--max-scenes 2`: two copies of one room read as two scenes.
+    # That silently voids the verdict's load-bearing rule, because build_verdict
+    # keys scenes by basename — the duplicate collapses into itself, and a config
+    # measured in ONE room reports as "admissible everywhere" across two.
+    seen: Dict[str, str] = {}
+    unique: List[str] = []
+    for path in sorted(hits):
+        key = os.path.basename(path)
+        if key in seen:
+            REPORT.setdefault("_duplicate_scenes_dropped", []).append(
+                {"dropped": path, "kept": seen[key]})
+            continue
+        seen[key] = path
+        unique.append(path)
+    return unique[:limit]
 
 
 def geodesic(sim, a, b) -> float:
@@ -252,6 +308,24 @@ def resample_polyline(points: List[np.ndarray], n: int) -> List[np.ndarray]:
                 break
             acc += seg
     return out
+
+
+def seed_pathfinder(sim, seed: Optional[int]) -> bool:
+    """Make the navmesh draw reproducible. Returns whether it actually took.
+
+    Reported rather than assumed: a run that says it was seeded and was not is
+    the silent-failure class ticket 17 named, and here it would surface as an
+    unexplained knob effect two runs later.
+    """
+    if seed is None:
+        return False
+    fn = getattr(sim.pathfinder, "seed", None)
+    if not callable(fn):
+        print("  WARN: pathfinder.seed is absent on this build — the source draw "
+              "is NOT reproducible across runs", flush=True)
+        return False
+    fn(int(seed))
+    return True
 
 
 def pick_source_and_start(sim, min_dist: float, tries: int = 200
@@ -352,6 +426,43 @@ def attach_audio(sim, cfg: Dict[str, Any], sample_rate: Optional[int]
     return sensors[uuid], uuid
 
 
+def place(sim, sensor, listener: np.ndarray, source: np.ndarray) -> None:
+    """Move the listener and the source. No render."""
+    agent = sim.get_agent(0)
+    state = agent.get_state()
+    state.position = np.asarray(listener, dtype=np.float32)
+    agent.set_state(state)
+    sensor.setAudioSourceTransform(np.asarray(source, dtype=np.float32))
+
+
+def arm_scene_audio(sim, sample_rate: Optional[int], listener: np.ndarray,
+                    source: np.ndarray) -> Dict[str, Any]:
+    """Prove the audio context is real before timing hundreds of renders against it.
+
+    Ticket 16 measured on the binary that an RLR call can fail, print only to
+    fd 2, and still return ``RLRA_Success``. For a *timing* probe that is the
+    worst failure mode on offer: a broken context renders FAST, so a silent
+    failure biases this ticket's verdict toward "affordable".
+
+    The per-step ``ir_nonzero`` flag is not cover for this. Ticket 16's HRTF
+    failure still produced a plausible IR; what gave it away was un-prefixed
+    engine text on fd 2, which only the guard reads.
+
+    The caller must hand a REAL placement. The guard asserts a non-silent IR, so
+    arming over an unplaced source fails for a reason that has nothing to do with
+    the audio context — ticket 16 hit exactly this and answered it by seeding a
+    1-8 m pair before arming.
+
+    Costs one render plus a 32 MB OBJ write (~2.1 s measured) per scene. Raises
+    ``AudioContextError`` on a bad context, which the caller lets propagate: a
+    scene whose audio is broken must not contribute a timing at all.
+    """
+    sensor, uuid = attach_audio(sim, {}, sample_rate)
+    place(sim, sensor, listener, source)
+    report = arm_audio_context(sensor, lambda: sim.get_sensor_observations()[uuid])
+    return report.as_dict()
+
+
 def render_once(sim, sensor, uuid: str, listener: np.ndarray, source: np.ndarray
                 ) -> Tuple[float, np.ndarray]:
     """One step: move the listener, move the source, render. Returns (seconds, IR).
@@ -359,11 +470,7 @@ def render_once(sim, sensor, uuid: str, listener: np.ndarray, source: np.ndarray
     Both transforms are set every call because that is what the live runner does
     every step, so their cost belongs inside the measured window.
     """
-    agent = sim.get_agent(0)
-    state = agent.get_state()
-    state.position = np.asarray(listener, dtype=np.float32)
-    agent.set_state(state)
-    sensor.setAudioSourceTransform(np.asarray(source, dtype=np.float32))
+    place(sim, sensor, listener, source)
     t0 = time.time()
     obs = sim.get_sensor_observations()[uuid]
     elapsed = time.time() - t0
@@ -417,7 +524,7 @@ def walk_config(sim, cfg: Dict[str, Any], label: str,
 
     times = [r["s"] for r in rows]
     steady = times[1:] if len(times) > 1 else times
-    finite = [r for r in rows if math.isfinite(r["geodesic_m"]) and r["energy_db"] > -300]
+    finite = scorable(rows)
     dists = [r["geodesic_m"] for r in finite]
     energies = [r["energy_db"] for r in finite]
 
@@ -433,8 +540,7 @@ def walk_config(sim, cfg: Dict[str, Any], label: str,
     # gradient purely from its line-of-sight samples while being flat everywhere
     # a wall is in the way — which is exactly what killing `diffraction` or
     # `transmission` would do. Ticket 09 decides on these numbers.
-    nlos_ok = [r for r in nlos
-               if math.isfinite(r["geodesic_m"]) and r["energy_db"] > -300]
+    nlos_ok = scorable(nlos)
     nlos_rho = (spearman([r["energy_db"] for r in nlos_ok],
                          [r["geodesic_m"] for r in nlos_ok])
                 if score_gradient and len(nlos_ok) >= 3 else None)
@@ -464,6 +570,8 @@ def walk_config(sim, cfg: Dict[str, Any], label: str,
         "ir_samples_min": min((r["ir_samples"] for r in rows), default=0),
         "ir_samples_max": max((r["ir_samples"] for r in rows), default=0),
         "any_silent": any(not r["ir_nonzero"] for r in rows),
+        "n_silent_samples": sum(1 for r in rows if not r["ir_nonzero"]),
+        "n_scored_samples": len(finite),
     }
     ss = out["steady_state"].get("median_ms")
     print("  {:<28} steady {:>8} ms  first {:>8} ms  rho {:>7}  dr {:>6} dB  {}".format(
@@ -515,14 +623,23 @@ def sweep_plan() -> List[Tuple[str, Dict[str, Any]]]:
     ]
 
 
-def walk_geometry(scene: str, min_dist: float, step_m: float, walk_steps: int
-                  ) -> Dict[str, Any]:
+def walk_geometry(scene: str, min_dist: float, step_m: float, walk_steps: int,
+                  seed: Optional[int] = None, sample_rate: Optional[int] = None,
+                  guard: bool = True, source_height: float = 1.0) -> Dict[str, Any]:
     """Pick the source and the walk ONCE, on a throwaway sim.
 
     Every config must be timed over the *same* poses. Re-sampling a random walk
     per config would compare two different journeys and call the difference a
     knob effect. habitat's navigable-point sampler carries no reproducibility
-    guarantee across simulators, so the points are computed here and replayed.
+    guarantee across simulators, so the points are computed here and replayed —
+    and `seed` extends that guarantee across *runs*, not just across configs.
+
+    This is also where the audio context is proved (`arm_scene_audio`), on the
+    same throwaway sim, before any number is taken — and AFTER the source is
+    picked, because the guard asserts a non-silent IR and needs a real placement
+    to assert over. Nothing may print between the arm call and its return: the
+    guard redirects fd 1 and fd 2 around the render it owns, so anything else
+    writing there lands in its capture and reads as habitat output.
     """
     import habitat_sim
 
@@ -530,7 +647,14 @@ def walk_geometry(scene: str, min_dist: float, step_m: float, walk_steps: int
     try:
         if not sim.pathfinder.is_loaded:
             raise RuntimeError("navmesh not loaded for {}".format(scene))
+        seeded = seed_pathfinder(sim, seed)
         source, start, dist = pick_source_and_start(sim, min_dist)
+        if guard:
+            elevated = np.asarray(source, dtype=np.float32).copy()
+            elevated[1] += source_height
+            audio_ctx = arm_scene_audio(sim, sample_rate, start, elevated)
+        else:
+            audio_ctx = None
         path = habitat_sim.ShortestPath()
         path.requested_start = start
         path.requested_end = source
@@ -550,6 +674,8 @@ def walk_geometry(scene: str, min_dist: float, step_m: float, walk_steps: int
             "reached_min_dist": bool(dist >= min_dist),
             "step_spacing_m": round(length / max(1, n - 1), 3),
             "waypoints": waypoints,
+            "seed_applied": seeded,
+            "audio_context": audio_ctx,
         }
     finally:
         sim.close()
@@ -666,7 +792,8 @@ def probe_defaults_recheck() -> Dict[str, Any]:
 @stage("02_sweep")
 def probe_sweep(scenes: List[str], walk_steps: int, step_m: float, min_dist: float,
                 sample_rate: Optional[int], source_height: float,
-                with_camera_delta: bool) -> Dict[str, Any]:
+                with_camera_delta: bool, seed: Optional[int] = None,
+                guard: bool = True) -> Dict[str, Any]:
     per_scene: List[Dict[str, Any]] = []
     geoms: Dict[str, Dict[str, Any]] = {}
 
@@ -676,9 +803,20 @@ def probe_sweep(scenes: List[str], walk_steps: int, step_m: float, min_dist: flo
         scene_out: Dict[str, Any] = {"scene": scene}
         try:
             t_load = time.time()
-            geom = walk_geometry(scene, min_dist, step_m, walk_steps)
+            geom = walk_geometry(scene, min_dist, step_m, walk_steps,
+                                 seed=seed, sample_rate=sample_rate, guard=guard,
+                                 source_height=source_height)
             scene_out["scene_load_s"] = round(time.time() - t_load, 2)
             geoms[scene] = geom
+            scene_out["seed"] = seed
+            scene_out["seed_applied"] = geom["seed_applied"]
+            scene_out["audio_context"] = geom["audio_context"]
+            if geom["audio_context"]:
+                ctx = geom["audio_context"]
+                print("  audio context armed: {} verts, IR peak {}, "
+                      "stdout/stderr {}/{} chars".format(
+                          ctx["n_vertices"], ctx["ir_peak_abs"],
+                          ctx["stdout_chars"], ctx["stderr_chars"]), flush=True)
             scene_out["source"] = [float(x) for x in geom["source"]]
             scene_out["start"] = [float(x) for x in geom["start"]]
             scene_out["start_geodesic_m"] = round(geom["geodesic_m"], 3)
@@ -755,7 +893,8 @@ def probe_sweep(scenes: List[str], walk_steps: int, step_m: float, min_dist: flo
 
 @stage("03_source_count")
 def probe_source_count(scenes: List[str], repeats: int, sample_rate: Optional[int],
-                       source_height: float, min_dist: float) -> Dict[str, Any]:
+                       source_height: float, min_dist: float,
+                       seed: Optional[int] = None) -> Dict[str, Any]:
     """Item 5, as far as a STOCK build can answer it.
 
     Ticket 02 found the engine is natively multi-source with per-source IRs, but
@@ -774,6 +913,7 @@ def probe_source_count(scenes: List[str], repeats: int, sample_rate: Optional[in
         sim = build_sim(scene, with_camera=False)
         out: Dict[str, Any] = {"scene": scene}
         try:
+            out["seed_applied"] = seed_pathfinder(sim, seed)
             source, start, _ = pick_source_and_start(sim, min_dist)
             sensor, uuid = attach_audio(sim, {}, sample_rate)
             src = np.asarray(source, dtype=np.float32).copy()
@@ -926,6 +1066,15 @@ def build_verdict() -> Dict[str, Any]:
             "gradient_rho_max": GRADIENT_RHO_MAX,
             "gradient_dynamic_range_min_db": GRADIENT_DR_MIN_DB,
         },
+        # How far this run's numbers can be trusted and compared, carried next to
+        # the verdict so a reader of report.json does not have to know to look.
+        "provenance": {
+            "seed": REPORT.get("_seed"),
+            "seeded_scenes": sum(1 for s in sweep if s.get("seed_applied")),
+            "guard_enabled": REPORT.get("_guard_enabled"),
+            "guarded_scenes": sum(1 for s in sweep if s.get("audio_context")),
+            "duplicate_scenes_dropped": len(REPORT.get("_duplicate_scenes_dropped", [])),
+        },
     }
 
 
@@ -950,11 +1099,43 @@ def main() -> int:
                     help="re-measure baseline with an RGB camera attached, to "
                          "quantify the confound in ticket 04's 0.6013 s")
     ap.add_argument("--skip-source-count", action="store_true")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="navmesh draw seed, so a re-run re-measures the same "
+                         "geometry instead of sampling fresh (0 disables)")
+    ap.add_argument("--no-guard", action="store_true",
+                    help="skip ticket 12's audio-context guard. Only for a box "
+                         "where the guard itself is suspect — without it a "
+                         "silently-failed render is timed as a fast one")
     args = ap.parse_args()
 
     print("=" * 74, flush=True)
     print("ticket 06 render-cost probe — is live-every-step audio affordable?", flush=True)
     print("=" * 74, flush=True)
+
+    seed = args.seed if args.seed else None
+    guard = not args.no_guard
+    REPORT["_seed"] = seed
+    REPORT["_guard_enabled"] = guard
+    if guard and not _GUARD_OK:
+        REPORT["_guard_import_error"] = _GUARD_ERR
+        print("\nFATAL: audio_guard did not import ({}). It sits next to this "
+              "probe, so this is a real breakage rather than a missing optional. "
+              "Re-run with --no-guard only if you accept that a silently-failed "
+              "render is timed as a fast one.".format(_GUARD_ERR), flush=True)
+        return 1
+    # Must precede the first habitat_sim import anywhere in the process: the log
+    # level is read at import time, and the guard's canary check fails closed if
+    # habitat is quieter than Debug. pin_habitat_logging() raises rather than
+    # no-ops if it is already too late.
+    #
+    # Disclosed bias: the pin is process-wide and cannot be lowered after import,
+    # so every TIMED render also logs at Debug. Ticket 16 measured ~916 chars per
+    # render, and Corrade flushes per line, so this is a handful of write(2) calls
+    # inside a window whose floor is 50 ms — sub-0.1% by arithmetic, not measured.
+    # It biases pessimistic. If a verdict lands within ~10% of a threshold, an
+    # `SS2_EXTRA_ARGS=--no-guard` re-run turns the arithmetic into a number.
+    if guard:
+        REPORT["_habitat_sim_log"] = pin_habitat_logging()
 
     probe_interpreter()
     probe_defaults_recheck()
@@ -967,12 +1148,17 @@ def main() -> int:
         REPORT["_scene_discovery_error"] = repr(exc)
         print("\nscene discovery FAILED: {!r}".format(exc), flush=True)
 
+    if REPORT.get("_duplicate_scenes_dropped"):
+        print("  dropped {} duplicate scene copy/copies (same mesh, second "
+              "tree)".format(len(REPORT["_duplicate_scenes_dropped"])), flush=True)
+
     if scenes:
         probe_sweep(scenes, args.walk_steps, args.step_m, args.min_dist,
-                    args.sample_rate, args.source_height, args.with_camera_delta)
+                    args.sample_rate, args.source_height, args.with_camera_delta,
+                    seed=seed, guard=guard)
         if not args.skip_source_count:
             probe_source_count(scenes, args.source_repeats, args.sample_rate,
-                               args.source_height, args.min_dist)
+                               args.source_height, args.min_dist, seed=seed)
 
     REPORT["_verdict"] = build_verdict()
 
