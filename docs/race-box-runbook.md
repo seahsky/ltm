@@ -41,11 +41,23 @@ Two of these are load-bearing and were assumptions for a long time before anyone
   The audio sensor's `threadCount` defaults to 1 and was long described as "a free speed knob".
   The ceiling here is ~4x, not an order of magnitude.
 
-### One open loose end
+### The loose end, closed 2026-08-03 (ticket 15)
 
-Only **8.2 GB of 32 GB VRAM was free** with nothing meant to be running, so ~24 GB is held by something unaccounted for.
-Run `nvidia-smi` before anything that wants real VRAM.
-Tracked as ticket 15.
+Only **8.2 GB of 32 GB VRAM was free** at inventory time. It was not a leak: a live 13.7-day `nrun` job (`race-r1-objectnav.sh --tag r1v1`, the R1 S1+ arm in the `ltm-embodied` env) held 24,397 MiB and was still running. Torn down; the card now reads **0 MiB used, 32,495 MiB free**.
+
+Two durable facts came out of it:
+
+- **Usable ceiling is 32,495 MiB = 31.73 GiB**, not the 32,768 nameplate. The ~273 MiB gap is ECC reserve (ECC is Enabled).
+- **The clean room's whole stack is 5.5 GiB co-resident** (1.3 GiB without the R2 captioner), so VRAM is not a constraint on this build. Live audio costs **exactly zero** VRAM — RLR propagation is CPU-side, so its budget is CPU (ticket 06), never memory.
+
+Still run a check before anything that wants real VRAM, but run the one that attributes:
+
+```bash
+python3 .scratch/ss2-clean-room/probes/vram_probe.py --attribute   # stdlib-only, read-only, any env
+bash .scratch/ss2-clean-room/probes/kill_nrun.sh                   # dry run; --yes to tear down
+```
+
+`nvidia-smi` alone is not enough: its process table is what ticket 05 captured and discarded, and a leaked habitat-sim holds an EGL *graphics* context that `--query-compute-apps` does not report.
 
 ### Large consumers (sizes as of 2026-08-01, for `du` context only)
 

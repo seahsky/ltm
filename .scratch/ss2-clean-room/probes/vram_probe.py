@@ -770,20 +770,25 @@ def summarize(path: str) -> Dict[str, Any]:
     audio_rows = [r for r in rows if "audio" in r["component"].lower()]
     audio_delta = sum(r["delta_gib"] for r in audio_rows)
     ir = b.get("ir_shape") or []
-    ir_samples = ir[0] if ir else 0
+    # Axis order is [channels, samples] on this branch — measured [2, 72300], a
+    # 1.506 s binaural IR at 48 kHz. Take the largest axis rather than a fixed
+    # index so a mono layout cannot trip a false SUSPECT.
+    ir_samples = max(ir) if ir else 0
     print()
     if not audio_rows:
         verdict = "ABSENT — no audio row in the ledger"
     elif not ir:
         verdict = ("INCONCLUSIVE — audio cost 0.000 GiB but no IR shape was recorded, "
                    "so this cannot distinguish 'free' from 'never ran'")
-    elif ir_samples < 2:
-        verdict = ("SUSPECT — IR shape {} is degenerate; a direct-path-only or empty "
-                   "result looks identical to a healthy one on cost alone".format(ir))
+    elif ir_samples < 64:
+        verdict = ("SUSPECT — IR shape {} has too few samples to be a real render".format(ir))
     elif audio_delta == 0.0:
         verdict = ("CONFIRMED VRAM-FREE — IR shape {} came back non-trivial and the "
                    "audio rows cost exactly 0.000 GiB, so RLR propagation is entirely "
-                   "CPU-side and the live-audio budget is ticket 06's, not VRAM".format(ir))
+                   "CPU-side and the live-audio budget is ticket 06's, not VRAM. "
+                   "Shape proves a render happened, NOT that the mesh was non-empty — "
+                   "a direct-path-only IR has the same shape, which is what "
+                   "arm_audio_context's vertex floor is for (tickets 12/16).".format(ir))
     else:
         verdict = "audio cost {:.3f} GiB, IR shape {}".format(audio_delta, ir)
     out["audio_verdict"] = verdict
