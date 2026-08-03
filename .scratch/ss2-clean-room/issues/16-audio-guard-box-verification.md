@@ -23,14 +23,21 @@ runs, the clean room's loudest safety property is unexercised.
 ## What would resolve it
 
 ```
-conda activate ss2
-mkdir -p runs/ss2-audioguard
-pip freeze > runs/ss2-audioguard/freeze.txt          # stage 0, ticket 17
-nrun python3 .scratch/ss2-clean-room/probes/audioguard_probe.py \
-    --out runs/ss2-audioguard/report.json
+git fetch && git checkout wayfinder/ss2-clean-room-16     # once, to get the driver
+bash .scratch/ss2-clean-room/probes/audioguard_gate.sh
 ```
 
-Four stages, ~2 minutes, read-only. Paste `report.json` **and** `freeze.txt` back here.
+Four stages, ~2 minutes, read-only. Paste `report.json` **and** `freeze.txt` back here,
+or just the `[5/5] verdict` block, which pulls out every field this ticket asks for.
+
+`audioguard_gate.sh` is the driver: it self-updates (and **re-execs** if the pull changed
+it, so the 10-hour-run gotcha cannot bite), activates `ss2` with `set +u` around conda,
+asserts habitat-sim is audio-capable by probing the enum *member* rather than the class,
+runs stage 0 and the probe, and prints the verdict. It installs nothing and builds
+nothing. `--branch <name>` makes it do its own checkout; `SS2_SCENE` overrides the scene.
+
+**Stage 0 now runs first**, so a guard failure still leaves ticket 17's freeze behind.
+The driver also greps out the five versions ticket 17 could not find anywhere in the repo.
 
 **Stage 0 — the `pip freeze`, for ticket 17.**
 Not part of the guard at all; it rides along because this is a read-only box trip that was already going to happen.
