@@ -223,3 +223,95 @@ so a RED comes back about the audio context rather than about the plumbing.
 
 **Status stays claimed. The run command is unchanged** (`--out runs/ss2-audioguard/report.json`),
 and `freeze.txt` for ticket 17 still rides along.
+
+---
+
+## Box run 1, 2026-08-03 (commit `6c49f2f`): GREEN, and the pre-flight call held
+
+`VERDICT: GREEN`, all three stages ok, 8.25 s of probe time.
+
+**The fd-1 finding is confirmed on the binary.** The healthy first render logged
+**916 chars on stdout and 0 on stderr**. The pre-fix guard captured fd 2 only, so
+`log_canary_seen` would have been False and `arm_audio_context` would have raised. Stage 2
+would have come back RED on a good audio context, exactly as predicted.
+
+**Stage 0 delivered.** All five versions ticket 17 could not find: `huggingface_hub==0.36.2`,
+`numpy-quaternion==2023.0.4`, `safetensors==0.7.0`, `soundfile==0.13.1`, `tokenizers==0.22.2`.
+71 packages in `runs/ss2-audioguard/freeze.txt`.
+
+**Stage 1 reproduces ticket 15 exactly.** `vars(spec)` is `['__noise_model_kwargs']` after both
+a bare construct and a configure, nothing else. `irTime` rejected, swallowed key detected.
+`KNOWN_DYNAMIC_ATTRS` is right and complete.
+
+**Stage 2 passes**, on a seeded placement 3.146 m apart: 392,364 verts, IR peak 0.130,
+`ray_efficiency` 0.669, `source_is_visible` False. Guard total **2.24 s**, of which the
+**OBJ write is 0.893 s for 32.2 MB** — the "well under 1%" claim is now measured, and it
+holds against a 500-step episode.
+
+**Stage 3's forced floor fires.** And because the canary now passes on fd 1, the floor is
+the *only* failure in that exception, so the negative control is clean rather than tripping
+two invariants at once.
+
+### Four things run 1 corrected
+
+1. **`ir_shape` was `None` over a real IR.** The audio observation is not a numpy array, so
+   `getattr(ir, "shape")` finds nothing. `_shape_of` walks the nesting instead, still
+   numpy-free. `_peak_abs` was unaffected and read 0.130.
+2. **392,364, not ticket 04's 392,356.** Not a discrepancy: `AudioSensor.cpp:499` logs what
+   habitat **submitted**, `writeSceneMeshOBJ` reports what the engine **holds**. Two numbers
+   either side of the upload. Both are now recorded with the delta, so invariant 1's
+   "reads the geometry the engine holds, not what habitat thinks it sent" is visible in the
+   artifact rather than being a claim in a docstring.
+3. **`canary_seen_on_second_render` is True**, and this ticket's "expect False" was wrong.
+   `Vertex count` is a first-render artefact, but the *other* canary substring is
+   `logHeader_`, and `runSimulation` logs `[Audio] Running the audio simulator`
+   (`AudioSensor.cpp:130`) on **every** render. The canary stays armed for the whole episode,
+   which is strictly better than predicted.
+4. **No habitat-prefixed line reached fd 2 on any provocation**, yet stderr carried 406 and
+   238 chars. Diagnosed from the stored tails via `--tails`, no re-run. See below.
+
+### The engine has its own stderr, and it reports success anyway
+
+The un-prefixed fd-2 text is the closed RLR engine, Meta's AudioSDK (`ovra`), writing
+around Corrade entirely:
+
+```
+File: arvr/libraries/audio/AudioSDK/Research/Source/Wrapper/PropagationWrapper.cpp
+Function: ovrResult PropagationWrapper::WriteSceneMeshOBJ(const std::string &), Line 1025
+Error writing scene OBJ mesh at location:
+/nonexistent-dir/x.obj
+```
+
+A block, not a line: two stable header lines, then free text and often the offending value.
+
+**The sharper half is what is absent.** `setListenerHRTF`'s stdout carries the `ESP_DEBUG` at
+`AudioSensor.cpp:177` and **no `ESP_ERROR` at `:181`**, so `RLRA_SetListenerHRTF` printed
+`Error reading HRTF file` and returned `RLRA_Success`. Ticket 12 stated invariant 2 as "the
+error is detected in C++ and discarded before Python". For this class **it is never detected
+at all** — the engine does not report it through the return code. A failure with no return
+code and no habitat log entry is visible **only** as that block.
+
+Two consequences beyond this ticket:
+
+- **Invariant 2 is load-bearing, not a stopgap.** The log scan is not standing in for a
+  return code that exists behind a missing binding; for this class there is no return code.
+- **It weakens the map's second fork candidate.** Ticket 12 proposed binding `RLRA_Error` to
+  Python to convert invariant 2 from log-scraping into a return code. That would **not** have
+  caught this, because the call returned Success. The patch is worth less than it looked.
+
+`setAudioMaterialsJSON` produced **0 chars on stderr**, predicted from source (`:169` is
+`ESP_DEBUG`-only, it just stores the path). That is the control: the stream split is real,
+not an artefact of one call.
+
+### Run 2 is required, and why
+
+The fd-2 rule changed, so run 1 no longer validates the current code. `RLR_ENGINE_RE` matches
+the verbatim box text off-box and third-party stderr noise does not trip it, but that is a
+fixture, not the binary. Run 2 also settles two open items: whether `writeSceneMeshOBJ`
+**returns** false on a bad path (if it returns success like `setListenerHRTF`, invariant 1's
+`is True` check is decorative and the vertex floor is the whole arm), and the submitted-vs-engine
+vertex delta from the healthy-path tails.
+
+```
+bash .scratch/ss2-clean-room/probes/audioguard_gate.sh
+```
