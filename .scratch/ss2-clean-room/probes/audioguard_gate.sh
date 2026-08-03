@@ -7,6 +7,14 @@
 #   git fetch && git checkout wayfinder/ss2-clean-room-16     # once, to get this file
 #   bash .scratch/ss2-clean-room/probes/audioguard_gate.sh
 #
+# `--tails` re-reads the report a previous run already wrote and dumps every captured
+# log tail verbatim, with a verdict on which of them habitat-sim actually formatted. It
+# does NOT re-run anything: no conda, no habitat_sim, no simulator, ~2 seconds. That is
+# the point of storing the tails at all — a surprise in the numbers is answerable from
+# the artifact instead of costing another box trip.
+#
+#   bash .scratch/ss2-clean-room/probes/audioguard_gate.sh --tails
+#
 # ~2 minutes, read-only. Installs nothing, builds nothing, applies no patches, and
 # reuses the `ss2` env ticket 04 built. If `ss2` is missing, run ticket 04's gate first.
 #
@@ -37,6 +45,7 @@ ENV_NAME="${SS2_ENV_NAME:-ss2}"
 OUT_DIR="${SS2_OUT_DIR:-runs/ss2-audioguard}"
 PROBE="$REPO_ROOT/.scratch/ss2-clean-room/probes/audioguard_probe.py"
 BRANCH="${SS2_BRANCH:-}"
+TAILS_ONLY=0
 
 # `shift 2` on a flag with no value would leave $# unchanged and spin forever, so every
 # value-taking flag checks first.
@@ -46,7 +55,8 @@ while [ $# -gt 0 ]; do
     --branch)  need_value $# "$1"; BRANCH="$2";  shift 2 ;;
     --out-dir) need_value $# "$1"; OUT_DIR="$2"; shift 2 ;;
     --tag)     need_value $# "$1";              shift 2 ;;  # so `nrun ... --tag t` names the log
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    --tails)   TAILS_ONLY=1; shift ;;
+    -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -69,11 +79,78 @@ _self_after="$(md5sum "$0" | awk '{print $1}')"
 if [ "$_self_before" != "$_self_after" ] && [ -z "${_REEXEC:-}" ]; then
   echo "  this script changed in the pull — re-execing the new body"
   export _REEXEC=1
-  exec bash "$0" ${BRANCH:+--branch "$BRANCH"} --out-dir "$OUT_DIR"
+  exec bash "$0" ${BRANCH:+--branch "$BRANCH"} --out-dir "$OUT_DIR" \
+    $([ "$TAILS_ONLY" = "1" ] && echo --tails)
 fi
 echo "  branch: $(git rev-parse --abbrev-ref HEAD)   commit: $(git rev-parse --short HEAD)"
 
 mkdir -p "$OUT_DIR"
+
+# --- 1b. --tails: read back what a previous run already captured ----------
+# Deliberately BEFORE the conda step: this parses JSON with the stdlib and must not need
+# `ss2`, habitat_sim, a GPU, or a simulator. Nothing here re-runs anything.
+if [ "$TAILS_ONLY" = "1" ]; then
+  PY_BIN="$(command -v python3 || command -v python)"
+  [ -n "$PY_BIN" ] || { echo "FATAL: no python3 on PATH"; exit 1; }
+  [ -f "$OUT_DIR/report.json" ] || {
+    echo "FATAL: $OUT_DIR/report.json not found — run the gate without --tails first"; exit 1; }
+  banner "raw log tails from $OUT_DIR/report.json"
+  "$PY_BIN" - "$OUT_DIR/report.json" <<'PY'
+import json, re, sys
+
+rep = json.load(open(sys.argv[1]))
+# The same pattern the guard uses, rebuilt here so this mode stays stdlib-only and does
+# not import audio_guard (which would drag in the probes dir and its assumptions).
+PREFIX = re.compile(
+    r"\]:\[(?:Default|Gfx|Scene|Sim|Physics|Nav|Metadata|Geo|IO|URDF|Core|Assets|Sensor|"
+    r"Agent)\] \S+\(\d+\)::")
+
+
+def dump(label, text, stream):
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    tagged = sum(1 for ln in lines if PREFIX.search(ln))
+    print("\n--- {} / {} --- {} line(s), {} habitat-formatted, {} NOT".format(
+        label, stream, len(lines), tagged, len(lines) - tagged))
+    for ln in lines:
+        print("  [{}] {}".format("habitat" if PREFIX.search(ln) else "  OTHER ", ln))
+    return lines, tagged
+
+
+unformatted_on_stderr = []
+s2 = (rep.get("02_healthy_path") or {}).get("report") or {}
+if s2.get("stdout_tail") or s2.get("stderr_tail"):
+    print("=" * 78)
+    print("HEALTHY PATH (the first render the guard owns)")
+    dump("healthy", s2.get("stdout_tail"), "stdout")
+    lines, tagged = dump("healthy", s2.get("stderr_tail"), "stderr")
+    unformatted_on_stderr += [ln for ln in lines if not PREFIX.search(ln)]
+else:
+    print("(no healthy-path tails in this report — it predates commit 08ec48c; the "
+          "provocations below are still the ones that matter)")
+
+for p in (rep.get("03_negative_controls") or {}).get("provocations", []):
+    print("\n" + "=" * 78)
+    print("PROVOCATION: {}   raised: {}".format(p.get("provocation"), p.get("raised")))
+    dump(p.get("provocation"), p.get("stdout_tail"), "stdout")
+    lines, tagged = dump(p.get("provocation"), p.get("stderr_tail"), "stderr")
+    unformatted_on_stderr += [ln for ln in lines if not PREFIX.search(ln)]
+
+print("\n" + "=" * 78)
+print("WHAT IS ON fd 2 THAT HABITAT DID NOT FORMAT")
+if not unformatted_on_stderr:
+    print("  nothing — every stderr line is Corrade-formatted, so the prefix rule covers"
+          " fd 2 completely")
+else:
+    print("  {} line(s). These are why prefix_re_validated_on_stderr came back False, and"
+          " they\n  are the text the fd-2 severity rule has to recognise:".format(
+              len(unformatted_on_stderr)))
+    for ln in unformatted_on_stderr:
+        print("    {!r}".format(ln))
+PY
+  echo
+  echo "  Paste this whole block back to close out ticket 16's last open arm."
+  exit 0
+fi
 
 # --- 2. activate the env ticket 04 built ----------------------------------
 banner "[2/5] conda env: $ENV_NAME"
