@@ -31,9 +31,23 @@ Three invariants, and one correction to how ticket 12 originally stated them.
    ``runSimulation`` is ``void``, so the failure is detected in C++ and *discarded
    before Python*. There is no return code, no exception, no flag. The only way to see
    it without patching the bindings is to read the log, and habitat-sim logs from C++
-   to **file descriptor 2** — which ``contextlib.redirect_stderr`` does not touch. A
-   guard built on ``redirect_stderr`` captures nothing and passes vacuously, which is
-   this ticket's own failure mode. Hence the fd-level capture, and the canary below.
+   at the **file-descriptor** level — which ``contextlib.redirect_stderr`` does not
+   touch. A guard built on ``redirect_stderr`` captures nothing and passes vacuously,
+   which is this ticket's own failure mode. Hence the fd-level capture, and the canary.
+
+   **The log is split across two descriptors, and ticket 16 corrected this module on
+   the point.** ``ESP_DEBUG`` expands to ``Corrade::Utility::Debug`` (``Logging.h:326``),
+   whose ``defaultOutput()`` is ``&std::cout`` (Corrade ``Debug.cpp:525``), while
+   ``ESP_WARNING``/``ESP_ERROR`` expand to ``Warning``/``Error``, whose
+   ``defaultOutput()`` is ``&std::cerr`` (``:526-527``). So the ``Vertex count`` canary
+   (``AudioSensor.cpp:499``, an ``ESP_DEBUG``) arrives on **fd 1** and every RLRA
+   failure on **fd 2**. Capturing fd 2 alone sees an empty stream over a perfectly
+   healthy render — the canary would have failed every run.
+
+   That split is also the *only* severity signal there is. ``buildMessagePrefix``
+   (``Logging.cpp:149-152``) renders ``"[HH:MM:SS:uuuuuu]:[Subsystem] file(line)::func : "``
+   and Corrade adds no severity tag, so nothing in the text says "Error". **The stream
+   is the severity**: fd 2 carries Warning and Error and nothing else.
 
 3. **Unknown spec keys.** ``AudioSensorSpec`` carries ``py::dynamic_attr()``, so
    ``spec.irTime = 4.0`` (renamed to ``maxIRLength`` on this branch) attaches a fresh
@@ -58,13 +72,15 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 __all__ = [
     "AudioContextError",
     "AudioContextReport",
+    "HABITAT_LOG_PREFIX_RE",
+    "RLR_ENGINE_RE",
     "KNOWN_DYNAMIC_ATTRS",
     "MIN_SCENE_VERTICES",
     "apply_audio_config",
     "arm_audio_context",
     "assert_no_swallowed_keys",
     "bound_field_names",
-    "capture_fd_stderr",
+    "capture_habitat_logs",
     "count_obj_vertices",
     "pin_habitat_logging",
 ]
@@ -87,14 +103,19 @@ MIN_SCENE_VERTICES = 10_000
 
 # habitat-sim reads this at import (esp/core/Logging.h). The grammar is
 # `SUBSYSTEM[,SUBSYSTEM]*=LEVEL` joined by `:`, levels VeryVerbose|Debug|Warning|Error
-# with aliases Verbose=Debug and Quiet=Error. `Sensor` covers AudioSensor.cpp's own
-# ESP_DEBUG/ESP_ERROR; `Assets` covers ResourceManager.cpp, where the empty-mesh cast
-# failure lives. Pinned rather than inherited because an operator setting
-# HABITAT_SIM_LOG=quiet to reduce noise would otherwise silently disarm invariant 2.
+# with aliases Verbose=Debug and Quiet=Error. Pinned rather than inherited because an
+# operator setting HABITAT_SIM_LOG=quiet to reduce noise would otherwise silently
+# disarm invariant 2.
 #
-# BOX-VERIFIED BY audioguard_probe.py, not assumed: the subsystem a given ESP_DEBUG
-# resolves to is derived from its C++ namespace, and this is the inference. The probe
-# asserts the vertex line actually appears under this value.
+# SOURCE-VERIFIED by ticket 16, where it was an inference. The subsystem an ESP_DEBUG
+# resolves to comes from C++ namespace lookup on `espLoggingSubsystem()`
+# (`Logging.h:312`), and `ESP_ADD_SUBSYSTEM_FN(sensor)` installs that function in
+# `esp::sensor` — which is exactly the namespace `AudioSensor.cpp` opens (`:12-13`), so
+# its ESP_DEBUG/ESP_ERROR resolve to `Subsystem::sensor`, rendered "Sensor". Likewise
+# ResourceManager.cpp is `esp::assets` -> "Assets", where the empty-mesh cast failure
+# lives. Note the default level is already Verbose (== Debug, `Logging.h:167`), so on an
+# untouched env this pin changes nothing; its whole job is to survive an operator who
+# turned logging down.
 HABITAT_SIM_LOG_PIN = "Sensor,Assets=Debug"
 
 # Verbatim from the source at 4f61e321. These are the failures that produce a plausible
@@ -109,80 +130,155 @@ FATAL_LOG_SUBSTRINGS: Tuple[str, ...] = (
     "Error setting audio listener transform",
 )
 
-# habitat-sim's log prefix carries a severity marker. The exact rendering is NOT read
-# from source here — it is built by buildMessagePrefix() plus Corrade's own severity
-# output — so this pattern is a default that audioguard_probe.py VALIDATES on the box by
-# provoking a real ESP_ERROR and asserting it matches. Treat a probe failure here as a
-# finding about the pattern, not about the run.
-DEFAULT_SEVERITY_RE = re.compile(r"\[Error\]")
+# The subsystem names, verbatim from `subsystemNames` (Logging.h) — the enum and the
+# array are static_assert'd to the same length in Logging.cpp:30, so this list is the
+# whole set.
+_SUBSYSTEM_NAMES: Tuple[str, ...] = (
+    "Default", "Gfx", "Scene", "Sim", "Physics", "Nav", "Metadata",
+    "Geo", "IO", "URDF", "Core", "Assets", "Sensor", "Agent",
+)
+
+# This matches habitat-sim's log PREFIX — it does not detect severity, because no such
+# marker exists. `buildMessagePrefix` (Logging.cpp:149-152) formats
+# "[{h}:{m}:{s}:{us}]:[{Subsystem}] {file}({line})::{func} : " and Corrade prepends no
+# severity tag of its own, so the earlier `r"\[Error\]"` pattern could never match
+# anything and its arm of invariant 2 was silently dead.
+#
+# What it is FOR: on fd 2 the severity is already known (Corrade routes only Warning and
+# Error there), so the one thing left to establish is whether a line came from
+# habitat-sim at all rather than from some third party that also writes to stderr. That
+# is provenance, and the prefix is an exact test for it.
+HABITAT_LOG_PREFIX_RE = re.compile(
+    r"\]:\[(?:" + "|".join(_SUBSYSTEM_NAMES) + r")\] \S+\(\d+\)::"
+)
+
+# The closed RLR engine has its own stderr channel, which does not go through Corrade and
+# therefore carries no habitat prefix. MEASURED on the box (ticket 16) by provoking it:
+#
+#   File: arvr/libraries/audio/AudioSDK/Research/Source/Wrapper/PropagationWrapper.cpp
+#   Function: ovrResult PropagationWrapper::WriteSceneMeshOBJ(const std::string &), Line 1025
+#   Error writing scene OBJ mesh at location:
+#   /nonexistent-dir/x.obj
+#
+# A block, not a line: two structural header lines then a free-text message and often the
+# offending value. Only the header is stable enough to match on, so the rule is "if the
+# engine spoke on fd 2 at all, the whole capture is its report" — the message lines are
+# the informative ones and matching them individually is not possible.
+RLR_ENGINE_RE = re.compile(
+    r"^File: arvr/libraries/audio/AudioSDK|^Function: .*\bLine \d+|ovrResult|ovra::",
+    re.M,
+)
 
 # If the capture comes back with none of these, either the fd redirect did not take or
 # logging is turned down far enough to hide the errors invariant 2 exists to catch.
 # Either way the log scan proved nothing, and saying so is the whole point.
+#
+# Both of these are ESP_DEBUG output and therefore arrive on fd 1, not fd 2:
+# "Vertex count" is AudioSensor.cpp:499 and "[Audio] " is its `logHeader_` (AudioSensor.h:45).
 LOG_CANARY_SUBSTRINGS: Tuple[str, ...] = ("Vertex count", "[Audio]")
 
+# `AudioSensor.cpp:499` logs the vertex count habitat SUBMITTED. Invariant 1 counts what
+# the engine WROTE BACK via writeSceneMeshOBJ. They are two different numbers either side
+# of the upload, and on the box they differ (ticket 16: 392,356 submitted vs 392,364 in
+# the OBJ), so recording both makes the seam visible instead of a puzzle. Recorded, never
+# asserted: the engine is free to add geometry of its own and the closed .so does not say.
+SUBMITTED_VERTEX_RE = re.compile(r"Vertex count\s*:\s*(\d+)")
+
+# How much of the captured log to keep on the report. Enough to diagnose a surprise from
+# the artifact rather than paying for a second box trip; small enough to paste.
+LOG_TAIL_CHARS = 2000
+
 
 # ----------------------------------------------------------------------
-# fd-level stderr capture
+# fd-level log capture
 # ----------------------------------------------------------------------
 
 
-class _StderrCapture:
-    """Holds the text captured from file descriptor 2. Populated on context exit."""
+class _CapturedLogs:
+    """Holds the text captured per file descriptor. Populated on context exit.
 
-    def __init__(self) -> None:
-        self.text: str = ""
-
-
-class capture_fd_stderr:
-    """Redirect **file descriptor 2** to a temp file for the duration of the block.
-
-    Not ``contextlib.redirect_stderr``: that rebinds ``sys.stderr``, a Python-level
-    object the C++ logger never touches. habitat-sim writes to fd 2 directly, so only an
-    ``os.dup2`` on the descriptor sees it.
-
-    The original fd is restored in ``__exit__`` whether or not the block raised.
+    ``stdout`` and ``stderr`` are kept apart because the split *is* the severity
+    signal — see invariant 2 in the module docstring. ``text`` concatenates them for
+    substring scans that do not care which stream a line came from; it does not
+    preserve interleaving, and nothing should depend on ordering across streams.
     """
 
     def __init__(self) -> None:
-        self._saved_fd: Optional[int] = None
-        self._tmp_fd: Optional[int] = None
-        self._tmp_path: Optional[str] = None
-        self.captured = _StderrCapture()
+        self.streams: Dict[int, str] = {}
 
-    def __enter__(self) -> _StderrCapture:
-        # Flush Python's own buffer first, or its pending bytes land in the capture.
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
-        self._saved_fd = os.dup(2)
-        self._tmp_fd, self._tmp_path = tempfile.mkstemp(prefix="audioguard-stderr-", suffix=".log")
-        os.dup2(self._tmp_fd, 2)
+    @property
+    def stdout(self) -> str:
+        return self.streams.get(1, "")
+
+    @property
+    def stderr(self) -> str:
+        return self.streams.get(2, "")
+
+    @property
+    def text(self) -> str:
+        return self.stdout + self.stderr
+
+
+class capture_habitat_logs:
+    """Redirect **file descriptors 1 and 2** to temp files for the duration of the block.
+
+    Both descriptors, because habitat-sim splits its own log across them: ``ESP_DEBUG``
+    is a ``Corrade::Utility::Debug`` and goes to ``std::cout``, ``ESP_WARNING`` and
+    ``ESP_ERROR`` go to ``std::cerr``. Capturing fd 2 alone misses the ``Vertex count``
+    canary entirely and reports an empty log over a healthy render.
+
+    Not ``contextlib.redirect_stdout``/``redirect_stderr``: those rebind Python-level
+    objects the C++ logger never touches. habitat-sim writes to the descriptors
+    directly, so only an ``os.dup2`` on them sees it.
+
+    Both original fds are restored in ``__exit__`` whether or not the block raised.
+    """
+
+    _PY_STREAMS = {1: "stdout", 2: "stderr"}
+
+    def __init__(self, fds: Sequence[int] = (1, 2)) -> None:
+        self._fds: Tuple[int, ...] = tuple(fds)
+        self._saved: Dict[int, int] = {}
+        self._tmp: Dict[int, Tuple[int, str]] = {}
+        self.captured = _CapturedLogs()
+
+    def _flush_python(self) -> None:
+        # Flush Python's own buffers first, or its pending bytes land in the capture —
+        # which on fd 1 would mean the caller's own print() output.
+        for name in self._PY_STREAMS.values():
+            try:
+                getattr(sys, name).flush()
+            except Exception:
+                pass
+
+    def __enter__(self) -> _CapturedLogs:
+        self._flush_python()
+        for fd in self._fds:
+            self._saved[fd] = os.dup(fd)
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                prefix="audioguard-fd{}-".format(fd), suffix=".log"
+            )
+            self._tmp[fd] = (tmp_fd, tmp_path)
+            os.dup2(tmp_fd, fd)
         return self.captured
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
-        if self._saved_fd is not None:
-            os.dup2(self._saved_fd, 2)
-            os.close(self._saved_fd)
-            self._saved_fd = None
-        if self._tmp_fd is not None:
-            os.close(self._tmp_fd)
-            self._tmp_fd = None
-        if self._tmp_path is not None:
+        self._flush_python()
+        for fd, saved_fd in self._saved.items():
+            os.dup2(saved_fd, fd)
+            os.close(saved_fd)
+        self._saved.clear()
+        for fd, (tmp_fd, tmp_path) in self._tmp.items():
+            os.close(tmp_fd)
             try:
-                with open(self._tmp_path, "r", errors="replace") as fh:
-                    self.captured.text = fh.read()
+                with open(tmp_path, "r", errors="replace") as fh:
+                    self.captured.streams[fd] = fh.read()
             finally:
                 try:
-                    os.unlink(self._tmp_path)
+                    os.unlink(tmp_path)
                 except OSError:
                     pass
-                self._tmp_path = None
+        self._tmp.clear()
         return False  # never swallow
 
 
@@ -304,6 +400,31 @@ def count_obj_vertices(path: str) -> int:
     return count
 
 
+def _shape_of(ir: Any) -> Optional[Sequence[int]]:
+    """The IR's dimensions, without requiring numpy.
+
+    MEASURED on the box (ticket 16): the audio observation is **not** a numpy array, so
+    the earlier ``getattr(ir, "shape", None)`` recorded ``None`` over a perfectly good
+    ``[2, 72300]`` IR. Callers that reach for numpy get a shape; this module cannot, so
+    it walks the nesting instead. ``.shape`` is still preferred when present.
+    """
+    shape = getattr(ir, "shape", None)
+    if shape is not None:
+        return tuple(int(n) for n in shape)
+    dims: List[int] = []
+    node = ir
+    while not isinstance(node, (str, bytes)):
+        try:
+            length = len(node)
+        except TypeError:
+            break
+        dims.append(length)
+        if length == 0:
+            break
+        node = node[0]
+    return tuple(dims) or None
+
+
 def _peak_abs(ir: Any) -> float:
     """Largest absolute sample in an IR, without requiring numpy."""
     try:
@@ -335,26 +456,43 @@ class AudioContextReport:
     """What the guard measured. Log this per episode — it is the audit trail."""
 
     n_vertices: int = 0
+    submitted_n_vertices: Optional[int] = None
     obj_written: bool = False
     ir_peak_abs: float = 0.0
     ir_shape: Optional[Sequence[int]] = None
     ray_efficiency: Optional[float] = None
     source_is_visible: Optional[bool] = None
     log_chars: int = 0
+    stdout_chars: int = 0
+    stderr_chars: int = 0
     log_canary_seen: bool = False
+    rlr_engine_error: bool = False
     fatal_log_lines: List[str] = field(default_factory=list)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "n_vertices": self.n_vertices,
+            "submitted_n_vertices": self.submitted_n_vertices,
             "obj_written": self.obj_written,
             "ir_peak_abs": self.ir_peak_abs,
             "ir_shape": list(self.ir_shape) if self.ir_shape is not None else None,
             "ray_efficiency": self.ray_efficiency,
             "source_is_visible": self.source_is_visible,
             "log_chars": self.log_chars,
+            # Split out because it is diagnostic on its own: a healthy first render is
+            # expected to be all fd 1 and an empty fd 2, and the reverse would mean the
+            # canary moved.
+            "stdout_chars": self.stdout_chars,
+            "stderr_chars": self.stderr_chars,
             "log_canary_seen": self.log_canary_seen,
+            "rlr_engine_error": self.rlr_engine_error,
             "fatal_log_lines": list(self.fatal_log_lines),
+            # Kept so a surprise in the numbers above is diagnosable from the report
+            # rather than from a second box trip.
+            "stdout_tail": self.stdout_tail,
+            "stderr_tail": self.stderr_tail,
         }
 
 
@@ -365,7 +503,7 @@ def arm_audio_context(
     min_vertices: int = MIN_SCENE_VERTICES,
     obj_dir: Optional[str] = None,
     keep_obj: bool = False,
-    severity_re: "re.Pattern" = DEFAULT_SEVERITY_RE,
+    habitat_prefix_re: "re.Pattern" = HABITAT_LOG_PREFIX_RE,
     fatal_substrings: Sequence[str] = FATAL_LOG_SUBSTRINGS,
     canary_substrings: Sequence[str] = LOG_CANARY_SUBSTRINGS,
     require_log_canary: bool = True,
@@ -386,28 +524,60 @@ def arm_audio_context(
     report = AudioContextReport()
     failures: List[str] = []
 
-    with capture_fd_stderr() as captured:
+    with capture_habitat_logs() as captured:
         ir = render()
-    log = captured.text
-    report.log_chars = len(log)
+    report.stdout_chars = len(captured.stdout)
+    report.stderr_chars = len(captured.stderr)
+    report.log_chars = report.stdout_chars + report.stderr_chars
+    report.stdout_tail = captured.stdout[-LOG_TAIL_CHARS:]
+    report.stderr_tail = captured.stderr[-LOG_TAIL_CHARS:]
+    submitted = SUBMITTED_VERTEX_RE.search(captured.text)
+    if submitted:
+        report.submitted_n_vertices = int(submitted.group(1))
 
     # --- invariant 2: the log scan, and whether it proved anything --------------
-    report.log_canary_seen = any(marker in log for marker in canary_substrings)
+    # The canary is ESP_DEBUG output and lands on fd 1; the scan is over both streams
+    # anyway, so a future habitat-sim that reroutes its Debug output still trips it.
+    report.log_canary_seen = any(marker in captured.text for marker in canary_substrings)
     if require_log_canary and not report.log_canary_seen:
         failures.append(
-            "stderr capture returned {} chars and none of {} — either the fd-2 redirect "
-            "did not take or HABITAT_SIM_LOG is turned down below Debug. Invariant 2 is "
-            "unverified, not satisfied; call pin_habitat_logging() before importing "
-            "habitat_sim.".format(report.log_chars, list(canary_substrings))
+            "fd capture returned {} chars on stdout and {} on stderr, and none of {} — "
+            "either the fd redirect did not take or HABITAT_SIM_LOG is turned down below "
+            "Debug. Invariant 2 is unverified, not satisfied; call pin_habitat_logging() "
+            "before importing habitat_sim.".format(
+                report.stdout_chars, report.stderr_chars, list(canary_substrings)
+            )
         )
-    for line in log.splitlines():
-        if any(marker in line for marker in fatal_substrings) or severity_re.search(line):
-            report.fatal_log_lines.append(line.strip())
+    # Three ways a line is fatal, covering different gaps. The substrings name the
+    # specific failures that produce a plausible IR over a broken context, wherever they
+    # are logged. The stream rule is the general one: Corrade routes ONLY Warning and
+    # Error to fd 2, so habitat-sim writing there during the first render is by
+    # construction a severity event, and the prefix match keeps third-party stderr noise
+    # from counting as one.
+    #
+    # The third is the RLR engine, and ticket 16 measured why it has to exist separately:
+    # `RLRA_SetListenerHRTF` printed "Error reading HRTF file" to fd 2 and still returned
+    # `RLRA_Success`, so `AudioSensor.cpp:181`'s ESP_ERROR never fired and there was no
+    # habitat-formatted line to match. A failure with no return code and no habitat log
+    # entry is visible ONLY as this block.
+    report.rlr_engine_error = bool(RLR_ENGINE_RE.search(captured.stderr))
+    for stream_fd, stream_text in ((1, captured.stdout), (2, captured.stderr)):
+        for line in stream_text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            fatal = any(marker in line for marker in fatal_substrings)
+            if not fatal and stream_fd == 2 and (
+                habitat_prefix_re.search(line) or report.rlr_engine_error
+            ):
+                fatal = True
+            if fatal and stripped not in report.fatal_log_lines:
+                report.fatal_log_lines.append(stripped)
     if report.fatal_log_lines:
         failures.append(
-            "habitat-sim logged {} error line(s) during the first render — every RLRA_* "
-            "failure is handled by ESP_ERROR + bare return and is invisible to Python, "
-            "so this log is the only channel:\n  {}".format(
+            "habitat-sim logged {} error/warning line(s) during the first render — every "
+            "RLRA_* failure is handled by ESP_ERROR + bare return and is invisible to "
+            "Python, so this log is the only channel:\n  {}".format(
                 len(report.fatal_log_lines), "\n  ".join(report.fatal_log_lines[:10])
             )
         )
@@ -443,7 +613,7 @@ def arm_audio_context(
                 pass
 
     # --- corroboration: the render did something --------------------------------
-    report.ir_shape = getattr(ir, "shape", None)
+    report.ir_shape = _shape_of(ir)
     report.ir_peak_abs = _peak_abs(ir)
     if report.ir_peak_abs <= 0.0:
         failures.append("first render returned a silent IR (peak abs 0.0)")
