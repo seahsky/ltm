@@ -1,9 +1,10 @@
 # 16 — Verify the audio guard against the real binary
 
 Type: task
-Status: claimed
+Status: resolved
 Assignee: Sky
 Blocked by: none (12 resolved; needs the box)
+Resolved: 2026-08-03 — box runs 1 and 2 GREEN on `riftvm`. See the Answer section.
 
 ## Question
 
@@ -315,3 +316,123 @@ vertex delta from the healthy-path tails.
 ```
 bash .scratch/ss2-clean-room/probes/audioguard_gate.sh
 ```
+
+---
+
+## Answer (box run 2, 2026-08-03, commit `3750b04`): GREEN — the guard holds, and it can fail
+
+`VERDICT: GREEN`, three stages, 7.95 s. All three claims came back True on the binary:
+
+| claim | measured |
+| --- | --- |
+| the ESP_DEBUG canary is on fd 1 | **True** — healthy render logged 916 chars stdout, **0** stderr |
+| a healthy render leaves fd 2 empty | **True** — so anything on fd 2 during a render is anomalous by construction |
+| a real failure IS caught on fd 2 | **True** — the engine block fires on 2 of 3 provocations, and not on the control |
+
+**The guard both passes and fires, which is the whole question.** The healthy path returns a
+report (392,364 verts, IR peak 0.130, `ray_efficiency` 0.669, `rlr_engine_error` False,
+`fatal_log_lines` empty) and the forced floor raises. Because the canary now passes on the
+right descriptor, the floor is the *only* failure in that exception, so the negative control
+is clean rather than tripping two invariants at once.
+
+Costs, now measured rather than estimated: guard total **2.12 s**, of which the OBJ write is
+**0.814 s for 32.2 MB**. Once per episode against ~500 steps of audio, so the "well under 1%"
+claim holds.
+
+### The two calibration constants, settled
+
+- `HABITAT_SIM_LOG_PIN = "Sensor,Assets=Debug"` — **correct**, and now source-verified as well
+  as observed: every habitat line came back `[Sensor]`/`[Assets]`/`[Sim]`/`[Metadata]`-tagged.
+- `DEFAULT_SEVERITY_RE = r"\[Error\]"` — **structurally wrong and deleted.** `buildMessagePrefix`
+  emits no severity tag, so it matched nothing, ever. Replaced by `HABITAT_LOG_PREFIX_RE`
+  (provenance) plus `RLR_ENGINE_RE`, with severity taken from the stream.
+
+### The finding: two error channels, and only one of them is honest
+
+The un-prefixed fd-2 text is the closed engine, Meta's AudioSDK (`ovra`), writing around
+Corrade in blocks. Habitat's own `ESP_ERROR` is a *third* thing that, for these calls, never
+fires at all. Run 2 pinned down which is which:
+
+| call | engine block on fd 2 | habitat `ESP_ERROR` | Python return |
+| --- | --- | --- | --- |
+| `setListenerHRTF` (bad path) | yes, 406 chars | **never fired** | `None` (binding is `void`) |
+| `writeSceneMeshOBJ` (bad path) | yes, 238 chars | never fired | **`False`** |
+| `setAudioMaterialsJSON` (bad path) | no, 0 chars | n/a — only stores the path | `None` |
+
+`AudioSensor.cpp:181` fires iff `RLRA_SetListenerHRTF(...) != RLRA_Success`. It did not fire,
+across both runs, while the engine printed `Error reading HRTF file`. **So that call returns
+`RLRA_Success` over a failed load.** `RLRA_WriteSceneMeshOBJ` does not: it returns non-Success
+and habitat hands back `False`.
+
+**The correct statement is that the engine's return code is reliable for some calls and not
+others**, which is worse than uniformly unreliable — you cannot tell from the outside which
+kind a call is. That has two consequences, and they land on different invariants:
+
+1. **Invariant 1's `... is True` check is load-bearing, not decorative.** `writeSceneMeshOBJ`
+   really does return `False` on failure, so a mesh read that fails is caught by the return
+   value before the vertex floor is even consulted. This was an open question going into run 2.
+2. **Invariant 2's log scan is the only channel for the other kind.** It is not standing in
+   for a return code hidden behind a missing binding; for `SetListenerHRTF`-class failures
+   there is no failing return code to bind.
+
+**This weakens, but does not kill, the map's second fork candidate.** Ticket 12 proposed
+binding `RLRA_Error` to Python to convert invariant 2 from log-scraping into a return code.
+It would work for the `WriteSceneMeshOBJ` kind and **not** for the `SetListenerHRTF` kind, so
+it is a partial fix that cannot retire the log scan. (An earlier commit message on this branch
+said the patch "would not have caught this" without qualification; that is right for
+`SetListenerHRTF` and wrong as a general claim.)
+
+`setAudioMaterialsJSON` producing exactly 0 chars on stderr is the control that makes the rest
+of the table meaningful: predicted from source (`:169` is `ESP_DEBUG`-only, it just stores the
+path), and it is what shows the stream split is real rather than an artefact of one call.
+
+### Four corrections run 1 forced, all confirmed fixed in run 2
+
+1. **`ir_shape` now reads `[2, 55637]`**, was `None`. The audio observation is not a numpy
+   array, so `getattr(ir, "shape")` found nothing; `_shape_of` walks the nesting instead.
+   55,637 samples at 44.1 kHz is **1.26 s**, a *third* distinct IR length after ticket 04's
+   1.64 s and ticket 15's 1.506 s — independent confirmation of the map's "no fixed-width IR
+   buffer" requirement, from three poses.
+2. **The vertex numbers differ by exactly 8, and both are right.** `AudioSensor.cpp:499` logs
+   **392,356** (what habitat submitted); the OBJ holds **392,364** (what the engine has). Ticket
+   04's control was never wrong, it is a different quantity. The +8 is the engine adding
+   geometry of its own — a bounding box, on the count. This is the first direct evidence that
+   invariant 1's premise is real: `writeSceneMeshOBJ` reports the *engine's* geometry, not
+   habitat's, which is exactly why it is the mesh read and the ESP_DEBUG line is not.
+3. **`canary_seen_on_second_render` is True**, and this ticket's "expect False" was wrong.
+   `Vertex count` is first-render only, but `logHeader_` rides on
+   `runSimulation`'s `[Audio] Running the audio simulator` (`AudioSensor.cpp:130`) **every**
+   render. The canary stays armed for the whole episode, not just at arm time.
+4. **Placement is seeded**, so both runs used the identical pair (3.146 m apart, 3 draws) and
+   run 2 is a true re-measurement rather than a fresh sample.
+
+### `vars(spec)` and stage 0
+
+Stage 1 reproduces ticket 15 exactly: `['__noise_model_kwargs']` after both a bare construct
+and a configure, nothing else. `KNOWN_DYNAMIC_ATTRS` is right and complete; `irTime` rejected;
+a key attached behind the validator's back still caught.
+
+**Stage 0 delivered ticket 17's five missing versions**, twice: `huggingface_hub==0.36.2`,
+`numpy-quaternion==2023.0.4`, `safetensors==0.7.0`, `soundfile==0.13.1`, `tokenizers==0.22.2`.
+71 packages in `runs/ss2-audioguard/freeze.txt`. Ticket 17's constraints file can be filled in
+from real numbers now, which was the last thing it was missing.
+
+### What this still does not prove
+
+A **genuinely** empty audio mesh is still not shown to be detectable, because producing one
+needs the `enableMaterials=True` semantic path ADR-0007 closed permanently. The assertion path
+is now proven live on the real sensor; the state itself remains unreproduced. That is the
+honest limit of guarding a state we made unreachable by other means, and it is unchanged from
+ticket 12.
+
+One thing worth carrying: the engine also writes **benign** un-prefixed text to **stdout**
+(`CreateContext: Context created` appears in the healthy `stdout_tail`). `RLR_ENGINE_RE` is
+applied to stderr only, so this cannot false-positive, but a future rule that scans both
+streams for engine text would fire on every healthy run.
+
+### Artifacts
+
+`probes/audio_guard.py` (the guard), `probes/audioguard_probe.py` (stages 1-3),
+`probes/audioguard_gate.sh` (pull-and-run driver, plus `--tails` to re-read a report without
+re-running anything), `probes/test_audio_guard.py` (**42 tests**, green on the Mac, using the
+verbatim box output as a fixture). On the box: `runs/ss2-audioguard/{report.json,freeze.txt,probe.log}`.
