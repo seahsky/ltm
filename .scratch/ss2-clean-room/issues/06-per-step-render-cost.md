@@ -1,9 +1,9 @@
 # 06 — What does live-every-step audio actually cost?
 
 Type: task
-Status: claimed
+Status: resolved
 Assignee: Sky
-Blocked by: 04, 11 (both resolved — unblocked)
+Blocked by: 04, 11 (both resolved)
 
 ## Question
 
@@ -40,6 +40,72 @@ Note two readouts ticket 02 found on the branch that this sweep should use:
 Take the knob names and defaults from ticket 11, not ticket 01 — ticket 01 was researched against a different branch.
 
 Deliverable: a table of ms/step against setting, a recommended preset, and an explicit verdict on whether live-every-step holds or whether the map's destination needs amending to the throttled variant.
+
+## Answer
+
+**`LIVE_EVERY_STEP_HOLDS`. The destination as named is reachable, but only on a tuned preset — defaults are ~50x too slow.**
+
+Ran on `riftvm` 2026-08-01, exit 0 in 8m41s, 2 HM3D minival scenes (`TEEsavR23oF` 392,356 verts; `HaxA7YrQdEC` 408,639 verts), ~20-step navmesh walks toward the source. Report: `runs/ss2-render-cost/report.json`.
+
+| | ms/step (worst scene) | per 500-step episode |
+| --- | --- | --- |
+| **`cheap_preset`** | **27.2** | **13.6 s** |
+| defaults | 1723.5 | 14 min 22 s |
+
+The recommended preset, derived from the sweep rather than guessed:
+
+```
+indirectRayCount 5000 -> 500      indirectRayDepth 200 -> 50
+threadCount      1    -> 4        temporalCoherence 0  -> 1
+```
+
+Gradient stays healthy at that preset: Spearman(energy, distance) **−0.98 / −0.99**, dynamic range **16.8 / 24.2 dB**, and the non-line-of-sight subset is just as clean (**rho_nlos −0.95 / −0.98**). So the 63x speedup costs nothing measurable in climbability, which was the admissibility gate.
+
+### Which knobs are actually levers
+
+Measured one at a time off the defaults, both scenes agreeing:
+
+| knob | effect |
+| --- | --- |
+| `indirectRayCount` 5000→500 | **8.5x faster** — the dominant lever, roughly linear in ray count |
+| `indirectRayDepth` 200→50 | **~3.7x faster** |
+| `threadCount` 1→4 | **~2.4x faster** on 4 cores |
+| `temporalCoherence` 0→1 | ~10% |
+| `transmission` / `diffraction` off | ~10% each |
+| `maxIRLength` 4.0→1.0→0.5 | **nothing** (within noise, and *slower* on one scene) |
+| `directRayCount` 500→100 | **nothing** (within noise) |
+
+Two of those are worth stating as findings rather than table rows:
+
+- **`maxIRLength` is not a cost knob.** Ticket 04 found the IR is trimmed to actual decay (1.64 s against a 4.0 s cap), and this confirms the cap only bounds the *output buffer* — the Monte-Carlo tracing runs regardless. Dropping it to 0.5 s bought 0%. The ticket listed it as a primary lever; it is not one.
+- **`threadCount` behaved exactly as ticket 04 predicted**: ~2.4x on 4 cores, not the order of magnitude the map's "free speed knob" framing implied. Ticket 04's correction was right.
+
+### `transmission` and `diffraction` — for ticket 09, not adopted here
+
+Both are ~10% cost each, so neither is worth buying on speed. They were deliberately excluded from the cheap preset because they are the non-line-of-sight audio path, not performance tweaks.
+
+The number ticket 09 wants: **turning either off left the gradient climbable in this eval** (rho −0.99, rho_nlos −0.99 with `diffraction=0`). Read that carefully — it does **not** mean diffraction is dispensable. These walks approach a source on the same floor along a navmesh path, so the direct and transmitted paths dominate and the measurement is insensitive to the thing diffraction buys. It is evidence about *this* walk, not about a source around a corner or a floor away. ADR-0003's retirement still needs its own test.
+
+### Item 5 — the source-count sweep did NOT run
+
+`03_source_count` crashed with `KeyError('audio_sensor')`. **My bug, now found and fixed.** `AudioSensorSpec` ships `uuid = "audio_sensor"` from its C++ constructor, and assigning a different uuid does not fully take: the Python `_sensors` dict picks up the new name while the C++ sensor suite keeps the old, so `get_sensor_observations()` fails an internal cross-lookup. The sweep survived only because it happened to pass the default name; the source-count stage passed `"audio_multi"` and died. This is the same `py::dynamic_attr` family of trap ticket 04 measured on the spec — a write that is silently not the write you think it is. `attach_audio` now reads the uuid back from the spec and refuses to proceed if it is not the registered one, and the stub was extended to reproduce the trap so the fix is verified rather than assumed.
+
+**The gap does not change any decision, because arithmetic already closes it.** The sequential path is by construction N renders, so 3 sources ≤ **3 × 27.2 = ~82 ms/step ≈ 41 s/episode** — inside the 150 ms tolerable bar without any patch at all. Per Decision 1 above, the ~40-line multi-source patch only earned a rebuild in the band where 1x fits and 3x does not. **That band is empty. The patch is not budget-gated, and ticket 09 decides it purely on onset provenance.** A confirming re-run is ~9 minutes and worth doing, but nothing waits on it.
+
+### Caveat: do not cross-quote the baseline against ticket 04
+
+Ticket 04 measured `first_render_s = 0.6013` on `TEEsavR23oF`; this sweep's default-config median on the same scene is **1387 ms**, 2.3x higher — despite this probe having *removed* the RGB camera and running at a *lower* sample rate (44100 vs ticket 04's 48000), both of which should have made it faster.
+
+The likely explanation, marked as inference: ticket 04's figure is a **single sample at a random pose**, and this is a **median over a deliberate ~6 m approach**. Path-tracing cost is strongly pose-dependent, and ticket 04 flagged its own number as one timing rather than a sweep. `report.json` carries `los_steady`, `nlos_steady` and `cost_vs_distance_rho` per config, which settle it directly; they were not in the emailed tail.
+
+**None of this touches the verdict.** Every config in the sweep was timed over identical poses in the same process, so the preset-vs-defaults comparison is internally valid regardless of how the absolute baseline compares to ticket 04's one-off.
+
+### What this settles for the map
+
+- **The destination stands.** No throttled variant, no amendment.
+- **The audio budget is ~14 s per 500-step episode**, which is a rounding error next to a VLM in the loop.
+- **The clean room needs a preset, not just defaults.** The new tree's audio wrapper must ship `indirectRayCount=500, indirectRayDepth=50, threadCount=4, temporalCoherence=1` as its configured values, and the ~1.7 s default is a trap for anyone who constructs an `AudioSensorSpec` and uses it as-is.
+- **First-call cost is ~356–394 ms** (geometry upload plus the first simulate) against a 24–27 ms steady state, so per-episode there is a real one-time cost worth keeping out of any per-step budget.
 
 ## Note added by ticket 03
 

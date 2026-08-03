@@ -2,7 +2,17 @@
 
 Type: grilling
 Status: open
-Blocked by: 06 (02, 08 resolved)
+Blocked by: none (02, 06, 08 all resolved)
+
+## Note added by ticket 06 (resolved 2026-08-01)
+
+Three inputs this ticket was waiting on:
+
+1. **Cost is not a constraint on the task spec.** Live-every-step holds at **27.2 ms/step** on the `cheap_preset` (`indirectRayCount=500, indirectRayDepth=50, threadCount=4, temporalCoherence=1`) = 13.6 s per 500-step episode. Design the task for what it should test, not for a render budget.
+2. **The multi-source patch is not budget-gated.** Three sequential renders is ~82 ms/step, still inside budget. So ADR-0002's room-normal distractor and ADR-0004's background bed can each be a *real positioned source* if the task wants them, at a cost that does not threaten anything. **This ticket now decides the ~40-line patch purely on onset provenance** — per-source IRs make "which source did this energy come from" structural rather than re-inferred from a summed signal, which is exactly the failure that invalidated the `anommxv` headline. That is the whole argument now; cost has dropped out of it.
+3. **`transmission` and `diffraction` cost ~10% each**, so ADR-0003's floor constraint cannot be retired or kept on performance grounds either.
+
+One caution on that last point. Ticket 06 measured that turning `diffraction` off still left a climbable gradient (rho_nlos −0.99), but its walks approach a source **on the same floor along a navmesh path**, where direct and transmitted paths dominate. That measurement is insensitive to what diffraction actually buys. **Do not read it as "diffraction is dispensable"** — a source around a corner or a floor away is untested, and that is precisely the regime ADR-0003 is about.
 
 ## Question
 
