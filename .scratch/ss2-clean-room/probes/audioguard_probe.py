@@ -47,6 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from audio_guard import (  # noqa: E402
     HABITAT_LOG_PREFIX_RE,
     HABITAT_SIM_LOG_PIN,
+    RLR_ENGINE_RE,
     MIN_SCENE_VERTICES,
     AudioContextError,
     apply_audio_config,
@@ -351,9 +352,16 @@ def probe_negative_controls(scene: Optional[str], sample_rate: float) -> Dict[st
         samples: List[Dict[str, Any]] = []
         for name, call in provocations:
             raised = None
+            returned = "<not reached>"
             with capture_habitat_logs() as captured:
                 try:
-                    call()
+                    # Recorded because run 1 showed the engine can print an error and
+                    # still hand back success: setListenerHRTF's ESP_ERROR
+                    # (AudioSensor.cpp:181) never fired, so RLRA_SetListenerHRTF must
+                    # have returned RLRA_Success over a failed load. Whether
+                    # writeSceneMeshOBJ does the same decides whether invariant 1's
+                    # `is True` check is load-bearing or decorative.
+                    returned = repr(call())
                 except Exception as exc:  # a raising binding is a finding, not a failure
                     raised = repr(exc)
             on_stderr = [ln.strip() for ln in captured.stderr.splitlines()
@@ -363,6 +371,8 @@ def probe_negative_controls(scene: Optional[str], sample_rate: float) -> Dict[st
             samples.append({
                 "provocation": name,
                 "raised": raised,
+                "returned": returned,
+                "rlr_engine_error": bool(RLR_ENGINE_RE.search(captured.stderr)),
                 "stdout_chars": len(captured.stdout),
                 "stderr_chars": len(captured.stderr),
                 "prefix_re_matched_on_stderr": bool(on_stderr),
@@ -374,18 +384,24 @@ def probe_negative_controls(scene: Optional[str], sample_rate: float) -> Dict[st
                 "stdout_tail": captured.stdout[-600:],
                 "stderr_tail": captured.stderr[-600:],
             })
-            print("  {:<24} out {:>5}c / err {:>5}c, prefix on stderr: {}".format(
-                name, len(captured.stdout), len(captured.stderr), bool(on_stderr)), flush=True)
+            print("  {:<24} out {:>5}c / err {:>5}c, habitat-prefix {}, engine-block {}, "
+                  "returned {}".format(
+                      name, len(captured.stdout), len(captured.stderr), bool(on_stderr),
+                      samples[-1]["rlr_engine_error"], returned), flush=True)
         info["provocations"] = samples
-        # The claim under test: a real ESP_ERROR reaches fd 2 AND the prefix pattern
-        # matches it. If this is False the generic arm of invariant 2 is blind again and
-        # only FATAL_LOG_SUBSTRINGS is load-bearing.
         info["prefix_re_validated_on_stderr"] = any(
             s["prefix_re_matched_on_stderr"] for s in samples
         )
-        if not info["prefix_re_validated_on_stderr"]:
-            print("  *** no habitat-prefixed line reached fd 2 — read stderr_tail and fix "
-                  "HABITAT_LOG_PREFIX_RE; invariant 2's generic arm is blind", flush=True)
+        # Run 1's answer was NO for all three, and the reason is the finding: the closed
+        # engine writes its own un-prefixed block to fd 2 and can return Success anyway,
+        # so habitat never logs. Detecting THAT is what keeps invariant 2 from being
+        # blind, and it is the claim this asserts now.
+        info["engine_block_detected_on_stderr"] = any(
+            s["rlr_engine_error"] for s in samples
+        )
+        if not info["engine_block_detected_on_stderr"]:
+            print("  *** no RLR engine block detected on fd 2 — read stderr_tail and fix "
+                  "RLR_ENGINE_RE; invariant 2's generic arm is blind", flush=True)
 
         # (c) The canary. Turning the capture off entirely is not possible here, so
         # instead record which stream carries it — the whole reason stage 2 could have

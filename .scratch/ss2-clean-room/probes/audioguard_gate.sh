@@ -258,24 +258,29 @@ s3 = rep.get("03_negative_controls", {})
 if s3:
     print("\n  stage 3 — does it fire, and on which descriptor")
     print("    impossible floor fires     : {}".format(s3.get("floor_fires")))
-    print("    prefix RE matched on fd 2  : {}".format(s3.get("prefix_re_validated_on_stderr")))
+    print("    habitat prefix on fd 2     : {}  (run 1: False — habitat never logs it)".format(
+        s3.get("prefix_re_validated_on_stderr")))
+    print("    RLR engine block on fd 2   : {}  (this is the arm that has to hold)".format(
+        s3.get("engine_block_detected_on_stderr")))
     print("    canary on stdout / stderr  : {} / {}".format(
         s3.get("canary_on_stdout"), s3.get("canary_on_stderr")))
-    print("    canary on 2nd render       : {}  (expected False — mesh uploads once)".format(
+    print("    canary on 2nd render       : {}  (expected True — logHeader_ every render)".format(
         s3.get("canary_seen_on_second_render")))
     for p in s3.get("provocations", []):
-        print("      {:<22} out {:>5}c / err {:>5}c  prefix-on-stderr {}".format(
+        print("      {:<22} out {:>5}c / err {:>5}c  habitat {:<5} engine {:<5} returned {}".format(
             p.get("provocation"), p.get("stdout_chars"), p.get("stderr_chars"),
-            p.get("prefix_re_matched_on_stderr")))
+            str(p.get("prefix_re_matched_on_stderr")), str(p.get("rlr_engine_error")),
+            p.get("returned")))
 
 # The two claims ticket 16 pre-flighted from source. If either comes back False the
 # constant is wrong on the binary and the raw tails in report.json say how.
 if s2 and s3:
     canary_ok = bool(r.get("log_canary_seen")) and bool(s3.get("canary_on_stdout"))
-    print("\n  pre-flight claims, now measured:")
+    print("\n  the three claims, measured:")
     print("    ESP_DEBUG canary is on fd 1        : {}".format(canary_ok))
-    print("    ESP_ERROR reaches fd 2 + matches   : {}".format(
-        s3.get("prefix_re_validated_on_stderr")))
+    print("    healthy render leaves fd 2 empty   : {}".format(r.get("stderr_chars") == 0))
+    print("    a real failure IS caught on fd 2   : {}".format(
+        s3.get("engine_block_detected_on_stderr")))
 PY
 
 echo

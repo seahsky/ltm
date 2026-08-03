@@ -155,6 +155,17 @@ ERROR_LOG = (
     "custom audio listener HRTF\n"
 )
 
+# VERBATIM from the box (ticket 16, writeSceneMeshOBJ against a bad path). The closed RLR
+# engine writes this to fd 2 itself, with no habitat prefix, and — for setListenerHRTF —
+# returns RLRA_Success anyway, so habitat's own ESP_ERROR never fires. This block is the
+# entire evidence that anything went wrong.
+RLR_ENGINE_LOG = (
+    "File: arvr/libraries/audio/AudioSDK/Research/Source/Wrapper/PropagationWrapper.cpp\n"
+    "Function: ovrResult PropagationWrapper::WriteSceneMeshOBJ(const std::string &), Line 1025\n"
+    "Error writing scene OBJ mesh at location:\n"
+    "/nonexistent-dir/x.obj\n"
+)
+
 
 def make_render(log=HEALTHY_LOG, err="", ir=((0.0, 0.163), (0.02, -0.09))):
     """``log`` goes to fd 1 (ESP_DEBUG), ``err`` to fd 2 (ESP_WARNING/ESP_ERROR)."""
@@ -362,6 +373,34 @@ class TestArmAudioContext(unittest.TestCase):
             FakeAudioSensor(), make_render(log=HEALTHY_LOG + ERROR_LOG)
         )
         self.assertEqual(report.fatal_log_lines, [])
+
+    def test_rlr_engine_block_on_stderr_is_fatal(self):
+        """The case the box found: no habitat prefix, no return code, no ESP_ERROR.
+
+        Nothing in FATAL_LOG_SUBSTRINGS matches it and HABITAT_LOG_PREFIX_RE cannot,
+        so without the engine rule a broken context passes silently.
+        """
+        with self.assertRaises(AudioContextError) as ctx:
+            arm_audio_context(FakeAudioSensor(), make_render(err=RLR_ENGINE_LOG))
+        message = str(ctx.exception)
+        self.assertIn("Error writing scene OBJ mesh", message)
+        # The whole block, not just the line carrying the marker: the message and the
+        # offending path are the informative parts and neither matches on its own.
+        self.assertIn("/nonexistent-dir/x.obj", message)
+
+    def test_engine_block_sets_its_own_flag(self):
+        report = arm_audio_context(FakeAudioSensor(), make_render())
+        self.assertFalse(report.rlr_engine_error)
+        with self.assertRaises(AudioContextError):
+            arm_audio_context(FakeAudioSensor(), make_render(err=RLR_ENGINE_LOG))
+
+    def test_engine_block_on_stdout_is_not_fatal(self):
+        """Same text, benign stream. The engine reports failures on fd 2."""
+        report = arm_audio_context(
+            FakeAudioSensor(), make_render(log=HEALTHY_LOG + RLR_ENGINE_LOG)
+        )
+        self.assertEqual(report.fatal_log_lines, [])
+        self.assertFalse(report.rlr_engine_error)
 
     def test_third_party_stderr_noise_is_not_fatal(self):
         """A numpy warning on fd 2 must not fail a healthy audio context."""

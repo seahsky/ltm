@@ -73,6 +73,7 @@ __all__ = [
     "AudioContextError",
     "AudioContextReport",
     "HABITAT_LOG_PREFIX_RE",
+    "RLR_ENGINE_RE",
     "KNOWN_DYNAMIC_ATTRS",
     "MIN_SCENE_VERTICES",
     "apply_audio_config",
@@ -149,6 +150,23 @@ _SUBSYSTEM_NAMES: Tuple[str, ...] = (
 # is provenance, and the prefix is an exact test for it.
 HABITAT_LOG_PREFIX_RE = re.compile(
     r"\]:\[(?:" + "|".join(_SUBSYSTEM_NAMES) + r")\] \S+\(\d+\)::"
+)
+
+# The closed RLR engine has its own stderr channel, which does not go through Corrade and
+# therefore carries no habitat prefix. MEASURED on the box (ticket 16) by provoking it:
+#
+#   File: arvr/libraries/audio/AudioSDK/Research/Source/Wrapper/PropagationWrapper.cpp
+#   Function: ovrResult PropagationWrapper::WriteSceneMeshOBJ(const std::string &), Line 1025
+#   Error writing scene OBJ mesh at location:
+#   /nonexistent-dir/x.obj
+#
+# A block, not a line: two structural header lines then a free-text message and often the
+# offending value. Only the header is stable enough to match on, so the rule is "if the
+# engine spoke on fd 2 at all, the whole capture is its report" — the message lines are
+# the informative ones and matching them individually is not possible.
+RLR_ENGINE_RE = re.compile(
+    r"^File: arvr/libraries/audio/AudioSDK|^Function: .*\bLine \d+|ovrResult|ovra::",
+    re.M,
 )
 
 # If the capture comes back with none of these, either the fd redirect did not take or
@@ -448,6 +466,7 @@ class AudioContextReport:
     stdout_chars: int = 0
     stderr_chars: int = 0
     log_canary_seen: bool = False
+    rlr_engine_error: bool = False
     fatal_log_lines: List[str] = field(default_factory=list)
     stdout_tail: str = ""
     stderr_tail: str = ""
@@ -468,6 +487,7 @@ class AudioContextReport:
             "stdout_chars": self.stdout_chars,
             "stderr_chars": self.stderr_chars,
             "log_canary_seen": self.log_canary_seen,
+            "rlr_engine_error": self.rlr_engine_error,
             "fatal_log_lines": list(self.fatal_log_lines),
             # Kept so a surprise in the numbers above is diagnosable from the report
             # rather than from a second box trip.
@@ -528,19 +548,28 @@ def arm_audio_context(
                 report.stdout_chars, report.stderr_chars, list(canary_substrings)
             )
         )
-    # Two ways a line is fatal, and they cover different gaps. The substrings name the
+    # Three ways a line is fatal, covering different gaps. The substrings name the
     # specific failures that produce a plausible IR over a broken context, wherever they
     # are logged. The stream rule is the general one: Corrade routes ONLY Warning and
-    # Error to fd 2, so habitat-sim writing there at all during the first render is by
-    # construction a severity event — the prefix match is what keeps third-party stderr
-    # noise from counting as one.
+    # Error to fd 2, so habitat-sim writing there during the first render is by
+    # construction a severity event, and the prefix match keeps third-party stderr noise
+    # from counting as one.
+    #
+    # The third is the RLR engine, and ticket 16 measured why it has to exist separately:
+    # `RLRA_SetListenerHRTF` printed "Error reading HRTF file" to fd 2 and still returned
+    # `RLRA_Success`, so `AudioSensor.cpp:181`'s ESP_ERROR never fired and there was no
+    # habitat-formatted line to match. A failure with no return code and no habitat log
+    # entry is visible ONLY as this block.
+    report.rlr_engine_error = bool(RLR_ENGINE_RE.search(captured.stderr))
     for stream_fd, stream_text in ((1, captured.stdout), (2, captured.stderr)):
         for line in stream_text.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
             fatal = any(marker in line for marker in fatal_substrings)
-            if not fatal and stream_fd == 2 and habitat_prefix_re.search(line):
+            if not fatal and stream_fd == 2 and (
+                habitat_prefix_re.search(line) or report.rlr_engine_error
+            ):
                 fatal = True
             if fatal and stripped not in report.fatal_log_lines:
                 report.fatal_log_lines.append(stripped)
