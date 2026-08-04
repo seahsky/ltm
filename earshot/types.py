@@ -18,6 +18,15 @@ change, so the convention is *measured* by ``tests/box/`` and owned by
 ``audio/lateral.py``. A plausible ``atan2`` in this leaf would be a frame convention
 asserted by nobody, which is the class of quietly-wrong the map keeps catching.
 
+**``NoRouteError`` lives here, and it moved for a structural reason.** Ticket 21 defined
+it in ``sim/world.py``, where the follower raises it — but a caller that wants to catch
+it has to be able to *name* the type, and only ``sim/world.py`` may import the simulator.
+``task/runner.py`` catching it from there would drag ``import habitat_sim`` into the one
+module the whole Mac suite needs to be able to import, and the alternative — catching
+``RuntimeError`` and sniffing the class name — is the kind of quietly-wrong this tree
+keeps removing. It is a leaf type about routing, not about habitat, so it belongs beside
+the geometry. ``sim.world`` re-exports it, so every existing reference still resolves.
+
 Python 3.9: annotations are postponed, so nothing here evaluates a PEP 604 union.
 """
 
@@ -27,7 +36,21 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Mapping, Sequence, Tuple
 
-__all__ = ["Xyz", "Pose"]
+__all__ = ["Xyz", "Pose", "NoRouteError"]
+
+
+class NoRouteError(RuntimeError):
+    """The follower could not route to the target from where the agent stands.
+
+    Its own type because the alternative reading — ``None``, meaning *arrived* — is the
+    exact confusion that made the old tree's navigation unfalsifiable. The grid-A* it
+    replaced found no path on roughly 92% of steps and silently fell back to
+    straight-line steering, so "a waypoint was chosen" and "the agent got there" came
+    apart with nothing in the code marking where. A caller that wants to re-propose
+    catches this; a caller that does not gets a loud failure instead of a slow drift.
+
+    Raised by ``sim.world.World.follower``; caught by ``task.runner._steer``.
+    """
 
 
 @dataclass(frozen=True)

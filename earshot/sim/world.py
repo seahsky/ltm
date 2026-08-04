@@ -53,7 +53,7 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from earshot.audio.guard import assert_habitat_logging_pinned
-from earshot.types import Pose, Xyz
+from earshot.types import NoRouteError, Pose, Xyz
 
 # `import earshot` runs `pin_habitat_logging()`, so by the time any module in the
 # package is importable the variable is already set. Assert it immediately before the
@@ -87,16 +87,11 @@ __all__ = [
 ]
 
 
-class NoRouteError(RuntimeError):
-    """The follower could not route to the target from where the agent stands.
-
-    Its own type because the alternative reading — ``None``, meaning *arrived* — is the
-    exact confusion that made the old tree's navigation unfalsifiable. The grid-A* it
-    replaced found no path on roughly 92% of steps and silently fell back to
-    straight-line steering, so "a waypoint was chosen" and "the agent got there" came
-    apart with nothing in the code marking where. A caller that wants to re-propose
-    catches this; a caller that does not gets a loud failure instead of a slow drift.
-    """
+# `NoRouteError` is defined in `earshot/types.py` and re-exported here, because the
+# module that RAISES it may import habitat-sim and the module that CATCHES it may not:
+# `task/runner.py` re-proposes on a no-route and cannot name a type it would have to
+# import this file to reach. It stays in `__all__` so `sim.world.NoRouteError` — which
+# is where the follower's own docstring points — still resolves. See types.py.
 
 # The three actions the greedy follower requires to be present
 # (``habitat_sim/nav/greedy_geodesic_follower.py:22-24``). STOP is deliberately absent:
