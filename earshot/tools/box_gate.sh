@@ -7,11 +7,15 @@
 # A few minutes, read-only. Installs nothing, builds nothing, applies no patches, and
 # reuses the `ss2` env `bootstrap_ss2.sh` builds. If `ss2` is missing, run that first.
 #
-# Three suites now: the audio guard (tickets 12/16), `sim.World` + the ObjectNav loader
-# (ticket 21), and the audio layer (ticket 22 — the lateral FRAME CONVENTION, the real
-# spec, the received signal, the per-step bill). The last two scan the ObjectNav content
-# files until they find a scene whose mesh is on this box, so their setup is the slow
-# part; `SS2_SCENE_LABEL` pins one and skips the scan.
+# Five suites now: the audio guard (tickets 12/16), `sim.World` + the ObjectNav loader
+# (ticket 21), the audio layer (ticket 22 — the lateral FRAME CONVENTION, the real spec,
+# the received signal, the per-step bill), the agent's frame against the simulator
+# (ticket 23), and `env_check`'s capability half (ticket 24 — the real allocation, the
+# audio enum MEMBER, CLAP instantiated, plus the two forced-failure arms). The
+# scene-loading ones scan the ObjectNav content files until they find a scene whose mesh
+# is on this box, so their setup is the slow part; `SS2_SCENE_LABEL` pins one and skips
+# the scan. `env_check`'s costs seconds and opens no scene, which is why the bootstrap
+# can afford to run the same assertion as its stage-8 verdict.
 #
 # The single most important line in the log is ticket 22's frame verdict. A red there
 # does not mean "fix the test": it means live rendering behaves as the grid did, and

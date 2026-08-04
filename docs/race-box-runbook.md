@@ -188,6 +188,23 @@ The steps, in order:
 8. **CLAP stack.** `pip install "transformers>=4.40,<5" scipy soundfile -c <np-constraint>`.
 9. **Re-probe the audio build after every layer.** Layering is the actual question, so a probe that only runs at the end cannot tell you which layer broke it.
 
+**The verdict is `env_check --strict`, and it is the same assertion the runtime makes** (ticket 24).
+Stage 8 runs `python -m earshot.env_check --strict`; `task/`'s entry point calls `assert_env()`.
+One implementation, two callers — an assertion that lived only in the gate could not run at episode time, which is exactly when a drifted env produces results instead of an error.
+
+Run it standalone on the box any time, in seconds and with nothing to install:
+
+```bash
+conda activate ss2
+cd <repo> && PYTHONPATH=. python -m earshot.env_check --strict          # + --clap for CLAP
+PYTHONPATH=. python -m earshot.env_check --provenance \
+    --constraints earshot/tools/ss2-constraints.txt --freeze <a pip freeze>
+```
+
+Every probe is **capability-shaped**: it allocates on the GPU and reads the result back, resolves the audio enum **member**, instantiates CLAP and reads a finite logit.
+A version table would have printed green through the whole of ticket 13, and `--strict` treats a probe that *could not run* exactly as it treats one that failed.
+The ticket-04 probe is kept as stage 9 for the one thing `env_check` does not do: open a scene and render.
+
 **habitat-lab is deliberately not installed.**
 Ticket 04 measured it rather than requiring it, and it is still not importable (`No module named 'habitat_sim.robots'`).
 The clean room drives `habitat_sim` directly, so the new tree owns three small pieces habitat-lab used to supply: ObjectNav `.json.gz` episode loading, `sim.make_greedy_follower()` steering, and the SPL/SoftSPL arithmetic.

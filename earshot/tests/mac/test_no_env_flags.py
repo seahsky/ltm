@@ -69,6 +69,32 @@ class TestNoEnvFlags(unittest.TestCase):
             ),
         )
 
+    def test_env_checks_access_is_recording_the_environment_it_ran_in(self):
+        """The other exemption, checked the same way — and checked at all.
+
+        Ticket 24 added this one's subject. An exemption nobody uses is an **inert
+        pin**: it reports success while enforcing nothing, exactly like ticket 17's
+        constraint on a package that is never installed. So the reaches are named
+        rather than merely permitted.
+
+        ``describe_environment`` is the forensic half of ticket 17's "record the
+        outputs" — which interpreter and which conda prefix answered, because ticket
+        13's diagnosis cost a whole ticket partly because nothing on disk said. The
+        allocation probe reads ``CUDA_VISIBLE_DEVICES`` so a failure message can say
+        *which* GPU was not visible.
+        """
+        path = _tree.PACKAGE_ROOT / "env_check.py"
+        accesses = sorted(set(_tree.environ_accesses_by_function(_tree.parse(path))))
+        self.assertEqual(
+            accesses,
+            [
+                ("describe_environment", "os.environ"),
+                ("probe_torch_cuda_allocation", "os.environ"),
+            ],
+            "env_check's exemption is for recording and reporting the resolved "
+            "environment, not for configuring behaviour; found {}".format(accesses),
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

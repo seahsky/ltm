@@ -55,10 +55,30 @@ NON_AGENT_ROOTS: Dict[str, str] = {
     "tests": "the verification surface itself, mac and box",
 }
 
-# The one module permitted to import habitat_sim (ADR-0013). Everything else reaches
-# the simulator through an injected callable, which is what keeps the Mac surface most
-# of the tree instead of a corner of it.
+# The module that owns the simulator's lifecycle (ADR-0013). Everything else reaches the
+# simulator through an injected callable, which is what keeps the Mac surface most of the
+# tree instead of a corner of it.
 SIMULATOR_MODULE = "sim/world.py"
+
+# Where `import habitat_sim` is permitted. Two entries, and the second is a tension
+# inside ADR-0013 that its own prose already resolved: the ADR states the one-importer
+# rule, and then — dissolving ticket 17's ordering contradiction — states that "`env_check`
+# is free to import habitat-sim for its enum probe". Ticket 24 hit both halves at once.
+#
+# The exemption is narrow and cannot be met any other way. The audio enum MEMBER probe's
+# subject IS habitat-sim's build: `AudioSensorSpec` is bound even in non-audio builds
+# (habitat-sim #2340), so only resolving the member distinguishes them. It cannot arrive
+# injected, because `env_check` runs BEFORE a `World` exists — on an environment that may
+# not be able to build one, which is the case it exists to catch — and `env_check` sits at
+# layer `()` so it cannot import `sim` to ask.
+#
+# The alternative was `importlib.import_module("habitat_sim")`, which the AST walker does
+# not see. Rejected outright: dodging a structural test with a dynamic import is the
+# "written down and quietly stopped being true" pattern these invariants exist to stop.
+SIMULATOR_IMPORT_ALLOWED: Dict[str, str] = {
+    SIMULATOR_MODULE: "the simulator lifecycle: Simulator(cfg), observe, navmesh, follower",
+    "env_check.py": "the audio enum MEMBER probe — a capability that has no injectable form",
+}
 
 # `os.environ` is allowed in exactly two agent modules. ADR-0008 removed the flag
 # surface — the old tree read `LTM_REALIZABLE_LOCALIZATION` at the runner — and both
@@ -299,16 +319,12 @@ def attribute_names(tree: ast.Module) -> List[Tuple[int, str]]:
     ]
 
 
-def environ_accesses_by_function(tree: ast.Module) -> List[Tuple[str, str]]:
-    """Every environment reach paired with the function that contains it.
+def enclosing_function_by_lineno(tree: ast.Module) -> Dict[int, str]:
+    """``{lineno: enclosing function name}``. Lines outside any ``def`` are absent.
 
-    Stronger than counting accesses, which is what this replaced. A count says the
-    exemption did not grow; naming the enclosing function says it is still spent on
-    what earned it — ``guard.py`` legitimately both *sets* the pin and *asserts* it, and
-    a bare count could not tell that second read from a new configuration flag.
-
-    ``"<module>"`` for a top-level access, since a module-level environment read is a
-    different and worse thing than one inside a named function.
+    Shared by the two exemption checks, which ask the same question of different
+    subjects: is this reach still spent on what earned it? A count says only that the
+    exemption did not grow.
     """
     owner: Dict[int, str] = {}
     for node in ast.walk(tree):
@@ -320,9 +336,49 @@ def environ_accesses_by_function(tree: ast.Module) -> List[Tuple[str, str]]:
                 # the inner one refine it.
                 if lineno is not None:
                     owner[lineno] = node.name
+    return owner
+
+
+def environ_accesses_by_function(tree: ast.Module) -> List[Tuple[str, str]]:
+    """Every environment reach paired with the function that contains it.
+
+    Stronger than counting accesses, which is what this replaced. A count says the
+    exemption did not grow; naming the enclosing function says it is still spent on
+    what earned it — ``guard.py`` legitimately both *sets* the pin and *asserts* it, and
+    a bare count could not tell that second read from a new configuration flag.
+
+    ``"<module>"`` for a top-level access, since a module-level environment read is a
+    different and worse thing than one inside a named function.
+    """
+    owner = enclosing_function_by_lineno(tree)
     return [
         (owner.get(lineno, "<module>"), what) for lineno, what in environ_accesses(tree)
     ]
+
+
+def module_imports_by_function(tree: ast.Module, name: str) -> List[Tuple[str, int]]:
+    """Every ``import <name>`` reach paired with the function that contains it.
+
+    ``"<module>"`` for a top-level import. The distinction is load-bearing for
+    ``env_check.py``: a *top-level* ``import habitat_sim`` there would run on every
+    import of the module, including from a Mac, which is precisely what the exemption
+    does not cover.
+    """
+    owner = enclosing_function_by_lineno(tree)
+    hits: List[Tuple[str, int]] = []
+    for node in ast.walk(tree):
+        matched = False
+        if isinstance(node, ast.Import):
+            matched = any(a.name == name or a.name.startswith(name + ".") for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            matched = bool(
+                not node.level
+                and node.module
+                and (node.module == name or node.module.startswith(name + "."))
+            )
+        if matched:
+            hits.append((owner.get(node.lineno, "<module>"), node.lineno))
+    return hits
 
 
 def environ_accesses(tree: ast.Module) -> List[Tuple[int, str]]:

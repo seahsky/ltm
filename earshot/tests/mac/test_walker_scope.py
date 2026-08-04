@@ -52,6 +52,14 @@ class TestWalkerScope(unittest.TestCase):
             # and `agent/controller.py` is the module that must not. A walker that
             # stopped reaching it would make that invariant pass by scanning nothing.
             "agent/controller.py",
+            # Ticket 24, and both are subjects of an invariant rather than incidental
+            # files. `report/agent.py` is what `test_report_boundary.py` scans for a
+            # ground-truth-supplying import, and `env_check.py` holds BOTH standing
+            # exemptions — the `os.environ` one and the `habitat_sim` one. A walker
+            # that stopped reaching either would make those checks pass by finding
+            # nothing to check.
+            "report/agent.py",
+            "env_check.py",
         ):
             self.assertIn(expected, found)
 
