@@ -10,9 +10,15 @@ Linux-x64 binary and this laptop cannot even create a GL context.
 **Audio-blind.** ``World`` is handed a list of sensor specs it does not interpret and
 returns whatever ``get_sensor_observations()`` gives back. It does not know an
 ``AudioSensorSpec`` from a camera, which is what stops ``import habitat_sim`` spreading
-into ``audio/`` for the sensor handle. ``audio/spec.py`` builds the audio spec;
-``camera_sensor_specs()`` below builds the cameras, because only this file can
-construct a habitat-sim type at all.
+into ``audio/`` for the sensor handle.
+
+Constructing the specs is the one thing that cannot move out, because only this file
+may name a habitat-sim type: ``camera_sensor_specs()`` builds the cameras, and
+``audio_spec_parts()`` hands out a **bare** ``AudioSensorSpec`` plus the Binaural enum
+member for ``audio/spec.py`` to configure. The blindness survives that because neither
+this class nor that function reads or writes an audio field — see
+``audio_spec_parts``'s own docstring for why ADR-0013's "the only ``AudioSensorSpec()``
+call site" had to land as a split between construction here and configuration there.
 
 **Every spec goes in at construction, and that is a constraint rather than a
 preference.** ``Configuration._sanitize_config`` (``habitat_sim/simulator.py:92-112``)
@@ -61,10 +67,17 @@ import quaternion  # noqa: E402  MUST precede habitat_sim (habitat-sim issue #18
 
 import habitat_sim  # noqa: E402
 
+# The audio enum lives in the `sensor` submodule, imported by name rather than reached
+# through the package: `box_gate.sh` imports it explicitly, and an attribute that
+# resolves only because some other module happened to import it first is the kind of
+# accident this tree does not rely on.
+import habitat_sim.sensor  # noqa: E402
+
 __all__ = [
     "World",
     "NoRouteError",
     "camera_sensor_specs",
+    "audio_spec_parts",
     "yaw_from_quaternion",
     "OBJECTNAV_HM3D",
     "AgentSpec",
@@ -163,6 +176,36 @@ def camera_sensor_specs(
         spec.sensor_subtype = habitat_sim.SensorSubType.PINHOLE
         specs.append(spec)
     return specs
+
+
+def audio_spec_parts() -> Tuple[Any, Any]:
+    """A **bare, unconfigured** ``AudioSensorSpec`` and the Binaural layout enum member.
+
+    The two habitat-sim names ``audio/spec.py`` needs and is not allowed to say. This
+    function sets nothing: every field that reaches an audio spec goes through
+    ``audio.spec.audio_sensor_spec``, which routes it via ``apply_audio_config`` and
+    ``assert_no_swallowed_keys``.
+
+    **This is a correction to ADR-0013's wording, in the direction the ADR intended.**
+    It calls ``audio/spec.py`` "THE only ``AudioSensorSpec()`` call site", but under the
+    ADR's own one-importer rule that module cannot construct one — only this file can
+    name a habitat-sim type at all. The constructor therefore lives here and the
+    *configuration* lives there, which is what the requirement was actually protecting:
+    ``AudioSensorSpec`` is bound ``py::dynamic_attr``, so an unknown key is silently
+    attached and never read, and the validator has to sit on the one path that writes
+    fields. A bare constructor call writes none.
+
+    The enum **member**, not the class, is what proves this is an audio build:
+    ``AudioSensorSpec`` is bound even in non-audio builds (habitat-sim #2340), so
+    ``hasattr(habitat_sim, "AudioSensorSpec")`` is not evidence. Both the box gate and
+    ``env_check`` probe ``RLRAudioPropagationChannelLayoutType.Binaural`` for that
+    reason, and returning the member here means the caller holds the proof rather than
+    re-deriving it.
+    """
+    return (
+        habitat_sim.AudioSensorSpec(),
+        habitat_sim.sensor.RLRAudioPropagationChannelLayoutType.Binaural,
+    )
 
 
 def _vec(point: Xyz) -> Any:

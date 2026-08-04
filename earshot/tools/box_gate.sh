@@ -7,10 +7,15 @@
 # A few minutes, read-only. Installs nothing, builds nothing, applies no patches, and
 # reuses the `ss2` env `bootstrap_ss2.sh` builds. If `ss2` is missing, run that first.
 #
-# Two suites now: the audio guard (tickets 12/16) and `sim.World` + the ObjectNav
-# loader (ticket 21). The second scans the ObjectNav content files until it finds a
-# scene whose mesh is on this box, so its setup is the slow part; `SS2_SCENE_LABEL`
-# pins one and skips the scan.
+# Three suites now: the audio guard (tickets 12/16), `sim.World` + the ObjectNav loader
+# (ticket 21), and the audio layer (ticket 22 — the lateral FRAME CONVENTION, the real
+# spec, the received signal, the per-step bill). The last two scan the ObjectNav content
+# files until they find a scene whose mesh is on this box, so their setup is the slow
+# part; `SS2_SCENE_LABEL` pins one and skips the scan.
+#
+# The single most important line in the log is ticket 22's frame verdict. A red there
+# does not mean "fix the test": it means live rendering behaves as the grid did, and
+# ticket 23's controller needs the compensation term back.
 #
 # CARRIED, NOT REWRITTEN, from .scratch/ss2-clean-room/probes/audioguard_gate.sh. Only
 # the driver concerns live here — ADR-0014 draws the split there, and everything below

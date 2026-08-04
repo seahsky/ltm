@@ -70,6 +70,8 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 
 - [20 — Scaffold `earshot/` and its three structural invariants](issues/20-scaffold-the-root.md) — **The root exists and asserts its own shape: 84 Mac tests green under a fresh `earshot-mac` 3.9.25 env, `ruff check earshot/` clean over 16 files, and CI green in 31 s on `ubuntu-latest`.** The suite **refuses to run** on this Mac's 3.14 (exit 1, every module errors), `import earshot` pins `HABITAT_SIM_LOG`, and `import earshot.reference.memory.ltm` raises the intended `ImportError` rather than a `ModuleNotFoundError` about faiss. **The one fact it was told to verify came back GO: `actions/setup-python` still provides 3.9** (32 entries to 3.9.25, linux-x64; CI resolved 3.9.25), so ADR-0014's single disclosed weakening of the interpreter refusal did not happen. **Four corrections, all found by building.** (a) The walker's excluded set is **`{reference, tools, tests}`, not `{reference}`** — ADR-0014's version would have been **red on day one**, because `tests/box/` *must* import `habitat_sim` (it drives the real artefact, ADR-0014's own definition) and `test_audio_guard.py` *must* touch `os.environ` (it tests the pin); there are now **two pins**, each entry carrying its reason, plus a test that every excluded root exists — an exclusion for an absent directory is an inert pin. (b) The interpreter refusal **cannot live in `tests/mac/__init__.py`**: `unittest discover` sets `top_level_dir` to the start dir and imports each `test_*.py` as a top-level module, so the package init never runs (read out of `TestLoader._find_tests`); it lives in `_interpreter.py`, imported by every module, with a hygiene test closing the forget-to-import gap. (c) The constraints file was being **generated, not read** (`echo "numpy<1.24" > …` into `$BUILD_ROOT`) — the pin lived on the box and nowhere in the repo, so ticket 17's "content, not plumbing" needed one plumbing change after all. (d) `reference/memory/__init__.py`'s message is **unreachable** on the normal path (the parent always raises first) — kept as defence in depth, not as a second message. Also **rescued a test the reset would have dropped silently**: `compute_benchmark_spl`'s 8 cases lived inside `embodied_memory/`, which phase 3 deletes wholesale, and no carry list named them. `guarded_observe` shares `_scan_logs` with the arming path and a test asserts the two **agree on what is fatal**. Deliberate: **no bearing helper in `types.py`** (ticket 09 found the lateral sign inverts under live rendering — that convention is the box's to pin), and the bootstrap does **not** yet call `env_check` (ticket 24 owns it; a guarded call would be the version-blind-skip pattern). Fixed `docs/race-box-runbook.md` §3, which went false the moment `ss2-constraints.txt` landed.
 
+- [22 — The `audio/` module](issues/22-the-audio-module.md) — **Ten modules, 121 new Mac tests (114 → 235 green), ruff clean, and a box file whose headline is the frame convention.** Five corrections, one of them the ticket's own premise: **(a) `audio/spec.py` cannot CONSTRUCT an `AudioSensorSpec`** — it is a habitat-sim type and ADR-0013's one-importer rule reserves those for `sim/world.py`, so construction (`audio_spec_parts()`, bare) and configuration (here, the only path) split; the requirement's real point survives intact, since `py::dynamic_attr` swallows keys on the path that *writes* fields and a bare constructor writes none. **(b) The spec is written about a signal and the sensor returns an IR** — the bed is mixed after rendering, so the heard quantity is `conv(IR, clip) + bed`; calibrating on IR energy and thresholding on a received signal is a silent unit error whose symptom is a threshold that never fires. That also houses §7's rewritten `process_audio_step` (`clips.render_through_ir` + `bed.heard_signal`), which ADR-0013's tree named no module for, and `heard_signal` takes **no pose** — the absence is the whole difference from the grid. **(c) §3.1's `onset_step >= t_anom` was going to be dead code** (unrepresentable in the per-step fold), so it moved to `assert_provenance` on the *recorded* state, plus ticket 16's discipline: zero pre-onset readings means invariant 1 is **unverified, not satisfied**. **(d) The silent synthetic-clip fallback does not carry** — it is how a run could calibrate CLAP on real audio and classify a noise burst; `load_anomaly_clip` raises. **(e) A pybind read re-wraps enums**, so an identity check on `channelLayout.type` would have rejected a spec that took the value correctly. Also: §3.3's oracle boundary is now a **structural test armed before its subject exists** (ticket 21's shape) — nothing outside `audio/`/`report/`/`task/` may name `sourceIsVisible`, verified by planting a violation. `sample_rate` is the branch's 44100, not 48000, so **ESC-50 needs no resample**. The box owns what a fake cannot: the decisive turn-around pair for the frame, and its failure message says a red is the **finding** (ticket 23 needs the compensation term back), not a test to fix.
+
 ## Not yet specified
 
 <!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
@@ -81,27 +83,31 @@ Ticket 18 named them, and that patch graduated on 2026-08-04 into tickets **20�
 
 **Every decision on this map is now made.** Ticket 19 was the last open question; it resolved the same day and grew ticket 20 rather than surfacing anything new.
 Ticket 20 built the root on 2026-08-04 and surfaced nothing new either — four corrections, all inside tickets that already exist.
+Ticket 22 built `audio/` the same day and surfaced nothing new either: five corrections, every one inside a ticket or an ADR that already exists.
 
-The frontier is now **21, 22, 23 and 24 in parallel**, all unblocked by 20 and none blocking each other.
+The frontier is now **23 and 24 in parallel**; 21 and 22 are done.
 
 ```
 20 scaffold  ✓ resolved 2026-08-04
    │
-   ├─► 21 sim + episode loader ─┐
-   ├─► 22 audio/                │   ← the frontier: four independent tickets
-   ├─► 23 agent/                ├─► 25 task wiring
-   └─► 24 report/ + env_check ──┘         │
-                                          ▼
-                              26 smoke green on the box
-                                          │
-                                          ▼
-                        27 hermeticity + the deletion commit
+   ├─► 21 sim + episode loader ✓ ─┐
+   ├─► 22 audio/               ✓  │   ← the frontier: 23 and 24
+   ├─► 23 agent/                  ├─► 25 task wiring
+   └─► 24 report/ + env_check ────┘         │
+                                            ▼
+                                26 smoke green on the box
+                                            │
+                                            ▼
+                          27 hermeticity + the deletion commit
 ```
 
-Two things ticket 20 left for the tickets that own them, so they are not lost between sessions:
+Three things earlier tickets left for the tickets that own them, so they are not lost between sessions:
 
-- **Ticket 21 tightens the simulator-import assertion.** `test_layering.py` asserts the set of `habitat_sim` importers is a *subset* of `{sim/world.py}`, because that file does not exist yet. It fires the moment a second file reaches for the simulator, which is the failure it exists to catch — but it becomes the equality ADR-0013 states only once 21 lands.
 - **Ticket 24 wires the assertion into the bootstrap.** `bootstrap_ss2.sh` does not yet call `python -m earshot.env_check --strict`; it keeps ticket 04's probe as its verdict meanwhile. Adding a guarded call before the module existed would have been the version-blind-skip pattern this map keeps killing.
+- **Ticket 23 must not re-apply the grid-era lateral compensation**, and must not read `sourceIsVisible()`. The first is ticket 09's finding and is pinned by `tests/box/test_audio_box.py`; the second is now a structural Mac test (`test_analyst_only.py`) that is armed and currently scanning nothing, because `agent/` does not exist.
+- **Ticket 25 owns the calibration's other half.** `calibration.band_poses` returns geodesic *distances*; turning one into a navigable pose needs the navmesh, which lives behind `sim/` and reaches only the runner.
+
+Ticket 21's own hand-off is discharged: `test_layering.py`'s subset assertion became the equality ADR-0013 states once `sim/world.py` landed.
 
 ## Out of scope
 
