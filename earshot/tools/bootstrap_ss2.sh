@@ -1,40 +1,47 @@
 #!/bin/bash
-# .scratch/ss2-clean-room/probes/oneenv_gate.sh — ticket 04's box gate.
+# earshot/tools/bootstrap_ss2.sh — the clean room's rebuild path for the `ss2` env.
 #
-# Question: can ONE conda env on RACE hold an audio-capable habitat-sim build
-# AND everything else the rebuilt agent imports, or does "purely SoundSpaces 2.0"
-# force something out of process?
+# MOVED from .scratch/ss2-clean-room/probes/oneenv_gate.sh (ticket 17). Two copies of a
+# build recipe is a drift trap, and a probe inside a wayfinder ticket directory is not
+# where an operator looks — `.scratch` reads as disposable even though it is tracked.
+# The footgun hardening below is CARRIED, not rewritten: the SIGPIPE-safe conda
+# directory check, the poisoned half-configure wipe, the cmake/CPATH shim, and the
+# explicit submodule init all cost a box trip each to learn.
 #
-#   nrun bash .scratch/ss2-clean-room/probes/oneenv_gate.sh
+#   nrun bash earshot/tools/bootstrap_ss2.sh
 #
 # GREEN = one process, all imports, GPU visible, audio sensor renders in a scene.
-# RED   = the printed blocker list IS the deliverable; ticket 07 gets re-scoped
-#         around whatever cannot coexist.
+# RED   = the printed blocker list IS the deliverable.
 #
-# Deliberately does NOT reuse the `soundspaces-spike` env — ticket 04 calls it a
-# spike artifact with unknown drift. Builds clean so the result is trustworthy.
-# Never touches `ltm-embodied` either.
+# Deliberately does NOT reuse the `soundspaces-spike` env — a spike artifact with
+# unknown drift. Builds clean so the result is trustworthy. Never touches
+# `ltm-embodied` either; ticket 27 retires it.
 #
-# --- what this adds over race-soundspaces-spike.sh -------------------------
-#  1. ONE env: torch + transformers(CLAP) + scipy layer onto the audio build,
-#     and the audio probe re-runs after each layer. Layering is the actual
-#     question; the spike never tested it.
-#  2. Patch-capable from the start (ticket 02's ~40-line multi-source patch is
-#     likely), with applied patches recorded so box state is reproducible.
-#  3. Records habitat-sim HEAD + rlr-audio-propagation submodule SHAs, which is
-#     what makes tickets 01/11's parameter sheet falsifiable.
-#  4. Dumps every AudioSensorSpec / acousticsConfig field, so the defaults column
-#     stops being hearsay (ticket 06 blocks on this).
-#  5. habitat-lab is installed LAST, after the core verdict is already written to
-#     disk, because it is the layer most likely to rot the numpy pin. Two reports
-#     get produced and compared.
+# --- what ticket 17 changed on the way in ----------------------------------
+#  1. THE PIN IS A FILE, not a one-line numpy constraint. `earshot/tools/
+#     ss2-constraints.txt` carries nine exact versions and is passed as `-c` to every
+#     pip install here — the numpy layer, habitat-sim's own requirements.txt, torch,
+#     and the CLAP stack. That plumbing already existed; only the content widened.
+#  2. habitat-sim is pinned to a SHA, and THE BUILD-SKIP CHECKS IT. The old skip fired
+#     whenever an audio-capable habitat_sim merely imported, never asking which tree it
+#     was built from — the exact version-blind bug ticket 13 killed in the torch layer,
+#     still alive here, and it made a SHA pin inert on every re-run against an existing
+#     env.
+#  3. A BOOTSTRAP-TIME PROVENANCE CHECK. A constraint on a package that is never
+#     installed is a silent no-op, so a misspelled name is an inert pin that reports
+#     success. Only a resolved-versus-constraints comparison can see that; a capability
+#     probe cannot. (Its counterpart, the runtime capability assertion, is
+#     `earshot/env_check.py` — a different job, and ticket 24's.)
+#  4. The habitat-lab arm and the two-report comparison are GONE. habitat-lab is
+#     deliberately not installed: the runner drives habitat_sim directly, so that arm
+#     was feasibility-experiment shape, not production shape.
 #
-# Idempotent: re-runs reuse the env and clone, and skip the build when an
-# audio-capable habitat_sim already imports.
+# Idempotent: re-runs reuse the env and clone, and skip the build when an audio-capable
+# habitat_sim already imports AND is built from the pinned SHA.
 
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT" || { echo "FATAL: cannot cd to repo root"; exit 1; }
 
 ENV_NAME="${SS2_ENV_NAME:-ss2}"
@@ -42,13 +49,16 @@ PY_VER="3.9"                       # SoundSpaces INSTALLATION.md pin
 CMAKE_VER="3.14.0"                 # ditto (also dodges CMake 4.x refusing the 2022 dep tree)
 BUILD_ROOT="${SS2_BUILD_ROOT:-${HOME}/ss2-build}"
 SIM_DIR="${BUILD_ROOT}/habitat-sim"
-LAB_DIR="${BUILD_ROOT}/habitat-lab"
+# The audio work never left this branch: its HEAD IS the SHA below, last committed
+# 2022-11-04 and dormant since. So the source half of the pin costs one line, and the
+# genuinely unpinned surface was always the PyPI half in ss2-constraints.txt.
 SIM_BRANCH="RLRAudioPropagationUpdate"
-LAB_TAG="v0.2.2"
+SIM_SHA="${SS2_SIM_SHA:-4f61e321}"
 PROBE_DIR="$REPO_ROOT/.scratch/ss2-clean-room/probes"
 PATCH_DIR="$PROBE_DIR/patches"
-OUT_DIR="${SS2_OUT_DIR:-runs/ss2-oneenv-gate}"
-NP_CONSTRAINT="$BUILD_ROOT/np-constraint.txt"
+OUT_DIR="${SS2_OUT_DIR:-runs/ss2-bootstrap}"
+CONSTRAINTS="$REPO_ROOT/earshot/tools/ss2-constraints.txt"
+[ -f "$CONSTRAINTS" ] || { echo "FATAL: $CONSTRAINTS missing — the pin IS the recipe"; exit 1; }
 
 # V100 is compute 7.0 / CUDA 11.x era. Overridable because ticket 05's inventory
 # may find a driver that wants a different wheel.
@@ -118,12 +128,12 @@ mkdir -p "$OUT_DIR" "$BUILD_ROOT"
 # --- 1. self-update -------------------------------------------------------
 # Gotcha: this script git-pulls itself, so a change to THIS file only takes
 # effect on the second invocation.
-banner "[1/9] git pull --ff-only"
+banner "[1/8] git pull --ff-only"
 git pull --ff-only || echo "WARN: git pull failed — running the checked-out copy"
 echo "  running commit: $(git rev-parse --short HEAD)"
 
 # --- 2. conda env (FRESH; never ltm-embodied, never soundspaces-spike) -----
-banner "[2/9] conda env: $ENV_NAME (python=$PY_VER cmake=$CMAKE_VER, numpy<1.24, gcc-10)"
+banner "[2/8] conda env: $ENV_NAME (python=$PY_VER cmake=$CMAKE_VER, numpy<1.24, gcc-10)"
 MINICONDA="${HOME}/miniconda3"
 [ -x "$MINICONDA/bin/conda" ] || { echo "FATAL: $MINICONDA/bin/conda missing"; exit 1; }
 case "$ENV_NAME" in
@@ -148,8 +158,11 @@ set -u
 
 # numpy 2.x breaks the 2022-era tree. Pin BEFORE anything else resolves numpy,
 # and apply the constraint file to EVERY later pip install.
-echo "numpy<1.24" > "$NP_CONSTRAINT"
-pip install -q "numpy>=1.16.1,<1.24" numpy-quaternion -c "$NP_CONSTRAINT" \
+#
+# The constraint file is now git-tracked and READ, never written. It used to be
+# generated here as a single `numpy<1.24` line into $BUILD_ROOT — which meant the pin
+# lived on the box and nowhere in the repo.
+pip install -q "numpy>=1.16.1,<1.24" numpy-quaternion -c "$CONSTRAINTS" \
   || { echo "FATAL: numpy/numpy-quaternion pin install failed"; exit 1; }
 
 # The only attested toolchain for this 2022-era tree is gcc 7-10.
@@ -168,7 +181,7 @@ else
 fi
 
 # --- 3. system preflight (fail in seconds, not 40 min into the build) ------
-banner "[3/9] system preflight: GLIBC >= 2.29 + GL/EGL dev libs"
+banner "[3/8] system preflight: GLIBC >= 2.29 + GL/EGL dev libs"
 # Pipe-safe: `ldd | head -1 | grep` lets head/grep exit early -> SIGPIPEs ldd ->
 # under pipefail the pipeline "fails" despite a good match. getconf + awk consume
 # their whole input, so nothing SIGPIPEs.
@@ -210,16 +223,24 @@ echo "  nproc: $(nproc)  (threadCount is a free speed knob — ticket 06)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
   | sed 's/^/  gpu: /' || echo "  gpu: nvidia-smi unavailable"
 
-# --- 4. habitat-sim from the audio branch, patch-capable -------------------
-banner "[4/9] habitat-sim @ $SIM_BRANCH with --audio"
+# --- 4. habitat-sim at the pinned SHA, patch-capable -----------------------
+banner "[4/8] habitat-sim @ $SIM_BRANCH:$SIM_SHA with --audio"
 APPLIED_PATCHES=""
-if quick_audio_probe >/dev/null 2>&1; then
-  echo "  audio-capable habitat_sim already importable — skipping build"
+# TICKET 17'S FIX. This skip used to be `quick_audio_probe` alone: it fired whenever an
+# audio-capable habitat_sim merely imported, and never asked which tree it was built
+# from. Against an existing env that made the SHA pin INERT on every re-run — the same
+# version-blind class ticket 13 killed in the torch layer below. Both halves must hold.
+_sim_head="$( [ -d "$SIM_DIR/.git" ] && git -C "$SIM_DIR" rev-parse HEAD 2>/dev/null || echo "" )"
+if quick_audio_probe >/dev/null 2>&1 && [ "${_sim_head:0:${#SIM_SHA}}" = "$SIM_SHA" ]; then
+  echo "  audio-capable habitat_sim already built from $SIM_SHA — skipping build"
   if [ -d "$SIM_DIR/.git" ] && [ -f "$BUILD_ROOT/applied-patches.txt" ]; then
     APPLIED_PATCHES="$(cat "$BUILD_ROOT/applied-patches.txt")"
     echo "  previously applied patches: ${APPLIED_PATCHES:-none}"
   fi
 else
+  if [ -n "$_sim_head" ] && [ "${_sim_head:0:${#SIM_SHA}}" != "$SIM_SHA" ]; then
+    echo "  habitat-sim at ${_sim_head:0:8}, pinned to $SIM_SHA — rebuilding"
+  fi
   if [ ! -d "$SIM_DIR/.git" ]; then
     # MUST be a git clone, not a tarball: setup.py only auto-inits submodules
     # inside a git repo, and the closed-source audio engine IS a submodule.
@@ -227,12 +248,18 @@ else
       || { echo "FATAL: habitat-sim clone failed"; exit 1; }
   fi
   cd "$SIM_DIR" || exit 1
+  # FETCH THE BRANCH, RESET TO THE SHA. Not `git fetch origin <sha>`, which needs the
+  # server to allow SHA-in-want. This form also fails LOUDLY if a force-push ever makes
+  # the SHA unreachable from the branch — which is exactly the signal the pin exists to
+  # produce, and the reason the reset is no longer `|| true`.
   git fetch origin "$SIM_BRANCH" \
     || { echo "FATAL: branch $SIM_BRANCH not fetchable (repo archived — mirror needed?)"; exit 1; }
-  # Reset hard so a re-run after a failed patch starts from a known tree.
   git checkout "$SIM_BRANCH" || { echo "FATAL: checkout $SIM_BRANCH failed"; exit 1; }
-  git reset --hard "origin/$SIM_BRANCH" >/dev/null 2>&1 || true
-  echo "  habitat-sim HEAD: $(git rev-parse --short HEAD)"
+  git reset --hard "$SIM_SHA" >/dev/null 2>&1 \
+    || { echo "FATAL: $SIM_SHA unreachable from origin/$SIM_BRANCH — the branch moved or"
+         echo "  was force-pushed. The pin is doing its job; decide on the new tree before"
+         echo "  overriding with SS2_SIM_SHA."; exit 1; }
+  echo "  habitat-sim HEAD: $(git rev-parse --short HEAD) (pinned $SIM_SHA)"
   # Explicit submodule init so a transient network failure surfaces HERE, not as
   # 'Could NOT find Corrade' mid-configure.
   git submodule update --init --recursive \
@@ -261,7 +288,7 @@ else
   fi
   echo "${APPLIED_PATCHES# }" > "$BUILD_ROOT/applied-patches.txt"
 
-  pip install -q -r requirements.txt -c "$NP_CONSTRAINT" \
+  pip install -q -r requirements.txt -c "$CONSTRAINTS" \
     || { echo "FATAL: habitat-sim requirements failed"; exit 1; }
 
   # A failed configure leaves CMakeCache.txt WITHOUT compile_commands.json;
@@ -306,7 +333,7 @@ fi
 layer_check "habitat-sim" || exit 1
 
 # --- 5. torch on top, in the SAME env --------------------------------------
-banner "[5/9] torch ($TORCH_SPEC from $TORCH_INDEX)"
+banner "[5/8] torch ($TORCH_SPEC from $TORCH_INDEX)"
 # Ticket 13: this skip used to be `python -c "import torch"`, i.e. version-blind.
 # The box's ss2 env ALREADY has torch 2.0.1 installed, so a bare importability
 # check would have skipped the layer and made the pin bump a silent no-op — the
@@ -327,7 +354,7 @@ then
   echo "  torch already satisfies the transformers backend gate — skipping"
 else
   echo "  installing $TORCH_SPEC (replacing any older torch in this env)"
-  pip install -q "$TORCH_SPEC" --index-url "$TORCH_INDEX" -c "$NP_CONSTRAINT" \
+  pip install -q "$TORCH_SPEC" --index-url "$TORCH_INDEX" -c "$CONSTRAINTS" \
     || { echo "FATAL: torch install failed (wrong CUDA wheel for this driver? override SS2_TORCH_SPEC / SS2_TORCH_INDEX)"; exit 1; }
 fi
 layer_check "torch" || exit 1
@@ -335,8 +362,8 @@ layer_check "torch" || exit 1
 # --- 6. CLAP stack (transformers + scipy) ----------------------------------
 # The rebuilt agent's ONLY model dependency: memory is out of scope, so the 7B
 # planner and the VLM captioner are no longer required imports.
-banner "[6/9] CLAP stack ($TRANSFORMERS_SPEC + scipy)"
-pip install -q "$TRANSFORMERS_SPEC" scipy soundfile -c "$NP_CONSTRAINT" \
+banner "[6/8] CLAP stack ($TRANSFORMERS_SPEC + scipy)"
+pip install -q "$TRANSFORMERS_SPEC" scipy soundfile -c "$CONSTRAINTS" \
   || { echo "FATAL: transformers/scipy install failed"; exit 1; }
 layer_check "clap-stack" || exit 1
 
@@ -357,8 +384,76 @@ if parts >= (1, 24):
 print("  numpy pin held: {}".format(numpy.__version__))
 PY
 
-# --- 7. THE CORE VERDICT (written to disk before habitat-lab can rot it) ----
-banner "[7/9] core probe — this is the ticket-04 gate"
+# --- 7. provenance: did the pin actually take? ------------------------------
+# Ticket 17 section 4. A constraint on a package that is never installed is a SILENT
+# NO-OP, so a misspelled or dropped line in ss2-constraints.txt is an inert pin that
+# reports success — the same class as the version-blind build-skips fixed above, and
+# invisible to any capability probe. Only comparing the RESOLVED set against the file
+# can see it. This is the bootstrap-time half; the runtime capability half is
+# `earshot/env_check.py`, and it is a different job.
+#
+# WARN, not FATAL: the recipe already succeeded by this point, and killing a 40-minute
+# build over a version skew nobody has judged yet would destroy the evidence. The
+# printed diff IS the deliverable.
+banner "[7/8] provenance — resolved versus ss2-constraints.txt"
+pip freeze > "$OUT_DIR/freeze.txt" 2>/dev/null \
+  || echo "  WARN: pip freeze failed — provenance unverified, which is not the same as verified"
+python - "$CONSTRAINTS" "$OUT_DIR/freeze.txt" <<'PY'
+import re
+import sys
+
+def norm(name):
+    # PEP 503: pip normalises distribution names inconsistently across versions, so
+    # compare on the canonical form rather than on whatever the file happens to spell.
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+pins, resolved, skew, missing = {}, {}, [], []
+for raw in open(sys.argv[1]):
+    line = raw.split("#", 1)[0].strip()
+    if "==" in line:
+        name, _, version = line.partition("==")
+        pins[norm(name)] = version.strip()
+try:
+    freeze = open(sys.argv[2])
+except OSError:
+    print("  no freeze to compare against — SKIPPED")
+    sys.exit(0)
+for raw in freeze:
+    line = raw.strip()
+    if "==" in line:
+        name, _, version = line.partition("==")
+        resolved[norm(name)] = version.strip()
+
+for name, want in sorted(pins.items()):
+    got = resolved.get(name)
+    if got is None:
+        # THE INERT-PIN CASE: constraints do not force installation, so a name that
+        # matches nothing constrains nothing and says nothing while doing it.
+        missing.append(name)
+    elif got.split("+")[0] != want:
+        # `+cu118` is a local version; PEP 440 says `torch==2.2.2` matches it.
+        skew.append((name, want, got))
+
+print("  {} pinned, {} resolved".format(len(pins), len(pins) - len(missing)))
+if missing:
+    print("  *** INERT PINS — constrained but never installed, so they enforce nothing:")
+    for name in missing:
+        print("        {}".format(name))
+    print("      Either the name is misspelled or nothing in this recipe pulls it.")
+if skew:
+    print("  *** VERSION SKEW — the resolver did not honour the pin:")
+    for name, want, got in skew:
+        print("        {:<20} pinned {:<12} resolved {}".format(name, want, got))
+if not missing and not skew:
+    print("  every pin took")
+PY
+
+# --- 8. the verdict ---------------------------------------------------------
+# The payload stays at .scratch/ss2-clean-room/probes/oneenv_probe.py (ADR-0013): it is
+# the ticket-04 feasibility probe, and its defaults dump is what makes the 23-knob
+# parameter sheet measured rather than quoted. Ticket 24 replaces this call with
+# `python -m earshot.env_check --strict`, which is the assertion the runtime shares.
+banner "[8/8] core probe — the gate"
 python "$PROBE_DIR/oneenv_probe.py" \
     --out "$OUT_DIR/report-core.json" \
     --sim-dir "$SIM_DIR" \
@@ -367,75 +462,24 @@ python "$PROBE_DIR/oneenv_probe.py" \
     ${SS2_LOAD_CLAP:+--load-clap} 2>&1 | tee "$OUT_DIR/probe-core.log"
 CORE_RC=${PIPESTATUS[0]}
 
-# --- 8. habitat-lab, deliberately last and clearly optional -----------------
-# Ticket 04's source read found the clean-room runner can drive habitat_sim
-# directly (the audio branch's own tutorial does exactly that), so habitat-lab is
-# measured, not required. It goes last because it is the layer most likely to
-# break the numpy pin — and if it does, THAT is the finding.
-banner "[8/9] habitat-lab $LAB_TAG (measured, not required)"
-if [ "${SS2_SKIP_HABITAT_LAB:-0}" = "1" ]; then
-  echo "  skipped (SS2_SKIP_HABITAT_LAB=1)"
-elif python -c "import habitat" 2>/dev/null; then
-  echo "  habitat-lab already importable — skipping install"
-else
-  if [ ! -d "$LAB_DIR/.git" ]; then
-    git clone https://github.com/facebookresearch/habitat-lab.git "$LAB_DIR" || true
-  fi
-  if [ -d "$LAB_DIR/.git" ]; then
-    ( cd "$LAB_DIR" \
-        && { git fetch origin tag "$LAB_TAG" 2>/dev/null || true; } \
-        && git checkout "$LAB_TAG" \
-        && sed -i '/from habitat\.robots\.fetch_robot import FetchRobot/d' \
-             habitat/tasks/rearrange/rearrange_sim.py \
-        && pip install -q -e . -c "$NP_CONSTRAINT" 2>&1 | tail -5 ) \
-      || echo "WARN: habitat-lab $LAB_TAG install failed — record as version delta"
-    # The sed is the OFFICIAL post-install edit (INSTALLATION.md: remove the
-    # FetchRobot import) — without it `import habitat` breaks.
-  else
-    echo "WARN: habitat-lab clone failed — record as version delta"
-  fi
-fi
-if python -c "import habitat" 2>/dev/null; then
-  echo "  habitat-lab importable — re-running the full probe to see what it cost"
-  if quick_audio_probe; then :; else
-    echo "  *** DECISIVE: habitat-lab BROKE the audio build. The core verdict above"
-    echo "      still stands; habitat-lab is not free and the clean room should"
-    echo "      drive habitat_sim directly."
-  fi
-  python "$PROBE_DIR/oneenv_probe.py" \
-      --out "$OUT_DIR/report-with-lab.json" \
-      --sim-dir "$SIM_DIR" \
-      --label with-habitat-lab \
-      ${SS2_SCENE:+--scene "$SS2_SCENE"} 2>&1 | tee "$OUT_DIR/probe-with-lab.log"
-fi
-
-# --- 9. verdict -------------------------------------------------------------
-banner "[9/9] TICKET 04 VERDICT"
 python - "$OUT_DIR" <<'PY'
 import json, os, sys
 out = sys.argv[1]
-def load(name):
-    p = os.path.join(out, name)
-    if not os.path.exists(p):
-        return None
-    with open(p) as fh:
-        return json.load(fh)
-
-core = load("report-core.json")
-lab = load("report-with-lab.json")
-if core is None:
+path = os.path.join(out, "report-core.json")
+if not os.path.exists(path):
     print("  NO CORE REPORT — the probe did not run; see probe-core.log")
     sys.exit(1)
+with open(path) as fh:
+    core = json.load(fh)
 
 v = core["_verdict"]
 print("  core verdict: {}".format("GREEN" if v["green"] else "RED"))
 if not v["green"]:
     print("  failed stages: {}".format(", ".join(v["failed_stages"]) or "(render did not succeed)"))
 print("  numpy pin held: {}".format(v["numpy_pin_held"]))
-print("  habitat-lab importable at core time: {}".format(v["habitat_lab_importable"]))
 
 d = core.get("03_defaults_dump", {})
-print("\n  measured defaults that other tickets block on:")
+print("\n  measured defaults the parameter sheet rests on:")
 print("    transmission        = {}".format(d.get("transmission_default")))
 print("    enableMaterials     = {} (on {})".format(
     d.get("enableMaterials_default"), d.get("enableMaterials_location")))
@@ -448,7 +492,7 @@ print("    spec swallows unknown keys = {} (validator must live on the SPEC)".fo
 
 # Ticket 13: a GREEN must never again be ambiguous about what it proved of CLAP.
 c = core.get("05_clap", {})
-print("\n  CLAP (ticket 13):")
+print("\n  CLAP:")
 print("    transformers {} / torch backend enabled = {}".format(
     c.get("transformers"), c.get("torch_backend_available")))
 print("    ClapModel is a dummy object = {}".format(c.get("clap_is_dummy")))
@@ -457,30 +501,20 @@ if c.get("clap_weights_loaded"):
         c.get("clap_logits_shape"), c.get("clap_logits_finite"), c.get("clap_device")))
 else:
     print("    forward pass: NOT RUN — backend checked only.")
-    print("    ticket 13 GREEN needs the logit: re-run with SS2_LOAD_CLAP=1")
+    print("    a GREEN needs the logit: re-run with SS2_LOAD_CLAP=1")
 
 r = core.get("07_live_render", {})
 print("\n  first render: {} s, IR shape {}, non-silent {}".format(
     r.get("first_render_s"), r.get("ir_shape"), r.get("ir_nonzero")))
-print("  (single timing at defaults — the cost sweep is ticket 06)")
+print("  (single timing at defaults — the tuned preset is ticket 06's cheap_preset)")
 
 p = core.get("08_provenance", {})
 print("\n  provenance:")
 print("    habitat-sim {} @ {}".format(p.get("habitat_sim_branch"), p.get("habitat_sim_sha")))
 print("    rlr-audio-propagation submodule @ {}".format(p.get("rlr_audio_propagation_sha")))
-
-if lab is not None:
-    lv = lab["_verdict"]
-    print("\n  with habitat-lab: {} (numpy pin held: {})".format(
-        "GREEN" if lv["green"] else "RED", lv["numpy_pin_held"]))
-    if v["green"] and not lv["green"]:
-        print("  => habitat-lab COSTS the audio build. Drive habitat_sim directly.")
-    elif lv["green"]:
-        print("  => habitat-lab coexists. Keeping it is a choice, not a constraint.")
 PY
 
 echo
-echo "  reports: $OUT_DIR/report-core.json"
-[ -f "$OUT_DIR/report-with-lab.json" ] && echo "           $OUT_DIR/report-with-lab.json"
-echo "  paste report-core.json back into ticket 04 to resolve it."
+echo "  report: $OUT_DIR/report-core.json"
+echo "  freeze: $OUT_DIR/freeze.txt   (forensic evidence — never installed from)"
 exit "$CORE_RC"

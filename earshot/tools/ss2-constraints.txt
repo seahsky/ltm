@@ -1,0 +1,44 @@
+# The `ss2` environment's PyPI pin (ticket 17). Passed as `-c` to every pip install
+# in bootstrap_ss2.sh — the numpy layer, habitat-sim's own requirements.txt, torch, and
+# the CLAP stack — so widening this file reaches all four.
+#
+# Governing line: PIN WHERE FAILURE IS SILENT, LEAVE RANGES WHERE FAILURE IS LOUD.
+# The conda side (python=3.9, cmake=3.14.0, gcc_linux-64=10.*) stays on ranges because
+# its drift dies as a build error nobody can miss. PyPI drift dies as a DummyObject that
+# imports fine — which is exactly what ticket 13 spent a box trip on.
+#
+# PIN THE INPUTS, RECORD THE OUTPUTS. This is a constraints file, not a lockfile: it
+# bounds what the resolver may choose. The full `pip freeze` kept beside a run is
+# forensic evidence and is never installed from — habitat-sim is a source install that a
+# freeze records as `habitat-sim @ file:///root/ss2-build/...`, which cannot be
+# reinstalled at all.
+#
+# FOOTGUN: a constraint on a package that is never installed is a SILENT NO-OP, so a
+# misspelled name here is an inert pin that reports success — the same class as ticket
+# 13's version-blind skip. bootstrap_ss2.sh compares the resolved set against this file
+# after the installs, which is the only check that can see it.
+#
+# Every version below is MEASURED on the box, not chosen: ticket 13 recorded the first
+# known-good set and ticket 16's stage 0 recovered the five that were written down
+# nowhere (soundfile, numpy-quaternion, huggingface-hub, tokenizers, safetensors).
+
+# --- direct installs: bootstrap_ss2.sh names these ---
+# The 2022-era habitat-sim tree dies on numpy 2.x, and this is the pin everything else
+# is resolved against, so it is installed first.
+numpy==1.23.5
+numpy-quaternion==2023.0.4
+# PEP 440: matches the 2.2.2+cu118 local version. transformers gates its torch backend
+# on >= 2.1.0, and 2.2.x predates numpy 2.0 so numpy 1.23.x is its native ABI rather
+# than a tolerated downgrade. cu118 is the last CUDA line where the V100's sm_70 is a
+# first-class target.
+torch==2.2.2
+transformers==4.57.6
+scipy==1.13.1
+soundfile==0.13.1
+
+# --- transitive: pinned because this is the stack that already broke ---
+# Left floating against a frozen transformers==4.57.6 these are a live breakage class,
+# independent of the transformers version itself.
+huggingface-hub==0.36.2
+tokenizers==0.22.2
+safetensors==0.7.0

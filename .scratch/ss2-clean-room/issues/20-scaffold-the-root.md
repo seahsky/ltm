@@ -1,8 +1,8 @@
 # 20 — Scaffold `earshot/` and its three structural invariants
 
 Type: task
-Status: open
-Blocked by: 19
+Status: claimed
+Blocked by: 19 (resolved 2026-08-04)
 
 ## Question
 

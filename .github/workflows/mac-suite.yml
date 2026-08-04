@@ -1,0 +1,58 @@
+# The Mac suite, on a machine that is not the author's.
+#
+# NAMED FOR ITS SCOPE, deliberately. A green badge on a repo whose primary target is a
+# CUDA box that cannot run in CI is a real risk, so the job says what it verifies:
+#
+#   A GREEN MAC SUITE IS EVIDENCE ABOUT OUR OWN LOGIC AND NOTHING ELSE.
+#
+# It licenses no claim about binding behaviour, about the SoundSpaces stack, or about
+# the value of any tuned constant. The one thing it supports is: nothing we wrote
+# regressed since the last box confirmation. Ticket 12's guard passed 27 tests against
+# fakes and then raised on the first real spec.
+#
+# `mac/` does not mean macOS — it means "no box required" (ADR-0014). That definition is
+# what makes running it on a Linux runner consistent rather than the sort of name that
+# reads as true and quietly is not.
+#
+# WHY CI AT ALL, over a pre-push hook: the hook is per-clone, bypassable with
+# `--no-verify`, adds a hooksPath wrinkle under git worktrees, and never rebuilds the
+# dependency set on a machine that is not the author's. This is ticket 17's "pin the
+# inputs, record the outputs" applied to the Mac side.
+#
+# PYTHON 3.9 IS AVAILABLE AND WAS CHECKED, NOT ASSUMED. 3.9 reached end of life in late
+# 2025, and ADR-0014 disclosed "actions/setup-python may no longer provide it" as this
+# job's one known way to weaken. Checked 2026-08-04 against actions/python-versions'
+# versions-manifest.json: 32 3.9.x entries, up to 3.9.25, linux-x64 present. So the
+# interpreter refusal in earshot/tests/mac/_interpreter.py did NOT have to widen.
+
+name: mac-suite (our own logic only — not the simulator stack)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  mac-suite:
+    name: unittest + ruff, Python 3.9, no box
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The box is 3.9.19. The suite refuses to run on any other minor version, so
+          # a drift here fails loudly rather than passing on the wrong interpreter.
+          python-version: '3.9'
+
+      - name: Install the one dependency declaration
+        # The same file the `earshot-mac` conda env installs from. Two declarations of
+        # one set would drift, and the drift would be silent.
+        run: python -m pip install --disable-pip-version-check -r earshot/tools/mac-requirements.txt
+
+      - name: Lint (F + E9 only — it exists for sim/world.py)
+        # sim/world.py is the only module that imports habitat_sim, so the Mac can never
+        # import it and this static check is its ONLY Mac-side verification.
+        run: ruff check earshot/
+
+      - name: Mac suite
+        run: python -m unittest discover earshot/tests/mac -v
