@@ -133,10 +133,13 @@ The first fully verified set, recorded by ticket 13 on 2026-08-02:
 | habitat-sim | 0.2.2 @ `4f61e321` (`RLRAudioPropagationUpdate`, stock, no patches) |
 | rlr-audio-propagation | `4fd446b4` |
 
-**This is a record of what worked once, not a lockfile.**
-The env is reproduced by re-running a resolver against version *ranges*, so every rebuild re-resolves against whatever PyPI serves that day.
-That is exactly how it broke last time: `transformers` drifted to 4.57.6 against a frozen `torch==2.0.1` and silently disabled its own PyTorch backend, which made `ClapModel` a dummy object that imports fine and cannot instantiate.
-Python 3.9 does bound the drift on one axis: transformers 5.x requires >= 3.10, so resolution is capped at the 4.x line.
+**This table is a record; the pin lives in `earshot/tools/ss2-constraints.txt`.**
+It used to say "a record of what worked once, not a lockfile", which was accurate until ticket 17's constraints file existed and false the moment it landed (ticket 20).
+Nine exact versions are now passed as `-c` to every `pip install` in `earshot/tools/bootstrap_ss2.sh` — the numpy layer, habitat-sim's own `requirements.txt`, torch, and the CLAP stack — and habitat-sim is reset to the SHA rather than to whatever the branch serves.
+Read this table for context and change versions in the constraints file, never here.
+
+The drift it closed: `transformers` resolved to 4.57.6 against a frozen `torch==2.0.1` and silently disabled its own PyTorch backend, which made `ClapModel` a dummy object that imports fine and cannot instantiate.
+Python 3.9 bounds one axis for free — transformers 5.x requires >= 3.10, so resolution is capped at the 4.x line — and the governing rule for the rest is **pin where failure is silent, leave ranges where failure is loud**, which is why the conda side (`python=3.9`, `cmake=3.14.0`, `gcc_linux-64=10.*`) is deliberately still ranged.
 
 Two constraints worth knowing before touching pins:
 
@@ -147,8 +150,10 @@ Two constraints worth knowing before touching pins:
 
 ## 4. How `ss2` and `~/ss2-build` were actually built
 
-The real recipe is `.scratch/ss2-clean-room/probes/oneenv_gate.sh`, run once on 2026-08-01 (exit 0, 24m50s including the habitat-sim build).
-It is idempotent: a re-run skips the build when an audio-capable `habitat_sim` already imports, which is why ticket 13's re-run took 1m49s.
+The real recipe is `earshot/tools/bootstrap_ss2.sh` (moved there from `.scratch/ss2-clean-room/probes/oneenv_gate.sh` by ticket 20 — two copies of a build recipe is a drift trap, and `.scratch` is not where an operator looks).
+It was run once as `oneenv_gate.sh` on 2026-08-01 (exit 0, 24m50s including the habitat-sim build).
+It is idempotent: a re-run skips the build when an audio-capable `habitat_sim` already imports **and** is built from the pinned SHA, which is why ticket 13's re-run took 1m49s.
+The SHA half of that condition is new — the old skip fired on importability alone, which made the pin inert on every re-run against an existing env.
 
 **`scripts/race-soundspaces-spike.sh` is the ancestor recipe, not this one.**
 It builds a *different* env (`soundspaces-spike` in `~/soundspaces-build`) and never layers torch or transformers on top, which was the whole question.
@@ -188,8 +193,8 @@ Ticket 04 measured it rather than requiring it, and it is still not importable (
 The clean room drives `habitat_sim` directly, so the new tree owns three small pieces habitat-lab used to supply: ObjectNav `.json.gz` episode loading, `sim.make_greedy_follower()` steering, and the SPL/SoftSPL arithmetic.
 
 **The build is patch-capable and currently stock.**
-`oneenv_gate.sh` applies any `*.patch` in `.scratch/ss2-clean-room/probes/patches/` before building and records the result in `~/ss2-build/applied-patches.txt`, so box state stays reproducible.
-Nothing is applied today.
+`bootstrap_ss2.sh` applies any `*.patch` in `.scratch/ss2-clean-room/probes/patches/` before building and records the result in `~/ss2-build/applied-patches.txt`, so box state stays reproducible.
+Nothing is applied today, and ticket 09 ruled no fork, so the directory is expected to stay empty.
 
 ### Verifying an audio build
 

@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Ticket 12 — the audio context guard.
+"""The audio context guard — tickets 12 and 16, verbatim, plus the per-step split.
+
+Carried unchanged from ``.scratch/ss2-clean-room/probes/audio_guard.py`` except for
+one addition ADR-0013 asked for: ``arm_audio_context`` is now the heavy
+once-per-episode call and ``guarded_observe`` is the light per-step one, sharing the
+log scan through ``_scan_logs``. The reason is a measurement — ticket 16 found that
+``[Audio]`` is logged on **every** render (``AudioSensor.cpp:130``), and that the
+closed engine can write an un-prefixed error block to fd 2 while
+``RLRA_SetListenerHRTF`` still returns ``Success``. Those failures can happen at step
+300 as easily as at step 0, so a canary armed only at arm time has no consumer.
+
+**``guarded_observe`` is new code, so its fakes have never met the binary.** A green
+Mac suite is evidence about our own logic and nothing else (ADR-0014); its box
+confirmation is the smoke's, not this file's.
 
 A zero-geometry RLR audio context still returns plausible-looking audio. Nothing in
 habitat-sim stops it: ``loadMesh`` submits whatever the joined scene mesh contains,
@@ -72,6 +85,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 __all__ = [
     "AudioContextError",
     "AudioContextReport",
+    "StepGuardReport",
     "HABITAT_LOG_PREFIX_RE",
     "RLR_ENGINE_RE",
     "KNOWN_DYNAMIC_ATTRS",
@@ -82,6 +96,7 @@ __all__ = [
     "bound_field_names",
     "capture_habitat_logs",
     "count_obj_vertices",
+    "guarded_observe",
     "pin_habitat_logging",
 ]
 
@@ -496,6 +511,71 @@ class AudioContextReport:
         }
 
 
+def _scan_logs(
+    captured: "_CapturedLogs",
+    *,
+    habitat_prefix_re: "re.Pattern",
+    fatal_substrings: Sequence[str],
+    canary_substrings: Sequence[str],
+    require_log_canary: bool,
+    occasion: str,
+) -> Tuple[bool, bool, List[str], List[str]]:
+    """Invariant 2, shared by the once-per-episode arm and the per-step wrapper.
+
+    Returns ``(canary_seen, rlr_engine_error, fatal_lines, failures)``. Extracted so
+    the two entry points cannot drift: a per-step scan that recognised a different set
+    of fatal lines from the arming scan would be worse than no per-step scan at all.
+
+    Three ways a line is fatal, covering different gaps. The substrings name the
+    specific failures that produce a plausible IR over a broken context, wherever they
+    are logged. The stream rule is the general one: Corrade routes ONLY Warning and
+    Error to fd 2, so habitat-sim writing there is by construction a severity event,
+    and the prefix match keeps third-party stderr noise from counting as one.
+
+    The third is the RLR engine, and ticket 16 measured why it has to exist separately:
+    ``RLRA_SetListenerHRTF`` printed "Error reading HRTF file" to fd 2 and still
+    returned ``RLRA_Success``, so ``AudioSensor.cpp:181``'s ESP_ERROR never fired and
+    there was no habitat-formatted line to match. A failure with no return code and no
+    habitat log entry is visible ONLY as this block.
+    """
+    failures: List[str] = []
+    # The canary is ESP_DEBUG output and lands on fd 1; the scan is over both streams
+    # anyway, so a future habitat-sim that reroutes its Debug output still trips it.
+    canary_seen = any(marker in captured.text for marker in canary_substrings)
+    if require_log_canary and not canary_seen:
+        failures.append(
+            "fd capture returned {} chars on stdout and {} on stderr, and none of {} — "
+            "either the fd redirect did not take or HABITAT_SIM_LOG is turned down below "
+            "Debug. Invariant 2 is unverified, not satisfied; call pin_habitat_logging() "
+            "before importing habitat_sim.".format(
+                len(captured.stdout), len(captured.stderr), list(canary_substrings)
+            )
+        )
+    rlr_engine_error = bool(RLR_ENGINE_RE.search(captured.stderr))
+    fatal_lines: List[str] = []
+    for stream_fd, stream_text in ((1, captured.stdout), (2, captured.stderr)):
+        for line in stream_text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            fatal = any(marker in line for marker in fatal_substrings)
+            if not fatal and stream_fd == 2 and (
+                habitat_prefix_re.search(line) or rlr_engine_error
+            ):
+                fatal = True
+            if fatal and stripped not in fatal_lines:
+                fatal_lines.append(stripped)
+    if fatal_lines:
+        failures.append(
+            "habitat-sim logged {} error/warning line(s) during {} — every "
+            "RLRA_* failure is handled by ESP_ERROR + bare return and is invisible to "
+            "Python, so this log is the only channel:\n  {}".format(
+                len(fatal_lines), occasion, "\n  ".join(fatal_lines[:10])
+            )
+        )
+    return canary_seen, rlr_engine_error, fatal_lines, failures
+
+
 def arm_audio_context(
     audio_sensor: Any,
     render: Callable[[], Any],
@@ -536,51 +616,20 @@ def arm_audio_context(
         report.submitted_n_vertices = int(submitted.group(1))
 
     # --- invariant 2: the log scan, and whether it proved anything --------------
-    # The canary is ESP_DEBUG output and lands on fd 1; the scan is over both streams
-    # anyway, so a future habitat-sim that reroutes its Debug output still trips it.
-    report.log_canary_seen = any(marker in captured.text for marker in canary_substrings)
-    if require_log_canary and not report.log_canary_seen:
-        failures.append(
-            "fd capture returned {} chars on stdout and {} on stderr, and none of {} — "
-            "either the fd redirect did not take or HABITAT_SIM_LOG is turned down below "
-            "Debug. Invariant 2 is unverified, not satisfied; call pin_habitat_logging() "
-            "before importing habitat_sim.".format(
-                report.stdout_chars, report.stderr_chars, list(canary_substrings)
-            )
-        )
-    # Three ways a line is fatal, covering different gaps. The substrings name the
-    # specific failures that produce a plausible IR over a broken context, wherever they
-    # are logged. The stream rule is the general one: Corrade routes ONLY Warning and
-    # Error to fd 2, so habitat-sim writing there during the first render is by
-    # construction a severity event, and the prefix match keeps third-party stderr noise
-    # from counting as one.
-    #
-    # The third is the RLR engine, and ticket 16 measured why it has to exist separately:
-    # `RLRA_SetListenerHRTF` printed "Error reading HRTF file" to fd 2 and still returned
-    # `RLRA_Success`, so `AudioSensor.cpp:181`'s ESP_ERROR never fired and there was no
-    # habitat-formatted line to match. A failure with no return code and no habitat log
-    # entry is visible ONLY as this block.
-    report.rlr_engine_error = bool(RLR_ENGINE_RE.search(captured.stderr))
-    for stream_fd, stream_text in ((1, captured.stdout), (2, captured.stderr)):
-        for line in stream_text.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            fatal = any(marker in line for marker in fatal_substrings)
-            if not fatal and stream_fd == 2 and (
-                habitat_prefix_re.search(line) or report.rlr_engine_error
-            ):
-                fatal = True
-            if fatal and stripped not in report.fatal_log_lines:
-                report.fatal_log_lines.append(stripped)
-    if report.fatal_log_lines:
-        failures.append(
-            "habitat-sim logged {} error/warning line(s) during the first render — every "
-            "RLRA_* failure is handled by ESP_ERROR + bare return and is invisible to "
-            "Python, so this log is the only channel:\n  {}".format(
-                len(report.fatal_log_lines), "\n  ".join(report.fatal_log_lines[:10])
-            )
-        )
+    (
+        report.log_canary_seen,
+        report.rlr_engine_error,
+        report.fatal_log_lines,
+        log_failures,
+    ) = _scan_logs(
+        captured,
+        habitat_prefix_re=habitat_prefix_re,
+        fatal_substrings=fatal_substrings,
+        canary_substrings=canary_substrings,
+        require_log_canary=require_log_canary,
+        occasion="the first render",
+    )
+    failures.extend(log_failures)
 
     # --- invariant 1: the mesh the engine actually holds ------------------------
     obj_path = os.path.join(
@@ -633,6 +682,102 @@ def arm_audio_context(
             )
         )
     return report
+
+
+@dataclass
+class StepGuardReport:
+    """What the per-step wrapper measured. Cheap enough to keep for every step.
+
+    Deliberately smaller than ``AudioContextReport``: no vertex count, no OBJ write,
+    no IR statistics. The mesh uploads once (``newInitialization_`` is consumed by the
+    first ``runSimulation``), so re-reading it every step would pay ticket 16's
+    measured 0.814 s / 32.2 MB per step to re-answer a question that cannot have
+    changed. What CAN change mid-episode is the log, so that is what this scans.
+    """
+
+    stdout_chars: int = 0
+    stderr_chars: int = 0
+    log_canary_seen: bool = False
+    rlr_engine_error: bool = False
+    fatal_log_lines: List[str] = field(default_factory=list)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "stdout_chars": self.stdout_chars,
+            "stderr_chars": self.stderr_chars,
+            "log_canary_seen": self.log_canary_seen,
+            "rlr_engine_error": self.rlr_engine_error,
+            "fatal_log_lines": list(self.fatal_log_lines),
+            "stdout_tail": self.stdout_tail,
+            "stderr_tail": self.stderr_tail,
+        }
+
+
+def guarded_observe(
+    render: Callable[[], Any],
+    *,
+    habitat_prefix_re: "re.Pattern" = HABITAT_LOG_PREFIX_RE,
+    fatal_substrings: Sequence[str] = FATAL_LOG_SUBSTRINGS,
+    canary_substrings: Sequence[str] = LOG_CANARY_SUBSTRINGS,
+    require_log_canary: bool = True,
+    occasion: str = "a per-step render",
+) -> Tuple[Any, StepGuardReport]:
+    """Run one render under fd capture and scan its log. Every step, all episode.
+
+    The light half of the split ADR-0013 asked for. ``arm_audio_context`` establishes
+    that the context is real once; this establishes that it has not *stopped* being
+    real, which is a different claim and not implied by the first.
+
+    Ticket 16 measured why it is needed rather than merely tidy. ``[Audio]`` is logged
+    on every ``runSimulation`` (``AudioSensor.cpp:130``), so the canary stays armed for
+    the whole episode; and the closed engine writes un-prefixed error blocks to fd 2
+    while ``RLRA_SetListenerHRTF`` returns ``Success`` over a failed load. A context
+    that degrades at step 300 is invisible to everything else in the tree.
+
+    Takes no sensor: it writes no OBJ and reads no geometry, so there is nothing for it
+    to hold. ``render`` is the one shared observation call — in the runner,
+    ``lambda: world.observe()`` — and whatever it returns is handed back untouched, so
+    this wraps the RGB/depth/IR triple without knowing what is in it.
+
+    **The one caller-side constraint.** ``capture_habitat_logs`` flushes Python's own
+    buffers on entry and exit, so an interleaved in-thread ``print()`` between steps is
+    safe. What is forbidden is a *concurrent* writer to fd 1 or 2: a background thread,
+    a timer-driven progress bar, a subprocess that inherited the descriptor, or a
+    logging handler flushed off-thread. Its output would land in this capture and be
+    scanned as if habitat-sim had written it.
+
+    Raises ``AudioContextError`` if the canary is missing or any line is fatal.
+    """
+    with capture_habitat_logs() as captured:
+        observation = render()
+
+    report = StepGuardReport()
+    report.stdout_chars = len(captured.stdout)
+    report.stderr_chars = len(captured.stderr)
+    report.stdout_tail = captured.stdout[-LOG_TAIL_CHARS:]
+    report.stderr_tail = captured.stderr[-LOG_TAIL_CHARS:]
+    (
+        report.log_canary_seen,
+        report.rlr_engine_error,
+        report.fatal_log_lines,
+        failures,
+    ) = _scan_logs(
+        captured,
+        habitat_prefix_re=habitat_prefix_re,
+        fatal_substrings=fatal_substrings,
+        canary_substrings=canary_substrings,
+        require_log_canary=require_log_canary,
+        occasion=occasion,
+    )
+    if failures:
+        raise AudioContextError(
+            "audio context failed {} invariant(s) on {}:\n\n{}".format(
+                len(failures), occasion, "\n\n".join("- " + f for f in failures)
+            )
+        )
+    return observation, report
 
 
 def _safe_call(obj: Any, name: str, cast: Callable[[Any], Any]) -> Optional[Any]:

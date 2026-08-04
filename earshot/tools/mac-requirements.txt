@@ -1,0 +1,21 @@
+# The Mac suite's dependency set — ONE declaration, two consumers.
+#
+# The `earshot-mac` conda env installs from this file and so does the CI job
+# (.github/workflows/mac-suite.yml). Two declarations of the same set would drift, and
+# the drift would be silent (ADR-0014).
+#
+# Deliberately tiny. ADR-0013's injection rule means the Mac surface needs no
+# habitat-sim, no torch and no transformers: every simulator object the tree touches
+# arrives injected, so `audio/`, `agent/`, `report/`, `metrics` and `types` all test
+# against fakes.
+#
+# numpy is held under the BOX's `< 1.24` pin, not at whatever is current. A Mac suite
+# green on a numpy the box cannot install licenses nothing — the same reason the suite
+# refuses to run on any interpreter but 3.9.
+numpy>=1.16.1,<1.24
+
+# Lint, for exactly one file. `sim/world.py` is the only module that imports
+# habitat_sim, so the Mac can never import it and it has zero Mac-side verification
+# under everything else. ruff is AST-based and executes no imports, which makes it the
+# only thing on this side of the split that can look inside that file at all.
+ruff==0.14.4

@@ -1,0 +1,31 @@
+# Lint, for exactly one file.
+#
+# `earshot/sim/world.py` is the only module in the tree that imports `habitat_sim`, so
+# the Mac can never import it, so it has ZERO Mac-side verification under everything
+# else in ADR-0014. A static checker is AST-based and executes no imports, which makes
+# it the only thing on this side of the Mac/box split that can look inside that file at
+# all. Without it, an undefined name or a typo'd attribute in the one module that
+# touches the simulator survives until a box trip — and a box trip on this repo has
+# cost ten hours.
+#
+# The rule set is narrow ON PURPOSE. `F` (pyflakes: undefined names, unused imports,
+# f-string bugs) plus `E9` (syntax and IO errors) is the part that catches defects.
+# Style, formatting and import ordering are excluded: they would churn a repo that has
+# never had a linter, for value unrelated to the one file that justifies having one.
+#
+# `py_compile` was considered and rejected — zero new dependencies and it still reaches
+# `sim/world.py`, but it catches syntax only, so a typo'd name still reaches the box.
+
+target-version = "py39"
+
+# `earshot/reference/` is excluded here for the third time, by the third mechanism:
+# import is `reference/__init__.py` raising, test is the structural walker's pinned
+# denylist, and lint is this line. It is ~3,400 LOC vendored deliberately broken, so it
+# would fail `F` on imports of modules the reset deletes. The duplication with the
+# walker is accepted rather than engineered away: the walker's copy fails loudly if it
+# drifts, this one does not, and reading a `ruff.toml` from a Python 3.9 test would
+# need a `tomli` dependency to check a one-line string.
+exclude = ["earshot/reference"]
+
+[lint]
+select = ["F", "E9"]

@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Mac-runnable tests for ticket 12's audio context guard.
+"""Mac-runnable tests for the audio context guard.
 
-    python3 .scratch/ss2-clean-room/probes/test_audio_guard.py
+    python -m unittest discover earshot/tests/mac
+
+Carried from ``.scratch/ss2-clean-room/probes/test_audio_guard.py``. Two changes on the
+way in: the ``sys.path`` insertion is gone (the suite runs from the repo root and
+imports the package), and ``guarded_observe`` — new in ADR-0013's split — gets the
+coverage at the bottom.
 
 No habitat_sim, no simulator, no box. The fakes reproduce the two pybind11 behaviours
 the guard depends on, because those behaviours are the whole subject:
@@ -37,17 +42,18 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _interpreter import assert_interpreter  # noqa: F401
 
-from audio_guard import (  # noqa: E402
+from earshot.audio.guard import (
     HABITAT_LOG_PREFIX_RE,
     AudioContextError,
     apply_audio_config,
     arm_audio_context,
     assert_no_swallowed_keys,
     bound_field_names,
-    capture_habitat_logs,
     count_obj_vertices,
+    capture_habitat_logs,
+    guarded_observe,
     pin_habitat_logging,
 )
 
@@ -487,6 +493,102 @@ class TestArmAudioContext(unittest.TestCase):
         report = arm_audio_context(Minimal(), make_render())
         self.assertIsNone(report.ray_efficiency)
         self.assertIsNone(report.source_is_visible)
+
+
+class TestGuardedObserve(unittest.TestCase):
+    """The per-step half of ADR-0013's split.
+
+    ``arm_audio_context`` establishes that the context is real once; this establishes
+    that it has not *stopped* being real, which is a different claim and not implied by
+    the first. Ticket 16 measured why: ``[Audio]`` is logged on every ``runSimulation``
+    (``AudioSensor.cpp:130``) so the canary stays armed all episode, and the closed
+    engine can write an un-prefixed block to fd 2 while the call returns success. A
+    context that degrades at step 300 is invisible to everything else in the tree.
+
+    NEW CODE, so these fakes have never met the binary. Ticket 12's guard passed 27
+    fake-based tests and then raised on the first real spec; a green run here is
+    evidence about our own logic and nothing else, and the box confirmation is ticket
+    26's.
+    """
+
+    def test_healthy_step_passes_and_hands_back_the_observation(self):
+        sentinel = {"rgb": object(), "depth": object(), "audio_sensor": ((0.0, 0.1),)}
+        observation, report = guarded_observe(make_render(ir=sentinel))
+        self.assertIs(observation, sentinel)
+        self.assertTrue(report.log_canary_seen)
+        self.assertGreater(report.stdout_chars, 0)
+        self.assertEqual(report.stderr_chars, 0)
+        self.assertEqual(report.fatal_log_lines, [])
+
+    def test_it_writes_no_obj_and_needs_no_sensor(self):
+        """The mesh uploads once, so re-reading it every step would pay ticket 16's
+        measured 0.814 s / 32.2 MB to re-answer a question that cannot have changed.
+
+        Taking no sensor argument is how that is enforced rather than remembered.
+        """
+        before = set(os.listdir(tempfile.gettempdir()))
+        guarded_observe(make_render())
+        new_objs = [
+            name
+            for name in set(os.listdir(tempfile.gettempdir())) - before
+            if name.endswith(".obj")
+        ]
+        self.assertEqual(new_objs, [])
+
+    def test_a_habitat_error_on_stderr_mid_episode_raises(self):
+        with self.assertRaises(AudioContextError) as ctx:
+            guarded_observe(make_render(err=ERROR_LOG))
+        self.assertIn("Couldn't load custom audio listener HRTF", str(ctx.exception))
+
+    def test_the_engine_block_mid_episode_raises(self):
+        """The failure with no return code and no habitat log entry."""
+        with self.assertRaises(AudioContextError) as ctx:
+            guarded_observe(make_render(err=RLR_ENGINE_LOG))
+        self.assertIn("/nonexistent-dir/x.obj", str(ctx.exception))
+
+    def test_the_same_text_on_stdout_is_not_fatal(self):
+        _obs, report = guarded_observe(make_render(log=HEALTHY_LOG + ERROR_LOG))
+        self.assertEqual(report.fatal_log_lines, [])
+
+    def test_third_party_stderr_noise_does_not_fail_a_step(self):
+        _obs, report = guarded_observe(
+            make_render(err="UserWarning: torch.cuda is deprecated\n")
+        )
+        self.assertEqual(report.fatal_log_lines, [])
+        self.assertGreater(report.stderr_chars, 0)
+
+    def test_a_silent_capture_raises_rather_than_passing_vacuously(self):
+        """If the canary stopped arriving, the scan proved nothing — say so."""
+        with self.assertRaises(AudioContextError) as ctx:
+            guarded_observe(make_render(log=""))
+        self.assertIn("unverified, not satisfied", str(ctx.exception))
+
+    def test_the_occasion_is_named_in_the_message(self):
+        """A failure at step 300 should say so; the guard has no step counter of its own."""
+        with self.assertRaises(AudioContextError) as ctx:
+            guarded_observe(make_render(log=""), occasion="step 300")
+        self.assertIn("step 300", str(ctx.exception))
+
+    def test_it_agrees_with_the_arming_scan_on_what_is_fatal(self):
+        """Both entry points share ``_scan_logs``, and this is why that matters.
+
+        A per-step scan that recognised a different set of fatal lines from the arming
+        scan would be worse than no per-step scan at all: a context could arm clean and
+        then degrade into a state only one of them could see.
+        """
+        for kwargs in ({"err": ERROR_LOG}, {"err": RLR_ENGINE_LOG},
+                       {"log": HEALTHY_LOG + "Could not get the GenericSemanticMeshData\n"}):
+            with self.assertRaises(AudioContextError):
+                arm_audio_context(FakeAudioSensor(), make_render(**kwargs))
+            with self.assertRaises(AudioContextError):
+                guarded_observe(make_render(**kwargs))
+
+    def test_the_report_serialises(self):
+        _obs, report = guarded_observe(make_render())
+        as_dict = report.as_dict()
+        self.assertEqual(as_dict["stderr_chars"], 0)
+        self.assertTrue(as_dict["log_canary_seen"])
+        self.assertIn("Vertex count", as_dict["stdout_tail"])
 
 
 class TestLoggingPin(unittest.TestCase):
