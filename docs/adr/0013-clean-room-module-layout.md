@@ -132,6 +132,11 @@ The audio side has to participate at two moments of the simulator's life: the `A
 
 `earshot/sim/world.py` is audio-blind — it is handed a list of sensor specs and returns a dict of observations.
 `earshot/audio/spec.py` is the only place in the tree that constructs an `AudioSensorSpec`, so requirement 2's key validator (`apply_audio_config` + `assert_no_swallowed_keys`) is structural rather than remembered — a bare `setattr` elsewhere has nowhere to happen.
+
+> **Corrected by ticket 22, in the direction this paragraph intended.**
+> `audio/spec.py` cannot *construct* one: `AudioSensorSpec` is a habitat-sim type and this ADR's own one-importer rule reserves those for `sim/world.py`.
+> So `sim.world.audio_spec_parts()` hands out a **bare** spec plus the Binaural enum member, and `audio/spec.py` is the only place that **configures** one.
+> That is what the requirement was protecting: `py::dynamic_attr` swallows unknown keys silently, so the validator has to sit on the one path that writes fields, and a bare constructor call writes none.
 `earshot/audio/sensor.py` wraps the handle and arms the guard in the same constructor, satisfying requirement 1(b)'s "whichever module constructs the sensor also arms it" literally.
 
 **The per-step observation is one shared call.** `sim.get_sensor_observations()` returns RGB, depth and the audio IR together (`oneenv_probe.py:629`); there is no separate audio render.
