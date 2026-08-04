@@ -1,9 +1,9 @@
 """Invariant 2 — the agent's testimony cannot reach ground truth, by type.
 
-``report/agent.py`` and ``report/audit.py`` land in ticket 24, so the disjointness
-assertion below is conditional today. What is **not** deferred is the mechanism it has
-to use, and that is asserted here and now, because getting it wrong is a red build on
-the box rather than on this Mac.
+**Armed by ticket 24.** ``report/agent.py`` and ``report/audit.py`` now exist, so the
+``skipTest`` scaffolding is gone: a subject that disappears must fail here, not skip
+green. The mechanism assertions below stay, because getting them wrong is a red build
+on the box rather than on this Mac.
 
 The leak ticket 18's requirement 10 wants closed is not hypothetical — it is the
 current code. ``build_report`` (``anomaly_controller.py:302-316``) emits
@@ -42,8 +42,11 @@ AGENT_REPORT_FIELDS = frozenset(
     }
 )
 
-# The privileged set §5.2 puts in the audit record and nowhere else. Not exhaustive —
-# ticket 24 owns the full list — but every name here must stay out of the testimony.
+# The privileged set §5.2 puts in the audit record and nowhere else. Every name here
+# must stay out of the testimony — and, since ticket 24 built the audit, every name here
+# must also genuinely be ON it. A misspelled entry would pass the exclusion check while
+# checking nothing, which is the inert-pin class this map keeps finding: ticket 17's
+# constraint on a package nothing installs, ticket 20's exclusion of an absent directory.
 PRIVILEGED_FIELDS = frozenset({"source_xyz", "dist_at_stop", "source_is_visible_history"})
 
 
@@ -82,12 +85,9 @@ class TestTheHarnessReadsDataclassFields(unittest.TestCase):
 
 
 class TestReportBoundary(unittest.TestCase):
-    """The real assertion. Skips until ticket 24 builds the two modules."""
+    """The real assertion, armed: no skip path, so a missing subject is a red."""
 
     def _load(self, module_name, symbol):
-        path = _tree.PACKAGE_ROOT / "report" / (module_name + ".py")
-        if not path.exists():
-            self.skipTest("report/{}.py lands in ticket 24".format(module_name))
         import importlib
 
         module = importlib.import_module("{}.report.{}".format(_tree.PACKAGE_NAME, module_name))
@@ -112,6 +112,24 @@ class TestReportBoundary(unittest.TestCase):
         leaked = PRIVILEGED_FIELDS & set(agent_report.__dataclass_fields__)
         self.assertEqual(leaked, set())
 
+    def test_every_privileged_name_is_genuinely_on_the_audit(self):
+        """The pin above, armed. A name that is on neither type checks nothing.
+
+        Reads fields *and* properties, because ``source_is_valid_history``'s real home
+        is a property derived from the per-step rows — storing it twice would be a
+        drift trap, and a field-only check would call the correct design a violation.
+        """
+        audit = self._load("audit", "EpisodeAudit")
+        available = set(audit.__dataclass_fields__) | {
+            name for name in dir(audit) if isinstance(getattr(audit, name, None), property)
+        }
+        self.assertEqual(
+            PRIVILEGED_FIELDS - available,
+            set(),
+            "these are pinned as privileged but appear on neither report type, so the "
+            "exclusion check above is enforcing nothing for them",
+        )
+
     def test_report_agent_imports_nothing_that_can_supply_ground_truth(self):
         """A reviewer handed ``ep0000.agent.json`` must be unable to see the answer key.
 
@@ -120,8 +138,6 @@ class TestReportBoundary(unittest.TestCase):
         frozen nine-field schema.
         """
         path = _tree.PACKAGE_ROOT / "report" / "agent.py"
-        if not path.exists():
-            self.skipTest("report/agent.py lands in ticket 24")
         tree = _tree.parse(path)
         reached = {
             edge.target.split(".", 1)[0]

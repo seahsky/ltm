@@ -30,11 +30,24 @@
 #  3. A BOOTSTRAP-TIME PROVENANCE CHECK. A constraint on a package that is never
 #     installed is a silent no-op, so a misspelled name is an inert pin that reports
 #     success. Only a resolved-versus-constraints comparison can see that; a capability
-#     probe cannot. (Its counterpart, the runtime capability assertion, is
-#     `earshot/env_check.py` — a different job, and ticket 24's.)
+#     probe cannot.
 #  4. The habitat-lab arm and the two-report comparison are GONE. habitat-lab is
 #     deliberately not installed: the runner drives habitat_sim directly, so that arm
 #     was feasibility-experiment shape, not production shape.
+#
+# --- what ticket 24 changed ------------------------------------------------
+#  5. THE VERDICT IS NOW THE ASSERTION THE RUNTIME SHARES. Stage 8 runs
+#     `python -m earshot.env_check --strict` — one implementation of "can this env run
+#     an episode", called from here and from `task/`'s entry point. An assertion that
+#     lives only in the gate cannot run at episode time, which is exactly when a drifted
+#     env produces results instead of an error.
+#  6. STAGE 7'S COMPARISON MOVED OUT OF BASH. It was an inline heredoc; ticket 19 assigns
+#     that same rule to `env_check.py`'s Mac-testable half, so the two were one rule in
+#     two languages. One implementation now, unit-tested against this very constraints
+#     file.
+#  7. THE TICKET-04 PROBE IS KEPT, DEMOTED TO STAGE 9. `env_check` never opens a scene,
+#     and "audio sensor renders in a scene" is this script's headline — so the probe is
+#     the scene render rather than the verdict.
 #
 # Idempotent: re-runs reuse the env and clone, and skip the build when an audio-capable
 # habitat_sim already imports AND is built from the pinned SHA.
@@ -128,12 +141,12 @@ mkdir -p "$OUT_DIR" "$BUILD_ROOT"
 # --- 1. self-update -------------------------------------------------------
 # Gotcha: this script git-pulls itself, so a change to THIS file only takes
 # effect on the second invocation.
-banner "[1/8] git pull --ff-only"
+banner "[1/9] git pull --ff-only"
 git pull --ff-only || echo "WARN: git pull failed — running the checked-out copy"
 echo "  running commit: $(git rev-parse --short HEAD)"
 
 # --- 2. conda env (FRESH; never ltm-embodied, never soundspaces-spike) -----
-banner "[2/8] conda env: $ENV_NAME (python=$PY_VER cmake=$CMAKE_VER, numpy<1.24, gcc-10)"
+banner "[2/9] conda env: $ENV_NAME (python=$PY_VER cmake=$CMAKE_VER, numpy<1.24, gcc-10)"
 MINICONDA="${HOME}/miniconda3"
 [ -x "$MINICONDA/bin/conda" ] || { echo "FATAL: $MINICONDA/bin/conda missing"; exit 1; }
 case "$ENV_NAME" in
@@ -181,7 +194,7 @@ else
 fi
 
 # --- 3. system preflight (fail in seconds, not 40 min into the build) ------
-banner "[3/8] system preflight: GLIBC >= 2.29 + GL/EGL dev libs"
+banner "[3/9] system preflight: GLIBC >= 2.29 + GL/EGL dev libs"
 # Pipe-safe: `ldd | head -1 | grep` lets head/grep exit early -> SIGPIPEs ldd ->
 # under pipefail the pipeline "fails" despite a good match. getconf + awk consume
 # their whole input, so nothing SIGPIPEs.
@@ -224,7 +237,7 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>
   | sed 's/^/  gpu: /' || echo "  gpu: nvidia-smi unavailable"
 
 # --- 4. habitat-sim at the pinned SHA, patch-capable -----------------------
-banner "[4/8] habitat-sim @ $SIM_BRANCH:$SIM_SHA with --audio"
+banner "[4/9] habitat-sim @ $SIM_BRANCH:$SIM_SHA with --audio"
 APPLIED_PATCHES=""
 # TICKET 17'S FIX. This skip used to be `quick_audio_probe` alone: it fired whenever an
 # audio-capable habitat_sim merely imported, and never asked which tree it was built
@@ -333,7 +346,7 @@ fi
 layer_check "habitat-sim" || exit 1
 
 # --- 5. torch on top, in the SAME env --------------------------------------
-banner "[5/8] torch ($TORCH_SPEC from $TORCH_INDEX)"
+banner "[5/9] torch ($TORCH_SPEC from $TORCH_INDEX)"
 # Ticket 13: this skip used to be `python -c "import torch"`, i.e. version-blind.
 # The box's ss2 env ALREADY has torch 2.0.1 installed, so a bare importability
 # check would have skipped the layer and made the pin bump a silent no-op — the
@@ -362,7 +375,7 @@ layer_check "torch" || exit 1
 # --- 6. CLAP stack (transformers + scipy) ----------------------------------
 # The rebuilt agent's ONLY model dependency: memory is out of scope, so the 7B
 # planner and the VLM captioner are no longer required imports.
-banner "[6/8] CLAP stack ($TRANSFORMERS_SPEC + scipy)"
+banner "[6/9] CLAP stack ($TRANSFORMERS_SPEC + scipy)"
 pip install -q "$TRANSFORMERS_SPEC" scipy soundfile -c "$CONSTRAINTS" \
   || { echo "FATAL: transformers/scipy install failed"; exit 1; }
 layer_check "clap-stack" || exit 1
@@ -389,71 +402,65 @@ PY
 # NO-OP, so a misspelled or dropped line in ss2-constraints.txt is an inert pin that
 # reports success — the same class as the version-blind build-skips fixed above, and
 # invisible to any capability probe. Only comparing the RESOLVED set against the file
-# can see it. This is the bootstrap-time half; the runtime capability half is
-# `earshot/env_check.py`, and it is a different job.
+# can see it. This is the bootstrap-time half; the runtime capability half is stage 8.
 #
-# WARN, not FATAL: the recipe already succeeded by this point, and killing a 40-minute
-# build over a version skew nobody has judged yet would destroy the evidence. The
-# printed diff IS the deliverable.
-banner "[7/8] provenance — resolved versus ss2-constraints.txt"
+# TICKET 24 MOVED THE COMPARISON INTO PYTHON. It used to be an inline heredoc here, and
+# ticket 19 assigns exactly this rule to `env_check.py`'s Mac-testable half — so two
+# implementations of one rule were living in two languages, which is the drift trap
+# ticket 17 named when it refused to leave the build recipe in two places. There is now
+# one implementation, and it is unit-tested against this very constraints file.
+#
+# WARN, not FATAL (no `--strict`): the recipe already succeeded by this point, and
+# killing a 40-minute build over a version skew nobody has judged yet would destroy the
+# evidence. The printed diff IS the deliverable.
+banner "[7/9] provenance — resolved versus ss2-constraints.txt"
 pip freeze > "$OUT_DIR/freeze.txt" 2>/dev/null \
   || echo "  WARN: pip freeze failed — provenance unverified, which is not the same as verified"
-python - "$CONSTRAINTS" "$OUT_DIR/freeze.txt" <<'PY'
-import re
-import sys
+PYTHONPATH="$REPO_ROOT" python -m earshot.env_check --provenance \
+    --constraints "$CONSTRAINTS" \
+    --freeze "$OUT_DIR/freeze.txt"
 
-def norm(name):
-    # PEP 503: pip normalises distribution names inconsistently across versions, so
-    # compare on the canonical form rather than on whatever the file happens to spell.
-    return re.sub(r"[-_.]+", "-", name).lower()
+# --- 8. the runtime assertion ------------------------------------------------
+# TICKET 24, and it is the reason this file and the runtime cannot disagree about what a
+# working env is: `assert_env()` is ONE implementation with TWO callers — this line, and
+# `task/`'s entry point before an episode. An assertion stranded in bash cannot run at
+# episode time, which is exactly when a drifted env produces results instead of an error.
+#
+# CAPABILITY-SHAPED, NEVER PROVENANCE-SHAPED. Every probe does the thing: allocates on
+# the GPU and reads the result back, resolves the audio enum MEMBER (AudioSensorSpec is
+# bound even in non-audio builds), instantiates CLAP and reads a finite logit. Ticket 13
+# is the whole argument — `transformers` reported 4.57.6 both before and after the fix
+# and `ClapModel` imported cleanly the entire time it was a DummyObject, so a version
+# comparison would have printed green through the whole failure.
+#
+# A PROBE THAT DID NOT RUN IS NOT A PASS. `--strict` exits non-zero on a FAIL, on a
+# NOT_RUN, and on an expected probe that was never emitted at all.
+#
+# SS2_LOAD_CLAP adds the CLAP instantiation (153.5M params, ~0.7 GB VRAM), which is
+# requested rather than required for the same reason ticket 17 gave: it is paid only by
+# runs that use it.
+banner "[8/9] env_check --strict — the runtime assertion"
+PYTHONPATH="$REPO_ROOT" python -m earshot.env_check --strict \
+    ${SS2_LOAD_CLAP:+--clap} \
+    | tee "$OUT_DIR/env_check.log"
+ENV_CHECK_RC=${PIPESTATUS[0]}
+if [ "$ENV_CHECK_RC" -ne 0 ]; then
+  echo
+  echo "  RED: the env cannot run an episode. The probe list above IS the blocker list."
+  exit "$ENV_CHECK_RC"
+fi
 
-pins, resolved, skew, missing = {}, {}, [], []
-for raw in open(sys.argv[1]):
-    line = raw.split("#", 1)[0].strip()
-    if "==" in line:
-        name, _, version = line.partition("==")
-        pins[norm(name)] = version.strip()
-try:
-    freeze = open(sys.argv[2])
-except OSError:
-    print("  no freeze to compare against — SKIPPED")
-    sys.exit(0)
-for raw in freeze:
-    line = raw.strip()
-    if "==" in line:
-        name, _, version = line.partition("==")
-        resolved[norm(name)] = version.strip()
-
-for name, want in sorted(pins.items()):
-    got = resolved.get(name)
-    if got is None:
-        # THE INERT-PIN CASE: constraints do not force installation, so a name that
-        # matches nothing constrains nothing and says nothing while doing it.
-        missing.append(name)
-    elif got.split("+")[0] != want:
-        # `+cu118` is a local version; PEP 440 says `torch==2.2.2` matches it.
-        skew.append((name, want, got))
-
-print("  {} pinned, {} resolved".format(len(pins), len(pins) - len(missing)))
-if missing:
-    print("  *** INERT PINS — constrained but never installed, so they enforce nothing:")
-    for name in missing:
-        print("        {}".format(name))
-    print("      Either the name is misspelled or nothing in this recipe pulls it.")
-if skew:
-    print("  *** VERSION SKEW — the resolver did not honour the pin:")
-    for name, want, got in skew:
-        print("        {:<20} pinned {:<12} resolved {}".format(name, want, got))
-if not missing and not skew:
-    print("  every pin took")
-PY
-
-# --- 8. the verdict ---------------------------------------------------------
+# --- 9. the scene render ------------------------------------------------------
+# The verdict `env_check` cannot give, and the reason the ticket-04 probe is KEPT rather
+# than replaced: the assertion above proves the stack imports, allocates and resolves the
+# audio enum, but this script's headline is "audio sensor renders IN A SCENE" and no
+# probe in `env_check` opens a scene. That belongs to `audio/guard.arm_audio_context`,
+# whose own box coverage is `tests/box/test_audio_guard_box.py`.
+#
 # The payload stays at .scratch/ss2-clean-room/probes/oneenv_probe.py (ADR-0013): it is
 # the ticket-04 feasibility probe, and its defaults dump is what makes the 23-knob
-# parameter sheet measured rather than quoted. Ticket 24 replaces this call with
-# `python -m earshot.env_check --strict`, which is the assertion the runtime shares.
-banner "[8/8] core probe — the gate"
+# parameter sheet measured rather than quoted.
+banner "[9/9] core probe — the scene render"
 python "$PROBE_DIR/oneenv_probe.py" \
     --out "$OUT_DIR/report-core.json" \
     --sim-dir "$SIM_DIR" \
@@ -515,6 +522,7 @@ print("    rlr-audio-propagation submodule @ {}".format(p.get("rlr_audio_propaga
 PY
 
 echo
-echo "  report: $OUT_DIR/report-core.json"
-echo "  freeze: $OUT_DIR/freeze.txt   (forensic evidence — never installed from)"
+echo "  report:    $OUT_DIR/report-core.json"
+echo "  env_check: $OUT_DIR/env_check.log   (the assertion the runtime shares)"
+echo "  freeze:    $OUT_DIR/freeze.txt      (forensic evidence — never installed from)"
 exit "$CORE_RC"

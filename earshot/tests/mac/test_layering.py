@@ -86,15 +86,19 @@ class TestLayerGraph(unittest.TestCase):
 
 
 class TestSimulatorImportIsUnique(unittest.TestCase):
-    def test_habitat_sim_is_imported_in_exactly_the_designated_module(self):
-        """``import habitat_sim`` appears in exactly one file — ``sim/world.py``.
+    def test_habitat_sim_is_imported_in_exactly_the_designated_modules(self):
+        """``import habitat_sim`` appears in exactly the pinned set.
 
-        An **equality** since ticket 21 landed that module. It was a subset until then,
-        which caught a second importer but would also have passed over the module going
-        missing — and ADR-0013's claim is that the simulator has one designated door,
-        not at most one. Both directions now fail: a second file reaching for the
-        simulator, and ``sim/world.py`` ceasing to be the file that owns it (renamed,
+        An **equality** since ticket 21 landed ``sim/world.py``. It was a subset until
+        then, which caught a second importer but would also have passed over the module
+        going missing — and ADR-0013's claim is that the simulator has a designated
+        door, not at most one. Both directions fail: an unlisted file reaching for the
+        simulator, and a listed one ceasing to be the file that owns it (renamed,
         split, or its import moved behind a lazy helper somewhere else).
+
+        Ticket 24 made it two. See ``_tree.SIMULATOR_IMPORT_ALLOWED`` for why the audio
+        enum probe cannot be reached any other way — and for the dynamic-import dodge
+        that was rejected rather than taken.
         """
         importers = sorted(
             _tree.relative_path(path)
@@ -103,10 +107,38 @@ class TestSimulatorImportIsUnique(unittest.TestCase):
         )
         self.assertEqual(
             importers,
-            [_tree.SIMULATOR_MODULE],
-            "exactly {} may import habitat_sim (ADR-0013); found {}".format(
-                _tree.SIMULATOR_MODULE, importers
+            sorted(_tree.SIMULATOR_IMPORT_ALLOWED),
+            "only {} may import habitat_sim (ADR-0013); found {}".format(
+                sorted(_tree.SIMULATOR_IMPORT_ALLOWED), importers
             ),
+        )
+
+    def test_the_allowlist_is_the_two_the_adr_licenses(self):
+        """Widening it has to be a visible diff carrying a reason, not a quiet third."""
+        self.assertEqual(
+            set(_tree.SIMULATOR_IMPORT_ALLOWED),
+            {"sim/world.py", "env_check.py"},
+        )
+        for module, reason in _tree.SIMULATOR_IMPORT_ALLOWED.items():
+            self.assertTrue(reason.strip(), "{} is exempt with no reason given".format(module))
+
+    def test_env_checks_exemption_is_still_spent_on_the_enum_probe(self):
+        """The same discipline ``test_no_env_flags`` applies to ``guard.py``'s pin.
+
+        Named function rather than a count. A **top-level** ``import habitat_sim`` here
+        would be the real regression: it would fire on every import of the module,
+        including from this Mac, and would turn a probe that reports NOT_RUN into an
+        ``ImportError`` at the entry point of a tree that is otherwise fine.
+        """
+        path = _tree.PACKAGE_ROOT / "env_check.py"
+        owners = sorted(name for name, _ in _tree.module_imports_by_function(
+            _tree.parse(path), "habitat_sim"
+        ))
+        self.assertEqual(
+            owners,
+            ["probe_habitat_sim_audio_enum_member"],
+            "env_check's habitat_sim exemption covers the enum member probe only; "
+            "found it in {}".format(owners),
         )
 
     def test_nothing_imports_habitat_lab(self):

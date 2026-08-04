@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Sequence, Tuple
+from typing import Dict, Mapping, Sequence, Tuple
 
 __all__ = ["Xyz", "Pose"]
 
@@ -79,3 +79,17 @@ class Pose:
             "z": self.position.z,
             "yaw_rad": self.yaw_rad,
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, float]) -> "Pose":
+        """The inverse of ``as_dict``. Ticket 24: ``read_episode`` needs the round trip.
+
+        It lives here rather than in ``report/artifacts.py`` so the pose's flat
+        ``{x, y, z, yaw_rad}`` layout is known in exactly one module. A reader that
+        re-derived the key names would be a second copy of the convention, which is
+        the shape of every silent drift this map has caught.
+        """
+        return cls(
+            position=Xyz(float(data["x"]), float(data["y"]), float(data["z"])),
+            yaw_rad=float(data["yaw_rad"]),
+        )
