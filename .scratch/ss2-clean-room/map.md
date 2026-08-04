@@ -68,6 +68,8 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 
 - [19 — Test strategy for a Linux-only stack from a Mac](issues/19-test-strategy-linux-only-from-a-mac.md) — **The rule is ownership, not dependency** (ADR `docs/adr/0014`): an assertion is box-only when its *subject* is behaviour we did not write, and an our-logic assertion that needs the real artefact is a **seam defect, not a box test**. `mac/`/`box/` keep their names with the meaning pinned (`mac/` never meant macOS, which is what makes a Linux CI runner consistent). **Four layers**: fake (licenses nothing about bindings — ticket 12's 27-green-then-raise is cited as the proof); **source** (ticket 16 proved it productive; citations at `file:line` in the fake, **review-enforced, deliberately not a test**, because a grep verifies presence not truth); **box** (a detector ships **both arms** — healthy passes *and* forced failure fires — and a capability is **exercised, never proxied**; both directions earned by named incidents, under-firing 13/17 and over-firing 15); **structural** (a fourth layer on one ground: the only Mac layer that reads the **real** subject via `ast`). Three gates, each cheaper than what it protects: Mac-green → box trip → smoke → deletion commit. **Surfaced a divergence axis neither this ticket nor 18 listed: version skew** — this Mac defaults to **3.14.3, the box is 3.9.19**, so a green Mac suite licenses nothing about whether the code *imports* there; fix is a pinned `earshot-mac` 3.9 env **and a suite that refuses to run under any other interpreter**. **CI exists** (one `ubuntu-latest`/3.9 job, named for its scope, sharing **one** `mac-requirements.txt` with the env), the box suite becomes `unittest` behind a thin `tools/box_gate.sh` that **carries** the footgun hardening, and **box tests print their measurements** because ticket 16's numbers are what made 15/17/09 decidable. **Corrects ticket 17: `env_check` splits three ways**, and the new middle row (*given a failing probe result, does `assert_env()` raise*) is ticket 13's exact bug, is the module's highest-value assertion, and needs **no box**. Constants carry provenance (`box`/`source`/`fake`/`runtime`, generous until measured). **`reference/` is excluded three times by three mechanisms**, and **lint exists for exactly one file** — `ruff` `F`+`E9` only, because `sim/world.py` is the sole `import habitat_sim` module so a static AST check is its **only** Mac-side verification. Honest cost: three surfaces the repo did not have (CI, linter, pinned env), and one permanent gap — a capability probe that cannot be forced to fail gets the no-proxy rule alone.
 
+- [20 — Scaffold `earshot/` and its three structural invariants](issues/20-scaffold-the-root.md) — **The root exists and asserts its own shape: 84 Mac tests green under a fresh `earshot-mac` 3.9.25 env, `ruff check earshot/` clean over 16 files, and CI green in 31 s on `ubuntu-latest`.** The suite **refuses to run** on this Mac's 3.14 (exit 1, every module errors), `import earshot` pins `HABITAT_SIM_LOG`, and `import earshot.reference.memory.ltm` raises the intended `ImportError` rather than a `ModuleNotFoundError` about faiss. **The one fact it was told to verify came back GO: `actions/setup-python` still provides 3.9** (32 entries to 3.9.25, linux-x64; CI resolved 3.9.25), so ADR-0014's single disclosed weakening of the interpreter refusal did not happen. **Four corrections, all found by building.** (a) The walker's excluded set is **`{reference, tools, tests}`, not `{reference}`** — ADR-0014's version would have been **red on day one**, because `tests/box/` *must* import `habitat_sim` (it drives the real artefact, ADR-0014's own definition) and `test_audio_guard.py` *must* touch `os.environ` (it tests the pin); there are now **two pins**, each entry carrying its reason, plus a test that every excluded root exists — an exclusion for an absent directory is an inert pin. (b) The interpreter refusal **cannot live in `tests/mac/__init__.py`**: `unittest discover` sets `top_level_dir` to the start dir and imports each `test_*.py` as a top-level module, so the package init never runs (read out of `TestLoader._find_tests`); it lives in `_interpreter.py`, imported by every module, with a hygiene test closing the forget-to-import gap. (c) The constraints file was being **generated, not read** (`echo "numpy<1.24" > …` into `$BUILD_ROOT`) — the pin lived on the box and nowhere in the repo, so ticket 17's "content, not plumbing" needed one plumbing change after all. (d) `reference/memory/__init__.py`'s message is **unreachable** on the normal path (the parent always raises first) — kept as defence in depth, not as a second message. Also **rescued a test the reset would have dropped silently**: `compute_benchmark_spl`'s 8 cases lived inside `embodied_memory/`, which phase 3 deletes wholesale, and no carry list named them. `guarded_observe` shares `_scan_logs` with the arming path and a test asserts the two **agree on what is fatal**. Deliberate: **no bearing helper in `types.py`** (ticket 09 found the lateral sign inverts under live rendering — that convention is the box's to pin), and the bootstrap does **not** yet call `env_check` (ticket 24 owns it; a guarded call would be the version-blind-skip pattern). Fixed `docs/race-box-runbook.md` §3, which went false the moment `ss2-constraints.txt` landed.
+
 ## Not yet specified
 
 <!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
@@ -78,13 +80,15 @@ Ticket 09 cleared everything this section held except one patch — *the build i
 Ticket 18 named them, and that patch graduated on 2026-08-04 into tickets **20–27**.
 
 **Every decision on this map is now made.** Ticket 19 was the last open question; it resolved the same day and grew ticket 20 rather than surfacing anything new.
-The frontier is ticket **20**, which blocks the rest.
+Ticket 20 built the root on 2026-08-04 and surfaced nothing new either — four corrections, all inside tickets that already exist.
+
+The frontier is now **21, 22, 23 and 24 in parallel**, all unblocked by 20 and none blocking each other.
 
 ```
-20 scaffold  (the frontier)
+20 scaffold  ✓ resolved 2026-08-04
    │
    ├─► 21 sim + episode loader ─┐
-   ├─► 22 audio/                │
+   ├─► 22 audio/                │   ← the frontier: four independent tickets
    ├─► 23 agent/                ├─► 25 task wiring
    └─► 24 report/ + env_check ──┘         │
                                           ▼
@@ -93,6 +97,11 @@ The frontier is ticket **20**, which blocks the rest.
                                           ▼
                         27 hermeticity + the deletion commit
 ```
+
+Two things ticket 20 left for the tickets that own them, so they are not lost between sessions:
+
+- **Ticket 21 tightens the simulator-import assertion.** `test_layering.py` asserts the set of `habitat_sim` importers is a *subset* of `{sim/world.py}`, because that file does not exist yet. It fires the moment a second file reaches for the simulator, which is the failure it exists to catch — but it becomes the equality ADR-0013 states only once 21 lands.
+- **Ticket 24 wires the assertion into the bootstrap.** `bootstrap_ss2.sh` does not yet call `python -m earshot.env_check --strict`; it keeps ticket 04's probe as its verdict meanwhile. Adding a guarded call before the module existed would have been the version-blind-skip pattern this map keeps killing.
 
 ## Out of scope
 
