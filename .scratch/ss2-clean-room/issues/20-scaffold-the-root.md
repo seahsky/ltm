@@ -28,10 +28,32 @@ Nothing here imports `habitat_sim`, so all of it runs on the Mac.
 
 Plus `test_audio_guard.py` ported into `tests/mac/` (42 tests, must stay green), and `audioguard_probe.py` + `audioguard_gate.sh` into `tests/box/`.
 
+## Added by ticket 19 (resolved 2026-08-04) — the test strategy's scaffolding
+
+`docs/adr/0014-test-strategy-across-the-mac-box-split.md` decided the strategy, and five of its pieces are scaffolding rather than test content, so they land here rather than in a new ticket.
+
+**The shared structural walker.** The three invariants above do **not** each roll their own tree walk. One helper in `tests/mac/` enumerates the live tree, **denylist-shaped** so new top-level code is checked by default, with `reference/` as the sole exemption — and a test asserting the exemption set equals exactly `{reference}`, so widening it fails before it lands.
+
+**The `earshot-mac` env and its one dependency declaration.** A conda env at **Python 3.9** with numpy under the box's `< 1.24` pin, installing from `earshot/tools/mac-requirements.txt`. The CI job installs from the same file: two declarations of one set would drift silently. Do **not** reuse `ltm-embodied` (deleted tree's env, numpy 1.26.4 sits above the pin).
+
+**The interpreter refusal.** The Mac suite asserts its own interpreter is 3.9.x at start and refuses otherwise. This Mac's default `python3` is 3.14.3, so without it a green run proves nothing about the box — and ADR-0013's two 3.9 constraints (`int | None`, `get_type_hints()`) are invisible under 3.14.
+
+**`ruff.toml`** — rules `F` + `E9` **only**, `reference/` excluded. Not style, not import ordering. It exists for one file: `sim/world.py` is the sole `import habitat_sim` module, so the Mac can never import it, so a static AST check is its only Mac-side verification.
+
+**The CI workflow** — one job, `ubuntu-latest`, Python 3.9, `unittest discover earshot/tests/mac` plus the ruff check, on push and PR, **named for its scope** so green cannot read as "the stack works".
+
+**Two ports change shape from what is written above.** `audioguard_probe.py` becomes a `unittest` suite in `tests/box/` (its four negative controls as test methods, printing their measurements); `audioguard_gate.sh`'s driver concerns move to `earshot/tools/box_gate.sh` — **carried, not rewritten**, keeping the SIGPIPE-safe conda directory check, the enum-member preflight, and the pip-freeze-first ordering.
+
+**One fact to verify here rather than assume**: whether `actions/setup-python` still provides Python 3.9 in 2026 (EOL late 2025). If it does not, pin the nearest available and widen the interpreter refusal to match, and record that the refusal is weakened. ADR-0014 discloses this as a decision for this ticket, not a discovery in a red build.
+
 ## Done when
 
-`python -m unittest discover earshot/tests/mac` is green on this Mac, `import earshot` works and pins `HABITAT_SIM_LOG`, and `import earshot.reference.memory.ltm` raises `ImportError` with the intended message rather than a `ModuleNotFoundError` about faiss.
+`python -m unittest discover earshot/tests/mac` is green **under the `earshot-mac` 3.9 env** (and refuses to run under this Mac's default 3.14), `ruff check earshot/` is clean, the CI job is green, `import earshot` works and pins `HABITAT_SIM_LOG`, and `import earshot.reference.memory.ltm` raises `ImportError` with the intended message rather than a `ModuleNotFoundError` about faiss.
 
 ## Watch for
 
 Ticket 12's warning shot applies to `guarded_observe()`: it is new code, so its fakes have never met the binary. Its box confirmation is ticket 26's, not this ticket's — do not let a green Mac suite read as verified.
+
+ADR-0014 states the licence to quote here: **a green Mac suite is evidence about our own logic and nothing else.** Ticket 12's guard passed 27 fake-based tests and then raised on the first real spec.
+
+Every fake added here that reproduces a third-party behaviour carries a `file:line` citation and a note on what breaks if it changes (ADR-0014's source layer, review-enforced). Every tuned constant carries its provenance: `box` / `source` / `fake` / `runtime`.
