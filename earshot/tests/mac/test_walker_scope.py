@@ -47,6 +47,11 @@ class TestWalkerScope(unittest.TestCase):
             # that test pass by finding nothing to check.
             "sim/world.py",
             "task/episodes.py",
+            # Ticket 23, for the same reason one layer over: `test_analyst_only.py`
+            # asserts that nothing outside the recording path names `sourceIsVisible`,
+            # and `agent/controller.py` is the module that must not. A walker that
+            # stopped reaching it would make that invariant pass by scanning nothing.
+            "agent/controller.py",
         ):
             self.assertIn(expected, found)
 
