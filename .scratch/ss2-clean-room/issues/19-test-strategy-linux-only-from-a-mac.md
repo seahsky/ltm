@@ -1,7 +1,7 @@
 # 19 — Test strategy for a Linux-only stack from a Mac
 
 Type: grilling
-Status: open
+Status: resolved
 Blocked by: none (18 resolved 2026-08-04)
 Blocks: 20 (and through it, the whole build)
 
@@ -64,3 +64,51 @@ So the Mac-testable set is `audio/`, `agent/`, `report/`, `metrics`, `types`, th
 ## What would resolve it
 
 A grilling session producing the rule (per-assertion, not per-module), the named verification layers (fake / source-read / box, and whether the structural invariants are a fourth), the CI story for a repo whose primary target cannot run in CI, and where `reference/memory/` sits relative to all of it — noting that ADR-0013 already settled the *import* half with a raising `__init__.py`, leaving the lint and test halves to this ticket.
+
+## Answer (resolved 2026-08-04)
+
+**`docs/adr/0014-test-strategy-across-the-mac-box-split.md`.**
+Eleven decisions, and the one that reframes the ticket is a divergence axis it did not list.
+
+**The rule is ownership, not dependency.**
+An assertion is box-only when its *subject* is behaviour we did not write (the closed `.so`, pybind11, CUDA, the weights); everything about our own logic is Mac with whatever it touches injected.
+The corollary does the work: an our-logic assertion that cannot be stated without the real artefact is a **seam defect to fix, not a box test to relocate**.
+Dependency ("box when it imports `habitat_sim`/`torch`") was rejected as per-module in a per-assertion costume, and it splits `env_check` the wrong way; falsifiability ("box when a fake could pass vacuously") was rejected as near-universal, which would destroy ADR-0013's Mac surface.
+
+**Names stay, meaning pinned**: `mac/` means *no box required*, `box/` means *the subject lives on the box*.
+`mac/` never meant macOS, which is what makes the Linux CI runner consistent rather than a name that quietly stopped being true.
+
+**Four layers, and the structural one earns its place on a specific ground**: it is the only Mac layer that reads the **real** subject (`ast` over actual `earshot/` source, not a fake), so it cannot go vacuous.
+The **source** layer is named because ticket 16 proved it productive, with citations at `file:line` in the fake and **review enforcement, deliberately not a test** — a grep confirms a citation is present, not that it is true, which is the vacuous pass the layer exists to prevent.
+The **box** layer takes two mandatory rules, each earned by a named incident: a detector ships **both arms** (healthy passes, forced failure fires, on `audioguard_probe.py`'s existing stage shape), and a capability is **exercised, never proxied**.
+Both directions are covered because the record has both: under-firing (13's importability skip, `clap_symbols_importable`'s `DummyObject`, 17's version-blind skip at `oneenv_gate.sh:216`) and over-firing (15's false positive that would have fired on every healthy run).
+
+**What green licenses, stated with its proof cited rather than asserted**: a green Mac suite is evidence about our own logic and nothing else, and ticket 12's *27 fake-based tests then a raise on the first real spec* is the proof.
+Three gates, each cheaper than what it protects: Mac-green gates a box trip, `tests/box`-green gates the smoke, smoke plus hermeticity gates the deletion commit.
+
+**The axis this ticket did not list: version skew.**
+Measured today — this Mac's default `python3` is **3.14.3 with no numpy**; the box is **3.9.19**.
+A Mac suite green on 3.14 licenses nothing about whether the code *imports* on the box, and ADR-0013's two 3.9 constraints (`int | None`, `get_type_hints()`) are invisible to a 3.14 run.
+So: a dedicated **`earshot-mac`** conda env at 3.9 with numpy under the box's `< 1.24` pin, and **the suite refuses to run under any other interpreter** — the capability-shaped discipline turned on the suite itself, so it cannot silently pass on the wrong Python the way ticket 13's gate silently passed on the wrong torch.
+`ltm-embodied` was rejected despite being free: it is the deleted tree's env and its numpy sits above the pin.
+
+**CI exists, one job, named for its scope**: `ubuntu-latest`, 3.9, `unittest discover earshot/tests/mac` plus the lint check, both it and the conda env installing from **one** `tools/mac-requirements.txt` so the dependency set is declared once.
+**One unverified fact, disclosed rather than assumed**: whether `actions/setup-python` still provides 3.9 in 2026 (EOL late 2025). If not, the job pins the nearest available and the refusal widens — a decision at ticket 20, not a discovery in a red build.
+
+**The box suite becomes `unittest`** with the four negative controls as test methods, behind a thin `tools/box_gate.sh` **carrying** (not rewriting) `audioguard_gate.sh`'s footgun hardening — the SIGPIPE-safe conda check, the enum-member preflight, the pip-freeze-first ordering.
+**Box tests print their measurements**, because ticket 16's trip left the numbers that made 15, 17 and 09 decidable, and a pass/fail run discards exactly that.
+
+**Corrects ticket 17's own split: `env_check` is three-way, not two.**
+Metadata comparison → mac; capability probes → box; and *"given a failing probe result, does `assert_env()` raise"* → **mac with injected results**.
+That third one is ticket 13's exact bug (a layer that computed the right answer and then skipped), it is the highest-value assertion in the module, and it needs no box at all.
+It also exposes a permanent limit: where a forced-failure arm is **unavailable** (you cannot uninstall CUDA), the no-proxy rule is the whole discipline — weaker than what everything else gets, and disclosed rather than papered over.
+
+**Constants carry provenance** (`box` / `source` / `fake` / `runtime`) at their definition; a `box` tag names the measuring test; a `fake` threshold is **generous until a box measurement tightens it** (ticket 26's ceiling already models this, and gives the reason: 06 measured 2.3x pose variance, so a tight bound fails for a reason that is not a regression).
+
+**`reference/` is excluded three times by three mechanisms** — import (ADR-0013's raising `__init__.py`), test (a shared **denylist** walker whose exemption set is asserted to equal exactly `{reference}`, so new top-level code is checked by default and widening fails a test first), and lint.
+**Lint exists for exactly one file**: `ruff` with `F` + `E9` only, because `sim/world.py` is the sole `import habitat_sim` module, so the Mac can never import it, so a static AST check is the **only** Mac-side verification it can ever have.
+Before this, ticket 10's "excluded from lint" had no subject.
+
+**Honest cost, stated rather than hidden**: this adds three surfaces the repo did not have (CI, a linter, a pinned Mac env), and one duplication accepted rather than engineered away (`reference/` in two exclusion lists — the walker's assertion fails loudly, ruff's does not, and reading `ruff.toml` from 3.9 would need a `tomli` dependency to check a one-line string).
+
+**Ticket 20 grows rather than a new ticket being created**, since all of it is scaffolding for tests that ticket already builds.
