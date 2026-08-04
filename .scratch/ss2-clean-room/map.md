@@ -64,23 +64,30 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 
 - [09 — Re-derive the anomaly-response task spec on live audio](issues/09-task-spec-on-live-audio.md) — **The task spec is `docs/anomaly_response_task_spec.md`, and four ADRs supersede the four grid-era ones (0009→0004, 0010→0003, 0011→0001, 0012→0002).** One decision carried the rest: **one positioned source, no patch, and a bed that never renders.** Ticket 06 left the ~40-line patch to be decided on onset provenance alone; **that argument does not survive** — ticket 02's own sequential re-render yields the same per-source IRs, so the patch buys ~55 ms/step, not provenance, and the task needs one source at a time anyway (ADR-0002's distractor is an *across-episode* arm, and a bed is diotic by definition). **No fork**, which also kills ticket 12's error-channel patch. The unrendered bed then **retires ADR-0004's central argument while keeping its conclusion**: with the bed off the RIR the pre-onset signal is flat at every pose, so the 8x spatial swing that made an absolute threshold "unmeetable" is gone, the step detector stays unbuilt, `bg_gain` is retired outright, and **`onset_step < t_anom` becomes structurally impossible** — the `anommxv` break closed by construction. Provenance therefore changes job from a post-hoc check to an **asserted invariant that raises**, with a per-step record at every step. **ADR-0003's rule survives on a different reason**: its fabrication rationale is dead (its `nearest` guard is not retired but *unimplementable*), while its untouched controller-scope reason keeps same-floor as **builder policy**. Found from source and not from a run: **the lateral sign silently inverted from world-frame to agent-frame** under live rendering with no code change, so a verbatim port turns the wrong way on every stall; the ~1 m ceiling was a grid artefact and becomes measured distance-at-STOP; rotation-vs-translation is instrumented, not fixed. **CLIP stays dropped and `perception.py` does not carry** — a fourth option neither ticket 15 nor 09 listed dominates: the tree already carries Qwen2-VL-2B, which loads under ticket 13's pin because it ships safetensors. Carry line is **not file-shaped** (neither audio file carries whole). Anomaly-response SR becomes a **staged funnel**, benchmark SPL is computed but never cross-quoted from this map, and the report **splits into agent testimony and an audit record** so "is this arm realizable" is checkable by schema. Smoke-green is nine assertions, runs the **realizable** arm, and **does not require the primary find-task to succeed**.
 
+- [18 — The new package's module layout and seams](issues/18-module-layout-and-seams.md) — **The root is `earshot/`, the root *is* the package, and the load-bearing decision is an edge that is ABSENT: neither `audio/` nor `agent/` imports `sim`, so `import habitat_sim` lives in exactly one file** (ADR `docs/adr/0013`). Ticket 12's *fake the binding semantics, inject the object* generalises to the whole tree, which makes most of it Mac-testable and turns requirement 1(a) into a one-line check. `pin_habitat_logging()` is the whole of `__init__.py`, so Python enforces the pre-import ordering instead of a convention — **which dissolves a contradiction in ticket 17** (`assert_env()` cannot probe habitat-sim's audio enum *before* importing habitat-sim). Corrects two of this ticket's own requirements, both toward less work: **1(d) is narrower** (the guard flushes, so in-thread `print()` is safe; only *concurrent* fd writers are forbidden), and **6 needs an active guard** — an absent `__init__.py` does not work, verified: PEP 420 imports `earshot.reference.memory.ltm` fine, and only an uninstalled `faiss` currently stops it. The guard splits into a heavy once-per-episode `arm_audio_context()` and a light per-step `guarded_observe()`, giving ticket 16's every-render canary a consumer. **The privilege leak requirement 10 wants closed is the current code** — `build_report` emits `source_xyz` from an untyped dict and mutates its argument — so it moves to a frozen `AgentReport` of exactly §5.1's nine fields, a **disclosed deviation from ticket 10's "near-verbatim"**. Three structural invariants (layering / report boundary / no env flags) replace documentation-as-enforcement, on this repo's record of things written down that quietly stopped being true. Surfaced tickets **20–27**; unblocked 19.
+
 ## Not yet specified
 
 <!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
 
-Ticket 09 emptied this section of everything it held.
-Two patches **graduated to tickets** (18 module layout, 19 test strategy, the latter blocked by the former), and two were **settled outright**:
+**Empty.**
 
-- *Smoke-green acceptance criteria* was decided by 09 itself, not graduated — `docs/anomaly_response_task_spec.md` §8, nine checkable assertions plus ticket 10's hermeticity re-run.
-- *How far the clean room is willing to fork habitat-sim* is answered **no fork**. 09 takes neither the multi-source patch (02) nor the RLRA error-channel patch (12, already downgraded by 16). The band in which either had to be taken is empty.
+Ticket 09 cleared everything this section held except one patch — *the build itself, and the smoke run* — which could not be sliced into tickets until the module tree existed, because the slices **are** modules.
+Ticket 18 named them, and that patch graduated on 2026-08-04 into tickets **20–27**.
 
-What is left is genuinely dim, and it is execution rather than decision:
+The map is now fully charted: every remaining ticket is execution, and none of them is blocked on a question.
+The frontier is ticket 19 (the last open decision), which blocks 20, which blocks the rest.
 
-- **The build itself, and the smoke run.**
-  Ticket 10's phase 1 (vendor + port) and phase 2 (smoke, then the hermeticity re-run) cannot be sliced into tickets until the module tree exists, because the slices *are* modules.
-  Waits on 18.
-  Everything they need is decided: the agent (07/ADR-0008), the task (09 + the spec), the env pin (17), the guard (12/16), the reset order and carry list (10), and the box (05/14).
-  This is the last stretch to the destination, and nothing on it is blocked on a question.
+```
+19 test strategy ─► 20 scaffold ─┬─► 21 sim + episode loader ─┐
+   (the frontier)                ├─► 22 audio/                 ├─► 25 task wiring
+                                 ├─► 23 agent/                 │      │
+                                 └─► 24 report/ + env_check ───┘      ▼
+                                                            26 smoke green on the box
+                                                                      │
+                                                                      ▼
+                                                   27 hermeticity + the deletion commit
+```
 
 ## Out of scope
 

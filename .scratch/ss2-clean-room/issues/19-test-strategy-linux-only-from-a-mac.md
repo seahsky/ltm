@@ -2,7 +2,8 @@
 
 Type: grilling
 Status: open
-Blocked by: 18
+Blocked by: none (18 resolved 2026-08-04)
+Blocks: 20 (and through it, the whole build)
 
 ## Question
 
@@ -43,6 +44,23 @@ It is the clearest case that the split is **per-assertion, not per-module**.
 **Ticket 09 adds three more Mac-testable layers**, all pure by construction: the onset detector (a one-shot threshold on an RMS series), the level-calibration gate (a separation statistic over two distributions), and the report/audit split (a schema assertion — the agent's testimony must not be constructible from ground truth, which is a static check).
 It also adds one that is box-only and load-bearing: the **lateral-sign frame convention**, which inverted from world-frame to agent-frame under live rendering with no code change. A fake cannot settle which frame the real renderer produces.
 
+## Note added by ticket 18 (resolved 2026-08-04) — two constraints inherited, and the Mac surface is much larger than this ticket assumed
+
+`docs/adr/0013-clean-room-module-layout.md` decided the layout, and it pre-decides two things this ticket listed as open.
+
+**1. The paths are fixed: `earshot/tests/{mac,box}/`.** Where an assertion can run *is* the directory boundary, so this ticket's central rule is already a path rather than a convention. Ticket 17's `env_check` splits deliberately across the two — metadata half in `mac/`, capability half in `box/` — which is "per-assertion, not per-module" showing up in the tree on day one. This ticket inherits the taxonomy; what it still owns is the naming and the discipline for deciding which side an assertion lands on.
+
+**2. The Mac surface is most of the tree, not the four layers listed above.** ADR-0013 generalised ticket 12's proven pattern — *fake the binding semantics, inject the object* — to the whole layout. `audio/sensor.py` takes an injected `observe` callable and sensor handle; `agent/reachability.py` takes injected `snap_point` and `geodesic`; the oracle detector takes an injected distance function. The result is that **neither `audio/` nor `agent/` imports `sim`, and `import habitat_sim` appears in exactly one file** (`sim/world.py`), enforced by `tests/mac/test_layering.py`.
+
+So the Mac-testable set is `audio/`, `agent/`, `report/`, `metrics`, `types`, the `vlm` interface, and half of `env_check` — rather than the anomaly controller, the reachability filter, the SPL arithmetic and the guard. That is a materially different strategy problem: the question shifts from "which four things can we test here" to "what does a green Mac suite over most of the tree actually license", which is this ticket's warning shot at full strength.
+
+**Two facts that constrain the answer:**
+
+- The repo has **no `pyproject.toml`, no `setup.py`, no lint config and no CI**, and tests are stdlib `unittest` executed directly. So the "CI story for a repo whose primary target cannot run in CI" is a greenfield question, not a migration.
+- Three structural invariants already exist as Mac tests and are load-bearing rather than incidental: `test_layering.py`, `test_report_boundary.py`, `test_no_env_flags.py`. They assert the tree's own shape, which is a fourth verification layer alongside fake / source-read / box, and this ticket should say whether it names it as one.
+
+**This ticket now blocks ticket 20**, and through it the entire build — because building before the strategy lands means writing the tests twice.
+
 ## What would resolve it
 
-A grilling session producing the rule (per-assertion, not per-module), the named verification layers (fake / source-read / box), the CI story for a repo whose primary target cannot run in CI, and where `reference/memory/` sits relative to all of it (ticket 10 requires it outside the lint, test and import surface).
+A grilling session producing the rule (per-assertion, not per-module), the named verification layers (fake / source-read / box, and whether the structural invariants are a fourth), the CI story for a repo whose primary target cannot run in CI, and where `reference/memory/` sits relative to all of it — noting that ADR-0013 already settled the *import* half with a raising `__init__.py`, leaving the lint and test halves to this ticket.

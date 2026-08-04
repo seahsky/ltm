@@ -1,8 +1,10 @@
 # 18 — The new package's module layout and seams
 
 Type: grilling
-Status: open
+Status: resolved
+Assignee: Sky
 Blocked by: none (09 resolved 2026-08-04)
+Resolved: 2026-08-04 — see the Answer section. ADR: `docs/adr/0013-clean-room-module-layout.md`. Surfaced tickets 20–27.
 
 ## Question
 
@@ -75,3 +77,84 @@ Accumulated on the map's "Not yet specified" section by tickets 04, 08, 10, 12, 
 A grilling session producing the module tree, the seam list, and the new root's name, written down as an ADR or a layout document the build follows.
 
 Note that ticket 10's phase 1 (vendor + port) cannot start until the root exists, so this ticket is on the critical path to the deletion commit.
+
+## Answer
+
+**The root is `earshot/`, the root *is* the package, and the load-bearing decision is an edge that is absent: neither `audio/` nor `agent/` imports `sim`, so `import habitat_sim` appears in exactly one file in the tree.**
+
+Full tree, layer graph, seam list and rationale: `docs/adr/0013-clean-room-module-layout.md`.
+What follows is what this ticket decided beyond restating the ADR — the corrections it owes other tickets, and what it hands on.
+
+### The root is the package, and this ticket's own notation was wrong
+
+`<newroot>/<pkg>/env_check.py` was inherited from the fog patch, not decided.
+It does not survive the facts: this repo has **no `pyproject.toml`, no `setup.py`, no lint config and no CI**, so everything resolves from the repo root and a nested package costs either a two-level import prefix or a `sys.path` insertion.
+Nothing here is ever pip-installed — ticket 17 pins an *environment*, it does not build a distribution — so the separation buys nothing.
+
+Requirement 8's `<newroot>/<pkg>/env_check.py` therefore collapses to `earshot/env_check.py`, which is what both `bootstrap_ss2.sh` and the runtime reach as `python -m earshot.env_check`.
+
+`earshot` shares no prefix with `embodied_memory`, which matters during the window when both trees exist: a stale import fails loudly instead of reading as a typo.
+
+### Three corrections this ticket owes, all in the direction of less work
+
+**1. Requirement 1(d) is narrower than this ticket stated.**
+It reads "nothing else in the process may write to stdout during that window — no progress print, no `tqdm` bar, no stdout logging handler."
+But `capture_habitat_logs` flushes Python's own buffers on both `__enter__` and `__exit__` (`audio_guard.py:245-252`), precisely so the caller's pending bytes do not land in the capture.
+**Interleaved, in-thread `print()` is safe.**
+What is forbidden is a *concurrent* fd-1/2 writer: a background thread, a timer-driven progress bar, an inherited subprocess descriptor, a logging handler flushed off-thread.
+
+**2. Requirement 6 cannot be satisfied by omitting `__init__.py`, and this was verified rather than argued.**
+PEP 420 namespace packages import `earshot.reference.memory.ltm` cleanly from a regular parent package — tested directly, and the behaviour is 3.3+ so it holds on the box's 3.9.
+The only thing currently stopping it is `faiss` not being installed in `ss2`, which is luck, and which flips the day someone installs faiss to work on the memory follow-on.
+So `reference/__init__.py` and `reference/memory/__init__.py` each **raise `ImportError`** with a pointer to the README.
+
+**3. Ticket 17 contains a contradiction, and the layout dissolves it.**
+`assert_env()` is specified to run "at the entry point, **before** `import habitat_sim`" (17, line 119), while one of its three checks is "`habitat_sim` audio via the enum **member** probe" — which cannot be done without importing habitat-sim.
+With `pin_habitat_logging()` in `earshot/__init__.py`, importing `earshot.env_check` has already run the pin, so `env_check` is free to import habitat-sim.
+`assert_env()` stays an explicit entry-point call because it is expensive and half box-only, not because of ordering.
+
+### The leak requirement 10 wants closed is the current code, not a hypothetical
+
+`build_report` (`anomaly_controller.py:302-316`) emits `"source_xyz": ev.get("source_xyz")` straight out of `ControllerState.investigation_event`, returns an untyped `Dict[str, Any]`, and mutates the state it was handed.
+Ticket 10's "ports near-verbatim" would have carried all three in.
+
+"The controller cannot see ground truth" is **not available as the rule**, because the oracle arm's controller legitimately holds `source_xyz` as its waypoint while task spec §5.1 requires an identical schema in both arms.
+The boundary is drawn at the *type* instead: `AgentReport` is frozen with exactly §5.1's nine fields, so nothing privileged can appear in it whatever the controller holds.
+**Deviation from ticket 10, taken deliberately: the anomaly controller does not port near-verbatim.** `build_report` moves to `earshot/report/`, and the state mutation goes with it.
+
+### What the shared observation call forced
+
+`sim.get_sensor_observations()` returns RGB, depth and the audio IR in one dict (`oneenv_probe.py:629`).
+There is no separate audio render, so the frontier's depth frame and the onset detector's IR come from the same call, and criterion 1's "render count equals step count" is measured on it.
+
+That is why `sim/` owns the lifecycle and is audio-blind, while `audio/spec.py` is the only `AudioSensorSpec()` call site in the tree — which makes requirement 2's key validator structural rather than remembered.
+
+### The guard splits in two
+
+`arm_audio_context()` stays once-per-episode (the 0.814 s / 32.2 MB OBJ write, the vertex floor, key validation).
+A new light **`guarded_observe()`** wraps every step: fd capture, canary, fatal-line scan, no OBJ.
+
+Ticket 16 measured `[Audio]` on **every** render specifically so this is possible, and it needs to be: the same ticket found the closed engine writing un-prefixed error blocks to fd 2 and `RLRA_SetListenerHRTF` returning `Success` over a failed load.
+Those can happen at step 300.
+Cost is two tempfiles per step, landing inside the per-step wall-clock the task spec already requires reporting — audited, not assumed.
+
+### Three structural invariants, all Mac-runnable
+
+`test_layering.py`, `test_report_boundary.py`, `test_no_env_flags.py`.
+The layering test exists because both backwards dependencies rejected during the grilling — `agent/` reaching into `audio/` for a depth frame, `audio/` reaching into `agent/` for a room label — are one convenient import away.
+Documentation-as-enforcement was rejected on this repo's own record: ticket 14's self-update gotcha, ticket 17's inert pin and ticket 13's version-blind skip were all written down and then quietly stopped being true.
+
+### Smaller placements
+
+- **Probes carry only where a live consumer exists.** `oneenv_gate.sh` → `tools/bootstrap_ss2.sh`; `audio_guard.py` → `audio/guard.py`; `test_audio_guard.py` → `tests/mac/`; `audioguard_probe.py` + `audioguard_gate.sh` → `tests/box/`. The other seven stay in `.scratch/`, which is **tracked** (`.gitignore:129` is `scratch/`, not `.scratch/`), so nothing is lost — it just stops pretending to be part of the build.
+- **`tools/` is operator-facing and not part of the agent**, so the notify trio lands at `tools/notify/`. The dataset builder is *not* a tool — it enforces ADR-0010's source placement, which is task policy — so it sits at `task/dataset.py` beside the loader it shares a schema with.
+- **`onset_rms` is not configuration.** §2.3 derives it at run start from the calibration sweep; `AudioConfig` holds the bed level and the audible band.
+- **Python 3.9.19** means `int | None` needs `from __future__ import annotations`, and `test_report_boundary.py` must read `__dataclass_fields__` rather than `typing.get_type_hints()`, which raises on those annotations.
+
+### What this unblocks
+
+**Ticket 19 is unblocked, and inherits two constraints rather than deciding them freely**: the `tests/{mac,box}/` split pre-commits it to a where-it-runs taxonomy, and the injection rule makes its Mac surface most of the tree — `audio/`, `agent/`, `report/`, `metrics`, `types` — rather than the four layers it listed.
+
+**The map's last fog patch graduates.** "The build itself, and the smoke run" was waiting on exactly this ticket, because the slices *are* modules and the modules now have names.
+It becomes tickets **20–27**, in layer order: scaffold, then the four layers in parallel, then wiring, then the smoke, then the deletion.
+None of them is blocked on a question.
