@@ -32,6 +32,13 @@ Three things a Mac cannot settle, each of which would otherwise be an inference:
    on the live path — no path found on roughly 92% of steps — so "the follower works" is
    the claim that fixed locomotion and the one worth re-measuring on new code.
 
+**Run 1 (2026-08-04) went RED on two of twenty-one**, both the same cause:
+``MultiGoalShortestPath.closest_end_point_index`` is present on habitat-sim 0.3.3 and
+**absent on this branch**. It was read by a convenience that returned *which* end was
+nearest; nothing consumed it, and it is gone. Cross-version skew on the box's 2022-era
+``RLRAudioPropagationUpdate`` is exactly the risk this file exists to catch, and it
+caught it — on the one field a Mac pre-flight had verified and therefore trusted.
+
 Python 3.9 (the SoundSpaces pin).
 """
 
@@ -82,14 +89,16 @@ def _semantic_sibling(scene_path):
 
 
 def setUpModule():
-    """Find a scene whose mesh is actually on this box, preferring an unannotated one.
+    """Take the first scene whose mesh is actually on this box.
 
-    Preferring a scene with no ``.semantic.glb`` is not tidiness: it is what turns
-    ticket 08's answer from "the plain config was enough for this scene" into "the
-    annotated config could not have been used, because there is nothing for it to point
-    at". Ticket 05 measured 100 basis meshes against 36 semantic ones in ``val``, so
-    such a scene should exist; if every candidate is annotated the test says so and
-    reports the weaker claim rather than pretending.
+    **Run 1 of this test hunted for a scene with no ``.semantic.glb``**, on the theory
+    that an absent annotation file is what makes ticket 08's answer decisive. All 20
+    ObjectNav ``val`` scenes on this box are annotated, so it reported the weaker claim —
+    and the theory was wrong anyway. The decisive evidence is not that the file is
+    missing but that the loaded scene provably does not contain it
+    (``test_the_annotations_on_disk_are_not_loaded``), which is available on every
+    scene. So this stops at the first usable one instead of parsing twenty
+    tens-of-megabytes content files to answer a question that no longer needs asking.
     """
     global _DATASET, _SCENES_DIR, _SPLIT_DIR, _MESH_COVERAGE, _SEMANTIC_SIBLING
 
@@ -103,26 +112,14 @@ def setUpModule():
     override = os.environ.get("SS2_SCENE_LABEL")
     candidates = [override] if override else list(scenes)
 
-    # Stops at the first unannotated scene with a mesh rather than parsing all of them:
-    # HM3D ObjectNav content files are tens of megabytes each, and coverage over the
-    # whole split is ticket 05's measurement, not this test's. Coverage is therefore
-    # reported over the scenes actually EXAMINED, which is what the numbers say.
-    examined, present, annotated, chosen, fallback = 0, 0, 0, None, None
+    examined, chosen = 0, None
     for label in candidates:
         examined += 1
         dataset = load_scene(_SPLIT_DIR, label, scenes_dir=_SCENES_DIR)
-        if not os.path.exists(dataset.scene_path):
-            continue
-        present += 1
-        if _semantic_sibling(dataset.scene_path) is None:
+        if os.path.exists(dataset.scene_path):
             chosen = dataset
             break
-        annotated += 1
-        if fallback is None:
-            fallback = dataset
 
-    # Every mesh examined is annotated: take the first one and report the weaker claim.
-    chosen = chosen or fallback
     if chosen is None:
         raise unittest.SkipTest(
             "no ObjectNav {} scene has its mesh on this box (examined {} of {} content "
@@ -130,14 +127,9 @@ def setUpModule():
         )
 
     _DATASET = chosen
-    _MESH_COVERAGE = (present, examined)
+    _MESH_COVERAGE = (1, examined)
     _SEMANTIC_SIBLING = _semantic_sibling(chosen.scene_path)
-    print(
-        "  examined {} of {} content scenes: {} have a mesh, {} of those annotated".format(
-            examined, len(candidates), present, annotated
-        ),
-        flush=True,
-    )
+    print("  examined {} content scene(s) to find a mesh".format(examined), flush=True)
     print("  chosen scene: {}".format(_DATASET.scene_label), flush=True)
     print("  mesh:         {}".format(_DATASET.scene_path), flush=True)
     print("  semantic sibling: {}".format(_SEMANTIC_SIBLING or "NONE — decisive"), flush=True)
@@ -209,34 +201,57 @@ class TestSceneDatasetConfigIsUnnecessary(unittest.TestCase):
         finally:
             world.close()
 
-        if _SEMANTIC_SIBLING is None:
-            print(
-                "  DECISIVE: {} has no .semantic.glb on this box, so "
-                "hm3d_annotated_basis.scene_dataset_config.json could not have been "
-                "used. ObjectNav HM3D v1 needs NEITHER config.".format(
-                    _DATASET.scene_label
-                ),
-                flush=True,
-            )
-        else:
-            print(
-                "  WEAKER: every candidate scene on this box is annotated ({} exists), "
-                "so this shows the plain path SUFFICES, not that the annotations are "
-                "absent. Re-run with SS2_SCENE_LABEL on an unannotated scene for the "
-                "decisive form.".format(_SEMANTIC_SIBLING),
-                flush=True,
-            )
+    def test_the_annotations_on_disk_are_not_loaded(self):
+        """What makes the answer decisive, and it is not what run 1 looked for.
 
-    def test_the_loader_resolves_meshes_that_exist(self):
+        Run 1 hunted for a scene with **no** ``.semantic.glb``, reasoning that the
+        annotated config could then have had nothing to point at. Every ObjectNav
+        ``val`` scene on this box is annotated, so it reported the weaker "the plain
+        path suffices".
+
+        The stronger claim was available all along and on every scene: the annotation
+        file is **on disk and the loaded scene does not contain it**. habitat-sim says
+        so itself — ``ResourceManager.cpp:473`` "Not loading semantic mesh",
+        ``Simulator.cpp:471`` "The active scene does not contain semantic annotations",
+        and ``AudioSensor.cpp:143`` "Semantic scene does not exist or materials are
+        disabled, will use default material". This asserts it through the API rather
+        than by scraping those lines.
+
+        So the 9.3 GB of annotations are not merely unneeded by the *loader*; they are
+        untouched by the scene the simulator actually builds.
+        """
+        world = _new_world()
+        try:
+            count = world.semantic_object_count()
+            print("\n  semantic sibling on disk: {}".format(_SEMANTIC_SIBLING or "none"), flush=True)
+            print("  semantic objects in the loaded scene: {}".format(count), flush=True)
+            self.assertEqual(
+                count,
+                0,
+                "the loaded scene carries semantic annotations — load_semantic_mesh "
+                "was supposed to keep ticket 03's empty-mesh path shut",
+            )
+            if _SEMANTIC_SIBLING is not None:
+                print(
+                    "  DECISIVE: {} exists on disk and the loaded scene holds 0 "
+                    "semantic objects. ObjectNav HM3D v1 needs NEITHER scene-dataset "
+                    "config, and the annotations are untouched.".format(
+                        os.path.basename(_SEMANTIC_SIBLING)
+                    ),
+                    flush=True,
+                )
+        finally:
+            world.close()
+
+    def test_the_loader_resolves_a_mesh_that_exists(self):
         """The path arithmetic, against the real layout rather than a fixture."""
         print(
-            "\n  {} of the {} content scenes examined resolve to a file on disk".format(
-                _MESH_COVERAGE[0], _MESH_COVERAGE[1]
+            "\n  resolved a mesh after examining {} content scene(s): {}".format(
+                _MESH_COVERAGE[1], _DATASET.scene_path
             ),
             flush=True,
         )
         self.assertTrue(os.path.exists(_DATASET.scene_path))
-        self.assertGreater(_MESH_COVERAGE[0], 0)
 
 
 class TestEpisodesAgainstThePublishedDataset(unittest.TestCase):

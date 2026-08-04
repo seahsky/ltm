@@ -357,6 +357,26 @@ class World:
             state.rotation = quaternion.quaternion(w, x, y, z)
         self._sim.get_agent(self._agent_id).set_state(state)
 
+    def semantic_object_count(self) -> int:
+        """How many semantic objects the loaded scene holds. Expected: zero.
+
+        Corroborates by observation what ``load_semantic_mesh = False`` guarantees by
+        construction — and it is what makes ticket 08's answer decisive on a box where
+        the ``.semantic.glb`` files are all present. "The annotations are absent" was
+        never the claim available here; "the annotations are on disk and the scene the
+        simulator loaded provably does not contain them" is stronger and directly
+        observable. habitat-sim says the same thing in its own log
+        (``Simulator.cpp:471``, ``activeSemanticSceneID_ = 0``), but a log line is a
+        fragile thing to assert on.
+        """
+        scene = getattr(self._sim, "semantic_scene", None)
+        if scene is None:
+            raise AttributeError(
+                "Simulator has no semantic_scene on this habitat-sim build, so whether "
+                "the scene loaded annotations cannot be read back"
+            )
+        return len(scene.objects)
+
     # -- navmesh --------------------------------------------------------
 
     @property
@@ -402,22 +422,18 @@ class World:
         result. Caught on this Mac before a box trip: the plausible one-liner
         ``self._sim.pathfinder.geodesic_distance(...)`` is an ``AttributeError`` that no
         Mac test could have reached, because nothing here can construct a navmesh.
+
+        **Reads only the fields the box's branch actually has.** This deliberately does
+        not return *which* end was nearest. ``MultiGoalShortestPath`` grew a
+        ``closest_end_point_index`` field at some point after the 2022-era
+        ``RLRAudioPropagationUpdate`` branch: it is present on habitat-sim 0.3.3 and
+        **absent on the box**, which is what the first box run of ticket 21 found. If a
+        consumer ever needs the index, the branch-safe route is matching ``path.points``
+        (which both versions have) against ``ends`` — not the field, and not a
+        ``getattr`` fallback that would quietly return ``-1`` on the box forever.
         """
-        return self._nearest(start, ends)[0]
-
-    def nearest_of(self, start: Xyz, ends: Sequence[Xyz]) -> Optional[Tuple[float, int]]:
-        """``(distance, index)`` of the nearest reachable end, or ``None``.
-
-        The index is what makes multi-view-point arrival checkable: a goal has many view
-        points and the runner wants to know *which* one it is heading for, not only how
-        far the closest is.
-        """
-        distance, index = self._nearest(start, ends)
-        return None if distance is None else (distance, index)
-
-    def _nearest(self, start: Xyz, ends: Sequence[Xyz]) -> Tuple[Optional[float], int]:
         if not ends:
-            return None, -1
+            return None
         path = habitat_sim.MultiGoalShortestPath()
         path.requested_start = _vec(start)
         path.requested_ends = np.asarray(
@@ -426,8 +442,8 @@ class World:
         found = self._require_navmesh().find_path(path)
         distance = float(path.geodesic_distance)
         if not found or not math.isfinite(distance):
-            return None, -1
-        return distance, int(path.closest_end_point_index)
+            return None
+        return distance
 
     def random_navigable_point(self) -> Xyz:
         return Xyz.from_sequence(self._require_navmesh().get_random_navigable_point())
