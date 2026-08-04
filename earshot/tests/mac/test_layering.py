@@ -86,23 +86,25 @@ class TestLayerGraph(unittest.TestCase):
 
 
 class TestSimulatorImportIsUnique(unittest.TestCase):
-    def test_habitat_sim_is_imported_in_at_most_the_designated_module(self):
+    def test_habitat_sim_is_imported_in_exactly_the_designated_module(self):
         """``import habitat_sim`` appears in exactly one file — ``sim/world.py``.
 
-        Stated as a subset rather than an equality because ``sim/world.py`` lands in
-        ticket 21. The constraint is not vacuous meanwhile: it fires the moment a
-        *second* file reaches for the simulator, which is the failure it exists to
-        catch. Ticket 21's arrival is what makes it an equality.
+        An **equality** since ticket 21 landed that module. It was a subset until then,
+        which caught a second importer but would also have passed over the module going
+        missing — and ADR-0013's claim is that the simulator has one designated door,
+        not at most one. Both directions now fail: a second file reaching for the
+        simulator, and ``sim/world.py`` ceasing to be the file that owns it (renamed,
+        split, or its import moved behind a lazy helper somewhere else).
         """
         importers = sorted(
             _tree.relative_path(path)
             for path in _tree.agent_python_files()
             if _tree.imports_module(_tree.parse(path), "habitat_sim")
         )
-        self.assertLessEqual(
-            set(importers),
-            {_tree.SIMULATOR_MODULE},
-            "only {} may import habitat_sim (ADR-0013); found {}".format(
+        self.assertEqual(
+            importers,
+            [_tree.SIMULATOR_MODULE],
+            "exactly {} may import habitat_sim (ADR-0013); found {}".format(
                 _tree.SIMULATOR_MODULE, importers
             ),
         )

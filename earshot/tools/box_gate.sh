@@ -4,8 +4,13 @@
 #   git fetch && git checkout <branch>     # once, to get this file
 #   bash earshot/tools/box_gate.sh
 #
-# ~2 minutes, read-only. Installs nothing, builds nothing, applies no patches, and
+# A few minutes, read-only. Installs nothing, builds nothing, applies no patches, and
 # reuses the `ss2` env `bootstrap_ss2.sh` builds. If `ss2` is missing, run that first.
+#
+# Two suites now: the audio guard (tickets 12/16) and `sim.World` + the ObjectNav
+# loader (ticket 21). The second scans the ObjectNav content files until it finds a
+# scene whose mesh is on this box, so its setup is the slow part; `SS2_SCENE_LABEL`
+# pins one and skips the scan.
 #
 # CARRIED, NOT REWRITTEN, from .scratch/ss2-clean-room/probes/audioguard_gate.sh. Only
 # the driver concerns live here — ADR-0014 draws the split there, and everything below

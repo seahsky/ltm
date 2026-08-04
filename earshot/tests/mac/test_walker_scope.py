@@ -37,7 +37,17 @@ class TestWalkerScope(unittest.TestCase):
         known to contain today must be in scope.
         """
         found = {_tree.relative_path(p) for p in _tree.agent_python_files()}
-        for expected in ("__init__.py", "types.py", "metrics.py", "audio/guard.py"):
+        for expected in (
+            "__init__.py",
+            "types.py",
+            "metrics.py",
+            "audio/guard.py",
+            # Ticket 21. `sim/world.py` most of all: it is the subject of the
+            # one-importer invariant, so a walker that stopped reaching it would make
+            # that test pass by finding nothing to check.
+            "sim/world.py",
+            "task/episodes.py",
+        ):
             self.assertIn(expected, found)
 
     def test_the_excluded_roots_are_genuinely_excluded(self):

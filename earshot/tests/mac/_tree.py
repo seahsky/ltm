@@ -261,6 +261,70 @@ def imports_module(tree: ast.Module, name: str) -> bool:
     return False
 
 
+def code_string_constants(tree: ast.Module) -> List[Tuple[int, str]]:
+    """Every string literal except docstrings, with line numbers.
+
+    A structural invariant that greps raw text cannot tell a *use* from the *citation
+    explaining why it is not used* — ticket 19's "a grep verifies presence not truth",
+    met head-on the first time a test was written that way. Docstrings are excluded by
+    identity rather than by heuristic, and comments never enter the AST at all, so what
+    is left is what the module actually does.
+    """
+    docstring_nodes = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None) or []
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstring_nodes.add(id(body[0].value))
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstring_nodes
+    ]
+
+
+def attribute_names(tree: ast.Module) -> List[Tuple[int, str]]:
+    """Every ``x.attr`` reach, with line numbers. Attribute name only, no receiver."""
+    return [
+        (node.lineno, node.attr)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+    ]
+
+
+def environ_accesses_by_function(tree: ast.Module) -> List[Tuple[str, str]]:
+    """Every environment reach paired with the function that contains it.
+
+    Stronger than counting accesses, which is what this replaced. A count says the
+    exemption did not grow; naming the enclosing function says it is still spent on
+    what earned it — ``guard.py`` legitimately both *sets* the pin and *asserts* it, and
+    a bare count could not tell that second read from a new configuration flag.
+
+    ``"<module>"`` for a top-level access, since a module-level environment read is a
+    different and worse thing than one inside a named function.
+    """
+    owner: Dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for child in ast.walk(node):
+                lineno = getattr(child, "lineno", None)
+                # Nested defs: the innermost walk wins because it is visited later only
+                # if it is reached later, so take the first (outermost) claim and let
+                # the inner one refine it.
+                if lineno is not None:
+                    owner[lineno] = node.name
+    return [
+        (owner.get(lineno, "<module>"), what) for lineno, what in environ_accesses(tree)
+    ]
+
+
 def environ_accesses(tree: ast.Module) -> List[Tuple[int, str]]:
     """Every ``os.environ`` / ``os.getenv`` / ``environ[...]`` reach, with line numbers.
 

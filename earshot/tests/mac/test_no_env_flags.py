@@ -43,15 +43,27 @@ class TestNoEnvFlags(unittest.TestCase):
     def test_the_guards_access_is_the_pin_and_nothing_else(self):
         """The exemption is load-bearing, so check it is still spent on what earned it.
 
-        ``pin_habitat_logging`` is the only reason ``guard.py`` is on the allowlist. If
-        the module grows a second environment read, the exemption stops being about the
-        pin and this is where that shows up.
+        The pin is the only reason ``guard.py`` is on the allowlist, and it is two
+        functions rather than one: ``pin_habitat_logging`` *sets* the variable, and
+        ``assert_habitat_logging_pinned`` *reads it back* — the check ``sim/world.py``
+        makes immediately before ``import habitat_sim``, which lives here precisely so
+        that module never touches the environment itself.
+
+        Named functions rather than a count. Ticket 21 added the second read and the
+        old count-of-one assertion failed, which was the right alarm and the wrong
+        question: the thing worth asserting is not *how many* reaches there are but
+        that each one is still the pin. A third entry now has to be added here with a
+        reason, and a top-level ``os.environ`` anywhere in the module fails as
+        ``<module>``.
         """
         path = _tree.PACKAGE_ROOT / "audio" / "guard.py"
-        accesses = _tree.environ_accesses(_tree.parse(path))
+        accesses = _tree.environ_accesses_by_function(_tree.parse(path))
         self.assertEqual(
-            [what for _, what in accesses],
-            ["os.environ"],
+            sorted(accesses),
+            [
+                ("assert_habitat_logging_pinned", "os.environ"),
+                ("pin_habitat_logging", "os.environ"),
+            ],
             "guard.py's exemption covers the HABITAT_SIM_LOG pin only; found {}".format(
                 accesses
             ),
