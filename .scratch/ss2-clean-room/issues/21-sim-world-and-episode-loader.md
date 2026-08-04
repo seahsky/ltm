@@ -1,7 +1,7 @@
 # 21 — `sim/world.py` and the ObjectNav episode loader
 
 Type: task
-Status: claimed
+Status: resolved
 Blocked by: 20 (resolved 2026-08-04)
 
 ## Question
@@ -36,11 +36,31 @@ The observation is **not** a numpy array; `getattr(obs, "shape")` reads `None`, 
 
 ---
 
-## Built, 2026-08-04 — box run 1 RED on 2 of 21, fixed, awaiting run 2
+## Answer, 2026-08-04 — GREEN on the box, and ticket 08's 9.3 GB is released
 
-Both modules exist, the Mac suite is **114 green** (was 84), `ruff check earshot/` is clean over 20 files.
-Box run 1 (`4ok3usBNeis`, ObjectNav `val`, 74.8 s): **19 of 21 pass**, two errors on one cause, fixed below.
-Re-run `bash earshot/tools/box_gate.sh --branch wayfinder/ss2-clean-room-21` and paste `runs/ss2-box-gate/box-suite.log`.
+**Box run 2: 22 of 22, 55.2 s** (`4ok3usBNeis`, ObjectNav `val`, `ss2`, V100). Mac suite **114 green** (was 84), `ruff check earshot/` clean over 20 files, CI green.
+
+**The `scene_dataset_config` question is settled by measurement, and the question had a false premise.** It asked whether ObjectNav HM3D v1 loads against `hm3d_basis.scene_dataset_config.json` or requires `hm3d_annotated_basis.scene_dataset_config.json`. It needs **neither**. Nothing in `earshot/` sets `scene_dataset_config_file`; it stays at habitat-sim's own `'default'`, and the episode's `scene_id` resolves as a plain filesystem path — the same form tickets 04 and 16 already rendered against.
+
+**The decisive evidence, from run 2:** `4ok3usBNeis.semantic.glb` is **on disk** and the loaded scene holds **0 semantic objects**. Not "the annotations are absent" — they are present and provably untouched by the scene the simulator builds. **Ticket 10 may drop the semantic annotations from its keep list.**
+
+### What the box measured
+
+| claim | measured |
+| --- | --- |
+| `SimulatorConfiguration().scene_dataset_config_file` | `'default'` — habitat-sim's own constructor default |
+| a real HM3D scene loads with no scene-dataset config | **yes**, 1.18 s, navmesh loaded |
+| the annotations on disk are loaded | **no** — `.semantic.glb` present, **0 semantic objects** in the loaded scene |
+| **the loader resolved the right mesh** | geodesic start → nearest view point **5.980263710021973** against the dataset's own authored `info.geodesic_distance` **5.98026**. An independent end-to-end confirmation: wrong `scenes_dir`, stale symlink or wrong mesh would all still pass the path-arithmetic tests and would not reproduce the dataset's own number |
+| the audio spec reaches the sensor suite via `AgentConfiguration.sensor_specifications` | **yes** — `AudioSensor`. The disclosed cross-version inference is **closed GREEN**; the `add_sensor` fallback is not needed |
+| `observe()` returns all three modalities in one call | `rgb (256,256,4) uint8`, `depth (256,256) float32`, `audio_sensor (2, 57568) float64` |
+| depth is metric, not normalised | **0.400 – 2.551 m** |
+| the raw IR has no `.shape` | attribute **absent entirely** — ticket 16 recorded `None`; either way, coerce or walk it |
+| `step()` never renders | `n_steps=10, n_renders=5` |
+| the guard arms on `World.observe` | 335,370 verts held vs **335,362 submitted — the +8 gap reproduces** on a second scene |
+| **the follower routes** | 5.363 m start geodesic → **0.135 m at stop**, 44 actions (22 forward / 22 turn), arrival signalled |
+| `snap_point` / `geodesic_distance` off the navmesh | `None` / `None`, never NaN, never `inf` |
+| episode 0 parses from the published bytes | `bed`, 2 goals, **1187 view points**, authored `episode_id` preserved |
 
 ### What box run 1 established
 

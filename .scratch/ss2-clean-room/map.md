@@ -70,6 +70,8 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 
 - [20 — Scaffold `earshot/` and its three structural invariants](issues/20-scaffold-the-root.md) — **The root exists and asserts its own shape: 84 Mac tests green under a fresh `earshot-mac` 3.9.25 env, `ruff check earshot/` clean over 16 files, and CI green in 31 s on `ubuntu-latest`.** The suite **refuses to run** on this Mac's 3.14 (exit 1, every module errors), `import earshot` pins `HABITAT_SIM_LOG`, and `import earshot.reference.memory.ltm` raises the intended `ImportError` rather than a `ModuleNotFoundError` about faiss. **The one fact it was told to verify came back GO: `actions/setup-python` still provides 3.9** (32 entries to 3.9.25, linux-x64; CI resolved 3.9.25), so ADR-0014's single disclosed weakening of the interpreter refusal did not happen. **Four corrections, all found by building.** (a) The walker's excluded set is **`{reference, tools, tests}`, not `{reference}`** — ADR-0014's version would have been **red on day one**, because `tests/box/` *must* import `habitat_sim` (it drives the real artefact, ADR-0014's own definition) and `test_audio_guard.py` *must* touch `os.environ` (it tests the pin); there are now **two pins**, each entry carrying its reason, plus a test that every excluded root exists — an exclusion for an absent directory is an inert pin. (b) The interpreter refusal **cannot live in `tests/mac/__init__.py`**: `unittest discover` sets `top_level_dir` to the start dir and imports each `test_*.py` as a top-level module, so the package init never runs (read out of `TestLoader._find_tests`); it lives in `_interpreter.py`, imported by every module, with a hygiene test closing the forget-to-import gap. (c) The constraints file was being **generated, not read** (`echo "numpy<1.24" > …` into `$BUILD_ROOT`) — the pin lived on the box and nowhere in the repo, so ticket 17's "content, not plumbing" needed one plumbing change after all. (d) `reference/memory/__init__.py`'s message is **unreachable** on the normal path (the parent always raises first) — kept as defence in depth, not as a second message. Also **rescued a test the reset would have dropped silently**: `compute_benchmark_spl`'s 8 cases lived inside `embodied_memory/`, which phase 3 deletes wholesale, and no carry list named them. `guarded_observe` shares `_scan_logs` with the arming path and a test asserts the two **agree on what is fatal**. Deliberate: **no bearing helper in `types.py`** (ticket 09 found the lateral sign inverts under live rendering — that convention is the box's to pin), and the bootstrap does **not** yet call `env_check` (ticket 24 owns it; a guarded call would be the version-blind-skip pattern). Fixed `docs/race-box-runbook.md` §3, which went false the moment `ss2-constraints.txt` landed.
 
+- [21 — `sim/world.py` and the ObjectNav episode loader](issues/21-sim-world-and-episode-loader.md) — **GREEN on the box (22/22), and ticket 08's question had a false premise: ObjectNav HM3D v1 needs NEITHER scene-dataset config.** Nothing sets `scene_dataset_config_file`, so it stays at habitat-sim's own `'default'` and `scene_id` resolves as a plain path — read from habitat-lab's source, then measured. The **decisive** form is not the one this ticket predicted: every ObjectNav `val` scene on the box is annotated, so "no `.semantic.glb` exists" was unavailable; the stronger claim was there all along — the file **is on disk and the loaded scene holds 0 semantic objects**. The annotated config was the old tree's own override for a semantic sensor ADR-0007 and ticket 03 removed. **Ticket 10 may drop the semantic annotations from its keep list.** The loader is confirmed end-to-end by a number it does not compute: geodesic start → nearest view point **5.980263710021973** against the dataset's authored **5.98026**, which a wrong `scenes_dir` or stale symlink could not reproduce. `World` is audio-blind and every spec goes in at construction — a *constraint*, since `_sanitize_config` derives `create_renderer` from the list and `add_sensor` then refuses any modality absent at init. `step()` deliberately does not render, so smoke criterion 1 is falsifiable (`n_steps=10, n_renders=5`); the follower routes 5.363 m → **0.135 m**; depth arrives **metric** because `min_depth`/`normalize_depth` are habitat-**lab** fields that do not exist on the spec — setting them would have been three silently swallowed assignments. **Four defects found by building, three on the Mac before the box trip** (`PathFinder` has no `geodesic_distance`; the three non-existent depth fields; a Simulator built with no specs can never gain a camera) **and one only the box could find** — `MultiGoalShortestPath.closest_end_point_index` exists on habitat-sim 0.3.3 and **not on the branch**, caught on the one field a Mac pre-flight had verified and therefore trusted; the unconsumed convenience reading it was deleted rather than `getattr`-defaulted. The loader **keeps the authored `episode_id`** where habitat-lab overwrites it with the load index — the divergence that made the old analysis re-key onto `(scene_id, target_category, visit_order)`. `test_layering`'s importer check is now the **equality** ADR-0013 states, and `test_no_env_flags` names the enclosing function of each `os.environ` reach rather than counting them. Also: the audio spec **does** reach the sensor suite through `AgentConfiguration.sensor_specifications` on the branch (disclosed inference, closed GREEN), and per-step `guarded_observe` costs **~1230 ms** at stock acoustics — ticket 06's unaffordable regime, because the preset is ticket 22's.
+
 ## Not yet specified
 
 <!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
@@ -81,27 +83,30 @@ Ticket 18 named them, and that patch graduated on 2026-08-04 into tickets **20�
 
 **Every decision on this map is now made.** Ticket 19 was the last open question; it resolved the same day and grew ticket 20 rather than surfacing anything new.
 Ticket 20 built the root on 2026-08-04 and surfaced nothing new either — four corrections, all inside tickets that already exist.
+Ticket 21 landed the simulator and the loader the same day, surfaced nothing new, and settled ticket 08's last outstanding fact on the box.
 
-The frontier is now **21, 22, 23 and 24 in parallel**, all unblocked by 20 and none blocking each other.
+The frontier is now **22, 23 and 24 in parallel**, all unblocked and none blocking each other.
 
 ```
 20 scaffold  ✓ resolved 2026-08-04
    │
-   ├─► 21 sim + episode loader ─┐
-   ├─► 22 audio/                │   ← the frontier: four independent tickets
-   ├─► 23 agent/                ├─► 25 task wiring
-   └─► 24 report/ + env_check ──┘         │
-                                          ▼
-                              26 smoke green on the box
-                                          │
-                                          ▼
-                        27 hermeticity + the deletion commit
+   ├─► 21 sim + episode loader  ✓ resolved 2026-08-04 ─┐
+   ├─► 22 audio/                                       │   ← the frontier: three tickets
+   ├─► 23 agent/                                       ├─► 25 task wiring
+   └─► 24 report/ + env_check ─────────────────────────┘         │
+                                                                 ▼
+                                                     26 smoke green on the box
+                                                                 │
+                                                                 ▼
+                                               27 hermeticity + the deletion commit
 ```
 
-Two things ticket 20 left for the tickets that own them, so they are not lost between sessions:
+Left for the tickets that own them, so they are not lost between sessions:
 
-- **Ticket 21 tightens the simulator-import assertion.** `test_layering.py` asserts the set of `habitat_sim` importers is a *subset* of `{sim/world.py}`, because that file does not exist yet. It fires the moment a second file reaches for the simulator, which is the failure it exists to catch — but it becomes the equality ADR-0013 states only once 21 lands.
 - **Ticket 24 wires the assertion into the bootstrap.** `bootstrap_ss2.sh` does not yet call `python -m earshot.env_check --strict`; it keeps ticket 04's probe as its verdict meanwhile. Adding a guarded call before the module existed would have been the version-blind-skip pattern this map keeps killing.
+- **Ticket 22 owns the acoustics preset, and ticket 21 measured what its absence costs.** Per-step `guarded_observe` against a bare `AudioSensorSpec` (only `sampleRate` set) is **~1230 ms**, which is ticket 06's *unaffordable* default regime rather than its 27.2 ms `cheap_preset`. Nothing in `sim/` to fix; recorded so the number is not later read as a `World` cost.
+- **Ticket 25 must not reach for `MultiGoalShortestPath.closest_end_point_index`.** It exists on habitat-sim 0.3.3 and **not** on the box's branch (ticket 21's box run 1). If the runner needs to know *which* view point is nearest, the branch-safe route is matching `path.points` against the ends.
+- **Ticket 10 may drop the semantic annotations from its keep list.** They were kept only against ticket 08's open question, which ticket 21 closed: the clean room needs no scene-dataset config, and the `.semantic.glb` on disk is provably not loaded.
 
 ## Out of scope
 
