@@ -98,6 +98,7 @@ __all__ = [
     "count_obj_vertices",
     "guarded_observe",
     "pin_habitat_logging",
+    "assert_habitat_logging_pinned",
 ]
 
 
@@ -809,3 +810,25 @@ def pin_habitat_logging(level: str = HABITAT_SIM_LOG_PIN) -> str:
         )
     os.environ["HABITAT_SIM_LOG"] = level
     return level
+
+
+def assert_habitat_logging_pinned(level: str = HABITAT_SIM_LOG_PIN) -> None:
+    """Fail unless the pin is in force. Called immediately before ``import habitat_sim``.
+
+    Lives here rather than at the call site so ``sim/world.py`` never touches
+    ``os.environ`` — ADR-0008's flag surface stays exactly the two modules
+    ``test_no_env_flags.py`` names, and the check sits next to the pin it is about.
+
+    Belt to ``pin_habitat_logging``'s braces, and the two catch different failures.
+    The pin raises when it is called too late; this raises when it was never called at
+    all — an entry point that imports ``earshot.sim.world`` directly, or a box session
+    that unset the variable between the two imports.
+    """
+    actual = os.environ.get("HABITAT_SIM_LOG")
+    if actual != level:
+        raise AudioContextError(
+            "HABITAT_SIM_LOG is {!r}, not the pinned {!r}. habitat-sim reads it at "
+            "import time, so importing the simulator now would silently disarm the "
+            "guard's log scan — invariant 2 would pass by seeing nothing. Import "
+            "`earshot` first; its __init__ is the pin.".format(actual, level)
+        )
