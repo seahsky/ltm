@@ -462,22 +462,15 @@ class World:
         result. Caught on this Mac before a box trip: the plausible one-liner
         ``self._sim.pathfinder.geodesic_distance(...)`` is an ``AttributeError`` that no
         Mac test could have reached, because nothing here can construct a navmesh.
+
+        This asks the multi-goal query for the distance and **nothing else**. It used to
+        route through a helper that also read ``closest_end_point_index``, which is
+        absent on the box's habitat-sim 0.2.2 binding (see ``nearest_of``) — an index no
+        caller here wanted, computed on every call, which is what took down ticket 25's
+        second box run at the calibration sweep.
         """
-        return self._nearest(start, ends)[0]
-
-    def nearest_of(self, start: Xyz, ends: Sequence[Xyz]) -> Optional[Tuple[float, int]]:
-        """``(distance, index)`` of the nearest reachable end, or ``None``.
-
-        The index is what makes multi-view-point arrival checkable: a goal has many view
-        points and the runner wants to know *which* one it is heading for, not only how
-        far the closest is.
-        """
-        distance, index = self._nearest(start, ends)
-        return None if distance is None else (distance, index)
-
-    def _nearest(self, start: Xyz, ends: Sequence[Xyz]) -> Tuple[Optional[float], int]:
         if not ends:
-            return None, -1
+            return None
         path = habitat_sim.MultiGoalShortestPath()
         path.requested_start = _vec(start)
         path.requested_ends = np.asarray(
@@ -486,8 +479,39 @@ class World:
         found = self._require_navmesh().find_path(path)
         distance = float(path.geodesic_distance)
         if not found or not math.isfinite(distance):
-            return None, -1
-        return distance, int(path.closest_end_point_index)
+            return None
+        return distance
+
+    def nearest_of(self, start: Xyz, ends: Sequence[Xyz]) -> Optional[Tuple[float, int]]:
+        """``(distance, index)`` of the nearest reachable end, or ``None``.
+
+        The index is what makes multi-view-point arrival checkable: a goal has many view
+        points and the runner wants to know *which* one it is heading for, not only how
+        far the closest is.
+
+        **One single-goal query per end, deliberately not ``MultiGoalShortestPath``.**
+        That class computes the index and exposes it as ``closest_end_point_index`` —
+        upstream, and not on the pinned build. Measured on the box 2026-08-05:
+        ``AttributeError: 'habitat_sim._ext.habitat_sim_bindings.MultiGoalSho' object has
+        no attribute 'closest_end_point_index'``. Deriving it from N single-goal paths
+        works on that binding and on any later one, which is what a version check would
+        not do; the alternative — matching ``path.points[-1]`` back to the requested ends
+        — is ambiguous exactly when two view points are close together, which is the case
+        the index exists to resolve.
+        """
+        pathfinder = self._require_navmesh()
+        best: Optional[Tuple[float, int]] = None
+        for index, end in enumerate(ends):
+            path = habitat_sim.ShortestPath()
+            path.requested_start = _vec(start)
+            path.requested_end = _vec(end)
+            found = pathfinder.find_path(path)
+            distance = float(path.geodesic_distance)
+            if not found or not math.isfinite(distance):
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, index)
+        return best
 
     def random_navigable_point(self) -> Xyz:
         return Xyz.from_sequence(self._require_navmesh().get_random_navigable_point())

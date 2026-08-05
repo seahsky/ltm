@@ -486,6 +486,60 @@ class TestTheFollowerRoutes(unittest.TestCase):
         finally:
             world.close()
 
+    def test_nearest_of_names_which_end_it_measured(self):
+        """The index, on the binding that has no ``closest_end_point_index``.
+
+        ``MultiGoalShortestPath`` computes this and exposes it upstream; the pinned
+        0.2.2 build does not, and reading it is an ``AttributeError`` no Mac test can
+        reach — it took down a box run at the calibration sweep. ``nearest_of`` derives
+        it from N single-goal paths instead, so this exercises the derivation against
+        the real navmesh rather than asserting the shape of a tuple.
+
+        Checked against ``geodesic_distance``, which takes the multi-goal path: the two
+        agree on the distance or the derivation is measuring something else.
+        """
+        world = _new_world(with_audio=False)
+        try:
+            world.seed_navmesh(PLACEMENT_SEED)
+            start = world.pose().position
+            ends = []
+            for _ in range(FOLLOW_DRAW_TRIES):
+                candidate = world.random_navigable_point()
+                if world.geodesic_distance(start, [candidate]) is not None:
+                    ends.append(candidate)
+                if len(ends) == 3:
+                    break
+            if len(ends) < 2:
+                self.skipTest("fewer than two reachable points after {} draws".format(
+                    FOLLOW_DRAW_TRIES))
+
+            per_end = [world.geodesic_distance(start, [end]) for end in ends]
+            result = world.nearest_of(start, ends)
+            print("\n  --- nearest_of ---", flush=True)
+            for index, (end, distance) in enumerate(zip(ends, per_end)):
+                print("  [{}] {} -> {}".format(index, end, distance), flush=True)
+            print("  nearest_of -> {!r}".format(result), flush=True)
+
+            self.assertIsNotNone(result, "no end reachable, yet each measured finite")
+            distance, index = result
+            self.assertEqual(index, per_end.index(min(per_end)))
+            self.assertAlmostEqual(distance, min(per_end), places=4)
+            # The multi-goal query is the one `geodesic_distance` uses; if the two
+            # disagree the derivation is answering a different question.
+            self.assertAlmostEqual(
+                distance, world.geodesic_distance(start, ends), places=4
+            )
+
+            self.assertIsNone(
+                world.nearest_of(start, []), "an empty end list has no nearest"
+            )
+            self.assertIsNone(
+                world.nearest_of(start, [Xyz(1e6, 1e6, 1e6)]),
+                "an unreachable end must be None, not index 0 at inf",
+            )
+        finally:
+            world.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
