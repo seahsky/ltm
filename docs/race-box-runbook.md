@@ -228,6 +228,25 @@ assert t is not None and hasattr(t, "Binaural"), "built WITHOUT --audio"
 Same class of trap on the CLAP side: `import ClapModel` succeeds against a disabled torch backend because transformers substitutes a DummyObject that only raises on *instantiation*.
 Probe capability, not importability.
 
+### The hermeticity gate (ticket 10 phase 2)
+
+The gate the irreversible deletion commit hangs off, and the one box procedure that takes the repo apart while it runs:
+
+```bash
+source earshot/tools/notify/notify-run.sh
+nrun bash earshot/tools/hermeticity_gate.sh --tag hermetic-1
+```
+
+It moves everything phase 3 deletes out of the repo, runs the box suite and one smoke episode with them gone, moves them back, and writes `hermeticity.json` into the run directory so `python -m earshot.task.smoke --run-dir <dir>` can answer criterion 9 from an artefact instead of from memory.
+
+Three things worth knowing before running it:
+
+- It **refuses a dirty tree**, because an uncommitted edit inside a moved path cannot be told apart from a restore failure afterwards.
+- Restore is an EXIT trap, so a failure or a Ctrl-C repairs the tree. After a `kill -9` there is no trap: every moved path is tracked, and the recovery line is printed into the log *before* anything moves — `git checkout -- embodied_memory dialogue_memory scripts …`.
+- `--dry-run` does the move and the restore and stops. Use it to rehearse; it needs no env and no GPU.
+
+**A red gate is the gate working.** Fix the leak, restore, repeat.
+
 ---
 
 ## 5. Running things unattended
@@ -235,13 +254,17 @@ Probe capability, not importability.
 `nrun` wraps any command so it survives an SSH disconnect and emails a report when it ends, on success, crash, or Ctrl-C.
 
 ```bash
-source scripts/notify-run.sh          # defines nrun; safe to source, never exits your shell
-nrun bash <driver> --tag <t>          # self-detaches (nohup + background)
+source earshot/tools/notify/notify-run.sh   # defines nrun; safe to source, never exits your shell
+nrun bash <driver> --tag <t>                # self-detaches (nohup + background)
 tail -f runs/nrun-*.out
 ```
 
+The trio moved to `earshot/tools/notify/` when ticket 10 carried it out of `scripts/`, which phase 3 deletes.
+Ticket 27 found all three of its self-references still written against the old location — `nrun` dispatched at `earshot/tools/scripts/notify-run.sh`, the emailer at `earshot/tools/scripts/notify_email.py`, and `.env` was read from `earshot/tools/` — so `nrun` printed a pid and ran nothing, and a foreground run emailed nothing while reporting success.
+Every path is derived from the script's own location now, and `earshot/tests/mac/test_notify.py` runs the trio inside a skeleton holding only what survives the reset.
+
 - **Do not prefix `nohup` yourself.** `nrun` is a shell function, and `nohup` cannot launch functions. `nrun` already does the `nohup` + background + `disown`.
-- For a **foreground** run: `bash scripts/notify-run.sh <command...>`.
+- For a **foreground** run: `bash earshot/tools/notify/notify-run.sh <command...>`.
 - The wrapper's exit code is **always** the wrapped command's. A notifier failure never changes it.
 - Output is tee'd to `runs/notify-<tag>-<timestamp>.log`; the tag is the first `--tag` value in the args, else the first non-`bash`/`python` argument's basename.
 
@@ -264,7 +287,7 @@ MATTERPORT_TOKEN_SECRET=
 Unconfigured is fine: the run works, there is just no email.
 `NOTIFY_DISABLE=1` skips sending entirely.
 
-`scripts/notify_email.py` is **stdlib-only on purpose**, so it adds no dependency to the env.
+`earshot/tools/notify/notify_email.py` is **stdlib-only on purpose**, so it adds no dependency to the env.
 It posts to `https://api.resend.com/emails` with the gzipped log attached, caps the attachment at 35 MB (Resend's request limit is 40 MB) and truncates to the log tail beyond that, and **always exits 0**.
 
 ---

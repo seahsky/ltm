@@ -115,6 +115,12 @@ Ticket 25 wired `task/` the same day and surfaced no new *question*, but it surf
 
 The frontier is now **27 alone**; 20 through 26 are done.
 
+**27 is claimed and half-built (2026-08-05).** Its Mac half landed — the gate is a script rather than a hand procedure (`earshot/tools/hermeticity_gate.sh` + `reset_manifest.py`), criterion 9 is answerable off a recorded artefact instead of operator memory, and the delete list is audited against `git ls-files` with the counts pinned.
+Two things a session picking this up should know before touching it.
+**The gate moves all five phase-3 groups, not the two ticket 10 named** — because the narrow version would have been green over a real leak: the carried `earshot/tools/notify/` trio still executed `$REPO_ROOT/scripts/…`, inside a group phase 2 would not have moved, so `nrun` printed a pid and ran nothing and the box trip had no launcher.
+**And a test written inside this tree cannot see that class of bug at all** — a reference to a doomed path resolves fine while the doomed path is still there, which is this map's own argument for phase 2 arriving in miniature. The fix is a skeleton holding only what survives the reset.
+What is left is box-only and in the ticket: run the gate, sweep the box, then the atomic commit.
+
 ```
 20 scaffold  ✓ resolved 2026-08-04
    │
