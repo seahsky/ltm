@@ -1,7 +1,7 @@
 # 26 — The smoke, green on the box
 
 Type: task
-Status: claimed
+Status: resolved (2026-08-05)
 Blocked by: 25 (resolved)
 
 ## Question
@@ -225,3 +225,91 @@ ever sounds.
 662 Mac tests (628 → 662), ruff clean, every fix plant-verified red for the right reason.
 Criterion 5 has not yet been *tested* — runs 2 and 3 both failed upstream of the climb, on
 geometry and on timing. Run 4 is the first honest test of the probe-routed detour.
+
+---
+
+## Resolution — 2026-08-05, `runs/ss2-ep3`
+
+**Criteria 1–8 PASS on the RACE V100. Criterion 9 is NOT_RUN by construction and belongs to
+ticket 27**, which is how this ticket defined its own bar. The destination sentence is now a
+measured fact: one HM3D episode ran end to end with SoundSpaces 2.0 audio rendered live in
+the simulator at every step, the agent ran its find-task, an alarm fired, it investigated,
+resumed, and reported.
+
+    1. PASS  audio live and every-step          168 renders / 168 loop steps
+    2. PASS  audio context sound                335370 verts (submitted 335362), canary seen
+    3. PASS  the IR is real                     shape (2, 13909), peak 0.5949
+    4. PASS  provenance did not raise           onset step 4, 4 pre-onset readings, t_anom 4
+    5. PASS  the full loop ran                  funnel stage 6 (PRIMARY_RESUMED)
+    6. PASS  a report was emitted               all 9 of §5.1's keys
+    7. PASS  audio wall-clock inside its ceiling max 0.0653 s, mean 0.0553 s, ceiling 0.5 s
+    8. PASS  env_check passed                   5 probe(s), all pass
+
+`onset 4 → INVESTIGATE 4 → RESUME 8 → primary goal 167`, 89 forwards, **0 collisions**,
+22.25 m walked.
+
+### The detour reached the right instance
+
+Criterion 5's flag is not enough on its own: arrival in the realizable arm is plateau **plus**
+visual confirm, and the confirm is `detector.detects("chair")`, which fires on *any* chair
+view point within a metre. §4.2 anticipated this by making "reached the source" a measured
+distance, and the measurement settles it: **`dist_at_stop` 0.486 m** against a
+`source_separation_m` of 3.216 m, with `min_d2source_m` 0.117 m. It stopped at the source
+chair, not a different one.
+
+The honest caveat is the leg's length. The alarm fired at step 4 with the agent already
+`start_pose_anomaly_rms` 0.190 from a standing start, so the detour was four steps and about
+a metre. The builder decouples the source from the **goal** (≥ 3 m in xz) and says nothing
+about the **start**, so a source next to the agent's opening pose is legal. The claim that
+the probe-routed detour can route *around* something rests on
+`tests/box/test_investigate_route_box.py` — 0.11 m behind a wall in 29 steps, 0 collisions,
+against a control arm that walks the old straight line into it — and not on this episode.
+
+### §9's builder numbers, now measured rather than argued
+
+- **`investigate_max_steps`** 40 → 120 held: the detour used 4 of it.
+- **Criterion 7's ceiling** 0.5 s is ~7.6x the measured max (0.0653 s) and ~9x the mean
+  (0.0553 s) over 168 live renders. Generous on purpose, and now with a number behind the
+  word. Live-every-step costs 9.29 s of the episode's 19.48 s wall clock.
+- **§3.1's pre-onset tolerance** never fired: the pre-onset spread is 0.001 .. 0.001 over 4
+  readings, the bed level exactly, which is ADR-0009's unrendered bed doing what it promised.
+- **The calibration** separated by 44.5 dB over 16 poses; `onset_rms` 0.0130 against an
+  onset measured at 0.215.
+- **`derive_t_anom`'s bound was tight on geometry and loose on the agent.** The episode's
+  geodesic `start_end_distance_m` is 3.129 m, so the earliest step the find could have ended
+  on was 8 and the derivation chose 4. The find actually ended at **167** — the agent walked
+  22.25 m to cover 3.13 m (`soft_spl` 0.103). So the conservatism that made this work is the
+  explorer's inefficiency, not route tortuosity, and the bound is doing its job at the
+  geometric end where the argument lives.
+
+### One defect found in the artefact, not fixed here
+
+**`source_is_visible` has been false at every step of every box episode** — 31, 153 and now
+168 steps, including at 0.117 m from the source and at the 0.486 m STOP. That is not
+credible as geometry. The arithmetic in the run's own log points at the cause: the listener
+transform sits at y 3.564 while the source sits at y 2.064, **exactly 1.5 m apart**, because
+the source is a goal **view point** — a navigable pose on the floor — and the listener is at
+sensor height. A ray from eye level to a point lying on the floor plane hits the floor at or
+just before its endpoint, so the probe can never return true for a source placed this way.
+
+This is inference from one arithmetic coincidence, not a measurement. It matters because
+§3.3 calls the field "the best available diagnostic for why a gradient climb stalled" and
+§3.2 records it at every step, so if this is right the artefact carries 168 dead booleans —
+the same shape as `source_dy_m` reading 0.000 while the real drop was 2.6 m.
+
+Not fixed here because the obvious fix is **not** a bug fix: raising the source off the floor
+would make the ray meaningful *and* change every acoustic number this map has measured, and
+a real alarm is not on the floor anyway. That is a task-design decision about §2.1's source
+placement, and it goes to the map rather than being done quietly on the day the smoke went
+green. The separating measurement is cheap — query `sourceIsVisible()` with the listener
+placed at the source position; still false means the probe is inert rather than occluded.
+
+### State
+
+662 Mac tests, ruff clean, `tests/box/` green (43/45 with the frame PINNED agent-frame).
+Four defects closed on the box across four runs, each invisible in the artefact it produced:
+the funnel over-credit, the detour re-entry, the single-anchor floor rule, and the constant
+`t_anom`. Three of the four were fake constants or rules falsified by a measurement.
+
+Hands to **ticket 27**: the same run, green again, with `embodied_memory/` and
+`dialogue_memory/` moved out of the repo.

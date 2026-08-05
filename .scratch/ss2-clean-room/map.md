@@ -78,11 +78,30 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 
 - [25 — `task/` wiring: the runner, the dataset builder, and the CLI](issues/25-task-wiring.md) — **The tree is a runnable program: `python -m earshot --run-dir runs/<tag>`. Five modules, 76 new Mac tests (484 → 560 green), ruff clean, four planted violations and four reds — but the box run itself is undelivered and hands to ticket 26.** The finding is structural: **`NoRouteError` had to move to `types.py`**, because the module that RAISES it may import habitat-sim and the module that CATCHES it may not, and both alternatives were shapes this map removes (sniffing `type(exc).__name__`, or an import-guarded fallback class the Mac would then catch **vacuously** — ticket 13's version-blind skip in new clothes). `sim/world.py` re-exports it, so every reference still resolves. **`earshot/vlm.py` does not exist** — ADR-0013's tree names it and no ticket built it, so `Detector.CAPTION` and `CaptionerRoomLabeler` cannot run; `make_detector` **raises naming it** rather than substituting the oracle, because an arm that silently ran the other arm would mislabel every audit record (both are R2, out of scope here). Three homeless things found homes, each disclosed: **CLAP's encoder → `task/models.py`** (a disclosed *addition* to the ADR's tree, layer graph unchanged — the seam now ships with both sides), **soft-SPL → `metrics.compute_soft_spl`** (habitat-lab supplied it and is not a dependency; re-derived from its source with the citation, one divergence at the divide-by-zero cold-start-on-goal), and **the calibration's other half → `runner.calibration_poses`** (navmesh draws matched to `band_poses`' target distances). Five corrections: the calibration is **per episode** (one source per episode ⇒ the anomaly distribution is a property of the episode, and each threshold lands on its own audit record); **criterion 1 needs two counters** — arming, the §2.5 start-pose check and the sweep all render *outside* the loop, so it is `n_renders_in_loop == n_loop_steps`, not the lifetime counter, and **ticket 26 must use them**; the builder's separation bar is against **every** primary view point (the agent succeeds at any instance, so one-instance separation is not decoupling), with placement attrition counted per episode and kept distinct from §2.5's audibility attrition, which is not screened at all (held structurally: the builder may not import `audio`); **no invented fallback action** — after two steering attempts the runner records `action: null` and takes no step, because the alternative is the old tree's straight-line lie; and **no `NaN`/`Infinity` in an artefact**. One test caught a real drift (`FakeWorld` lacked `sensor_handle`, which only `run()` calls — and `run()` is the part that has never executed anywhere). **A prediction for the box:** an omnidirectional fake IR made the greedy climb non-terminating, because `rising` is its only route back to `move_forward` — so if the live HRTF gives weak front-back discrimination, a stalled climb rotates until the sub-budget aborts, and the symptom is `investigate_aborted` with a run of `turn_*` on a flat `measured_rms`. That is §4.1's instrumented-not-fixed conflation, readable from the artefact.
 
+- [26 — The smoke, green on the box](issues/26-the-smoke-green-on-the-box.md) — **Criteria 1–8 PASS on the RACE V100 (`runs/ss2-ep3`); 9 is NOT_RUN by construction and is ticket 27's. The destination sentence is a measured fact: one HM3D episode end to end with SoundSpaces 2.0 rendered live at every step, find-task → alarm → investigate → resume → report.** 168 renders / 168 steps, 89 forwards, **0 collisions**, `dist_at_stop` **0.486 m** against a 3.216 m source separation, so the detour reached the *right* instance and not merely a same-category one — which is the check §4.2 exists for, because arrival is plateau plus a visual confirm that fires on any chair within a metre. Four defects were found on the box across four runs and **every one was invisible in the artefact it produced**: the funnel's over-credit, the detour's forever-re-entry, and then two in the **builder** — a floor rule anchored only on the goal, which let a source sit at the goal's level (`|anchor − source|` 0.000, satisfied *exactly*) a storey below the agent's start, and a constant `t_anom = 30` that landed the alarm on the last step of a 31-step episode. **Three of the four were `fake` constants or rules falsified by measurement**, so `t_anom` is now **derived per episode** from a straight-line lower bound on the earliest step the find can end on — an argument rather than a guess — and `RunConfig.t_anom` becomes a pin. The one that changed the agent: **the realizable climb livelocked against any obstacle** (`move_forward` its only translation, the gradient choosing where forward pointed, and the planner bypassed entirely during INVESTIGATE), so the detour now names a **probe point** and routes to it through the same pool and follower SEARCH uses — §4.1's greedy rule untouched, its answer now a place rather than a step. Two things were deliberately **not** done and are stated as such: the controller's completion-over-interrupt precedence would also have turned a red run green and is a ticket-23 decision the spec does not contradict; and the collision flag is recorded but **not consumed**, because sliding is off so a wall already reads as the stall branch's plateau (a branch was built, then reverted when four wall geometries came back byte-identical). §9's builder numbers are now measured: criterion 7's 0.5 s ceiling is ~7.6x the measured max, §3.1's tolerance never fired (pre-onset spread 0.001..0.001, ADR-0009's unrendered bed exactly), the 120-step sub-budget used 4. **One defect found and not fixed**: `source_is_visible` has been false at every step of every box episode including at 0.117 m, and the listener sits *exactly* 1.5 m above a source placed at a floor-level view point — see the fog below.
+
 ## Not yet specified
 
 <!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
 
-**Empty.**
+**How high off the floor does the anomaly source sound from?** Ticket 26's four box runs put
+`source_is_visible` at false on every one of 352 steps, including at 0.117 m from the source
+and at a 0.486 m STOP — and the run's own log shows the listener at y 3.564 against a source
+at y 2.064, **exactly** the 1.5 m sensor height, because §2.1 places the source at a goal
+**view point**: a navigable pose on the floor. A ray from eye level to a point on the floor
+plane hits the floor at its endpoint, which would make the field structurally unable to
+return true and §3.2's per-step record carry a dead boolean at every step — the shape this
+map keeps finding, after `source_dy_m` reading 0.000 over a 2.6 m drop.
+
+Not yet a ticket because the question underneath it is not the one the symptom names. Raising
+the source would make the ray meaningful *and* change every acoustic number measured so far,
+and a real alarm is not on the floor — so this is a **task-design** decision about source
+placement, not a bug fix, and it is entangled with whether `sourceIsVisible` is occluded or
+simply inert. The separating measurement is cheap and comes first: query it with the listener
+placed at the source position. Still false means the probe is dead, and the placement question
+does not arise.
+
+Nothing else. Everything below stood before ticket 26 and still does.
 
 Ticket 09 cleared everything this section held except one patch — *the build itself, and the smoke run* — which could not be sliced into tickets until the module tree existed, because the slices **are** modules.
 Ticket 18 named them, and that patch graduated on 2026-08-04 into tickets **20–27**.
@@ -94,7 +113,7 @@ Ticket 23 built `agent/` the same day and surfaced no new *question*, but it did
 Ticket 24 built `report/` + `env_check.py` on 2026-08-05 and surfaced no new question either, but it did find a **contradiction inside ADR-0013** (the one-importer rule versus its own licence for `env_check`'s enum probe) — resolved in place with a two-entry allowlist and a use-it-or-lose-it test, not deferred.
 Ticket 25 wired `task/` the same day and surfaced no new *question*, but it surfaced two facts the tree did not have: **`earshot/vlm.py` is named by ADR-0013 and was never built**, so `Detector.CAPTION` and the captioner room label raise rather than run (both R2, out of scope here); and **the tree is now a runnable program that has never been run**, because no session on this Mac can load habitat-sim.
 
-The frontier is now **26 alone**; 21 through 25 are done.
+The frontier is now **27 alone**; 20 through 26 are done.
 
 ```
 20 scaffold  ✓ resolved 2026-08-04
@@ -104,13 +123,13 @@ The frontier is now **26 alone**; 21 through 25 are done.
    ├─► 23 agent/               ✓  ├─► 25 task wiring ✓
    └─► 24 report/ + env_check  ✓ ─┘         │
                                             ▼
-                                26 smoke green on the box   ← the frontier: 26
+                                26 smoke green on the box ✓ resolved 2026-08-05
                                             │
                                             ▼
-                          27 hermeticity + the deletion commit
+              27 hermeticity + the deletion commit   ← the frontier: 27
 ```
 
-**Ticket 26 is claimed and part-done (2026-08-05), and it moved a decision the map had treated as settled.**
+**Ticket 26 resolved on 2026-08-05: criteria 1–8 green on the box, 9 deferred to 27 by construction.** The detail is in its resolution comment and gisted above; what follows is the arc it took, kept because four of its findings were defects that produced correct-looking records.
 `task/smoke.py` exists — §8's nine criteria as a pure `judge()`, every one with a tested red path, criterion 9 NOT_RUN by construction so no run reads green while hermeticity is outstanding.
 The four defects the first box episode handed forward are closed: the funnel's over-credit (criterion 5's own measurement), the detour's forever-re-entry, §9's sub-budget set against measurement (40 → 120; 40 was never enough and the re-entry hid it), and the collision flag now recorded in §3.2 — and deliberately **not** consumed, since sliding is off so a wall already reads as the stall branch's plateau.
 
@@ -129,7 +148,8 @@ The second was **timing**: the find took 30 steps and `t_anom` was 30, so the an
 It is **derived per episode** now, from a straight-line lower bound on the earliest step the find can end on, so the onset lands inside the search by an argument rather than by a guess about a scene; `RunConfig.t_anom` becomes a pin, and the audit records what actually ran because `funnel_stage` is computed from it.
 The controller's completion-over-interrupt precedence would also have turned that run green and was **deliberately left alone** — it is a ticket-23 decision the spec does not contradict, and changing the agent's semantics to make a gate pass is the move this ticket keeps catching in other forms.
 
-**Criterion 5 has still never been tested.** Both box failures were upstream of the climb, on geometry and on timing, so the probe-routed detour has yet to meet a winnable episode.
+The fourth run met a winnable episode and closed it: `onset 4 → INVESTIGATE 4 → RESUME 8 → primary goal 167`, stage 6, `dist_at_stop` 0.486 m.
+The detour itself was four steps and about a metre — the builder decouples the source from the **goal** and says nothing about the **start**, so an alarm can fire from beside the agent's opening pose — which is why the claim that the detour can route *around* something rests on the box route test rather than on this episode.
 
 Five things earlier tickets left for the tickets that own them, so they are not lost between sessions:
 
