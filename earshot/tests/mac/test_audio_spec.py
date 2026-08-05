@@ -186,5 +186,70 @@ class TestAudioSensorSpec(unittest.TestCase):
         self.assertEqual(self.spec.acousticsConfig.globalVolume, 2.0)
 
 
+class TestTheUuidIsAssignedNotInherited(unittest.TestCase):
+    """The defect that survived 560 green tests and died on the box's first render.
+
+    ``AudioSensorSpec`` constructs with ``uuid == 'audio'``;
+    ``Simulator._get_audio_observation`` looks up the literal ``"audio_sensor"``. The
+    old fake carried ``"audio_sensor"`` as its starting value, so the one assertion that
+    would have caught this passed against a spec that already held the answer.
+    """
+
+    def test_a_fresh_spec_does_not_already_carry_the_name(self):
+        """Guards every test below: a fake born correct cannot fail."""
+        self.assertEqual(fakes.FakeAudioSensorSpec().uuid, "audio")
+        self.assertNotEqual(fakes.FakeAudioSensorSpec().uuid, AUDIO_SENSOR_UUID)
+
+    def test_configuring_assigns_the_name_habitat_looks_up(self):
+        spec = fakes.FakeAudioSensorSpec()
+        audio_sensor_spec(spec, AudioConfig(), fakes.BINAURAL)
+        self.assertEqual(spec.uuid, AUDIO_SENSOR_UUID)
+
+    def test_a_uuid_that_does_not_take_is_a_loud_failure(self):
+        """A build that ignores the write must raise here, not at the first render.
+
+        The failure it stands in for is not hypothetical: it is exactly what the box
+        did, one render in, from inside habitat, as a ``KeyError`` naming a string that
+        appears nowhere in our code.
+        """
+
+        class RefusesTheName(fakes.FakeAudioSensorSpec):
+            @property
+            def uuid(self):
+                return "audio"
+
+            @uuid.setter
+            def uuid(self, _value):
+                pass
+
+        with self.assertRaises(ValueError) as caught:
+            audio_sensor_spec(RefusesTheName(), AudioConfig(), fakes.BINAURAL)
+        message = str(caught.exception)
+        self.assertIn("audio_sensor", message)
+        self.assertIn("_get_audio_observation", message)
+
+    def test_it_is_asserted_before_the_acoustics_are_written(self):
+        """Ordering, so the diagnosis names the uuid rather than whichever knob is first.
+
+        A spec that refuses one write is a spec whose other writes are suspect; failing
+        on the config would send the reader to the preset, which is not where the
+        problem is.
+        """
+
+        class RefusesEverything(fakes.FakeAudioSensorSpec):
+            @property
+            def uuid(self):
+                return "audio"
+
+            @uuid.setter
+            def uuid(self, _value):
+                pass
+
+        spec = RefusesEverything()
+        with self.assertRaises(ValueError):
+            audio_sensor_spec(spec, AudioConfig(), fakes.BINAURAL)
+        self.assertEqual(spec.acousticsConfig.indirectRayCount, 5000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

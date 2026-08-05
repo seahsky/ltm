@@ -62,10 +62,14 @@ class AudioSensorHandle:
         (``oneenv_probe.py:629``). That is what makes smoke criterion 1's "render count
         equals step count" measurable at all.
 
-        ``uuid`` is read from the spec by the caller and passed in rather than assumed.
-        It is ``"audio_sensor"`` on this branch and assigning any other name does not
-        fully take (ticket 06), so a mismatch here is a ``KeyError`` on the first
-        observation rather than a subtly wrong sensor.
+        ``uuid`` is read from the spec by the caller and passed in rather than assumed —
+        but the safety in that is the *agreement*, not the reading.
+        ``audio.spec.audio_sensor_spec`` **assigns** ``AUDIO_SENSOR_UUID`` and asserts it
+        took, because the constructor default is ``'audio'`` while habitat's own
+        ``_get_audio_observation`` looks up the literal ``"audio_sensor"``. Passing the
+        value through means this handle and the world's sensor lookup cannot disagree
+        about which sensor they hold; it is not a licence for the spec to carry whatever
+        name it was born with.
         """
         self._sensor = sensor
         self._observe = observe

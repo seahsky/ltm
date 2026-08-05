@@ -30,14 +30,15 @@ on this Mac against habitat-sim 0.3.3: a Simulator built with an empty spec list
 on the next ``add_sensor``. Passing the whole list through one channel is therefore
 both the audio-blind shape and the only shape that works.
 
-The one thing that inherits a **cross-version** inference from that check: whether the
-box's 2022-era ``RLRAudioPropagationUpdate`` branch accepts an ``AudioSensorSpec``
-through ``sensor_specifications`` as well as through ``add_sensor``. ``Agent.__init__``
-routes both through the identical ``SensorFactory.create_sensors`` call
-(``habitat_sim/agent/agent.py:158-171``), and tickets 04 and 16 proved the
-``add_sensor`` form on the branch. ``tests/box/test_world_box.py`` measures the
-agent-config form; if it comes back red, the fallback is to add audio specs after
-construction, which is one line and costs the audio-blindness this file is built around.
+That inherited a **cross-version** inference — whether the box's 2022-era
+``RLRAudioPropagationUpdate`` branch accepts an ``AudioSensorSpec`` through
+``sensor_specifications`` as well as through ``add_sensor`` — and it is now MEASURED,
+green. ``audio_registration_probe.py`` built both forms against a real HM3D scene on
+2026-08-05 and they are indistinguishable: same ``agent._sensors`` keys, same wrapper
+dict, ``wrapper._agent is get_agent(0)`` true in both. The predicted fallback (add audio
+specs after construction, at the cost of this file's audio-blindness) is **not needed**
+and should not be reached for. What actually broke ticket 25's first run was the sensor's
+uuid, one layer up in ``audio/spec.py``, and it broke both forms identically.
 
 **The observation is one shared call.** RGB, depth and the IR come out of a single
 ``get_sensor_observations()``, so smoke criterion 1 — render count equals step count —
@@ -63,6 +64,27 @@ from earshot.types import NoRouteError, Pose, Xyz
 assert_habitat_logging_pinned()
 
 import numpy as np  # noqa: E402
+
+# MUST precede habitat_sim, and nothing here uses it. MEASURED on the box 2026-08-05
+# (`.scratch/ss2-clean-room/probes/import_order_ladder.sh`, six one-process cases):
+# `import habitat_sim` alone aborts the interpreter with `free(): invalid pointer` and no
+# Python-level diagnostic at all — exit 134, nothing raised, nothing to catch. So does
+# `import numpy, habitat_sim`, and so does `import earshot, habitat_sim`. The only green
+# import in the ladder is `import torch, habitat_sim`.
+#
+# Until this line, the tree survived that by accident: `assert_env()` imports torch two
+# probes before anything reaches this module, so every run that went through
+# `__main__` happened to satisfy a constraint nothing stated. Any entry point that
+# skipped env_check — a REPL, a box script, a box test that calls one probe — aborted.
+# `earshot/__init__` is deliberately NOT the place for it: its docstring refuses to make
+# every `python -m` in the tree pay for the simulator, and most of them never touch it.
+# This module is the one that cannot avoid habitat_sim, so the cost lands exactly on the
+# paths that were going to pay it anyway.
+#
+# Placed BEFORE quaternion because that is the order proven to run: numpy (via
+# `audio/sensor.py`), torch (via `env_check`), quaternion, habitat_sim.
+import torch  # noqa: E402,F401
+
 import quaternion  # noqa: E402  MUST precede habitat_sim (habitat-sim issue #1813)
 
 import habitat_sim  # noqa: E402
