@@ -79,6 +79,13 @@ class StepRecord:
     Ticket 06's 27.2 ms at the ``cheap_preset`` is the measurement the whole
     live-every-step feasibility claim rests on, so it is audited per run rather than
     trusted from one sweep.
+
+    ``collided`` and ``displacement_m`` are ticket 26's addition to §3.2's five, and they
+    exist for one question the first box run could not answer: **did that forward move,
+    or did it hit a wall?** The episode reported 110 forwards for 6.57 m of path with no
+    way to tell which, because ``World.step`` returns habitat's collision flag and the
+    runner discarded it. Path length cannot substitute — habitat slides an agent along a
+    wall, so a collided forward displaces a little rather than nothing.
     """
 
     step: int
@@ -88,6 +95,8 @@ class StepRecord:
     source_is_visible: Optional[bool] = None
     action: Optional[str] = None
     audio_render_s: Optional[float] = None
+    collided: Optional[bool] = None
+    displacement_m: Optional[float] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -98,6 +107,8 @@ class StepRecord:
             "source_is_visible": self.source_is_visible,
             "action": self.action,
             "audio_render_s": self.audio_render_s,
+            "collided": self.collided,
+            "displacement_m": self.displacement_m,
         }
 
     @classmethod
@@ -110,6 +121,8 @@ class StepRecord:
             source_is_visible=data.get("source_is_visible"),
             action=data.get("action"),
             audio_render_s=data.get("audio_render_s"),
+            collided=data.get("collided"),
+            displacement_m=data.get("displacement_m"),
         )
 
 
@@ -266,6 +279,29 @@ class EpisodeAudit:
             "total_s": sum(values),
         }
 
+    def forward_summary(self) -> Dict[str, float]:
+        """How many forwards hit a wall, and how far the rest actually went (ticket 26).
+
+        The number that decides whether the realizable climb needs obstacle awareness or
+        a bigger sub-budget. Restricted to ``move_forward`` because a turn displaces
+        nothing by design and averaging it in would hide exactly the walls this measures.
+
+        Empty rather than zeros when the episode took no forward, for
+        ``audio_render_summary``'s reason: absent is not 0.0.
+        """
+        rows = [row for row in self.steps if row.action == "move_forward"]
+        if not rows:
+            return {}
+        moved = [row.displacement_m for row in rows if row.displacement_m is not None]
+        summary = {
+            "n_forward": float(len(rows)),
+            "n_collided": float(sum(1 for row in rows if row.collided)),
+        }
+        if moved:
+            summary["total_displacement_m"] = sum(moved)
+            summary["mean_displacement_m"] = sum(moved) / len(moved)
+        return summary
+
     def as_dict(self) -> Dict[str, Any]:
         return {
             "episode_index": int(self.episode_index),
@@ -284,17 +320,18 @@ class EpisodeAudit:
             "steps": [row.as_dict() for row in self.steps],
             "source_is_visible_history": list(self.source_is_visible_history),
             "audio_render_summary": self.audio_render_summary(),
+            "forward_summary": self.forward_summary(),
             "metrics": dict(self.metrics),
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "EpisodeAudit":
-        """The inverse. The three derived keys are ignored rather than trusted.
+        """The inverse. The derived keys are ignored rather than trusted.
 
-        ``source_is_visible_history`` and ``audio_render_summary`` are serialised for
-        an analyst reading the JSON directly, and re-derived from ``steps`` on the way
-        back in. Reading them would let a hand-edited file disagree with its own step
-        rows and have the disagreement survive a round trip.
+        ``source_is_visible_history``, ``audio_render_summary`` and ``forward_summary``
+        are serialised for an analyst reading the JSON directly, and re-derived from
+        ``steps`` on the way back in. Reading them would let a hand-edited file disagree
+        with its own step rows and have the disagreement survive a round trip.
         """
         source = data.get("source_xyz")
         return cls(

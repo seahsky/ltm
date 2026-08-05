@@ -97,9 +97,11 @@ class TestTheFunnelIsOrdinal(unittest.TestCase):
 def _steps():
     return (
         StepRecord(0, 1e-3, lateral_sign=0, source_playing=False, source_is_visible=False,
-                   action="move_forward", audio_render_s=0.030),
+                   action="move_forward", audio_render_s=0.030,
+                   collided=False, displacement_m=0.25),
         StepRecord(1, 2e-3, lateral_sign=1, source_playing=True, source_is_visible=True,
-                   action="turn_left", audio_render_s=0.026),
+                   action="turn_left", audio_render_s=0.026,
+                   collided=False, displacement_m=0.0),
         StepRecord(2, 3e-3, lateral_sign=1, source_playing=True, source_is_visible=None,
                    action="stop", audio_render_s=0.028),
     )
@@ -133,6 +135,53 @@ class TestTheDerivedSeries(unittest.TestCase):
         audit = EpisodeAudit(steps=_steps() + (StepRecord(3, 1e-3, audio_render_s=None),))
         self.assertEqual(len(audit.steps), 4)
         self.assertEqual(audit.n_render_steps, 3)
+
+
+class TestTheForwardSummary(unittest.TestCase):
+    """Ticket 26's addition to §3.2: what separates a forward that moved from a wall.
+
+    The first box episode reported 110 forwards for 6.57 m of path and no way to tell
+    which of those forwards were walls, because ``World.step`` returns habitat's
+    collision flag and the runner discarded it. That one number decides whether the
+    climb needs obstacle awareness or a bigger budget, so it belongs in the record
+    rather than in an inference from path length.
+    """
+
+    def _forwards(self, *pairs):
+        return EpisodeAudit(
+            steps=tuple(
+                StepRecord(i, 1e-3, action="move_forward", collided=c, displacement_m=d)
+                for i, (c, d) in enumerate(pairs)
+            )
+        )
+
+    def test_it_counts_walls_against_forwards(self):
+        audit = self._forwards((False, 0.25), (True, 0.0), (True, 0.02), (False, 0.25))
+        summary = audit.forward_summary()
+        self.assertEqual(summary["n_forward"], 4)
+        self.assertEqual(summary["n_collided"], 2)
+        self.assertAlmostEqual(summary["total_displacement_m"], 0.52)
+
+    def test_turns_are_not_forwards(self):
+        """A turn displaces nothing by design, so averaging it in would hide the walls."""
+        audit = EpisodeAudit(
+            steps=(
+                StepRecord(0, 1e-3, action="move_forward", collided=False, displacement_m=0.25),
+                StepRecord(1, 1e-3, action="turn_left", collided=False, displacement_m=0.0),
+                StepRecord(2, 1e-3, action="stop"),
+            )
+        )
+        self.assertEqual(audit.forward_summary()["n_forward"], 1)
+
+    def test_an_episode_with_no_forwards_is_empty_rather_than_zero(self):
+        """The same rule ``audio_render_summary`` follows: absent is not 0.0."""
+        audit = EpisodeAudit(steps=(StepRecord(0, 1e-3, action="turn_left"),))
+        self.assertEqual(audit.forward_summary(), {})
+
+    def test_the_fields_are_optional_so_an_older_record_still_reads(self):
+        audit = EpisodeAudit(steps=(StepRecord(0, 1e-3, action="move_forward"),))
+        self.assertEqual(audit.forward_summary()["n_forward"], 1)
+        self.assertEqual(audit.forward_summary()["n_collided"], 0)
 
 
 class TestTheAuditRoundTrips(unittest.TestCase):

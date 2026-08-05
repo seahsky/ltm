@@ -43,11 +43,13 @@ bug. ``tests/box/test_audio_box.py`` pins the convention.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Optional, Sequence, Tuple
 
 from earshot.agent.config import ControllerConfig
+from earshot.agent.occupancy import forward_xz
 from earshot.types import Pose, Xyz
 
 __all__ = [
@@ -61,6 +63,7 @@ __all__ = [
     "ControllerState",
     "ControllerDecision",
     "realizable_investigate_step",
+    "realizable_investigate_probe",
     "is_diverting",
     "step_controller",
 ]
@@ -105,6 +108,18 @@ def realizable_investigate_step(
     agent stops *at* the source rather than at an arbitrary loud cell; a stall without a
     confirm turns toward the louder half-plane.
 
+    **The rule does not read the collision flag, and ticket 26 measured why it should
+    not.** The first box episode walked 110 forwards for 6.57 m of path and never reached
+    line-of-sight, which looks like a rule pushing a wall it cannot see. It is not.
+    ``allow_sliding`` is **False** (``sim/world.py``, the ObjectNav benchmark's setting),
+    so a collided forward leaves the pose *unchanged*; ``heard_signal`` convolves the whole
+    clip every step and takes no pose, so the RMS is a pure function of pose; so the reading
+    after a collision **equals** the one before it, ``rising`` is False, and the stall branch
+    below already turns. Adding a collision branch produces the action that branch produces
+    anyway — verified over four wall geometries against the carried rule, trajectories
+    byte-identical in all four. What the flag is genuinely for is the *record*
+    (``report/audit.StepRecord``), which is where it now goes.
+
     ``turn_left`` and ``turn_right`` change the measured RMS without changing the
     distance, and §4.1 instruments that rather than fixing it — the per-step record
     carries the action taken so a rotation-driven rise is separable from a
@@ -125,6 +140,71 @@ def realizable_investigate_step(
     if int(lateral_sign) < 0:
         return ACT_TURN_LEFT
     return ACT_TURN_LEFT  # ambiguous sign, default scan turn
+
+
+def realizable_investigate_probe(action: str, pose: Pose, cfg: ControllerConfig) -> Xyz:
+    """Where the realizable detour routes to next, given the carried rule's answer.
+
+    **Ticket 26's structural fix, and the one change to how the realizable arm moves.**
+    The arm used to apply ``realizable_investigate_step``'s action *directly* to the
+    simulator, which meant that during the whole detour the agent had no planner and no
+    map — ``move_forward`` was its only translation, and the energy gradient decided which
+    way forward pointed. Blocked forward, flat reading, turn, gradient turns it back,
+    collide: measured as a **livelock** against every wall geometry tried, ending pressed
+    against the obstacle with zero lateral movement, and budget-independent. No sequence
+    of that rule's actions can go around anything.
+
+    So the rule now chooses a *direction* and this turns it into a *place*, which the
+    navmesh follower reaches by whatever route exists — the same machinery SEARCH already
+    uses for the primary task. **The arm stays realizable**: the heading comes from live
+    binaural energy and the interaural level sign, the distance is a fixed constant, and
+    the map the follower plans on is the agent's own. No source coordinate enters, which
+    is the property ADR-0001 built this arm for and the one the oracle arm gives up.
+
+    The carried rule is the single source of the decision — this reads its action rather
+    than re-deriving the cue, so there is one copy of ADR-0011's logic. ``ACT_STOP`` never
+    arrives here: arrival is terminal and handled before a probe is wanted.
+    """
+    if action == ACT_STOP:
+        raise ValueError(
+            "arrival is not a probe — `step_controller` transitions to CHECK on a STOP "
+            "and must not also ask where to go next"
+        )
+    offset = math.radians(float(cfg.investigate_probe_turn_deg))
+    if action == ACT_TURN_LEFT:
+        heading = pose.yaw_rad + offset
+    elif action == ACT_TURN_RIGHT:
+        heading = pose.yaw_rad - offset
+    elif action == ACT_FORWARD:
+        heading = pose.yaw_rad
+    else:
+        raise ValueError("unknown realizable action {!r}".format(action))
+    dx, dz = forward_xz(heading)
+    reach = float(cfg.investigate_probe_m)
+    return Xyz(
+        pose.position.x + dx * reach, pose.position.y, pose.position.z + dz * reach
+    )
+
+
+def _probe_for(
+    action: Optional[str], pose: Optional[Pose], cfg: ControllerConfig
+) -> Optional[Xyz]:
+    """``realizable_investigate_probe``, guarded for the two cases that have no probe.
+
+    A ``None`` action or a ``STOP`` is an arrival or a tick with nothing to steer, and a
+    missing pose **raises**: the realizable arm cannot name a place without knowing where
+    it is, and returning ``None`` there would put the runner back on the planner-less path
+    this replaced, silently and only sometimes.
+    """
+    if action is None or action == ACT_STOP:
+        return None
+    if pose is None:
+        raise ValueError(
+            "the realizable arm needs a pose to place its probe — without one the "
+            "detour has no waypoint and falls back to stepping blind, which is the "
+            "livelock ticket 26 measured"
+        )
+    return realizable_investigate_probe(action, pose, cfg)
 
 
 class NavMode(Enum):
@@ -185,16 +265,28 @@ class ControllerDecision:
     """What the runner does this tick. ``mode`` always equals the returned state's mode.
 
     The booleans are one-shot directives, true on the tick of the transition only.
-    ``investigate_waypoint`` is the oracle arm's point goal, injected into the candidate
-    pool as a ``SOURCE_INVESTIGATE`` candidate so it wins the scorer's pick;
-    ``realizable_action`` is the realizable arm's low-level action, applied directly. They
-    are mutually exclusive by construction — an arm produces one or the other — and that
-    is what makes "which arm ran" readable off a decision.
+
+    **Both arms name a place, and they stay mutually exclusive.** ``investigate_waypoint``
+    is the oracle arm's point goal — the source coordinate. ``investigate_probe`` is the
+    realizable arm's: a point a fixed distance along the heading live energy and the
+    lateral sign chose (``realizable_investigate_probe``). Both are injected into the
+    candidate pool as ``SOURCE_INVESTIGATE`` so the divert wins the scorer's pick by rank.
+
+    Two fields rather than one, because they are not the same claim — one is where the
+    source *is*, the other is where the agent has decided to *look*. Collapsing them
+    would make "which arm ran" unreadable off a decision, and the audit's
+    ``localization_arm`` should not be the only witness to it.
+
+    ``realizable_action`` is retained and is now **diagnostic rather than steering**: the
+    arm no longer applies it to the simulator, because doing so left the whole detour with
+    no planner and no map. See ``realizable_investigate_probe`` for the livelock that
+    produced.
     """
 
     mode: NavMode
     active_goal: Optional[str]
     investigate_waypoint: Optional[Xyz] = None
+    investigate_probe: Optional[Xyz] = None
     realizable_action: Optional[str] = None
     force_requery: bool = False
     save_primary_state: bool = False
@@ -250,7 +342,14 @@ def step_controller(
             nxt = replace(state, mode=NavMode.COMPLETE, active_goal=primary)
             return nxt, ControllerDecision(mode=NavMode.COMPLETE, active_goal=primary)
 
-        if onset_fired and not state.investigated:
+        # **The abort is terminal for the interrupt** (ticket 26). `investigate_aborted`
+        # is read here as well as `investigated`, because an abort correctly leaves
+        # `investigated` False — the source was never reached — and the guard without it
+        # sees a still-firing onset and diverts again. The first box episode entered
+        # INVESTIGATE six times and spent about 210 of its 250 steps re-aborting, which
+        # makes `investigate_max_steps` a per-attempt budget that nothing bounds in
+        # aggregate. One detour per episode: the sub-budget is the whole detour's.
+        if onset_fired and not state.investigated and not state.investigate_aborted:
             interrupt = is_anomaly is True or is_anomaly is None
             # The realizable arm needs only the onset; the oracle arm needs a coordinate
             # to point-goal to, so without one it cannot enter and keeps searching.
@@ -267,12 +366,14 @@ def step_controller(
                     investigate_steps=0,
                 )
                 if realizable:
+                    entry = realizable_investigate_step(
+                        energy_history or [], lateral_sign, visual_confirm
+                    )
                     return nxt, ControllerDecision(
                         mode=NavMode.INVESTIGATE,
                         active_goal=goal,
-                        realizable_action=realizable_investigate_step(
-                            energy_history or [], lateral_sign, visual_confirm
-                        ),
+                        investigate_probe=_probe_for(entry, pose, cfg),
+                        realizable_action=entry,
                         force_requery=True,
                         save_primary_state=True,
                     )
@@ -336,7 +437,14 @@ def step_controller(
             return state, ControllerDecision(
                 mode=NavMode.INVESTIGATE,
                 active_goal=state.active_goal,
+                investigate_probe=_probe_for(action, pose, cfg),
                 realizable_action=action,
+                # The probe moves with the cue, so the pool is re-proposed every tick of
+                # the detour rather than on the planner's decision period. A stale probe
+                # is a place the energy reading that chose it no longer supports, and the
+                # detour is short — this is the one loop where paying a proposal per step
+                # is cheaper than steering to yesterday's guess.
+                force_requery=True,
             )
         return state, ControllerDecision(
             mode=NavMode.INVESTIGATE,

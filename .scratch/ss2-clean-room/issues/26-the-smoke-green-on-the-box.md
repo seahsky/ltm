@@ -1,8 +1,8 @@
 # 26 — The smoke, green on the box
 
 Type: task
-Status: open
-Blocked by: 25
+Status: claimed
+Blocked by: 25 (resolved)
 
 ## Question
 
@@ -47,3 +47,82 @@ And the box confirmation `guarded_observe()` has never had — it is new code fr
 ## Watch for
 
 `docs/race-box-runbook.md` — the self-update gotcha lives in 33 drivers and has already cost a 10-hour run. Read §8's footguns before the first box trip, not after.
+
+## Comments
+
+### 2026-08-05 — `task/smoke.py` exists, and the first run's four findings are closed
+
+Not resolved: §8's criteria are not green *on the box*, because no session on this Mac can
+run one. What changed is that the gate now exists, the four defects PR #32 handed forward
+are fixed, and one of them turned out to be structural.
+
+**The gate.** `earshot/task/smoke.py` — `judge()` is pure (records in, verdict out), so
+ticket 19's third row applies and every criterion has a red path tested with injected
+records: 33 new Mac tests, each criterion in both directions. Criterion 9 is **NOT_RUN by
+construction** rather than omitted, so no run can read green while hermeticity is
+outstanding. `judge_run_dir` reads the artefacts with the real readers, which is what
+caught its own first bug — it read `run_paths()[0]` as the env-report *file* when it is the
+run *directory*, and would have reported criterion 8 NOT_RUN on the box for a reason that
+has nothing to do with the environment.
+
+**1. The funnel over-credited.** `_funnel_stage` read each flag independently on the
+premise *an episode that resumed necessarily investigated*, which the abort path falsifies.
+The nesting is enforced now. This was criterion 5's own measurement, so the over-credit was
+the gate asserting a loop that did not run.
+
+**2. The detour re-entered forever.** SEARCH's guard was `onset_fired and not
+state.investigated`, and an abort correctly leaves `investigated` False. The abort is now
+terminal for the interrupt: one detour per episode, and the sub-budget is the whole
+detour's rather than one attempt's.
+
+**3. §9's sub-budget, set against measurement: `investigate_max_steps` 40 → 120.** 40 was
+never enough and the re-entry hid it — the fake stall-turn climb needs **59 steps** and
+passed under 40 only because a second attempt started from a pose the first had improved.
+`test_it_still_reaches_the_source` was passing on the strength of the bug it was supposed
+to be independent of; with the abort terminal it is now the budget's guard.
+
+**4. The collision flag is recorded, and deliberately not consumed.** `StepRecord` gains
+`collided` and `displacement_m` (+ `EpisodeAudit.forward_summary`), because nothing
+separated a forward that moved from one that hit a wall. The rule does **not** read it, and
+that is measured rather than assumed: `allow_sliding` is False, `heard_signal` takes no
+pose, so a collided forward repeats the reading exactly and ADR-0011's stall branch already
+turns. A collision branch was built, then reverted when trajectories came back
+byte-identical with the flag read and ignored across four wall geometries.
+
+### The finding that changed the arm
+
+Chasing that flag produced the real one. **The realizable climb livelocks against any
+obstacle.** `move_forward` was its only translation and the energy gradient decided where
+forward pointed, so: blocked forward → flat reading → turn → gradient turns it back →
+collide. Measured ending pressed flat against the wall at exactly `(0.00, -1.00)` with
+**zero lateral movement**, 119 of 123 forwards colliding, unchanged by tripling the budget,
+and identical in a geometry where moving 1 m sideways would have cleared it. No sequence of
+that rule's actions can go around anything. The first box episode's *never line-of-sight,
+`min_d2source` 3.19 m* is this.
+
+The gap was never the oracle coordinate — it was the **planner**. During INVESTIGATE the
+agent bypassed `_steer` entirely, while the oracle arm injected a waypoint and used the
+navmesh follower. So the climb now names a **place**: `realizable_investigate_probe` turns
+the carried rule's action into a point `investigate_probe_m` (2.0) along the heading, offset
+`investigate_probe_turn_deg` (60, deliberately wider than the simulator's 30-degree turn so
+a probe does not snap back onto the same obstacle), injected as the same `SOURCE_INVESTIGATE`
+divert the oracle arm uses. **The arm stays realizable** — heading from live binaural energy
+and the lateral sign, distance a constant, map the agent's own; no source coordinate enters,
+and the two arms still name different fields so "which arm ran" is readable off a decision.
+The realizable arm now **raises** without a pose rather than falling back to blind stepping.
+
+**A Mac cannot show this working.** `_task_fakes.FakeWorld.follower` steers in a straight
+line, so the livelock persists there for the fake's reasons; routing is a navmesh capability
+and `tests/box/test_investigate_route_box.py` exercises it (ADR-0014), with a control arm
+that walks the old straight line into the wall so a green cannot come from an unwalled pair.
+
+628 Mac tests (581 → 628), ruff clean. Five plants verified red for the right reason: the
+funnel un-nested, the abort re-entry, the discarded collision flag, the 40-step budget, and
+the env-report path.
+
+**Hands to the box.** Nothing here has executed against habitat-sim. The trip is
+`python -m earshot.audio.clips --out-dir data/anomaly_audio` once, then
+`python -m earshot --run-dir runs/ss2-first-episode --n-episodes 1 --max-steps 250`, then
+`python -m earshot.task.smoke --run-dir runs/ss2-first-episode` — and
+`tests/box/test_investigate_route_box.py` **before** trusting any of it, since the whole fix
+rests on the follower routing.

@@ -28,6 +28,7 @@ from earshot.agent.controller import (
     ControllerState,
     NavMode,
     is_diverting,
+    realizable_investigate_probe,
     realizable_investigate_step,
     step_controller,
 )
@@ -46,6 +47,10 @@ def tick(state, **kwargs):
     kwargs.setdefault("onset_fired", False)
     kwargs.setdefault("is_anomaly", None)
     kwargs.setdefault("primary_goal_reached", False)
+    # The realizable arm places its probe relative to the agent, so it needs a pose and
+    # raises without one rather than falling back to stepping blind. Defaulted here so
+    # every test that is not *about* the pose reads as it did before.
+    kwargs.setdefault("pose", POSE)
     return step_controller(state, CFG, **kwargs)
 
 
@@ -92,6 +97,156 @@ class TestTheGreedyRule(unittest.TestCase):
         self.assertEqual(
             realizable_investigate_step([0.3, 0.3 + 1e-9], 0, True), ACT_STOP
         )
+
+
+class TestAWallIsAlreadyAStall(unittest.TestCase):
+    """Why ticket 26 did NOT give the rule a collision branch, as an executable argument.
+
+    The first box episode walked 110 forwards for 6.57 m of path and never reached
+    line-of-sight, which reads as a rule pushing a wall it cannot see. It is not, and the
+    chain is three facts that are each checked somewhere else in this suite:
+
+    - ``allow_sliding`` is **False** (``sim/world.py``, the ObjectNav benchmark setting),
+      so a collided forward leaves the pose unchanged;
+    - ``heard_signal`` takes no pose and convolves the whole clip every step, so the
+      measured RMS is a pure function of pose;
+    - therefore the reading after a collision **equals** the one before it.
+
+    Which lands on the rule as a plateau — and ADR-0011's stall branch already turns on a
+    plateau. A collision branch would emit the action the stall branch emits anyway;
+    ``test_task_runner``'s wall fixture measures that end to end over real geometry.
+
+    So the flag is recorded and not consumed, and the real finding is one this rule cannot
+    fix: the agent turns 30 degrees, the energy gradient points back into the wall, and it
+    re-collides. Nothing in the arm remembers which yaws are blocked.
+    """
+
+    def test_a_collision_reads_as_a_plateau_and_the_stall_branch_turns(self):
+        """An unchanged pose repeats the reading exactly, which is not ``rising``."""
+        after_collision = [0.2, 0.2]  # the same RMS twice: the agent did not move
+        self.assertEqual(
+            realizable_investigate_step(after_collision, +1, False), ACT_TURN_RIGHT
+        )
+        self.assertEqual(
+            realizable_investigate_step(after_collision, -1, False), ACT_TURN_LEFT
+        )
+
+    def test_the_rule_takes_no_collision_argument(self):
+        """A parameter accepted and ignored is the inert surface this tree deletes."""
+        import inspect
+
+        params = inspect.signature(realizable_investigate_step).parameters
+        self.assertNotIn(
+            "collided",
+            params,
+            "the rule grew a collision argument — if that is deliberate, the wall "
+            "fixture in test_task_runner has to show it changing a trajectory first",
+        )
+
+
+class TestTheProbeThePlannerRoutesTo(unittest.TestCase):
+    """Ticket 26's structural fix: the climb names a place, not a step.
+
+    Applying the rule's action straight to the simulator gave the detour no planner and
+    no map — ``move_forward`` was its only translation and the gradient chose where
+    forward pointed, so a blocked line to the source was a **livelock**: measured against
+    every wall geometry tried, ending pressed flat against the obstacle with zero lateral
+    movement, and unchanged by tripling the step budget.
+
+    What a Mac can settle is the geometry and the provenance. Whether the follower
+    actually gets around a wall is a navmesh property and lives in ``tests/box/``
+    (ADR-0014: a capability is exercised, never proxied) — this suite's follower steers in
+    a straight line, so a green here licenses nothing about routing.
+    """
+
+    CFG = ControllerConfig(investigate_probe_m=2.0, investigate_probe_turn_deg=60.0)
+
+    def test_forward_probes_along_the_agents_own_heading(self):
+        """``forward_xz(0)`` is ``-z``, habitat's forward — the frame ticket 23 pinned."""
+        at_origin = Pose(position=Xyz(0.0, 0.0, 0.0), yaw_rad=0.0)
+        probe = realizable_investigate_probe(ACT_FORWARD, at_origin, self.CFG)
+        self.assertAlmostEqual(probe.x, 0.0)
+        self.assertAlmostEqual(probe.z, -2.0)
+
+    def test_a_turn_offsets_the_heading_in_the_frames_direction(self):
+        """``turn_left`` adds to yaw (``occupancy.bearing_rel``), so its probe is to port."""
+        at_origin = Pose(position=Xyz(0.0, 0.0, 0.0), yaw_rad=0.0)
+        left = realizable_investigate_probe(ACT_TURN_LEFT, at_origin, self.CFG)
+        right = realizable_investigate_probe(ACT_TURN_RIGHT, at_origin, self.CFG)
+        self.assertLess(left.x, 0.0)
+        self.assertGreater(right.x, 0.0)
+        self.assertAlmostEqual(left.z, right.z)
+
+    def test_the_offset_is_wider_than_one_simulator_turn(self):
+        """A probe one 30-degree step off the blocked heading snaps back onto the wall."""
+        self.assertGreater(self.CFG.investigate_probe_turn_deg, 30.0)
+
+    def test_it_keeps_the_agents_own_height(self):
+        """The probe is a floor-plane move; a y of its own would be a storey change."""
+        pose = Pose(position=Xyz(1.0, 0.7, -3.0), yaw_rad=1.1)
+        self.assertAlmostEqual(
+            realizable_investigate_probe(ACT_FORWARD, pose, self.CFG).y, 0.7
+        )
+
+    def test_it_is_always_the_probe_distance_away(self):
+        pose = Pose(position=Xyz(1.0, 0.0, -3.0), yaw_rad=2.3)
+        for action in (ACT_FORWARD, ACT_TURN_LEFT, ACT_TURN_RIGHT):
+            probe = realizable_investigate_probe(action, pose, self.CFG)
+            self.assertAlmostEqual(
+                pose.position.horizontal_distance_to(probe), self.CFG.investigate_probe_m
+            )
+
+    def test_arrival_is_not_a_probe(self):
+        pose = Pose(position=Xyz(0.0, 0.0, 0.0), yaw_rad=0.0)
+        with self.assertRaises(ValueError):
+            realizable_investigate_probe(ACT_STOP, pose, self.CFG)
+
+    def test_the_realizable_arm_emits_a_probe_rather_than_an_applied_action(self):
+        state, decision = tick(searching(), onset_fired=True, is_anomaly=True)
+        self.assertIsNotNone(decision.investigate_probe)
+        state, decision = tick(state, energy_history=[0.1, 0.2])
+        self.assertIsNotNone(decision.investigate_probe)
+
+    def test_the_probe_is_derived_from_the_agents_pose_and_nothing_privileged(self):
+        """Same cue, same pose, same probe — with the source moved 20 m away."""
+        near, _ = tick(
+            searching(), onset_fired=True, is_anomaly=True, source_xyz=SOURCE
+        )
+        far, _ = tick(
+            searching(),
+            onset_fired=True,
+            is_anomaly=True,
+            source_xyz=Xyz(20.0, 0.0, 20.0),
+        )
+        self.assertEqual(near.investigate_target_xyz, far.investigate_target_xyz)
+
+    def test_the_two_arms_still_name_different_fields(self):
+        """"Which arm ran" stays readable off a decision (ADR-0013's report boundary)."""
+        _, realizable = tick(searching(), onset_fired=True, is_anomaly=True)
+        _, oracle = tick(
+            searching(),
+            onset_fired=True,
+            is_anomaly=True,
+            realizable=False,
+            source_xyz=SOURCE,
+        )
+        self.assertIsNone(realizable.investigate_waypoint)
+        self.assertIsNotNone(realizable.investigate_probe)
+        self.assertIsNotNone(oracle.investigate_waypoint)
+        self.assertIsNone(oracle.investigate_probe)
+
+    def test_the_realizable_arm_refuses_to_steer_without_a_pose(self):
+        """It cannot name a place without knowing where it is, and a silent None here
+        puts the detour back on the planner-less path — sometimes, and invisibly."""
+        with self.assertRaises(ValueError):
+            step_controller(
+                searching(),
+                CFG,
+                onset_fired=True,
+                is_anomaly=True,
+                primary_goal_reached=False,
+                pose=None,
+            )
 
 
 class TestSearch(unittest.TestCase):
@@ -282,6 +437,35 @@ class TestTheAbort(unittest.TestCase):
         self.assertFalse(state.investigated)
         self.assertIsNone(state.investigation_event)
 
+    def test_an_aborted_detour_is_not_re_entered(self):
+        """The sub-budget is the whole detour's, not one attempt's.
+
+        SEARCH's guard was ``onset_fired and not state.investigated``, and an abort sets
+        ``investigate_aborted`` without setting ``investigated`` — correctly, because the
+        source was never reached. So the next SEARCH tick saw a still-firing onset and a
+        still-false ``investigated`` and diverted again. The first box episode entered
+        INVESTIGATE six times and spent about 210 of its 250 steps re-aborting, which
+        makes ``investigate_max_steps`` a per-attempt budget nothing bounds in aggregate.
+        """
+        state, _ = tick(searching(), onset_fired=True, is_anomaly=True)
+        for _ in range(CFG.investigate_max_steps):
+            state, _ = tick(state, energy_history=[0.1, 0.1])
+        self.assertTrue(state.investigate_aborted)
+
+        state, decision = tick(state, onset_fired=True, is_anomaly=True)  # RESUME -> SEARCH
+        state, decision = tick(state, onset_fired=True, is_anomaly=True)
+        self.assertEqual(decision.mode, NavMode.SEARCH)
+        self.assertEqual(decision.active_goal, "chair")
+
+    def test_the_primary_task_still_completes_after_an_abort(self):
+        """Terminal for the interrupt, not for the episode."""
+        state, _ = tick(searching(), onset_fired=True, is_anomaly=True)
+        for _ in range(CFG.investigate_max_steps):
+            state, _ = tick(state, energy_history=[0.1, 0.1])
+        state, _ = tick(state)  # RESUME -> SEARCH
+        state, decision = tick(state, onset_fired=True, primary_goal_reached=True)
+        self.assertEqual(decision.mode, NavMode.COMPLETE)
+
     def test_arrival_on_the_last_permitted_step_still_checks(self):
         """The arrival branch is evaluated before the budget, which is the carried order."""
         state, _ = tick(searching(), onset_fired=True, is_anomaly=True)
@@ -357,7 +541,12 @@ class TestTheStateIsAValue(unittest.TestCase):
         ``investigated`` into the next episode and ``reset()`` existed to paper over it."""
         state = searching()
         step_controller(
-            state, CFG, onset_fired=True, is_anomaly=True, primary_goal_reached=False
+            state,
+            CFG,
+            onset_fired=True,
+            is_anomaly=True,
+            primary_goal_reached=False,
+            pose=POSE,
         )
         self.assertEqual(state.mode, NavMode.SEARCH)
         self.assertEqual(state.n_benign_ignored, 0)
