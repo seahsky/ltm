@@ -30,14 +30,15 @@ on this Mac against habitat-sim 0.3.3: a Simulator built with an empty spec list
 on the next ``add_sensor``. Passing the whole list through one channel is therefore
 both the audio-blind shape and the only shape that works.
 
-The one thing that inherits a **cross-version** inference from that check: whether the
-box's 2022-era ``RLRAudioPropagationUpdate`` branch accepts an ``AudioSensorSpec``
-through ``sensor_specifications`` as well as through ``add_sensor``. ``Agent.__init__``
-routes both through the identical ``SensorFactory.create_sensors`` call
-(``habitat_sim/agent/agent.py:158-171``), and tickets 04 and 16 proved the
-``add_sensor`` form on the branch. ``tests/box/test_world_box.py`` measures the
-agent-config form; if it comes back red, the fallback is to add audio specs after
-construction, which is one line and costs the audio-blindness this file is built around.
+That inherited a **cross-version** inference — whether the box's 2022-era
+``RLRAudioPropagationUpdate`` branch accepts an ``AudioSensorSpec`` through
+``sensor_specifications`` as well as through ``add_sensor`` — and it is now MEASURED,
+green. ``audio_registration_probe.py`` built both forms against a real HM3D scene on
+2026-08-05 and they are indistinguishable: same ``agent._sensors`` keys, same wrapper
+dict, ``wrapper._agent is get_agent(0)`` true in both. The predicted fallback (add audio
+specs after construction, at the cost of this file's audio-blindness) is **not needed**
+and should not be reached for. What actually broke ticket 25's first run was the sensor's
+uuid, one layer up in ``audio/spec.py``, and it broke both forms identically.
 
 **The observation is one shared call.** RGB, depth and the IR come out of a single
 ``get_sensor_observations()``, so smoke criterion 1 — render count equals step count —
@@ -63,6 +64,27 @@ from earshot.types import NoRouteError, Pose, Xyz
 assert_habitat_logging_pinned()
 
 import numpy as np  # noqa: E402
+
+# MUST precede habitat_sim, and nothing here uses it. MEASURED on the box 2026-08-05
+# (`.scratch/ss2-clean-room/probes/import_order_ladder.sh`, six one-process cases):
+# `import habitat_sim` alone aborts the interpreter with `free(): invalid pointer` and no
+# Python-level diagnostic at all — exit 134, nothing raised, nothing to catch. So does
+# `import numpy, habitat_sim`, and so does `import earshot, habitat_sim`. The only green
+# import in the ladder is `import torch, habitat_sim`.
+#
+# Until this line, the tree survived that by accident: `assert_env()` imports torch two
+# probes before anything reaches this module, so every run that went through
+# `__main__` happened to satisfy a constraint nothing stated. Any entry point that
+# skipped env_check — a REPL, a box script, a box test that calls one probe — aborted.
+# `earshot/__init__` is deliberately NOT the place for it: its docstring refuses to make
+# every `python -m` in the tree pay for the simulator, and most of them never touch it.
+# This module is the one that cannot avoid habitat_sim, so the cost lands exactly on the
+# paths that were going to pay it anyway.
+#
+# Placed BEFORE quaternion because that is the order proven to run: numpy (via
+# `audio/sensor.py`), torch (via `env_check`), quaternion, habitat_sim.
+import torch  # noqa: E402,F401
+
 import quaternion  # noqa: E402  MUST precede habitat_sim (habitat-sim issue #1813)
 
 import habitat_sim  # noqa: E402
@@ -440,22 +462,15 @@ class World:
         result. Caught on this Mac before a box trip: the plausible one-liner
         ``self._sim.pathfinder.geodesic_distance(...)`` is an ``AttributeError`` that no
         Mac test could have reached, because nothing here can construct a navmesh.
+
+        This asks the multi-goal query for the distance and **nothing else**. It used to
+        route through a helper that also read ``closest_end_point_index``, which is
+        absent on the box's habitat-sim 0.2.2 binding (see ``nearest_of``) — an index no
+        caller here wanted, computed on every call, which is what took down ticket 25's
+        second box run at the calibration sweep.
         """
-        return self._nearest(start, ends)[0]
-
-    def nearest_of(self, start: Xyz, ends: Sequence[Xyz]) -> Optional[Tuple[float, int]]:
-        """``(distance, index)`` of the nearest reachable end, or ``None``.
-
-        The index is what makes multi-view-point arrival checkable: a goal has many view
-        points and the runner wants to know *which* one it is heading for, not only how
-        far the closest is.
-        """
-        distance, index = self._nearest(start, ends)
-        return None if distance is None else (distance, index)
-
-    def _nearest(self, start: Xyz, ends: Sequence[Xyz]) -> Tuple[Optional[float], int]:
         if not ends:
-            return None, -1
+            return None
         path = habitat_sim.MultiGoalShortestPath()
         path.requested_start = _vec(start)
         path.requested_ends = np.asarray(
@@ -464,8 +479,39 @@ class World:
         found = self._require_navmesh().find_path(path)
         distance = float(path.geodesic_distance)
         if not found or not math.isfinite(distance):
-            return None, -1
-        return distance, int(path.closest_end_point_index)
+            return None
+        return distance
+
+    def nearest_of(self, start: Xyz, ends: Sequence[Xyz]) -> Optional[Tuple[float, int]]:
+        """``(distance, index)`` of the nearest reachable end, or ``None``.
+
+        The index is what makes multi-view-point arrival checkable: a goal has many view
+        points and the runner wants to know *which* one it is heading for, not only how
+        far the closest is.
+
+        **One single-goal query per end, deliberately not ``MultiGoalShortestPath``.**
+        That class computes the index and exposes it as ``closest_end_point_index`` —
+        upstream, and not on the pinned build. Measured on the box 2026-08-05:
+        ``AttributeError: 'habitat_sim._ext.habitat_sim_bindings.MultiGoalSho' object has
+        no attribute 'closest_end_point_index'``. Deriving it from N single-goal paths
+        works on that binding and on any later one, which is what a version check would
+        not do; the alternative — matching ``path.points[-1]`` back to the requested ends
+        — is ambiguous exactly when two view points are close together, which is the case
+        the index exists to resolve.
+        """
+        pathfinder = self._require_navmesh()
+        best: Optional[Tuple[float, int]] = None
+        for index, end in enumerate(ends):
+            path = habitat_sim.ShortestPath()
+            path.requested_start = _vec(start)
+            path.requested_end = _vec(end)
+            found = pathfinder.find_path(path)
+            distance = float(path.geodesic_distance)
+            if not found or not math.isfinite(distance):
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, index)
+        return best
 
     def random_navigable_point(self) -> Xyz:
         return Xyz.from_sequence(self._require_navmesh().get_random_navigable_point())

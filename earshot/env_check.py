@@ -386,6 +386,16 @@ def probe_habitat_sim_audio_enum_member() -> Probe:
     against the 90 a full build check costs.
     """
     try:
+        # MUST precede habitat_sim and nothing here uses it — see the measurement in
+        # `sim/world.py`'s import block. Bare `import habitat_sim` aborts the interpreter
+        # with `free(): invalid pointer`, which no `except` can catch, so the honest
+        # NOT_RUN branch below would never be reached. Imported inside this probe rather
+        # than relied on from `probe_torch_min_version`: a probe that only works when
+        # another probe ran first is an ordering dependency between two functions with
+        # no call edge, and `assert_env` is not the only caller — `tests/box/` runs them
+        # one at a time.
+        import torch  # noqa: F401
+
         import habitat_sim
     except Exception as exc:  # pragma: no cover - exercised on a broken env only
         return Probe(

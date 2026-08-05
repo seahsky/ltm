@@ -98,13 +98,22 @@ class FakeAudioSensorSpec:
        ticket 15's run, which is what answered ticket 16's stage-1 question), which is
        why ``guard.KNOWN_DYNAMIC_ATTRS`` exists. Reproduced, so a test passing against
        this fake is exercising that exclusion too.
-    2. **``uuid`` is ``"audio_sensor"`` from C++**, and assigning another name does not
-       fully take — the Python ``_sensors`` dict picks it up while the C++ suite keeps
-       the old one (ticket 06). Reproduced as an ordinary field, since the divergence is
-       on the simulator side and no Mac can show it.
+    2. **``uuid`` constructs as ``"audio"``, which is NOT the name habitat looks up.**
+       Measured on the box 2026-08-05 (``audio_registration_probe.py``:
+       ``AudioSensorSpec().uuid default: 'audio'``), while
+       ``Simulator._get_audio_observation`` reads ``self._agent._sensors["audio_sensor"]``
+       as a literal. So a spec left at its default renders nothing, from inside habitat,
+       and ``audio.spec.audio_sensor_spec`` has to assign the name.
+
+       **This field said ``"audio_sensor"`` until that measurement, and the whole suite
+       was green.** That is the specific reason ticket 25's first box run failed on its
+       first render with 560 passing Mac tests: a fake that already holds the value under
+       test cannot fail, so the assignment it was standing in for was never written.
+       Ticket 06's finding — assigning a name *other than* ``"audio_sensor"`` also fails
+       — is unchanged and still not Mac-observable; only the starting value was wrong.
     """
 
-    uuid = _Field("audio_sensor")
+    uuid = _Field("audio")
     enableMaterials = _Field(False)
     acousticsConfig = _Field(None)
     channelLayout = _Field(None)

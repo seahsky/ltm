@@ -42,13 +42,28 @@ __all__ = [
     "audio_config_mapping",
 ]
 
-# provenance: box — the sensor's own default uuid, from the C++ constructor. **Read
-# back, never assumed, and never overridden**: ticket 06 measured that assigning a
-# different uuid does not fully take — the Python-side `_sensors` dict picks up the new
-# name while the C++ sensor suite keeps the old, and `get_sensor_observations()` then
-# fails an internal cross-lookup with `KeyError('audio_sensor')`. That killed a box
-# stage once. `sensor.AudioSensorHandle` reads `spec.uuid` off the spec rather than
-# trusting this constant, and this exists to name what it should find.
+# provenance: box — the uuid habitat-sim's own render path REQUIRES, and it must be
+# ASSIGNED. `Simulator._get_audio_observation` (simulator.py:765 on this build) reads
+#
+#     audio_sensor = self._agent._sensors["audio_sensor"]
+#
+# with the name as a literal, so this is not a preference: a sensor registered under any
+# other key raises `KeyError('audio_sensor')` on the first observation, from inside
+# habitat, before our code sees anything.
+#
+# **The constructor default is `'audio'`, NOT this.** Measured 2026-08-05 by
+# `.scratch/ss2-clean-room/probes/audio_registration_probe.py`, which printed
+# `AudioSensorSpec().uuid default: 'audio'` and then reproduced the KeyError twice — once
+# with the spec passed through `agent_cfg.sensor_specifications` and once through
+# `sim.add_sensor`, byte-identical in both, ruling out the registration form.
+#
+# This comment previously said the opposite — "read back, never assumed, never
+# overridden", attributing to ticket 06 a rule that reading the uuid back is the safe
+# move. That rule is what broke ticket 25's first box run: the read-back yields `'audio'`,
+# the one name habitat can never find. Ticket 06's actual finding survives and is
+# narrower — assigning a name *other than* `"audio_sensor"` also fails, because the
+# Python-side `_sensors` dict picks up the new name while the hardcoded lookup does not.
+# Both halves point the same way: this exact string, assigned, asserted.
 AUDIO_SENSOR_UUID = "audio_sensor"
 
 # provenance: box — ticket 06's derived `cheap_preset`, measured on the V100 across two
@@ -130,7 +145,25 @@ def audio_sensor_spec(
     failure mode: an unset channel layout gives a lateral sign of exactly zero at every
     pose, and an unapplied preset is a 63x slower render that still produces a perfectly
     plausible IR.
+
+    The uuid is **assigned**, for the reason ``AUDIO_SENSOR_UUID`` documents: the
+    constructor default is ``'audio'`` and habitat's own render path looks up the literal
+    ``"audio_sensor"``. Assigned here rather than in ``sim/world.py`` because that module
+    is audio-blind by construction (ADR-0013) and this function is already "the only such
+    path in the tree" — one place that touches audio spec fields, not two.
     """
+    # Before `apply_audio_config`, so a build that rejects the assignment fails on the
+    # uuid rather than on whichever config key happens to be checked first.
+    spec.uuid = AUDIO_SENSOR_UUID
+    if str(getattr(spec, "uuid", None)) != AUDIO_SENSOR_UUID:
+        raise ValueError(
+            "spec.uuid is {!r} after assignment, not {!r}. habitat-sim's "
+            "_get_audio_observation looks the sensor up under that literal name, so a "
+            "spec that will not take it renders nothing — the whole audio path is "
+            "unreachable on this build".format(getattr(spec, "uuid", None),
+                                               AUDIO_SENSOR_UUID)
+        )
+
     mapping = audio_config_mapping(config, binaural_layout, acoustics)
     apply_audio_config(spec, mapping)
     assert_no_swallowed_keys(spec)

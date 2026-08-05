@@ -30,26 +30,64 @@ cross-version inference it inherited, named ``tests/box/test_world_box.py`` as t
 measurement, and named the fallback in advance. This is that measurement, run directly
 rather than through the suite so it prints the internals either verdict needs.
 
+**``import torch`` comes first, and it is not decoration.** Two revisions of this probe
+aborted the interpreter with ``free(): invalid pointer`` at ``import habitat_sim``,
+printing nothing further, while ``python -m earshot`` imported the same module in the
+same env without complaint. ``import_order_ladder.sh`` measured it: of six one-process
+cases, the ONLY green import is ``import torch, habitat_sim``. Not the
+``HABITAT_SIM_LOG`` pin (case 2 red), not numpy-first (case 3 red, the control), not
+``import earshot`` (case 5 red — its ``__init__`` is stdlib-only by design). The tree
+survives today only because ``assert_env()`` imports torch two probes before anything
+reaches ``sim/world.py``, which is an accident of listing order rather than a stated
+constraint.
+
+The first revision blamed ``HABITAT_SIM_LOG=quiet``, which it also set. That was wrong —
+the second revision set nothing and died identically. The grammar note still stands as
+written in ``audio/guard.py:118`` (``SUBSYSTEM[,SUBSYSTEM]*=LEVEL``, ``Quiet`` a *level*
+alias for ``Error``), but it is not what aborts this process, and nothing here should be
+read as evidence about it.
+
+The engine's chatter is therefore inherited and left alone; every line this probe emits
+is prefixed ``PROBE|`` so it can be sieved back out:
+
+    python .scratch/ss2-clean-room/probes/audio_registration_probe.py 2>&1 | grep '^PROBE|'
+
 No ``earshot`` import on purpose: the question is about habitat-sim, and a red here that
 came through our own stack would be one more layer to rule out.
-
-    python .scratch/ss2-clean-room/probes/audio_registration_probe.py [scene.glb]
 """
 
 import inspect
-import os
 import sys
 import traceback
 
-# Before `import habitat_sim`, which reads these at import time. Quiet, not the tree's
-# `Sensor,Assets=Debug` pin: this probe's output is the Python-side dicts, and the
-# engine's per-asset chatter buries them.
-os.environ["HABITAT_SIM_LOG"] = "quiet"
-os.environ["MAGNUM_LOG"] = "quiet"
 
+def say(message=""):
+    """One line of probe output, prefixed and flushed.
+
+    Prefixed because the engine writes hundreds of lines to the same two streams at the
+    inherited log level. Flushed because the failure this probe exists for is a crash,
+    and a buffered diagnostic that dies with the process is worse than none — the first
+    revision's abort printed nothing and cost a box round trip to attribute.
+    """
+    for line in str(message).splitlines() or [""]:
+        print("PROBE| " + line, flush=True)
+
+
+say("importing numpy")
 import numpy as np  # noqa: E402
+
+# BEFORE habitat_sim, and unused otherwise. `import_order_ladder.sh` measured that
+# `import habitat_sim` on its own aborts this interpreter with `free(): invalid pointer`
+# and that `import torch, habitat_sim` does not. Deleting this line does not tidy the
+# probe; it stops it running.
+say("importing torch (ordering constraint — see import_order_ladder.sh)")
+import torch  # noqa: E402,F401
+
+say("importing habitat_sim")
 import habitat_sim  # noqa: E402
 from habitat_sim.simulator import Sensor as SensorWrapper  # noqa: E402
+
+say("imports done")
 
 # The scene ticket 25's run picked, so a red here is the same red.
 DEFAULT_SCENE = (
@@ -90,7 +128,8 @@ def cameras():
 def try_form(scene, in_agent_config):
     """Build one Simulator, register audio the given way, print both dicts, render."""
     label = "sensor_specifications" if in_agent_config else "sim.add_sensor"
-    print("\n=============== {} ===============".format(label))
+    say()
+    say("=============== {} ===============".format(label))
 
     backend = habitat_sim.SimulatorConfiguration()
     backend.scene_id = scene
@@ -105,31 +144,31 @@ def try_form(scene, in_agent_config):
     agent_cfg.sensor_specifications = specs
     # Read BEFORE construction as well as after: hypothesis (a) is a rewrite, and a
     # rewrite is only visible as a difference between these two prints.
-    print("spec.uuid pre-build :", repr(spec.uuid))
+    say("spec.uuid pre-build : {!r}".format(spec.uuid))
 
     sim = habitat_sim.Simulator(habitat_sim.Configuration(backend, [agent_cfg]))
     try:
         if not in_agent_config:
             sim.add_sensor(spec)
         agent = sim.get_agent(0)
-        print("spec.uuid post-build:", repr(spec.uuid))
-        print("agent._sensors      :", type(agent._sensors).__name__,
-              keys_of(agent._sensors))
+        say("spec.uuid post-build: {!r}".format(spec.uuid))
+        say("agent._sensors      : {} {}".format(
+            type(agent._sensors).__name__, keys_of(agent._sensors)))
 
         # The wrapper dict habitat iterates in `get_sensor_observations`. Name-mangled,
         # so reach for it explicitly and say so if the attribute has moved rather than
         # silently skipping the half of the answer that lives in it.
         wrappers = getattr(sim, "_Simulator__sensors", None)
         if wrappers is None:
-            print("wrapper dict        : ABSENT — sensor-ish attributes on Simulator:",
-                  [k for k in vars(sim) if "sensor" in k.lower()])
+            say("wrapper dict        : ABSENT — sensor-ish attributes on Simulator: {}"
+                .format([k for k in vars(sim) if "sensor" in k.lower()]))
         else:
-            print("wrapper dict        :", keys_of(wrappers[0]))
+            say("wrapper dict        : {}".format(keys_of(wrappers[0])))
             for uuid, wrapper in wrappers[0].items():
                 own = getattr(wrapper, "_agent", None)
-                print("   {!r}: wrapper._agent is get_agent(0) -> {} ; its _sensors -> {}"
-                      .format(uuid, own is agent,
-                              keys_of(own._sensors) if own is not None else "<no _agent>"))
+                say("   {!r}: wrapper._agent is get_agent(0) -> {} ; its _sensors -> {}"
+                    .format(uuid, own is agent,
+                            keys_of(own._sensors) if own is not None else "<no _agent>"))
 
         # A source must be seated before the render: an unplaced source renders a silent
         # IR, and a silent IR is a second failure mode competing with the one under test.
@@ -139,32 +178,35 @@ def try_form(scene, in_agent_config):
         )
         observation = sim.get_sensor_observations()
         ir = np.asarray(observation[spec.uuid])
-        print("RENDER GREEN        : keys={} ir.shape={} peak={:.4g}".format(
+        say("RENDER GREEN        : keys={} ir.shape={} peak={:.4g}".format(
             sorted(observation), ir.shape,
             float(np.max(np.abs(ir))) if ir.size else 0.0))
     except Exception:
-        # Caught, not raised: the second form is the interesting one when the first is
-        # red, and an uncaught first red would never reach it.
-        print("RENDER RED          :")
-        traceback.print_exc()
+        # Caught and re-emitted through `say`, not `traceback.print_exc()`: an uncaught
+        # first red would never reach the second form, and an unprefixed traceback is
+        # the one part of the output that most needs to survive the sieve.
+        say("RENDER RED          :")
+        say(traceback.format_exc())
     finally:
         sim.close()
 
 
 def main():
     scene = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SCENE
-    print("habitat_sim", habitat_sim.__version__)
-    print("file       ", habitat_sim.__file__)
-    print("scene      ", scene)
-    print("AudioSensorSpec().uuid default:", repr(habitat_sim.AudioSensorSpec().uuid))
+    say("habitat_sim {}".format(habitat_sim.__version__))
+    say("file        {}".format(habitat_sim.__file__))
+    say("scene       {}".format(scene))
+    say("AudioSensorSpec().uuid default: {!r}".format(
+        habitat_sim.AudioSensorSpec().uuid))
 
     # The two methods the traceback names. Printed rather than described: the claim
     # "habitat hardcodes the string" is load-bearing for the fix, and the source is the
     # only thing that settles it on this branch.
     for fn in (SensorWrapper.__init__, SensorWrapper._get_audio_observation):
         lines, first = inspect.getsourcelines(fn)
-        print("\n--- {} (simulator.py:{}) ---".format(fn.__name__, first))
-        print("".join(lines).rstrip())
+        say()
+        say("--- {} (simulator.py:{}) ---".format(fn.__name__, first))
+        say("".join(lines).rstrip())
 
     try_form(scene, in_agent_config=True)
     try_form(scene, in_agent_config=False)
