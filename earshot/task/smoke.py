@@ -383,9 +383,29 @@ def _hermeticity(record: Optional[Mapping[str, Any]], run_dir: str = "") -> Crit
                              "{} the run, never checked: {}".format(
                                  half, ", ".join(unchecked)))
 
-    return Criterion(9, "hermeticity", CriterionStatus.PASS,
-                     "{} path(s) verified absent before and after the run".format(
-                         len(entries)))
+    # The box suite on either side of the move, when the gate ran it. A test green with
+    # the old trees and red without them is a leak, and it is the only thing here that
+    # licenses that word — the gate's first box run called a pre-existing CLAP failure a
+    # leak, which it could not have known. A failure on BOTH sides is a sick environment:
+    # loud, and deliberately not a hermeticity verdict.
+    box = record.get("box_compare")
+    if box:
+        if not box.get("comparable", True):
+            return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                             "the two box-suite runs collected different tests, so "
+                             "'no leaks' would be an absence of evidence")
+        leaks = list(box.get("leaks") or [])
+        if leaks:
+            return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                             "{} test(s) pass with the old trees and fail without "
+                             "them: {}".format(len(leaks), ", ".join(leaks)))
+
+    detail = "{} path(s) verified absent before and after the run".format(len(entries))
+    pre_existing = list((box or {}).get("pre_existing") or [])
+    if pre_existing:
+        detail += "; no leaks, but {} pre-existing box failure(s) unrelated to the " \
+                  "move: {}".format(len(pre_existing), ", ".join(pre_existing))
+    return Criterion(9, "hermeticity", CriterionStatus.PASS, detail)
 
 
 def judge(

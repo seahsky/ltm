@@ -154,6 +154,24 @@ fi
 
 PY="${PYTHON:-python}"
 
+# --- 3b. the CONTROL box suite, with the old trees still present ----------
+# The first box run of this gate stopped with "the box suite is red without the old
+# trees — that is a leak". It was not a leak: two tests failed on clap_instantiable,
+# which loads a model through transformers and touches nothing the reset deletes. A red
+# without the old trees is evidence of a leak ONLY IF the same test is green with them,
+# and the gate had no way to tell those apart. It does now, and this is the control half.
+CONTROL_JSON=""
+if [ "$DRY_RUN" = 0 ] && [ "$SKIP_BOX_TESTS" = 0 ]; then
+  banner "[3b/8] CONTROL box suite, old trees still present"
+  # Deterministic, not `mktemp -t`: GNU coreutils requires the X's at the END of the
+  # template and macOS reads -t as a bare prefix, so a portable template is easier to
+  # write than to remember. $HOLD does not exist yet — the move is two steps away.
+  CONTROL_JSON="${TMPDIR:-/tmp}/earshot-box-control-$$.json"
+  "$PY" -m earshot.tools.suite_result --run --start-dir earshot/tests/box \
+        --out "$CONTROL_JSON" > /dev/null
+  echo "  control recorded: $CONTROL_JSON"
+fi
+
 # --- 4. move the delete set out of the repo -------------------------------
 banner "[4/8] moving the phase-3 delete set out"
 HOLD="${HERMETICITY_HOLD_DIR:-${HOME}/.earshot-hermeticity-$(date +%Y%m%d-%H%M%S)}"
@@ -230,12 +248,32 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 
-# --- 6. the box suite (supporting evidence, not the criterion) ------------
+# --- 6. the box suite again, and the comparison that licenses a leak claim -
+BOX_COMPARE=""
 if [ "$SKIP_BOX_TESTS" = 0 ]; then
   banner "[6/8] box suite, with the delete set gone"
-  "$PY" -m unittest discover earshot/tests/box
-  BOX_EC=$?
-  [ "$BOX_EC" -eq 0 ] || { echo "FATAL: the box suite is red without the old trees — that is a leak"; exit 1; }
+  HERMETIC_JSON="$HOLD/box-hermetic.json"
+  "$PY" -m earshot.tools.suite_result --run --start-dir earshot/tests/box \
+        --out "$HERMETIC_JSON" > /dev/null
+
+  banner "[6b/8] control vs hermetic"
+  BOX_COMPARE="$HOLD/box-compare.json"
+  "$PY" -m earshot.tools.suite_result --compare "$CONTROL_JSON" "$HERMETIC_JSON" \
+      > "$BOX_COMPARE"
+  CMP_EC=$?
+  cp "$CONTROL_JSON" "$HOLD/box-control.json" 2>/dev/null || true
+  cat "$BOX_COMPARE"
+  if [ "$CMP_EC" -eq 1 ]; then
+    echo "FATAL: tests that pass WITH the old trees fail WITHOUT them. That is a leak,"
+    echo "       and it is what this gate exists to find. Fix it, restore, repeat."
+    exit 1
+  elif [ "$CMP_EC" -eq 2 ]; then
+    echo "FATAL: the two suite runs did not collect the same tests, so 'no leaks' would"
+    echo "       be an absence of evidence rather than evidence of absence."
+    exit 1
+  fi
+  echo "  no leaks. Any failures above are present with the old trees too, so they are a"
+  echo "  sick environment rather than a hermeticity problem — different owner."
 else
   banner "[6/8] box suite SKIPPED (--skip-box-tests)"
 fi
@@ -247,7 +285,10 @@ echo "  run dir: $RUN_DIR"
 RUN_EC=$?
 if [ "$RUN_EC" -ne 0 ]; then
   echo "FATAL: the smoke did not complete without the old trees (exit $RUN_EC)."
-  echo "       That is the gate working. Find the leak, restore, repeat."
+  echo "       Blocking, but NOT yet attributable to the move — the box suite has a"
+  echo "       control arm and this does not. Get the control before calling it a leak:"
+  echo "           python -m earshot --run-dir runs/control-\$(date +%s) --n-episodes 1"
+  echo "       Fails there too: a sick environment. Passes there: a real leak."
   exit "$RUN_EC"
 fi
 
@@ -260,6 +301,7 @@ AFTER="$HOLD/verify-after.json"
 "$PY" -m earshot.tools.reset_manifest --write-record \
     --run-dir "$RUN_DIR" --before "$BEFORE" --after "$AFTER" \
     --commit "$COMMIT" --holding-dir "$HOLD" \
+    ${BOX_COMPARE:+--box-compare "$BOX_COMPARE"} \
   || { echo "FATAL: could not write the hermeticity record"; exit 1; }
 
 echo

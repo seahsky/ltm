@@ -172,6 +172,7 @@ def build_record(
     after: Mapping[str, Any],
     commit: str = "unknown",
     holding_dir: str = "",
+    box_compare: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The `hermeticity.json` payload: two bracketing verifications and their provenance.
 
@@ -179,6 +180,13 @@ def build_record(
     run. This project has an incident behind that check — run directories quoted against
     another run's numbers — and a hermeticity record is exactly the kind of small file
     that gets copied forward to make a gate go green.
+
+    ``box_compare`` is `suite_result.compare`'s verdict: the box suite run on either side
+    of the move. A test that is green with the old trees and red without them is a leak
+    and belongs in this record; a test red on both sides is a sick environment and
+    belongs in it too, stated as such rather than left out. The gate's first box run
+    conflated the two, so the distinction is carried in the artefact and not only in a
+    log the next reader will not have.
     """
     return {
         "schema": "earshot.hermeticity/1",
@@ -191,6 +199,7 @@ def build_record(
         ],
         "before": dict(before),
         "after": dict(after),
+        "box_compare": dict(box_compare) if box_compare else None,
         "complete": bool(before.get("complete")) and bool(after.get("complete")),
     }
 
@@ -211,6 +220,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--after", help="path to the post-run --verify-absent blob")
     parser.add_argument("--commit", default="unknown")
     parser.add_argument("--holding-dir", default="")
+    parser.add_argument("--box-compare",
+                        help="suite_result --compare output, for --write-record")
     args = parser.parse_args(argv)
 
     if args.print_paths:
@@ -238,9 +249,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--write-record needs {}".format(", ".join(missing)))
     before = json.loads(pathlib.Path(args.before).read_text(encoding="utf-8"))
     after = json.loads(pathlib.Path(args.after).read_text(encoding="utf-8"))
+    box_compare = None
+    if args.box_compare and pathlib.Path(args.box_compare).exists():
+        box_compare = json.loads(pathlib.Path(args.box_compare).read_text(encoding="utf-8"))
     record = build_record(
         run_dir=args.run_dir, before=before, after=after,
-        commit=args.commit, holding_dir=args.holding_dir,
+        commit=args.commit, holding_dir=args.holding_dir, box_compare=box_compare,
     )
     out = pathlib.Path(args.run_dir) / RECORD_NAME
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -107,3 +107,29 @@ Three layers of restore: the EXIT trap; a `git status` check afterwards that sho
 1. **Box, phase 2.** `source earshot/tools/notify/notify-run.sh && nrun bash earshot/tools/hermeticity_gate.sh --tag hermetic-1`, then `python -m earshot.task.smoke --run-dir runs/hermetic-<ts>` after it restores. Nine green is the licence. A red is the gate working.
 2. **Box sweep.** Remove the `soundspaces-spike` env. Confirm the suspected `data/` duplicate by inode and record the answer, keeping both. The semantic annotations are now decidable — ticket 21 measured that the clean room needs no scene-dataset config of any kind — and the call is **keep**: 680 GB free means it was never a space question, and the deletion commit removes `scripts/download_hm3d_semantics.sh`, so re-fetching them would be a fresh piece of work.
 3. **Phase 3**, on green: the atomic commit, `CLAUDE.md` from the staged draft, `docs/archive/README.md`'s heading, PR.
+
+### 2026-08-05 — first box run: the gate stopped, and its reason was wrong
+
+`hermetic-1` on the V100, commit `675d8cd`, exit 1 at 1m35s. **The move, the absence check and the restore all worked on the real 244 files** — nine paths moved, all verified absent, all restored, working tree clean again. It stopped at the box suite with
+
+> FATAL: the box suite is red without the old trees — that is a leak
+
+and **it was not a leak.** 43 of 45 box tests passed with the delete set gone. The two failures are both `clap_instantiable`: `ClapModel.from_pretrained("laion/clap-htsat-unfused")` raising transformers' CVE-2025-32434 guard, which refuses `torch.load` on a `.bin` checkpoint under torch < 2.6. That probe touches no path the reset deletes, which is checkable from source rather than by re-running: `env_check.py:457` and `task/models.py:66` load through transformers from the HF cache, and nothing in `embodied_memory/`, `dialogue_memory/`, `scripts/`, `data/msc/` or the MSC files is on that path.
+
+**The defect is the gate's, and it is the shape this map keeps catching: an unsupported causal claim in a message.** A red without the old trees is evidence of a leak only if the same test is green with them, and the run had one arm.
+
+Fixed with a control arm. `earshot/tools/suite_result.py` runs the box suite on either side of the move and `compare()` sorts the difference into three verdicts: **leaks** (green in the control, red without the trees) are fatal and are the only thing that earns the word; **pre_existing** (red on both) is loud, recorded, and explicitly not a hermeticity failure; **recovered** (red only in the control) is reported because a test that passes once its own tree is gone is worth a look. A fourth outcome is separate from all three: if the two runs did not collect the same tests, "no leaks" is an absence of evidence and the gate says so rather than passing. `compare()` is pure, so all of it is Mac-tested with injected results, including the two outcomes the box actually produced.
+
+The comparison goes into `hermeticity.json`, so criterion 9 fails on a leak and passes-but-says-so on a pre-existing failure. The smoke keeps its hard failure, since a smoke that cannot complete blocks the deletion whatever the cause, but its message no longer says "leak": it names the control command that would settle it.
+
+**Not fixed here, and out of this map's scope: CLAP itself.** The smoke runs without `--clap` by design (§4.3: one sound, the anomaly by construction), so nothing on the route to the destination needs it. But it is a real regression against ticket 13's recorded green, and the interesting part is *how* it regressed: **`pinned_versions_match` PASSED — 9 of 9 pins agree with `ss2-constraints.txt`** — so torch and transformers are at the exact versions that produced ticket 13's finite `[1,3]` logit, and the capability is gone anyway. Ticket 17 pinned the inputs; the *checkpoint* is not an input it names. The chain that follows from the error text is that the resolved weights are now a `.bin` rather than safetensors, which points at the HF cache rather than at any version.
+
+That is a hypothesis, not a measurement, and the separating check is one line on the box:
+
+```
+ls ~/.cache/huggingface/hub/models--laion--clap-htsat-unfused/snapshots/*/
+```
+
+A `model.safetensors` there means something else is choosing the `.bin`; only `pytorch_model.bin` means the cache is the whole story and `from_pretrained(..., use_safetensors=True)` both fixes it and makes the next failure loud instead of a silent fallback. Ticket 09 already leaned on exactly this property for Qwen2-VL-2B. Deliberately not guessed at from here: it is a box capability, and this map's rule is that a capability is exercised, never proxied.
+
+**Re-run:** `nrun bash earshot/tools/hermeticity_gate.sh --tag hermetic-2`. Expect the control arm to record the same two CLAP failures on both sides and report them as pre-existing, then proceed to the smoke.
