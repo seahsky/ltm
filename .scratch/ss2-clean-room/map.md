@@ -115,6 +115,20 @@ Ticket 25 wired `task/` the same day and surfaced no new *question*, but it surf
 
 The frontier is now **27 alone**; 20 through 26 are done.
 
+**27 is claimed and half-built (2026-08-05).** Its Mac half landed — the gate is a script rather than a hand procedure (`earshot/tools/hermeticity_gate.sh` + `reset_manifest.py`), criterion 9 is answerable off a recorded artefact instead of operator memory, and the delete list is audited against `git ls-files` with the counts pinned.
+Two things a session picking this up should know before touching it.
+**The gate moves all five phase-3 groups, not the two ticket 10 named** — because the narrow version would have been green over a real leak: the carried `earshot/tools/notify/` trio still executed `$REPO_ROOT/scripts/…`, inside a group phase 2 would not have moved, so `nrun` printed a pid and ran nothing and the box trip had no launcher.
+**And a test written inside this tree cannot see that class of bug at all** — a reference to a doomed path resolves fine while the doomed path is still there, which is this map's own argument for phase 2 arriving in miniature. The fix is a skeleton holding only what survives the reset.
+What is left is box-only and in the ticket: run the gate, sweep the box, then the atomic commit.
+
+**First box run (`hermetic-1`, 2026-08-05): the move, the absence check and the restore all worked on the real 244 files, and the gate then stopped for a reason it could not support.**
+Two of 45 box tests failed on `clap_instantiable` and the gate called it a leak; it is not one, and that is checkable from source — the probe loads a model through transformers and touches no path the reset deletes.
+**A red without the old trees is evidence of a leak only if the same test is green with them**, so the box suite now runs on both sides of the move and `suite_result.compare` sorts the difference into leaks (fatal), pre-existing (loud, not a hermeticity failure) and not-comparable (an absence of evidence, which is not the same as no leaks).
+The lesson generalises past this gate: every claim of the form *X broke because of the change* needs the arm where the change is absent, and this map has three of them now (the notify test's skeleton, the delete-set bracketing, this).
+
+**Second box run (`hermetic-2`, exit 0): phase 2 ran clean and the prediction held exactly** — control 43/45, hermetic 43/45, no leaks, the two CLAP failures classified as pre-existing by measurement. The smoke completed with the delete set gone: onset 4 → INVESTIGATE 4 → RESUME 7 → goal 33, funnel PRIMARY_RESUMED, audio max 59.5 ms against a 0.5 s ceiling, `hermeticity.json` complete, tree restored.
+**And the gate exited 0 without evaluating the nine criteria** — it printed the judge command instead of running it, which is a green that has not asked the question the deletion is gated on. The trap judges now, and its exit code is the gate's. The criteria themselves are still unrun as of this line: one command on the box, no re-run needed.
+
 ```
 20 scaffold  ✓ resolved 2026-08-04
    │
@@ -173,6 +187,12 @@ Three from before that:
   Both belong to R2 — the distractor arm and caption-grounded detection — which this section already rules out, and the smoke runs `Detector.ORACLE` with a `NullRoomLabeler` by §8's own design.
   Ruled out as **scope, not sharpness**: the question is answerable today and the answer would not move this map toward one green episode.
   `make_detector` raises naming the missing module rather than substituting the oracle, so the gap is loud at the point of use rather than recorded only here.
+
+- **CLAP's checkpoint regression.**
+  Measured on the box 2026-08-05: `clap_instantiable` fails with transformers' CVE-2025-32434 guard (`torch.load` refused on a `.bin` under torch < 2.6), while `pinned_versions_match` **passes** — 9 of 9 pins agree with `ss2-constraints.txt`, so the environment is at the exact versions that produced ticket 13's finite `[1,3]` logit and the capability is gone regardless.
+  Ticket 17 pinned the inputs; the resolved **checkpoint** is not an input it names, which is the general lesson.
+  Out of scope because §8's smoke runs without `--clap` by design (one sound, the anomaly by construction), so nothing on the route to the destination needs it.
+  Ruled out as **scope, not sharpness** — the separating measurement is one `ls` of the HF cache, and the likely fix is `from_pretrained(..., use_safetensors=True)`, the same property ticket 09 relied on for Qwen2-VL-2B. It is written down in ticket 27 so the follow-on starts from evidence rather than from the error text.
 
 - **Rebuilding the memory stack.**
   Deferred to a follow-on effort by explicit decision. Only the STM/LTM calculation carries across as reference.

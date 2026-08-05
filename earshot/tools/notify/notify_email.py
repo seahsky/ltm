@@ -315,8 +315,13 @@ def main(argv=None, environ=None, urlopen=urllib.request.urlopen,
     ap.add_argument("--start-ts", type=float, required=True)
     ap.add_argument("--commit", default="unknown")
     ap.add_argument("--tag", default=None)
+    # Three levels up from earshot/tools/notify/. Ticket 10 carried this trio
+    # verbatim from `scripts/`, where one level up WAS the repo root; the move to
+    # three levels deep left this pointing at earshot/tools, so `.env` was read
+    # from a directory that has never held one and every run silently declined to
+    # email. Same defect as notify-run.sh's two dispatch paths, third instance.
     ap.add_argument("--repo-root",
-                    default=str(Path(__file__).resolve().parent.parent))
+                    default=str(Path(__file__).resolve().parents[3]))
     args = ap.parse_args(argv)
 
     repo_root = Path(args.repo_root)

@@ -67,6 +67,14 @@ REPORT_KEYS = (
 # degenerate mesh gives the same direct-path-only IR as an empty one.
 MIN_SCENE_VERTICES = 10_000
 
+# Criterion 9's evidence file, written into the run directory by
+# `earshot/tools/hermeticity_gate.sh`. The name and schema string are duplicated from
+# `earshot/tools/reset_manifest.py` on purpose: `tools/` sits outside the layer graph and
+# `task/` may not import it, so the record crosses that boundary as JSON exactly the way
+# `env_report.json` does. `tests/mac/test_reset_manifest.py` asserts the two agree.
+HERMETICITY_NAME = "hermeticity.json"
+HERMETICITY_SCHEMA = "earshot.hermeticity/1"
+
 
 class CriterionStatus(Enum):
     """PASS, FAIL, or NOT_RUN — and only PASS is green."""
@@ -312,16 +320,92 @@ def _env_green(env_report: Optional[Mapping[str, Any]]) -> Criterion:
                      "{} probe(s), all pass".format(len(probes)))
 
 
-def _hermeticity() -> Criterion:
-    """Criterion 9, and it is NOT_RUN by construction here — ticket 27 owns it.
+def _hermeticity(record: Optional[Mapping[str, Any]], run_dir: str = "") -> Criterion:
+    """Criterion 9: this run happened with everything phase 3 deletes already gone.
 
-    It is the same run, green again, with both old trees moved out of the repo: a property
-    of two runs, which a judge over one run directory cannot answer. Reported rather than
-    omitted, because a nine-point gate that silently judges eight is how "smoke green" and
-    "the deletion is safe" come apart.
+    It was NOT_RUN by construction until ticket 27, on the reasoning that hermeticity is a
+    property of two runs and a judge over one run directory cannot answer it. That was
+    half right. The comparison is not what makes the claim — *absence during this run* is,
+    and absence is a property of one run's environment that simply was not written down.
+    So the gate records it: ``earshot/tools/reset_manifest.py`` verifies the delete set is
+    gone immediately before the run and again immediately after, and writes both halves
+    into the run directory as ``hermeticity.json``. Without that file this stays NOT_RUN,
+    which is what an ordinary run produces — a baseline run cannot read green here by
+    being handed to this judge.
+
+    **Two checks, and only one of them lives here.** Is the record complete and about this
+    run — that is this function. Does the manifest actually name everything the deletion
+    commit removes — that is ``tests/mac/test_reset_manifest.py``, against ``git
+    ls-files``. Restating the delete set here would be ticket 24's one-rule-in-two-
+    languages, and the copy that drifted would be the one gating the irreversible commit.
+
+    ``complete`` is recomputed from the two halves rather than read off the top-level flag,
+    because a record is a small file and a top-level ``true`` is one edit away.
     """
-    return Criterion(9, "hermeticity", CriterionStatus.NOT_RUN,
-                     "a re-run with the old trees moved out — ticket 27")
+    if not record:
+        return Criterion(9, "hermeticity", CriterionStatus.NOT_RUN,
+                         "no {} in the run directory — this was an ordinary run, not a "
+                         "re-run with the delete set moved out "
+                         "(earshot/tools/hermeticity_gate.sh)".format(HERMETICITY_NAME))
+    if record.get("schema") != HERMETICITY_SCHEMA:
+        return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                         "unknown record schema {!r}".format(record.get("schema")))
+
+    entries = [e.get("path") for e in (record.get("entries") or [])]
+    if not entries:
+        return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                         "the record names no paths, so it verified nothing")
+
+    recorded_dir = str(record.get("run_dir") or "")
+    if recorded_dir and pathlib.Path(recorded_dir).name != pathlib.Path(run_dir).name:
+        # Catches a record copied forward from another run — the shape behind this
+        # project's own incident of a run directory quoted against another run's numbers.
+        # It does not catch a copy between two runs sharing a tag; nothing here could.
+        return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                         "record belongs to run {!r}, judged {!r}".format(
+                             recorded_dir, run_dir))
+
+    for half in ("before", "after"):
+        blob = record.get(half) or {}
+        if not blob:
+            return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                             "no {!r} verification — absence for the whole run is what "
+                             "the two halves are for".format(half))
+        still = list(blob.get("still_present") or [])
+        if still or not blob.get("complete"):
+            return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                             "{} the run, still present: {}".format(
+                                 half, ", ".join(still) or "unstated"))
+        checked = list(blob.get("checked") or [])
+        unchecked = [p for p in entries if p not in checked]
+        if unchecked:
+            return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                             "{} the run, never checked: {}".format(
+                                 half, ", ".join(unchecked)))
+
+    # The box suite on either side of the move, when the gate ran it. A test green with
+    # the old trees and red without them is a leak, and it is the only thing here that
+    # licenses that word — the gate's first box run called a pre-existing CLAP failure a
+    # leak, which it could not have known. A failure on BOTH sides is a sick environment:
+    # loud, and deliberately not a hermeticity verdict.
+    box = record.get("box_compare")
+    if box:
+        if not box.get("comparable", True):
+            return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                             "the two box-suite runs collected different tests, so "
+                             "'no leaks' would be an absence of evidence")
+        leaks = list(box.get("leaks") or [])
+        if leaks:
+            return Criterion(9, "hermeticity", CriterionStatus.FAIL,
+                             "{} test(s) pass with the old trees and fail without "
+                             "them: {}".format(len(leaks), ", ".join(leaks)))
+
+    detail = "{} path(s) verified absent before and after the run".format(len(entries))
+    pre_existing = list((box or {}).get("pre_existing") or [])
+    if pre_existing:
+        detail += "; no leaks, but {} pre-existing box failure(s) unrelated to the " \
+                  "move: {}".format(len(pre_existing), ", ".join(pre_existing))
+    return Criterion(9, "hermeticity", CriterionStatus.PASS, detail)
 
 
 def judge(
@@ -330,6 +414,8 @@ def judge(
     audit: EpisodeAudit,
     env_report: Optional[Mapping[str, Any]] = None,
     run_config: Optional[Mapping[str, Any]] = None,
+    hermeticity: Optional[Mapping[str, Any]] = None,
+    run_dir: str = "",
 ) -> SmokeVerdict:
     """§8's nine criteria over one episode's records. Pure.
 
@@ -354,7 +440,7 @@ def judge(
         _report_populated(report),
         _within_ceiling(audit, ceiling_s=cfg.get("audio_step_ceiling_s")),
         _env_green(env_report),
-        _hermeticity(),
+        _hermeticity(hermeticity, run_dir),
     )
     notes = []
     if audit.localization_arm != "realizable":
@@ -398,11 +484,17 @@ def judge_run_dir(run_dir: str, *, index: int = 0) -> SmokeVerdict:
         payload = json.loads(env_path.read_text())
         env_report = payload
         run_config = payload.get("run_config")
+    # Criterion 9's evidence, written by the hermeticity gate. Absent on an ordinary run,
+    # which is the correct reading: NOT_RUN, never green.
+    herm_path = root / HERMETICITY_NAME
+    hermeticity = json.loads(herm_path.read_text()) if herm_path.exists() else None
     return judge(
         report=report.as_dict(),
         audit=audit,
         env_report=env_report,
         run_config=run_config,
+        hermeticity=hermeticity,
+        run_dir=str(root),
     )
 
 

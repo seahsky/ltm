@@ -21,6 +21,11 @@ They are vendored **broken** on purpose.
 `ltm.py` imports `faiss`, `encoder.py` reaches for `sentence-transformers`, and `memory_bridge.py` imports `.frontier_planner`, `.perception`, `.room_resolver` and `.text_encode_util` — modules the reset deletes.
 If this directory ever becomes importable by accident, vendoring it was a mistake.
 
+Two of those dangling names are worth stating, because a revival will reach for them and no copy exists anywhere: `memory_bridge.py` lazily imports `dialogue_memory.train_scorer` and `dialogue_memory.train_predictor` (three call sites, all inside `if ckpt:` branches).
+They do **not** carry, deliberately — the importance-head training lever is closed on measurement, not on taste: R with an episode-soft-SPL label is unlearnable, R with a `goal_object` label recovers to heuristic-*competitive* without beating it, and all three U formulations regress warm soft-SPL to roughly half the heuristic's via the same wrong-instance over-fire.
+The heuristic `I = αR + βU + γN` in `consolidation.py` is the arm that produced every positive result, and it is here in full.
+Reviving the trained heads means re-deriving them against a better instance-discriminating embedding, which is the measured bottleneck and a different project.
+
 ## The write path
 
 `keyframe → segment → consolidate → LTM`.
