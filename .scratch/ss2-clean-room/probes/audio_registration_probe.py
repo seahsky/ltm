@@ -30,16 +30,25 @@ cross-version inference it inherited, named ``tests/box/test_world_box.py`` as t
 measurement, and named the fallback in advance. This is that measurement, run directly
 rather than through the suite so it prints the internals either verdict needs.
 
-**This probe sets no environment variable, and that is a correction.** Its first
-revision exported ``HABITAT_SIM_LOG=quiet`` to keep the output readable and aborted the
-interpreter with ``free(): invalid pointer`` before a single line reached stdout. Bare
-``quiet`` is what upstream habitat-sim's README documents; it is NOT this fork's
-grammar, which ``audio/guard.py:118`` source-verified as
-``SUBSYSTEM[,SUBSYSTEM]*=LEVEL`` joined by ``:`` (``Quiet`` being a *level* alias for
-``Error``, not a standalone word). habitat-sim parses it at static init during import,
-so a malformed value is a crash with no diagnostic at all. The engine's chatter is
-therefore inherited and left alone; every line this probe emits is prefixed ``PROBE|``
-so it can be sieved back out:
+**``import torch`` comes first, and it is not decoration.** Two revisions of this probe
+aborted the interpreter with ``free(): invalid pointer`` at ``import habitat_sim``,
+printing nothing further, while ``python -m earshot`` imported the same module in the
+same env without complaint. ``import_order_ladder.sh`` measured it: of six one-process
+cases, the ONLY green import is ``import torch, habitat_sim``. Not the
+``HABITAT_SIM_LOG`` pin (case 2 red), not numpy-first (case 3 red, the control), not
+``import earshot`` (case 5 red — its ``__init__`` is stdlib-only by design). The tree
+survives today only because ``assert_env()`` imports torch two probes before anything
+reaches ``sim/world.py``, which is an accident of listing order rather than a stated
+constraint.
+
+The first revision blamed ``HABITAT_SIM_LOG=quiet``, which it also set. That was wrong —
+the second revision set nothing and died identically. The grammar note still stands as
+written in ``audio/guard.py:118`` (``SUBSYSTEM[,SUBSYSTEM]*=LEVEL``, ``Quiet`` a *level*
+alias for ``Error``), but it is not what aborts this process, and nothing here should be
+read as evidence about it.
+
+The engine's chatter is therefore inherited and left alone; every line this probe emits
+is prefixed ``PROBE|`` so it can be sieved back out:
 
     python .scratch/ss2-clean-room/probes/audio_registration_probe.py 2>&1 | grep '^PROBE|'
 
@@ -66,6 +75,13 @@ def say(message=""):
 
 say("importing numpy")
 import numpy as np  # noqa: E402
+
+# BEFORE habitat_sim, and unused otherwise. `import_order_ladder.sh` measured that
+# `import habitat_sim` on its own aborts this interpreter with `free(): invalid pointer`
+# and that `import torch, habitat_sim` does not. Deleting this line does not tidy the
+# probe; it stops it running.
+say("importing torch (ordering constraint — see import_order_ladder.sh)")
+import torch  # noqa: E402,F401
 
 say("importing habitat_sim")
 import habitat_sim  # noqa: E402
