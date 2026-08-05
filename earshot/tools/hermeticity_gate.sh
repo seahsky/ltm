@@ -107,8 +107,48 @@ fi
 echo "  branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)   commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
-# --- 2. refuse a dirty tree ------------------------------------------------
+# --- 2. no other gate, no wreckage from a dead one, no dirt ----------------
 banner "[2/8] working tree must be clean"
+
+# 2a. Two gates at once would be catastrophic: the second moves paths the first has
+# already moved, and the first's restore then `mv`s a directory INTO its own restored
+# copy. A PID lock rather than `pgrep -f hermeticity_gate.sh`, because under `nrun` the
+# wrapper's command line contains this script's name and would match itself.
+LOCK="${HOME}/.earshot-hermeticity.lock"
+STALE_LOCK=""
+if [ -f "$LOCK" ]; then
+  _lockpid="$(cat "$LOCK" 2>/dev/null || echo)"
+  if [ -n "$_lockpid" ] && kill -0 "$_lockpid" 2>/dev/null; then
+    echo "FATAL: another hermeticity gate is already running (pid $_lockpid)."
+    echo "       Two at once would take the repo apart twice and restore it wrong."
+    echo "       Wait for it, or kill it and follow the recovery it printed."
+    exit 1
+  fi
+  STALE_LOCK="$_lockpid"
+fi
+
+# 2b. A run that was SIGKILLed — a dead pod, a closed session, an OOM — leaves no trap
+# and therefore leaves the repo taken apart. That is a MISSING-TRACKED-FILES tree, and
+# the generic message below would tell the operator to "commit or stash", which here
+# means recording the deletion of 244 files. So it is caught first and named.
+MISSING="$(git ls-files --deleted)"
+if [ -n "$MISSING" ]; then
+  echo "FATAL: $(echo "$MISSING" | wc -l | tr -d ' ') tracked file(s) are missing from the working tree."
+  echo
+  echo "       This is what a hermeticity run that died without its EXIT trap leaves"
+  echo "       behind — a kill -9, a dead pod, a closed session. DO NOT stash: that"
+  echo "       would record the deletions. Restore only the missing files:"
+  echo
+  echo "           git -C $REPO_ROOT ls-files --deleted -z | xargs -0 git -C $REPO_ROOT checkout --"
+  echo
+  [ -n "$STALE_LOCK" ] && echo "       (a stale lock from pid $STALE_LOCK agrees: that run is gone)"
+  for d in "${HOME}"/.earshot-hermeticity-*; do
+    [ -d "$d" ] && echo "       leftover holding directory, safe to delete once restored: $d"
+  done
+  echo "       Then re-run this gate."
+  exit 1
+fi
+
 DIRT="$(git status --porcelain)"
 if [ -n "$DIRT" ]; then
   echo "FATAL: the working tree is dirty. This gate moves TRACKED files out of the repo"
@@ -118,6 +158,8 @@ if [ -n "$DIRT" ]; then
   echo "$DIRT" | sed 's/^/         /'
   exit 1
 fi
+[ -n "$STALE_LOCK" ] && echo "  note: stale lock from pid $STALE_LOCK, but the tree is intact"
+echo $$ > "$LOCK"
 echo "  clean"
 
 # --- 3. the env (box-only; --dry-run stops before it) ---------------------
@@ -191,6 +233,7 @@ restore() {
   local status=$?
   banner "restore"
   local p i
+  rm -f "$LOCK"
   for ((i=${#MOVED[@]}-1; i>=0; i--)); do
     p="${MOVED[$i]}"
     mkdir -p "$(dirname "$REPO_ROOT/$p")"

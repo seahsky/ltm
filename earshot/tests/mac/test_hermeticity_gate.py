@@ -119,6 +119,50 @@ class TestRestore(unittest.TestCase):
         self.assertEqual(missing, [], "it moved files despite refusing to run")
         self.assertEqual(still_edited, "edited\n", "the refusal cost an uncommitted edit")
 
+    def test_a_repo_left_taken_apart_is_named_not_called_dirty(self):
+        """The wreckage a SIGKILLed run leaves, and the one message that must not fire.
+
+        A dead pod or a closed session takes the process without running the EXIT trap,
+        so the repo stays disassembled: tracked files missing, nothing else wrong. The
+        generic dirty-tree refusal would tell the operator to commit or stash, and
+        stashing here records the deletion of every moved file.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            h = GateHarness(td)
+            shutil.rmtree(h.repo / "embodied_memory")
+            (h.repo / "README_MSC_EVAL.md").unlink()
+            proc = h.run("--dry-run")
+            out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, out)
+        self.assertIn("tracked file(s) are missing", out)
+        self.assertIn("DO NOT stash", out)
+        self.assertIn("ls-files --deleted", out)
+        self.assertNotIn("Commit or stash first", out)
+
+    def test_a_second_gate_is_refused_while_one_is_running(self):
+        """Two at once move the same paths twice and restore into each other."""
+        with tempfile.TemporaryDirectory() as td:
+            h = GateHarness(td)
+            # This test process is alive, so its pid is a live lock by construction.
+            pathlib.Path(td, ".earshot-hermeticity.lock").write_text(
+                str(os.getpid()), encoding="utf-8")
+            proc = h.run("--dry-run")
+            missing = h.missing()
+            out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, out)
+        self.assertIn("already running", out)
+        self.assertEqual(missing, [], "the refused run moved files anyway")
+
+    def test_a_stale_lock_alone_does_not_block(self):
+        """A dead pid's lock is a note, not a refusal — the tree is the real subject."""
+        with tempfile.TemporaryDirectory() as td:
+            h = GateHarness(td)
+            pathlib.Path(td, ".earshot-hermeticity.lock").write_text(
+                "999999", encoding="utf-8")
+            proc = h.run("--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("stale lock", proc.stdout)
+
     def test_a_dry_run_does_not_claim_a_verdict(self):
         """The trap judges only a run that happened; --dry-run runs no episode.
 
