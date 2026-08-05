@@ -722,6 +722,7 @@ def run_episode(
         localization_arm=cfg.localization.value,
         detector_arm=cfg.detector.value,
         source_xyz=source,
+        t_anom=t_anom,
         dist_at_stop=source_dist_at_stop,
         funnel_stage=_funnel_stage(
             n_steps=len(steps),

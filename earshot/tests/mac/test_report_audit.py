@@ -192,6 +192,7 @@ class TestTheAuditRoundTrips(unittest.TestCase):
             localization_arm="realizable",
             detector_arm="oracle",
             source_xyz=Xyz(1.5, 0.1, -2.25),
+            t_anom=16,
             dist_at_stop=0.83,
             funnel_stage=FunnelStage.PRIMARY_RESUMED,
             onset=OnsetRecord(onset_step=130, pre_onset_rms=1e-3,

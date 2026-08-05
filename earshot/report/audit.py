@@ -140,6 +140,12 @@ class OnsetRecord:
     ``n_pre_onset_readings`` is the second half of the same idea, carried through from
     ``OnsetState``: with ``t_anom > 0`` and zero readings, §3.1's first invariant is
     *unverified*, not satisfied.
+
+    ``t_anom`` is deliberately **not** here, though §3.1 states both invariants against
+    it. It is a property of the episode as it was built, not of the onset as it was
+    measured, and this type is a projection of ``OnsetState`` plus exactly one field the
+    audit owns. It lives on ``EpisodeAudit`` beside ``source_xyz``, the builder's other
+    per-episode decision.
     """
 
     onset_step: Optional[int] = None
@@ -219,6 +225,12 @@ class EpisodeAudit:
     to be readable off the artefact. The spec requires an identical *testimony* schema
     in both arms, which is precisely what makes the arm invisible there — so if it were
     not recorded here it would be recorded nowhere.
+
+    ``t_anom`` is here for the same reason and was found the same way. It is derived per
+    episode (``task.dataset.derive_t_anom``), so ``run_config`` holds ``None`` unless a
+    run pinned one — and ``funnel_stage`` right below it is *computed* from ``t_anom``.
+    A record carrying a number derived from a bound it does not state cannot be read a
+    year later, which is what this whole type is for.
     """
 
     episode_index: int = 0
@@ -226,6 +238,7 @@ class EpisodeAudit:
     localization_arm: Optional[str] = None
     detector_arm: Optional[str] = None
     source_xyz: Optional[Xyz] = None
+    t_anom: Optional[int] = None
     dist_at_stop: Optional[float] = None
     funnel_stage: FunnelStage = FunnelStage.RUN
     onset: Optional[OnsetRecord] = None
@@ -309,6 +322,7 @@ class EpisodeAudit:
             "localization_arm": self.localization_arm,
             "detector_arm": self.detector_arm,
             "source_xyz": list(self.source_xyz.as_tuple()) if self.source_xyz else None,
+            "t_anom": None if self.t_anom is None else int(self.t_anom),
             "dist_at_stop": self.dist_at_stop,
             "funnel_stage": int(self.funnel_stage),
             "funnel_stage_name": self.funnel_stage.name,
@@ -334,12 +348,14 @@ class EpisodeAudit:
         with its own step rows and have the disagreement survive a round trip.
         """
         source = data.get("source_xyz")
+        t_anom = data.get("t_anom")
         return cls(
             episode_index=int(data.get("episode_index", 0)),
             scene_id=data.get("scene_id"),
             localization_arm=data.get("localization_arm"),
             detector_arm=data.get("detector_arm"),
             source_xyz=Xyz.from_sequence(source) if source is not None else None,
+            t_anom=None if t_anom is None else int(t_anom),
             dist_at_stop=data.get("dist_at_stop"),
             funnel_stage=FunnelStage(int(data.get("funnel_stage", FunnelStage.RUN))),
             onset=(

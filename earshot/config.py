@@ -90,14 +90,18 @@ class RunConfig:
     # primary task's; the detour has its own sub-budget in `ControllerConfig`.
     max_steps: int = 500
 
-    # provenance: fake — the step the anomaly source starts playing. Task spec §2.5:
+    # provenance: runtime — the step the anomaly source starts playing. Task spec §2.5:
     # this is when the source starts SOUNDING, not when the agent hears it, so an agent
     # that never gets close enough produces an episode with no onset and that attrition
-    # is a funnel stage rather than a screened-out episode. Low enough that a 500-step
-    # episode has room for the detour and the resume, high enough that §3.1's pre-onset
-    # invariant gets readings to assert on — with `t_anom = 0` it would never run at all,
-    # and `assert_provenance` says so rather than passing.
-    t_anom: int = 30
+    # is a funnel stage rather than a screened-out episode.
+    #
+    # `None` derives it per episode from that episode's own start-to-goal distance
+    # (`task.dataset.derive_t_anom`), which is why the tag is no longer `fake`. It was a
+    # constant 30, justified against the 500-step budget — and under an oracle STOP the
+    # budget is not what ends an episode. The smoke's second box episode found its bed at
+    # step 30, the same step the source started sounding, and the loop under test never
+    # ran. An integer here pins the old behaviour on every episode.
+    t_anom: Optional[int] = None
 
     # provenance: fake — seeds the navmesh's random point draws, which are the
     # calibration sweep's poses. A red run that cannot be reproduced is not evidence.
@@ -168,7 +172,7 @@ class RunConfig:
             "category": self.category,
             "n_episodes": int(self.n_episodes),
             "max_steps": int(self.max_steps),
-            "t_anom": int(self.t_anom),
+            "t_anom": None if self.t_anom is None else int(self.t_anom),
             "seed": int(self.seed),
             "localization": self.localization.value,
             "detector": self.detector.value,

@@ -204,6 +204,13 @@ def _provenance(audit: EpisodeAudit, *, t_anom: Optional[int]) -> Criterion:
     passed — unless it was never called. ``provenance_asserted`` is what makes the
     difference visible, and zero pre-onset readings with ``t_anom > 0`` means the first
     invariant is **unverified, not satisfied** (ticket 16).
+
+    ``t_anom`` arrives from two places now and both are used. The configured value is a
+    *pin* and is ``None`` on a run that derived one per episode, so the effective number
+    lives on the audit beside the source position the same builder chose. Where a run
+    pinned one, the two must agree: an episode whose source started at a different step
+    from the one the run asked for is a build that did not do what its configuration
+    says, which is the failure this gate exists to catch.
     """
     onset = audit.onset
     if onset is None:
@@ -212,13 +219,22 @@ def _provenance(audit: EpisodeAudit, *, t_anom: Optional[int]) -> Criterion:
     if not onset.provenance_asserted:
         return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
                          "assert_provenance never ran — its silence is not a pass")
-    if t_anom is not None and int(t_anom) > 0 and int(onset.n_pre_onset_readings) <= 0:
+    if t_anom is not None and audit.t_anom is not None and int(t_anom) != int(audit.t_anom):
+        return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
+                         "the run pinned t_anom {} but the episode recorded {}".format(
+                             int(t_anom), int(audit.t_anom)))
+    effective = audit.t_anom if audit.t_anom is not None else t_anom
+    if effective is None:
+        return Criterion(4, "provenance did not raise", CriterionStatus.NOT_RUN,
+                         "neither the run nor the episode records a t_anom, so §3.1's "
+                         "first invariant has no bound to be checked against")
+    if int(effective) > 0 and int(onset.n_pre_onset_readings) <= 0:
         return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
                          "t_anom is {} but there were no pre-onset readings, so §3.1's "
-                         "first invariant is unverified".format(t_anom))
+                         "first invariant is unverified".format(int(effective)))
     return Criterion(4, "provenance did not raise", CriterionStatus.PASS,
-                     "onset step {}, {} pre-onset readings".format(
-                         onset.onset_step, onset.n_pre_onset_readings))
+                     "onset step {}, {} pre-onset readings, t_anom {}".format(
+                         onset.onset_step, onset.n_pre_onset_readings, int(effective)))
 
 
 def _full_loop(audit: EpisodeAudit) -> Criterion:
@@ -317,10 +333,16 @@ def judge(
 ) -> SmokeVerdict:
     """§8's nine criteria over one episode's records. Pure.
 
-    ``run_config`` supplies the two numbers a criterion is measured *against* rather than
-    from — criterion 7's ceiling and §3.1's ``t_anom`` — which is why they arrive beside
-    the records rather than being read out of them. A gate that took its own bound from
-    the thing it is bounding would pass by construction.
+    ``run_config`` supplies the numbers a criterion is measured *against* rather than
+    from — criterion 7's ceiling, and §3.1's ``t_anom`` where a run pinned one — which is
+    why they arrive beside the records rather than being read out of them. A gate that
+    took its own bound from the thing it is bounding would pass by construction.
+
+    ``t_anom`` is the one place that is now a reconciliation rather than a lookup, and it
+    is stated because it weakens the rule above. It is derived per episode, so on an
+    unpinned run the configuration does not know it and criterion 4 falls back to the
+    record. What it buys back is a second check the old shape could not make: where a run
+    *did* pin one, the pin and the record must agree.
     """
     cfg = dict(run_config or {})
     criteria = (

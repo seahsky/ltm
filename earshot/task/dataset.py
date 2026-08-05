@@ -48,6 +48,7 @@ object** for the detector to visually confirm.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -61,9 +62,37 @@ __all__ = [
     "DatasetBuild",
     "goal_table",
     "primary_anchor",
+    "derive_t_anom",
     "place_anomaly_source",
     "build_anomaly_episodes",
 ]
+
+# provenance: source — `sim.world`'s action spec (`step_size_m=0.25`). One `move_forward`
+# advances the agent at most this far, and with `allow_sliding=False` a collided one
+# advances less. It bounds travel-per-step from **above**, which is the direction that
+# makes a step count derived from a distance a genuine lower bound.
+FORWARD_STEP_M = 0.25
+
+# provenance: source — `agent.config.DetectorConfig.oracle_radius_m`. The find ends when
+# the agent is within this of a primary goal view point, so this much of the route is
+# never walked and comes off the distance before it is turned into steps.
+ARRIVAL_RADIUS_M = 1.0
+
+# Both are duplicated rather than imported: this module may not reach into `sim` (the
+# navmesh never sees a candidate here) and `sim/world.py` imports torch at module scope,
+# so a Mac cannot load it at all. `test_task_dataset.py` reads both definitions out of
+# their own source with `ast` and fails if these drift.
+
+# provenance: fake — how far into the find the agent gets before the anomaly starts. Any
+# value below 1 makes the derived `t_anom` strictly earlier than the earliest step the
+# find can end on (`derive_t_anom` carries the argument); a half puts the interrupt near
+# the middle of the search rather than at either end of it.
+T_ANOM_FRACTION = 0.5
+
+# provenance: fake — §3.1's first invariant is checked on each pre-onset step, so a
+# `t_anom` of 0 leaves it unexercised and `assert_provenance` says so rather than
+# passing. Three readings is the smallest number that is not one.
+T_ANOM_FLOOR_STEPS = 3
 
 
 class PlacementError(ValueError):
@@ -225,6 +254,58 @@ def primary_anchor(episode: Episode) -> Xyz:
     )
 
 
+def derive_t_anom(
+    episode: Episode,
+    *,
+    fraction: float = T_ANOM_FRACTION,
+    floor_steps: int = T_ANOM_FLOOR_STEPS,
+) -> int:
+    """The step this episode's anomaly starts playing, derived from its own geometry.
+
+    **Why this is not a constant.** It was one — ``t_anom = 30``, tagged ``fake``, chosen
+    "low enough that a 500-step episode has room for the detour and the resume". That
+    reasoning measures against the step *budget*, and under an oracle STOP the binding
+    constraint is the *find*: the episode ends when the agent reaches its primary goal,
+    not when the budget runs out. The smoke's second box episode found its bed at step 30
+    after 3.75 m and 15 forwards — the same step the source started sounding — so the
+    anomaly arrived on the last step of the run and the loop under test never ran. A
+    number chosen against 500 was spent on an episode that lasted 31.
+
+    So it is derived per episode, from the one thing that decides how long the find is:
+
+    - ``reach`` — the straight-line ``xz`` distance from the start to the nearest primary
+      view point. A straight line is never longer than the navmesh route, so this is a
+      lower bound on the distance the agent must actually cover.
+    - minus ``ARRIVAL_RADIUS_M``, the part of that route the oracle STOP means is never
+      walked.
+    - divided by ``FORWARD_STEP_M``, an upper bound on travel per step, which turns a
+      lower-bound distance into a lower bound on the number of steps.
+
+    Every approximation therefore leans the same way — earlier — and the result is that
+    the find **cannot** end before ``floor((reach - radius) / step)``. Taking ``fraction``
+    of that lands the onset strictly inside the search, by an argument rather than by a
+    guess about any particular scene.
+
+    The one exception is stated rather than hidden: ``floor_steps`` wins when the goal is
+    within about two metres of the start, and in that episode the find can end before the
+    source ever sounds. That is a degenerate episode — there is no search to interrupt —
+    and §2.5's rule applies, so it shows up as a funnel stage rather than being screened.
+
+    Pin ``RunConfig.t_anom`` to an integer to override this; ``None`` means derive.
+    """
+    view_points = episode.view_points()
+    if not view_points:
+        raise PlacementError(
+            "episode {} publishes no goal view points, so there is no distance to derive "
+            "t_anom from".format(episode.episode_id)
+        )
+    start = episode.start_position
+    reach = min(start.horizontal_distance_to(point.position) for point in view_points)
+    walk_m = max(0.0, reach - ARRIVAL_RADIUS_M)
+    earliest_end = int(math.floor(walk_m / FORWARD_STEP_M))
+    return max(int(floor_steps), int(math.floor(float(fraction) * earliest_end)))
+
+
 def _primary_keep_out(episode: Episode) -> Tuple[Xyz, ...]:
     """Every point the source must stay clear of: all primary view points and objects.
 
@@ -368,7 +449,7 @@ def build_anomaly_episodes(
     dataset: EpisodeDataset,
     *,
     anomaly_class: str,
-    t_anom: int,
+    t_anom: Optional[int] = None,
     category: Optional[str] = None,
     n_episodes: Optional[int] = None,
     min_sep_m: float = 3.0,
@@ -379,6 +460,12 @@ def build_anomaly_episodes(
     ``category`` filters the **primary** goal only; the source is still drawn from every
     category in the scene, which is what makes a different-category source available at
     all.
+
+    ``t_anom`` is a pin. ``None`` — the default — derives one per episode from that
+    episode's own start-to-goal distance (``derive_t_anom``), so the anomaly lands inside
+    the find it is supposed to interrupt rather than at a step index chosen once for every
+    scene. An integer forces that value on every episode, which is what an experiment
+    holding the onset fixed wants and what the ``--t-anom`` flag is for.
 
     Episodes whose placement fails are skipped with the reason recorded rather than
     aborting the build — a scene that can express three of its episodes should run three.
@@ -416,7 +503,7 @@ def build_anomaly_episodes(
                 episode=episode,
                 source=placement,
                 anomaly_class=str(anomaly_class),
-                t_anom=int(t_anom),
+                t_anom=derive_t_anom(episode) if t_anom is None else int(t_anom),
             )
         )
 

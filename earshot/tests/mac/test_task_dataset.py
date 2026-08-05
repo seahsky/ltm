@@ -12,8 +12,12 @@ from _interpreter import assert_interpreter  # noqa: F401
 from _task_fakes import make_episode, make_goal
 
 from earshot.task.dataset import (
+    ARRIVAL_RADIUS_M,
+    FORWARD_STEP_M,
+    T_ANOM_FLOOR_STEPS,
     PlacementError,
     build_anomaly_episodes,
+    derive_t_anom,
     goal_table,
     place_anomaly_source,
     primary_anchor,
@@ -414,6 +418,168 @@ class TestBuild(unittest.TestCase):
         build = build_anomaly_episodes(scene, anomaly_class="alarm", t_anom=30)
         for anomaly_episode in build.episodes:
             self.assertTrue(anomaly_episode.source.anomaly_object)
+
+
+class TestDeriveTAnom(unittest.TestCase):
+    """When the anomaly starts, derived from the episode rather than fixed for the scene.
+
+    The bug this replaces was invisible in every artefact the run produced. ``t_anom``
+    was 30 and the smoke's second box episode reached its bed at step 30, so the source
+    started sounding on the last step of the episode: the onset fired, the funnel read
+    ONSET_FIRED, and criterion 5 failed with nothing anywhere saying the interrupt had
+    arrived too late to be one. Every number in the record was correct.
+    """
+
+    def _episode(self, reach_m, **kwargs):
+        """One episode whose nearest goal view point is ``reach_m`` from the start."""
+        return make_episode(
+            start=Xyz(0.0, 0.0, 0.0), goals=[make_goal(Xyz(0.0, 0.0, -reach_m))], **kwargs
+        )
+
+    def test_the_anomaly_starts_before_the_find_can_possibly_end(self):
+        """The property the derivation exists for, over the range HM3D episodes span.
+
+        ``earliest_end`` is not an estimate: the agent cannot be within the oracle radius
+        of the goal before it has walked the rest of the straight line, and no step covers
+        more than one forward stride. So a find cannot end earlier than this, and the
+        onset must land strictly inside it.
+        """
+        for reach_m in (3.0, 5.0, 7.5, 12.0, 25.0, 40.0):
+            with self.subTest(reach_m=reach_m):
+                earliest_end = (reach_m - ARRIVAL_RADIUS_M) / FORWARD_STEP_M
+                self.assertLess(derive_t_anom(self._episode(reach_m)), earliest_end)
+
+    def test_it_is_never_zero_so_the_pre_onset_invariant_has_readings(self):
+        """§3.1's first invariant is checked per pre-onset step, so ``t_anom = 0`` leaves
+        it unexercised — and ``assert_provenance`` raises rather than passing quietly."""
+        for reach_m in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0):
+            with self.subTest(reach_m=reach_m):
+                self.assertGreaterEqual(derive_t_anom(self._episode(reach_m)), 1)
+
+    def test_a_goal_within_arms_reach_falls_back_to_the_floor(self):
+        """The one case where the guarantee above does not hold, stated rather than hidden.
+
+        A goal the agent is already standing on has no search to interrupt. The floor wins,
+        the find can end before the source sounds, and §2.5 says that shows up as a funnel
+        stage rather than as a screened-out episode.
+        """
+        self.assertEqual(derive_t_anom(self._episode(0.5)), T_ANOM_FLOOR_STEPS)
+
+    def test_it_measures_to_the_nearest_instance_not_the_first(self):
+        """A category has several instances and the agent succeeds at any of them, so the
+        find is as long as the *shortest* route to one — the same argument that put every
+        view point in the separation bar rather than one."""
+        far_first = make_episode(
+            start=Xyz(0.0, 0.0, 0.0),
+            goals=[make_goal(Xyz(0.0, 0.0, -30.0)), make_goal(Xyz(0.0, 0.0, -6.0))],
+        )
+        self.assertEqual(derive_t_anom(far_first), derive_t_anom(self._episode(6.0)))
+
+    def test_a_longer_find_moves_the_onset_later(self):
+        """It tracks the episode. A constant could not, which is the whole point."""
+        derived = [derive_t_anom(self._episode(reach)) for reach in (4.0, 9.0, 20.0)]
+        self.assertEqual(derived, sorted(derived))
+        self.assertLess(derived[0], derived[-1])
+
+    def test_an_episode_with_no_view_points_raises(self):
+        """Rather than deriving 0 from a missing distance, which would read as "the source
+        sounds from step 0" — the `anommxv` break this map invalidated a matrix over."""
+        bare = make_episode(goals=[make_goal(Xyz(0.0, 0.0, -9.0), view_points=[])])
+        with self.assertRaises(PlacementError):
+            derive_t_anom(bare)
+
+    def test_the_builder_derives_one_per_episode_when_none_is_pinned(self):
+        scene = dataset(
+            [
+                self._episode(6.0, episode_id="near", category="chair"),
+                make_episode(
+                    episode_id="far",
+                    category="sofa",
+                    goals=[make_goal(Xyz(0.0, 0.0, -24.0))],
+                ),
+            ]
+        )
+        build = build_anomaly_episodes(scene, anomaly_class="alarm")
+        derived = {e.episode.episode_id: e.t_anom for e in build.episodes}
+        self.assertEqual(len(derived), 2)
+        self.assertLess(derived["near"], derived["far"])
+
+    def test_a_pinned_t_anom_is_used_verbatim(self):
+        """An experiment holding the onset fixed across episodes is what the flag is for,
+        and a derivation that quietly overrode it would make the flag a lie."""
+        scene = dataset(
+            [
+                self._episode(6.0, episode_id="near", category="chair"),
+                make_episode(
+                    episode_id="far",
+                    category="sofa",
+                    goals=[make_goal(Xyz(0.0, 0.0, -24.0))],
+                ),
+            ]
+        )
+        build = build_anomaly_episodes(scene, anomaly_class="alarm", t_anom=30)
+        self.assertEqual([e.t_anom for e in build.episodes], [30, 30])
+
+
+class TestTheDerivationsConstantsMatchTheirSources(unittest.TestCase):
+    """``FORWARD_STEP_M`` and ``ARRIVAL_RADIUS_M`` are copies, so they can drift.
+
+    They are copies because they have to be: this module may not import ``sim`` (the test
+    below this one holds that), and ``sim/world.py`` imports torch at module scope, so a
+    Mac cannot load it to ask. Read the defaults out of their own source with ``ast``
+    instead — the same answer ``test_box_call_arity.py`` reached for the same reason.
+
+    A drift here is silent and one-directional: a larger real step size or a smaller real
+    radius makes the derived ``t_anom`` too late again, which is the bug it replaced.
+    """
+
+    def _default(self, relative, class_name, func_name, argument):
+        import ast
+
+        import _tree
+
+        tree = _tree.parse(_tree.PACKAGE_ROOT / relative)
+        scope = tree
+        if class_name is not None:
+            scope = next(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            )
+        if func_name is None:
+            target = next(
+                node.value
+                for node in scope.body
+                if isinstance(node, ast.AnnAssign)
+                and getattr(node.target, "id", None) == argument
+            )
+            return ast.literal_eval(target)
+        function = next(
+            node
+            for node in ast.walk(scope)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == func_name
+        )
+        args = function.args
+        names = [arg.arg for arg in args.args] + [arg.arg for arg in args.kwonlyargs]
+        defaults = list(args.defaults) + list(args.kw_defaults)
+        return ast.literal_eval(defaults[names.index(argument) - (len(names) - len(defaults))])
+
+    def test_the_forward_step_matches_the_action_spec(self):
+        self.assertEqual(
+            FORWARD_STEP_M,
+            self._default("sim/world.py", None, "__init__", "step_size_m"),
+            "the simulator's forward stride changed; a longer one means the derived "
+            "t_anom is no longer inside the find",
+        )
+
+    def test_the_arrival_radius_matches_the_detector(self):
+        self.assertEqual(
+            ARRIVAL_RADIUS_M,
+            self._default("agent/config.py", "DetectorConfig", None, "oracle_radius_m"),
+            "the oracle STOP radius changed; the derivation subtracts it as the part of "
+            "the route that is never walked",
+        )
 
 
 class TestAudibilityIsNotScreened(unittest.TestCase):
