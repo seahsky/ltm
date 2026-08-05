@@ -126,3 +126,102 @@ the env-report path.
 `python -m earshot.task.smoke --run-dir runs/ss2-first-episode` — and
 `tests/box/test_investigate_route_box.py` **before** trusting any of it, since the whole fix
 rests on the follower routing.
+
+---
+
+## Comment — 2026-08-05, the box's second and third episodes
+
+Two more runs on the V100, two more defects, and both were in the **builder** rather than
+in the agent. Each was invisible in the artefact: every number the run recorded was
+correct, and criterion 5 failed for a reason nothing in the record named.
+
+### Run 2 (`runs/ss2-ep1`) — the source was a storey below the start
+
+The detour worked. 62 forwards, **0 collisions**, 15.5 m walked — the probe-routed climb
+doing exactly what the previous comment built it to do. It still never reached the source:
+`min_d2source` 1.88 m, `source_is_visible` false at all 153 steps, and the measured RMS
+*falling* 0.0407 → 0.0121 over 120 steps. It got quieter while walking cleanly.
+
+The frame was the first suspect and the box **refuted** it — `test_audio_box` pins the
+lateral cue agent-frame (ILD +0.081 facing, −0.065 turned) and `test_agent_frame_box`
+measures 0.00° of error at all four yaws. So a geometry probe
+(`probes/check_episode_geometry.py`) was written instead of a third theory, and it read
+**CROSS-FLOOR**: agent start y +2.064, primary anchor and source both y −0.536.
+
+ADR-0010's floor rule measured `max_dy_m` against the **primary anchor only**. The source
+sat *at* the goal's level — `|anchor − source|` 0.000, the rule satisfied exactly — and a
+full storey below where the agent begins. Legal by the builder's own test, unwinnable in
+practice, and a greedy energy climb cannot take stairs. **Fix (`63eda9c`): the rule covers
+both anchors.** `t_anom` is why it must be both rather than either — the anomaly fires
+mid-episode, so the agent may be on the start's floor or the goal's, and only a source
+within reach of both is climbable either way. The side effect is the right one: in a
+cross-floor episode the two anchors are further apart than `max_dy_m`, nothing qualifies,
+and the episode is **skipped with a reason** instead of running as a silent null.
+
+ADR-0010 predicted the wrong symptom, which is why this survived: it expected walking into
+a wall while the energy rose through the ceiling. The real shape has nothing to see.
+
+### Run 3 (`runs/ss2-ep2`) — the anomaly arrived on the last step
+
+The floor rule worked: episode 0 was skipped with the message naming its 2.60 m start-to-
+anchor gap, and a same-floor episode ran. Then:
+
+    step 30: onset at RMS 0.250589 (threshold 0.013833)
+    step 30: primary goal reached — STOP
+    funnel: ONSET_FIRED
+
+The find took 30 steps. `t_anom` was 30. The source started sounding on the last step of
+the episode, so there was no search left to interrupt, and completion wins that tie in
+SEARCH.
+
+`t_anom = 30` was tagged `fake` with the reason *"low enough that a 500-step episode has
+room for the detour and the resume"*. That reasons about the step **budget**; under an
+oracle STOP the binding constraint is the **find**, because the episode ends when the agent
+reaches its goal. A number chosen against 500 was spent on an episode that lasted 31. This
+is the third fake constant this ticket has had falsified by measurement, after
+`investigate_max_steps` 40 and the single-anchor floor rule.
+
+**Fix (`f8c6923`): derive it per episode.** `dataset.derive_t_anom` takes the straight-line
+xz distance from the start to the nearest primary view point, subtracts the oracle STOP
+radius (the part of the route never walked), and divides by the forward stride. Every
+approximation leans the same way — a straight line is never longer than the navmesh route,
+no step covers more than one stride — so the quotient is a genuine **lower bound on the
+earliest step the find can end on**, and half of it puts the onset strictly inside the
+search by an argument rather than by a guess about a scene. `T_ANOM_FLOOR_STEPS` (3) wins
+when the goal is within arm's reach; that episode is degenerate rather than mis-timed, and
+§2.5 says it shows as a funnel stage rather than a screen.
+
+`RunConfig.t_anom` becomes a **pin**: `None` derives, an integer forces (`--t-anom` for an
+experiment holding the onset fixed). Two consequences followed and both are improvements:
+
+- The audit records the effective `t_anom` beside `source_xyz`, because `funnel_stage` sits
+  in the same record and is *computed* from it. It went on `EpisodeAudit` rather than
+  `OnsetRecord` because a structural test caught the second projection — `OnsetRecord` is
+  `OnsetState` plus exactly one audit-owned field, and `t_anom` is a property of the episode
+  as built, not of the onset as measured.
+- Smoke criterion 4 **reconciles** the pin against the record rather than looking one up.
+  Where a run pinned a value, the two must agree; where it did not, the record is the only
+  place the bound exists. The old shape would have gone quiet on exactly the runs the smoke
+  performs.
+
+`FORWARD_STEP_M` and `ARRIVAL_RADIUS_M` are copies — `task/dataset.py` may not import `sim`
+and a Mac cannot load it anyway (torch at module scope) — so a test reads both defaults out
+of their own source with `ast`. Drift there is silent and one-directional: a longer stride
+or a smaller radius puts the onset back outside the find.
+
+### What was deliberately NOT changed
+
+The controller pins **completion over the interrupt** in SEARCH
+(`test_completing_takes_priority_over_an_onset`, ticket 23). Flipping it would also have
+turned run 3 green — the agent would divert, climb, and resume onto the bed it was standing
+beside. It is left alone: the pin is a deliberate ticket-23 decision, the task spec's §4
+does not speak to the tie, and changing the agent's semantics to make a gate pass is the
+move this ticket keeps catching in other forms. The scheduling fix is the honest one, and
+it also handles the case the precedence flip cannot — a find that ends *before* the source
+ever sounds.
+
+### State
+
+662 Mac tests (628 → 662), ruff clean, every fix plant-verified red for the right reason.
+Criterion 5 has not yet been *tested* — runs 2 and 3 both failed upstream of the climb, on
+geometry and on timing. Run 4 is the first honest test of the probe-routed detour.

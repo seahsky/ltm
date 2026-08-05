@@ -119,6 +119,17 @@ The one that changed the arm: **the realizable climb livelocks against any obsta
 So the detour now names a **probe point** and routes to it through the same pool and follower SEARCH uses, staying realizable (heading from live energy and the lateral sign, no source coordinate).
 **§4.1's "the greedy rule is unchanged" survives** — the rule is untouched and still the single source of the decision; what changed is that its answer becomes a place rather than a step.
 Whether the follower actually gets around a wall is a navmesh capability no Mac can settle, so it is `tests/box/test_investigate_route_box.py` and it must run **before** any smoke result is trusted.
+The box then ran it: **the detour routes** — 0.11 m from a probe behind a wall in 29 steps with 0 collisions, against the control arm's 5.64 m and 296 collisions on the straight line the old arm would have walked.
+
+**Two more box episodes, two more defects, and both were in the builder rather than the agent** — each invisible in the artefact, every recorded number correct, criterion 5 failing for a reason nothing in the record named.
+The first ran **cross-floor**: ADR-0010's floor rule measured `max_dy_m` against the primary anchor only, so a source at the goal's level (`|anchor − source|` 0.000, the rule satisfied *exactly*) sat a storey below where the agent begins — legal by the builder's own test, unwinnable by a climb that cannot take stairs, and the symptom was 62 clean forwards and 0 collisions while the RMS *fell*.
+The rule covers **both anchors** now, because `t_anom` fires mid-episode and the agent may be on either floor; a cross-floor episode is skipped with a reason instead of running as a silent null.
+The second was **timing**: the find took 30 steps and `t_anom` was 30, so the anomaly arrived on the last step and there was no search left to interrupt.
+`t_anom = 30` was a `fake` constant justified against the 500-step *budget*, and under an oracle STOP the binding constraint is the *find* — the third fake constant this ticket has had falsified by measurement.
+It is **derived per episode** now, from a straight-line lower bound on the earliest step the find can end on, so the onset lands inside the search by an argument rather than by a guess about a scene; `RunConfig.t_anom` becomes a pin, and the audit records what actually ran because `funnel_stage` is computed from it.
+The controller's completion-over-interrupt precedence would also have turned that run green and was **deliberately left alone** — it is a ticket-23 decision the spec does not contradict, and changing the agent's semantics to make a gate pass is the move this ticket keeps catching in other forms.
+
+**Criterion 5 has still never been tested.** Both box failures were upstream of the climb, on geometry and on timing, so the probe-routed detour has yet to meet a winnable episode.
 
 Five things earlier tickets left for the tickets that own them, so they are not lost between sessions:
 
