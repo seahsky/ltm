@@ -67,7 +67,7 @@ _SCENE = None
 
 def setUpModule():
     global _WORLD, _SCENE
-    from earshot.sim.world import World
+    from earshot.sim.world import World, camera_sensor_specs
 
     split_dir = find_split_dir(SPLIT)
     scenes_dir = find_scenes_dir()
@@ -81,7 +81,10 @@ def setUpModule():
     if _SCENE is None:
         raise unittest.SkipTest("no HM3D scene mesh on this box")
     print("\n  scene: {}".format(_SCENE.scene_path), flush=True)
-    _WORLD = World(_SCENE.scene_path)
+    # Cameras only. This module asks two questions — does the follower route, and is the
+    # probe where `move_forward` actually goes — and neither renders a sound, so an audio
+    # sensor here would buy nothing and cost the guard's arming render every episode.
+    _WORLD = World(_SCENE.scene_path, camera_sensor_specs(width=256, height=256))
     _WORLD.seed_navmesh(PLACEMENT_SEED)
 
 
