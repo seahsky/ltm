@@ -202,6 +202,16 @@ class TestTheFollowerRoutesAroundAnObstacle(unittest.TestCase):
             "the straight line was walkable, so this pair does not demonstrate what "
             "the probe is for",
         )
+        # The docstring's actual claim, asserted rather than printed. Measured 2026-08-05
+        # on 4ok3usBNeis: 296 collisions and 0.24 m of progress in 300 steps, against the
+        # follower's 0.11 m in 29 steps with none — which is the livelock and its fix on
+        # one navmesh.
+        self.assertGreater(
+            reached,
+            1.0,
+            "the old arm's face-and-push arrived, so this pair does not reproduce the "
+            "livelock the probe replaced",
+        )
 
 
 class TestTheProbeIsWhereTheFrameSaysItIs(unittest.TestCase):
@@ -213,17 +223,41 @@ class TestTheProbeIsWhereTheFrameSaysItIs(unittest.TestCase):
     acting.
     """
 
-    def test_a_forward_probe_lands_where_move_forward_goes(self):
-        start = _WORLD.random_navigable_point()
-        _WORLD.set_pose(start)
-        pose = _WORLD.pose()
-        probe = realizable_investigate_probe(ACT_FORWARD, pose, CFG)
+    # A first draw landed against furniture and skipped the whole check on 2026-08-05.
+    # Skipping the frame assertion because the floor was busy is how ticket 23's defect
+    # would survive this suite, so the draw is retried and running out of draws is a
+    # FAILURE rather than a skip: a scene with no clear two metres anywhere is a fact
+    # about the test's assumptions, not a reason to say nothing.
+    CLEAR_FLOOR_TRIES = 60
 
-        before = _WORLD.pose().position
-        for _ in range(int(round(CFG.investigate_probe_m / 0.25))):
-            if _WORLD.step(ACT_FORWARD):
-                self.skipTest("walked into something; this test needs clear floor")
-        after = _WORLD.pose().position
+    def _walk_clear(self):
+        """Seat the agent somewhere it can walk the probe distance without contact.
+
+        Returns ``(before, after, probe)`` or ``None``.
+        """
+        strides = int(round(CFG.investigate_probe_m / 0.25))
+        for _ in range(self.CLEAR_FLOOR_TRIES):
+            _WORLD.set_pose(_WORLD.random_navigable_point())
+            pose = _WORLD.pose()
+            probe = realizable_investigate_probe(ACT_FORWARD, pose, CFG)
+            before = pose.position
+            for _ in range(strides):
+                if _WORLD.step(ACT_FORWARD):
+                    break
+            else:
+                return before, _WORLD.pose().position, probe
+        return None
+
+    def test_a_forward_probe_lands_where_move_forward_goes(self):
+        walk = self._walk_clear()
+        self.assertIsNotNone(
+            walk,
+            "no clear {:.1f} m of floor in {} draws — the frame assertion did not run, "
+            "which is not the same as passing".format(
+                CFG.investigate_probe_m, self.CLEAR_FLOOR_TRIES
+            ),
+        )
+        before, after, probe = walk
         walked = after.horizontal_distance_to(before)
         error = after.horizontal_distance_to(probe)
         print(
