@@ -126,6 +126,9 @@ Two of 45 box tests failed on `clap_instantiable` and the gate called it a leak;
 **A red without the old trees is evidence of a leak only if the same test is green with them**, so the box suite now runs on both sides of the move and `suite_result.compare` sorts the difference into leaks (fatal), pre-existing (loud, not a hermeticity failure) and not-comparable (an absence of evidence, which is not the same as no leaks).
 The lesson generalises past this gate: every claim of the form *X broke because of the change* needs the arm where the change is absent, and this map has three of them now (the notify test's skeleton, the delete-set bracketing, this).
 
+**Second box run (`hermetic-2`, exit 0): phase 2 ran clean and the prediction held exactly** — control 43/45, hermetic 43/45, no leaks, the two CLAP failures classified as pre-existing by measurement. The smoke completed with the delete set gone: onset 4 → INVESTIGATE 4 → RESUME 7 → goal 33, funnel PRIMARY_RESUMED, audio max 59.5 ms against a 0.5 s ceiling, `hermeticity.json` complete, tree restored.
+**And the gate exited 0 without evaluating the nine criteria** — it printed the judge command instead of running it, which is a green that has not asked the question the deletion is gated on. The trap judges now, and its exit code is the gate's. The criteria themselves are still unrun as of this line: one command on the box, no re-run needed.
+
 ```
 20 scaffold  ✓ resolved 2026-08-04
    │

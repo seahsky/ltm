@@ -133,3 +133,33 @@ ls ~/.cache/huggingface/hub/models--laion--clap-htsat-unfused/snapshots/*/
 A `model.safetensors` there means something else is choosing the `.bin`; only `pytorch_model.bin` means the cache is the whole story and `from_pretrained(..., use_safetensors=True)` both fixes it and makes the next failure loud instead of a silent fallback. Ticket 09 already leaned on exactly this property for Qwen2-VL-2B. Deliberately not guessed at from here: it is a box capability, and this map's rule is that a capability is exercised, never proxied.
 
 **Re-run:** `nrun bash earshot/tools/hermeticity_gate.sh --tag hermetic-2`. Expect the control arm to record the same two CLAP failures on both sides and report them as pre-existing, then proceed to the smoke.
+
+### 2026-08-05 — `hermetic-2`: phase 2 ran clean, and the gate still owed a verdict
+
+Exit 0 in 3m20s on commit `f9dacf1`, run dir `runs/hermetic-20260805-131808`.
+
+**The control arm worked on its first real use, and the prediction held exactly.** Control 43/45 green, hermetic 43/45 green, `leaks: []`, `pre_existing:` the same two `TestClapIsInstantiableWhenRequested` methods, `comparable: true` on 45 tests both sides. The failure that stopped `hermetic-1` is now correctly classified as a sick environment rather than a leak, by measurement instead of by argument.
+
+**The smoke completed with the delete set gone**, which is the claim phase 2 exists to license:
+
+- `env_check` GREEN, 5 probes, `clap=False` (§8's own configuration — CLAP is not on this path)
+- audio context armed at **335,370 vertices** against ticket 12's 10,000 floor, IR `(2, 14227)`
+- calibration `onset_rms` 0.0136, **45.29 dB separation over 16 poses**
+- onset step 4 → INVESTIGATE step 4 → RESUME step 7 → primary goal reached step 33
+- funnel **PRIMARY_RESUMED**, stage 6 of 6
+- audio 34 renders, mean 51.6 ms, **max 59.5 ms** against criterion 7's 0.5 s ceiling (8.4x margin)
+- `hermeticity.json` written, `complete=True`; restore clean
+
+Ticket 26's builder fix also visibly did its job on the episode that got skipped: *"this episode spans floors and the greedy climb cannot take stairs"* — refused with a reason instead of running as a silent null.
+
+**But the gate exited 0 without producing the nine-point verdict.** It printed `python -m earshot.task.smoke --run-dir …` for the operator to run next, and a green exit that has not evaluated the criteria the deletion is gated on is the same shape as every other defect this ticket has found: a success that does not mean what it says. Nobody had run it yet, so **criteria 1–8 are unverified as of this entry** — everything above is ingredients, not the verdict.
+
+Fixed: the EXIT trap now runs `smoke --run-dir` after the restore, and **its exit code is the gate's**. After the restore, so the log still ends on a clean tree. Armed by `JUDGE_RUN_DIR`, which is set only once the record is written, with a Mac test pinning that `--dry-run` does not claim a verdict about a run that never happened.
+
+**Outstanding, and it is one command on the box** — the run directory already exists, so this needs no re-run:
+
+```
+python -m earshot.task.smoke --run-dir runs/hermetic-20260805-131808
+```
+
+Nine green licenses phase 3. Anything else and the gate has found something.

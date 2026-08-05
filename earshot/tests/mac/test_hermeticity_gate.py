@@ -119,6 +119,18 @@ class TestRestore(unittest.TestCase):
         self.assertEqual(missing, [], "it moved files despite refusing to run")
         self.assertEqual(still_edited, "edited\n", "the refusal cost an uncommitted edit")
 
+    def test_a_dry_run_does_not_claim_a_verdict(self):
+        """The trap judges only a run that happened; --dry-run runs no episode.
+
+        The first green box run exited 0 having never produced the nine-point verdict,
+        so the trap judges now. This pins the other direction: it must not judge when
+        there is nothing to judge, which would be a verdict about a previous run.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            h = GateHarness(td)
+            out = h.run("--dry-run").stdout
+        self.assertNotIn("the nine criteria", out)
+
     def test_the_recovery_command_is_in_the_log_before_the_move(self):
         """Layer 3 of the restore: a SIGKILL leaves no trap, only what was printed."""
         with tempfile.TemporaryDirectory() as td:

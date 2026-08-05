@@ -210,6 +210,21 @@ restore() {
   else
     echo "  working tree clean again"
   fi
+  # The nine criteria, HERE, after the restore rather than as a command printed for the
+  # operator to run next. The first green run of this gate exited 0 without ever
+  # producing the verdict the deletion is gated on, which is the same shape as every
+  # other defect on this map: a success that does not mean what it says. It runs after
+  # the restore so the last thing in the log is a clean tree, and its exit code is the
+  # gate's — nine green or the gate is not green.
+  if [ -n "${JUDGE_RUN_DIR:-}" ] && [ "$status" -eq 0 ]; then
+    banner "the nine criteria"
+    "$PY" -m earshot.task.smoke --run-dir "$JUDGE_RUN_DIR"
+    local verdict=$?
+    if [ "$verdict" -ne 0 ]; then
+      echo "  the run completed but the gate is NOT green — see the criteria above."
+      status="$verdict"
+    fi
+  fi
   exit "$status"
 }
 trap restore EXIT
@@ -304,9 +319,9 @@ AFTER="$HOLD/verify-after.json"
     ${BOX_COMPARE:+--box-compare "$BOX_COMPARE"} \
   || { echo "FATAL: could not write the hermeticity record"; exit 1; }
 
+# Judged by the EXIT trap, after the restore. Setting this is what arms it.
+JUDGE_RUN_DIR="$RUN_DIR"
 echo
-echo "  smoke complete and recorded. The restore runs next; judge AFTER it, so the last"
-echo "  thing in this log is a clean tree rather than a green with the repo taken apart:"
-echo "      python -m earshot.task.smoke --run-dir $RUN_DIR"
+echo "  smoke complete and recorded. The restore runs next, then the nine criteria —"
 echo "  criterion 9 reads $RUN_DIR/hermeticity.json and is now answerable."
 exit 0
