@@ -6,12 +6,20 @@
 
 Two jobs, and they are the same list, which is the point.
 
-**The delete list.** Ticket 27 names it in prose. Prose is what the deletion commit is
-executed from, and a list that lives only in a ticket cannot be checked against the tree
-it describes. Here every entry carries the number of tracked files it covered when it was
-audited, so `test_reset_manifest.py` goes red when the tree moves under it and the reset
-is re-audited by a human rather than widening silently. An irreversible commit is the one
-place where "the list changed and nobody looked" is unacceptable.
+**The delete list — and it has been executed.** Ticket 27 named it in prose, and prose is
+what an irreversible commit would have been run from; a list that lives only in a ticket
+cannot be checked against the tree it describes. Until 2026-08-06 the entries below were
+a plan, and `test_reset_manifest.py` asserted each one still existed with the tracked-file
+count it was audited at, so the reset could not widen silently.
+
+**Phase 3 has landed, so this file's job changed rather than ended.** It is now the record
+of what went — the counts are historical, as-deleted — and its test asserts the paths stay
+gone. That is a live check, not a museum piece: it fires if a revert is partial, or if
+someone restores one of these directories without deciding to.
+
+The gate still works, deliberately. `git revert` of the reset commit brings both the old
+trees and this machinery back together, and a gate that had been deleted alongside its
+subject would leave that revert unverifiable.
 
 **The hermeticity evidence.** Ticket 10 phase 2 requires the smoke green *with the old
 trees moved out*, because "the smoke is green" and "the smoke is green without the old
@@ -71,10 +79,11 @@ PathLike = Any
 
 @dataclass(frozen=True)
 class ManifestEntry:
-    """One path phase 3 deletes.
+    """One path phase 3 deleted.
 
-    ``tracked_files`` is the ``git ls-files`` count at audit time (2026-08-05), and it is
-    a pin rather than a comment — see the module docstring.
+    ``tracked_files`` is the ``git ls-files`` count at audit time (2026-08-05), which is
+    also the count that was deleted — the audit and the reset ran a day apart with the
+    test holding the tree still in between. Historical now; see the module docstring.
     """
 
     path: str

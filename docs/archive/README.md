@@ -5,7 +5,7 @@ These documents describe features that **shipped** and research arcs that
 running report) and summarized in `CLAUDE.md`. They are kept for design
 rationale, not as active reference.
 
-## Runbooks (superseded by `scripts/race-setup.sh` + CLAUDE.md "Running the ablation")
+## Runbooks (superseded by `docs/race-box-runbook.md`)
 
 - `phase2-race-runbook.md` — original RACE bring-up runbook.
 - `phase3-qwen7b-runbook.md` — Qwen2.5-7B planner bring-up runbook (Runs 4–6).
@@ -17,7 +17,7 @@ rationale, not as active reference.
 - `2026-05-27-fold-revisit-into-harness*` — folding the revisit eval into `analyze_ablation --revisit`.
 - `2026-05-27-phase-c-multiscene-revisit*` — Phase-C multi-scene revisit ablation.
 - `2026-05-28-goal-detector-binary-spl*` — goal detector for binary SPL (arc CLOSED, Run 11).
-- `2026-06-05-race-email-notification-design.md` — RACE run-notification email (SHIPPED; `scripts/notify-run.sh` + `scripts/notify_email.py` are active).
+- `2026-06-05-race-email-notification-design.md` — RACE run-notification email (SHIPPED; the trio is live at `earshot/tools/notify/`, carried out of `scripts/` before the reset deleted it).
 
 ## Note on historical references
 
