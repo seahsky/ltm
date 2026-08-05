@@ -693,6 +693,12 @@ def run_episode(
         "start_pose_audible": float(start_anomaly_rms >= calibration.onset_rms),
         "source_separation_m": float(anomaly_episode.source.separation_m),
         "source_dy_m": float(anomaly_episode.source.height_difference_m),
+        # The start-to-source drop, which the builder recorded and no run ever showed.
+        # `source_dy_m` is measured against the primary ANCHOR, so it read 0.000 on an
+        # episode whose source sat 2.6 m below the agent's start — and nothing in the run
+        # said so. The rule now bounds this, and the number is here so a future violation
+        # is visible in the record rather than inferred from raw coordinates.
+        "source_dy_start_m": float(anomaly_episode.source.height_difference_to_start_m),
         "source_same_category": float(anomaly_episode.source.same_category),
     }
     # Three measurements are recorded only when they exist, rather than as NaN or inf.

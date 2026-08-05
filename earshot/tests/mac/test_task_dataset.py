@@ -96,6 +96,103 @@ class TestPrimaryAnchor(unittest.TestCase):
             primary_anchor(make_episode(goals=[]))
 
 
+class TestTheFloorRuleCoversTheStartToo(unittest.TestCase):
+    """The break ticket 26's first full run walked into, measured on the box.
+
+    HM3D ObjectNav episodes routinely start a storey from their goal — the smoke's own
+    episode 0 begins at y +2.064 with its nearest bed view point at y -0.536, a **2.6 m**
+    gap and an authored geodesic of 5.98 m via stairs. The floor rule measured the source
+    against ``primary_anchor`` alone, so a source at the goal's level passed
+    (``|anchor - source|`` 0.000, ``source_dy_m`` 0.000) while sitting a full storey below
+    where the agent begins.
+
+    The episode was then legal by the builder's own test and unwinnable in practice: the
+    onset fired at step 30 with the agent still upstairs, and a greedy energy climb cannot
+    take stairs. It spent its entire 120-step budget on the wrong floor — 62 forwards, **0
+    collisions**, 15.5 m of clean walking — while the measured RMS *fell* from 0.0407 to
+    0.0121, chasing sound leaking through a stairwell. ``source_is_visible`` was false at
+    every one of 153 steps. Smoke criterion 5 was unreachable by construction.
+
+    **Both anchors, because ``t_anom`` makes the agent's floor unknowable at build time.**
+    The anomaly fires mid-episode, so the agent may be on the start's floor or the goal's.
+    Requiring the source within ``max_dy_m`` of *both* is the only placement that is
+    climbable either way — and it has the right side effect: in a cross-floor episode the
+    two anchors are further apart than the rule allows, no candidate can satisfy both, and
+    the episode is skipped with a reason rather than run as a silent null.
+    """
+
+    def _cross_floor(self):
+        """Start upstairs, primary goal and every candidate downstairs. The smoke's case."""
+        return make_episode(
+            category="bed",
+            start=Xyz(0.0, 2.064, 0.0),
+            goals=[make_goal(Xyz(0.0, -0.536, -3.0))],
+        )
+
+    def test_a_source_a_storey_below_the_start_is_rejected(self):
+        with self.assertRaises(PlacementError):
+            place_anomaly_source(
+                self._cross_floor(), table(toilet=[Xyz(0.0, -0.536, -8.0)])
+            )
+
+    def test_the_message_names_the_start_so_the_cause_is_readable(self):
+        """A skip reason that only said "another floor" would point at the goal."""
+        with self.assertRaises(PlacementError) as caught:
+            place_anomaly_source(
+                self._cross_floor(), table(toilet=[Xyz(0.0, -0.536, -8.0)])
+            )
+        self.assertIn("start", str(caught.exception).lower())
+
+    def test_a_source_on_the_starts_floor_is_still_rejected_when_the_goal_is_not(self):
+        """Both anchors, not either. The agent may have descended by ``t_anom``."""
+        with self.assertRaises(PlacementError):
+            place_anomaly_source(
+                self._cross_floor(), table(toilet=[Xyz(0.0, 2.064, -8.0)])
+            )
+
+    def test_a_same_floor_episode_is_unaffected(self):
+        """The regression guard: the rule only tightens where the start disagrees."""
+        episode = make_episode(
+            category="bed", start=Xyz(0.0, 0.0, 0.0), goals=[make_goal(Xyz(0.0, 0.0, -3.0))]
+        )
+        placement = place_anomaly_source(episode, table(toilet=[Xyz(0.0, 0.0, -8.0)]))
+        self.assertEqual(placement.anomaly_object, "toilet")
+
+    def test_a_step_rather_than_a_storey_still_qualifies(self):
+        """``max_dy_m`` is a floor rule, not a flatness rule — 0.4 m is a threshold."""
+        episode = make_episode(
+            category="bed", start=Xyz(0.0, 0.4, 0.0), goals=[make_goal(Xyz(0.0, 0.0, -3.0))]
+        )
+        placement = place_anomaly_source(episode, table(toilet=[Xyz(0.0, 0.0, -8.0)]))
+        self.assertEqual(placement.anomaly_object, "toilet")
+
+    def test_a_cross_floor_episode_is_skipped_rather_than_built(self):
+        """The consequence at the build layer: recorded attrition, not a silent null.
+
+        A same-floor episode rides along so the build does not raise for having produced
+        nothing at all, which is a different failure with a different message.
+        """
+        upstairs = make_episode(
+            episode_id="cross",
+            category="bed",
+            start=Xyz(0.0, 2.064, 0.0),
+            goals=[make_goal(Xyz(0.0, -0.536, -3.0))],
+        )
+        flat = make_episode(
+            episode_id="flat",
+            category="toilet",
+            start=Xyz(0.0, -0.536, -20.0),
+            goals=[make_goal(Xyz(0.0, -0.536, -20.0))],
+        )
+        build = build_anomaly_episodes(
+            dataset([upstairs, flat]), anomaly_class="alarm", t_anom=30
+        )
+        self.assertIn("cross", [episode_id for episode_id, _ in build.skipped])
+        self.assertNotIn(
+            "cross", [built.episode.episode_id for built in build.episodes]
+        )
+
+
 class TestPlacement(unittest.TestCase):
     def test_a_different_category_wins_over_a_nearer_same_category_instance(self):
         """The carried preference order, and the regime it exists for.
@@ -179,18 +276,52 @@ class TestPlacement(unittest.TestCase):
             place_anomaly_source(episode, table(sofa=[Xyz(1.0, 0.0, 0.0)]))
         self.assertIn("too near", str(caught.exception))
 
-    def test_the_placement_records_the_height_the_adr_does_not_constrain(self):
-        """The controller pays for the start-to-source drop even when the ADR is satisfied.
+    def test_the_placement_records_both_heights_and_the_rule_now_bounds_them(self):
+        """**Supersedes "the height the ADR does not constrain".**
 
-        A source on the goal's floor is still a stair-climb if the agent starts a storey
-        below it, and only the recorded number would say so afterwards.
+        This test used to construct a start a storey below the goal, place a source at the
+        goal's level, and assert that the placement *succeeded* while recording a 3.4 m
+        start-to-source drop — the position being that the number was worth recording but
+        not worth enforcing, since "only the recorded number would say so afterwards".
+
+        The box says recording was not enough. ``height_difference_to_start_m`` never
+        reached the run's metrics (the audit surfaced ``source_dy_m``, which is the
+        *anchor* difference and read 0.000), so nothing flagged the smoke's episode 0 as
+        the 2.6 m stair-climb it was, and it ran as a silent null: 120 steps of clean
+        climbing on the wrong floor, criterion 5 unreachable by construction.
+
+        So the rule now constrains it, and the field stays — bounded rather than
+        unbounded, which is the new fact worth asserting.
         """
         episode = make_episode(
-            start=Xyz(0.0, -3.0, 0.0), goals=[make_goal(Xyz(0.0, 0.0, 0.0))]
+            start=Xyz(0.0, -0.4, 0.0), goals=[make_goal(Xyz(0.0, 0.0, 0.0))]
         )
         placement = place_anomaly_source(episode, table(sofa=[Xyz(5.0, 0.4, 0.0)]))
         self.assertAlmostEqual(placement.height_difference_m, 0.4)
-        self.assertAlmostEqual(placement.height_difference_to_start_m, 3.4)
+        self.assertAlmostEqual(placement.height_difference_to_start_m, 0.8)
+
+    def test_no_qualifying_placement_can_exceed_the_rule_from_either_anchor(self):
+        """What the two-anchor rule buys, as the property rather than a case.
+
+        Tighter than it first looks, and tighter than I first asserted: constraining the
+        source against *both* anchors bounds the start-to-source drop by ``max_dy_m``
+        itself, not by twice it. A source 0.9 m above an anchor with the start 0.9 m below
+        it is 1.8 m from the start and is correctly rejected — the slack does not compose.
+        """
+        episode = make_episode(
+            start=Xyz(0.0, -0.4, 0.0), goals=[make_goal(Xyz(0.0, 0.0, 0.0))]
+        )
+        placement = place_anomaly_source(episode, table(sofa=[Xyz(5.0, 0.4, 0.0)]))
+        self.assertLessEqual(abs(placement.height_difference_m), 1.0)
+        self.assertLessEqual(abs(placement.height_difference_to_start_m), 1.0)
+
+    def test_the_slack_does_not_compose_across_the_two_anchors(self):
+        """The rejected half of the property above, so it is checked rather than argued."""
+        episode = make_episode(
+            start=Xyz(0.0, -0.9, 0.0), goals=[make_goal(Xyz(0.0, 0.0, 0.0))]
+        )
+        with self.assertRaises(PlacementError):
+            place_anomaly_source(episode, table(sofa=[Xyz(5.0, 0.9, 0.0)]))
 
 
 class TestBuild(unittest.TestCase):

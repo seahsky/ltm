@@ -1,15 +1,22 @@
 """The episode builder: where the one anomaly source goes, and what it is called.
 
-Task spec §2.1-§2.2 and ADR-0010. One positioned source per episode, on the primary
-goal's floor at ``|Δy| < 1.0 m``, and far enough from the primary goal in ``xz`` that
-investigating it is a real detour rather than a second route to the goal.
+Task spec §2.1-§2.2 and ADR-0010. One positioned source per episode, within ``|Δy| < 1.0
+m`` of **both the primary goal and the episode start**, and far enough from the primary
+goal in ``xz`` that investigating it is a real detour rather than a second route to it.
 
 **The floor rule is checked here and nowhere else.** ADR-0010 moved it from invariant to
 builder policy: with no grid and no ``nearest`` there is nothing to snap silently, so
 there is no runtime guard and none is needed. What survives is the *controller* argument
 — a greedy energy climb over ``move_forward`` / ``turn_left`` / ``turn_right`` cannot
-fund a stair-climb, and across floors it fails in a specific ugly way, walking into a
-wall while the energy rises through the ceiling.
+fund a stair-climb.
+
+**Measured, not predicted.** ADR-0010 guessed the failure would look like walking into a
+wall while the energy rises through the ceiling. Ticket 26's first full box episode shows
+otherwise, and the real shape is worse to diagnose: the agent walked **cleanly** — 62
+forwards, 0 collisions, 15.5 m — for its whole 120-step budget on the floor above the
+source, while the measured RMS *fell* 0.0407 -> 0.0121 as it chased sound leaking through
+a stairwell, and ``source_is_visible`` stayed false at all 153 steps. Nothing looked
+broken. That is why the rule now covers the start as well as the goal.
 
 **Audibility is not screened (§2.5).** Nothing here renders, computes an RIR, or asks
 how loud the source will be from anywhere — pre-screening would reintroduce offline
@@ -83,9 +90,15 @@ class SourcePlacement:
 
     The three measurements are recorded rather than merely checked: ``separation_m`` and
     ``height_difference_m`` are what ADR-0010's rule is about, and
-    ``height_difference_to_start_m`` is the number the ADR does *not* constrain but the
-    controller pays for — if the agent starts a storey below the goal, the detour is a
-    stair-climb no matter how faithful the source placement is.
+    ``height_difference_to_start_m`` is the start-to-source drop the controller pays for.
+
+    **That last one used to be recorded and unconstrained, and the box closed the gap.**
+    The reasoning was that the number would say so afterwards — but it never reached a
+    run's metrics (the audit surfaced ``source_dy_m``, the *anchor* difference, which read
+    0.000), so ticket 26's first full episode ran as a silent null with its source 2.6 m
+    below the agent's start. The floor rule now covers both anchors and this field is
+    bounded by it; ``runner`` publishes it as ``source_dy_start_m`` so a future violation
+    is visible in the record rather than inferred from raw coordinates.
     """
 
     position: Xyz
@@ -242,14 +255,34 @@ def place_anomaly_source(
        object standing at it.
     2. It clears ``min_sep_m`` in ``xz`` from **every** primary goal view point and
        object position — the decoupling.
-    3. It is within ``max_dy_m`` of the primary anchor in ``y`` — ADR-0010's floor rule,
-       checked **before** the nearest-first tie-break, which would otherwise actively
-       prefer a cross-floor candidate for being ``xz``-near.
+    3. It is within ``max_dy_m`` in ``y`` of **both** the primary anchor and the episode
+       start — ADR-0010's floor rule, checked **before** the nearest-first tie-break,
+       which would otherwise actively prefer a cross-floor candidate for being ``xz``-near.
+
+       **Both anchors, and the start was the one that was missing.** HM3D ObjectNav
+       episodes routinely begin a storey from their goal: the smoke's episode 0 starts at
+       y +2.064 with its nearest bed view point at y -0.536, 2.6 m apart with an authored
+       geodesic of 5.98 m via stairs. Measuring only against the anchor let a source sit
+       at the goal's level and pass — ``|anchor - source|`` 0.000 — while a full storey
+       below where the agent begins. The episode was then legal by this function's own
+       test and unwinnable in practice: the onset fired at step 30 with the agent still
+       upstairs, and a greedy energy climb cannot take stairs. It spent its whole 120-step
+       budget on the wrong floor, 62 forwards and 0 collisions, while the measured RMS
+       *fell* 0.0407 -> 0.0121 chasing sound through a stairwell. Smoke criterion 5 was
+       unreachable by construction.
+
+       ``t_anom`` is why it must be both rather than either: the anomaly fires mid-episode,
+       so the agent may be on the start's floor or the goal's, and only a source within
+       reach of both is climbable either way. The side effect is the right one — in a
+       cross-floor episode the two anchors are further apart than ``max_dy_m``, so nothing
+       qualifies and the episode is skipped with a reason instead of running as a silent
+       null.
     4. Among survivors: a different category first, then the nearest.
 
     Nothing about audibility is consulted, and nothing renders (§2.5).
     """
     anchor = primary_anchor(episode)
+    start = episode.start_position
     keep_out = _primary_keep_out(episode)
     primary_category = episode.object_category
 
@@ -268,7 +301,9 @@ def place_anomaly_source(
             if separation < float(min_sep_m):
                 n_too_near += 1
                 continue
-            if abs(position.height_difference_to(anchor)) > float(max_dy_m):
+            if abs(position.height_difference_to(anchor)) > float(max_dy_m) or abs(
+                position.height_difference_to(start)
+            ) > float(max_dy_m):
                 n_wrong_floor += 1
                 continue
             qualifying.append(
@@ -282,11 +317,25 @@ def place_anomaly_source(
             )
 
     if not qualifying:
+        # When the start and the anchor are themselves more than `max_dy_m` apart, NO
+        # candidate can satisfy both and the count above says "another floor" for a
+        # reason that is about the episode rather than the scene. Said plainly, because
+        # a skip reason that only blamed the scene is what let this run as a silent null.
+        start_to_anchor = abs(start.height_difference_to(anchor))
+        cross_floor = (
+            " The episode's own start is {:.2f} m in y from its primary anchor, which "
+            "already exceeds the {:.2f} m rule, so no placement could have qualified: "
+            "this episode spans floors and the greedy climb cannot take stairs.".format(
+                start_to_anchor, float(max_dy_m)
+            )
+            if start_to_anchor > float(max_dy_m)
+            else ""
+        )
         raise PlacementError(
             "no object in {} is >= {:.2f} m (xz) from every {!r} goal AND within "
-            "{:.2f} m in y of the primary anchor (rejected: {} too near, {} on another "
-            "floor, {} with no view point). The scene cannot express a decoupled anomaly "
-            "response for this episode.".format(
+            "{:.2f} m in y of BOTH the primary anchor and the episode start (rejected: "
+            "{} too near, {} on another floor, {} with no view point). The scene cannot "
+            "express a decoupled anomaly response for this episode.{}".format(
                 episode.scene_label,
                 float(min_sep_m),
                 primary_category,
@@ -294,6 +343,7 @@ def place_anomaly_source(
                 n_too_near,
                 n_wrong_floor,
                 n_no_view_point,
+                cross_floor,
             )
         )
 
