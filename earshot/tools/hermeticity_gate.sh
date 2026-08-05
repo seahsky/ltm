@@ -223,6 +223,20 @@ while IFS= read -r line; do
 done < <("$PY" -m earshot.tools.reset_manifest --print-paths)
 [ "${#PATHS[@]}" -gt 0 ] || { echo "FATAL: the manifest is empty or unreadable"; exit 1; }
 
+# Phase 3 landed on 2026-08-06, so on a current checkout there is nothing to move. Say
+# that, rather than moving nothing and then running a smoke whose green would mean only
+# that the tree still works — which is not this gate's question. Still reachable after a
+# revert, which is why the gate was not deleted alongside its subject.
+_present=0
+for p in "${PATHS[@]}"; do [ -e "$p" ] && _present=$((_present + 1)); done
+if [ "$_present" -eq 0 ]; then
+  echo "  none of the ${#PATHS[@]} manifest paths are here: the reset has already landed."
+  echo "  This gate licensed that deletion and has no subject on a current checkout."
+  echo "  It becomes meaningful again after a revert, which is why it still exists."
+  rm -f "$LOCK"
+  exit 0
+fi
+
 echo "  holding directory: $HOLD"
 echo "  IF THIS PROCESS IS KILLED, restore with:"
 echo "      cd $REPO_ROOT && git checkout -- ${PATHS[*]}"

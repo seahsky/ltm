@@ -1,7 +1,7 @@
 # 27 — The hermeticity re-run and the phase-3 deletion commit
 
 Type: task
-Status: claimed
+Status: resolved
 Blocked by: 26
 
 ## Question
@@ -163,3 +163,43 @@ python -m earshot.task.smoke --run-dir runs/hermetic-20260805-131808
 ```
 
 Nine green licenses phase 3. Anything else and the gate has found something.
+
+## Answer
+
+**SMOKE GREEN, all nine, and the reset is committed. The map's destination sentence is a measured fact.**
+
+```
+1. PASS  audio live and every-step      34 renders / 34 loop steps
+2. PASS  audio context sound            335370 verts (submitted 335362), canary seen
+3. PASS  the IR is real                 shape (2, 14227), peak 0.5949
+4. PASS  provenance did not raise       onset step 4, 4 pre-onset readings, t_anom 4
+5. PASS  the full loop ran              funnel stage 6 (PRIMARY_RESUMED)
+6. PASS  a report was emitted           all 9 of §5.1's keys
+7. PASS  audio wall-clock in ceiling    max 0.05953 s, mean 0.05157 s, ceiling 0.5 s
+8. PASS  env_check passed               5 probe(s), all pass
+9. PASS  hermeticity                    9 paths absent before and after; no leaks
+```
+
+Criterion 2's **+8 vertex gap** (335,370 held vs 335,362 submitted) is ticket 16's finding reproducing exactly: the engine holds slightly more geometry than habitat submits, which is the direct evidence that invariant 1 reads the *engine's* mesh rather than the caller's claim about it. Criterion 4's `t_anom 4` is ticket 26's per-episode derivation, not the old `fake` constant. Criterion 7 has 8.4x headroom.
+
+**Phase 3, one commit, 253 tracked files** — `embodied_memory/` 163, `dialogue_memory/` 30, `scripts/` 51 wholesale, `data/msc/` 4, the two MSC readmes, the three `run_msc_*.sh`. `CLAUDE.md` rewritten in the same commit, 580 lines → 110, with the outcome narrative deliberately not carried into it. `docs/archive/README.md`'s two dead pointers fixed. All 14 ADRs, both reports, `CONTEXT.md`, the proposal and `models/README.md` untouched.
+
+### The prerequisite this ticket recorded as landed had not
+
+**The tag `archive/pre-clean-room-2026-08-01` does not exist** — not locally, not on `origin`, not on `upstream`. Phase 0 was two halves and only the box-runbook half (ticket 14) ever happened; this ticket's "Prerequisites both landed" and its rollback line were both written against a tag nobody had made. Found by checking it rather than by needing it, which is the only reason it was not found the hard way.
+
+Created and pushed immediately before the deletion as **`archive/pre-reset-2026-08-06`**, named for what it actually is — the last commit where both old trees exist — rather than for a date and a state it does not have. It points at the merge of PR #36, so it carries the whole clean-room build as well as the old trees; the original name would have misdescribed that too.
+
+Rollback is therefore real in both forms the ticket promised: `git revert <commit>`, or `git checkout archive/pre-reset-2026-08-06 -- embodied_memory dialogue_memory scripts`.
+
+### What the manifest is now
+
+Its job changed rather than ended. The test that asserted every entry **exists** at its audited count — the guard against the delete list widening under a stale tree — now asserts the paths **stay gone**, which catches a partial revert or a directory restored by habit. The gate is kept working deliberately: `git revert` brings back the old trees *and* the machinery that checks them, and a gate deleted alongside its subject would leave that revert unverifiable. It now announces that the reset has landed rather than moving nothing and running a smoke whose green would mean something else.
+
+### The box sweep
+
+Not done, and it is not a gate on anything: `soundspaces-spike` is still on the box, the suspected ~9.3 GB `data/` duplicate is unconfirmed, and the semantic annotations are decided (**keep** — ticket 21 measured that the clean room needs no scene-dataset config, 680 GB free means it was never a space question, and this commit deletes `scripts/download_hm3d_semantics.sh` so re-fetching would be fresh work). Listed on the map as the one loose end that outlives the map.
+
+### Deliberately not done
+
+The **CLAP regression** is out of scope and recorded with its diagnostic: `pinned_versions_match` passes on 9 of 9 pins, so the box is at ticket 13's known-good versions and the capability is gone anyway — ticket 17 pinned the inputs, and the resolved checkout is not an input it names. §8's smoke runs without `--clap` by design, so nothing on the route to the destination needed it.

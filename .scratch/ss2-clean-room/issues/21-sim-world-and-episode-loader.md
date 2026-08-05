@@ -1,8 +1,16 @@
 # 21 — `sim/world.py` and the ObjectNav episode loader
 
 Type: task
-Status: claimed
+Status: resolved
 Blocked by: 20 (resolved 2026-08-04)
+
+Resolved 2026-08-06, by a status line rather than by work: the box measurement this
+ticket was left awaiting has been taken since, inside tickets 26 and 27's box-gate runs
+(`earshot/tests/box/` at 43/45, the only two failures being the CLAP probe). Nobody came
+back to flip it, so the tracker read `claimed` for two days while the map's own
+Decisions-so-far and its dependency tree both recorded 21 as done — a record that quietly
+stopped being true, which is this map's most-repeated finding, arriving in its own
+bookkeeping. See the caveat at the end of the built-section below.
 
 ## Question
 
@@ -104,3 +112,29 @@ Every field it reads steers the agent, so it raises rather than defaults: a miss
 ### Disclosed, and the box settles it
 
 `World` puts the `AudioSensorSpec` through `AgentConfiguration.sensor_specifications` rather than `sim.add_sensor` after construction. `Agent.__init__` routes both through the identical `SensorFactory.create_sensors` (`agent/agent.py:158-171`) and tickets 04 and 16 proved the `add_sensor` form — but "same code path on habitat-sim 0.3.3" is a **cross-version inference** until it runs on the 2022-era branch the box builds. `test_the_audio_spec_arrives_through_the_agent_config` is the check; if it comes back red the fallback is one line and costs the audio-blindness. Worth noting the risk is *guarded* rather than silent either way: if the agent-config path yielded an empty mesh, `arm_audio_context` raises with a diagnosis.
+
+## Caveat on the measurement, 2026-08-06
+
+The box suite has run three times since this was written (tickets 26, 27's `hermetic-1`
+and `hermetic-2`) and `tests/box/test_world_box.py` passed every time — 43 of 45, with
+both failures being `clap_instantiable`, which this ticket does not touch. So the awaited
+measurement exists.
+
+**What is not visible in the logs I have** is which claim
+`TestSceneDatasetConfigIsUnnecessary` actually made. It was built to prefer a scene with
+**no `.semantic.glb` on disk** — the decisive case, since the annotated config would have
+had nothing to point at — and to fall back to a weaker, merely-consistent claim if every
+candidate on the box turns out to be annotated. Both outcomes are a pass. The captured
+tails do not show which one ran, and ticket 05 measured 100 basis meshes against 36
+semantic ones in `val`, so the decisive case *should* be reachable.
+
+One line settles it against the full box-suite log:
+
+```
+grep -A3 TestSceneDatasetConfigIsUnnecessary runs/ss2-box-gate/box-suite.log
+```
+
+It is recorded rather than chased because nothing downstream depends on it: the
+semantic-annotation keep/delete call it was gating was decided on the source-derived
+answer plus `tests/mac/test_episodes.py::TestNoSceneDatasetConfig`, and the decision was
+**keep**, which is the safe side of it either way.

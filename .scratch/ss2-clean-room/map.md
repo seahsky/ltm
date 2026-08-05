@@ -80,9 +80,20 @@ Skills to consult per session: `/grilling`, `/domain-modeling`, `/research`, `/p
 
 - [26 — The smoke, green on the box](issues/26-the-smoke-green-on-the-box.md) — **Criteria 1–8 PASS on the RACE V100 (`runs/ss2-ep3`); 9 is NOT_RUN by construction and is ticket 27's. The destination sentence is a measured fact: one HM3D episode end to end with SoundSpaces 2.0 rendered live at every step, find-task → alarm → investigate → resume → report.** 168 renders / 168 steps, 89 forwards, **0 collisions**, `dist_at_stop` **0.486 m** against a 3.216 m source separation, so the detour reached the *right* instance and not merely a same-category one — which is the check §4.2 exists for, because arrival is plateau plus a visual confirm that fires on any chair within a metre. Four defects were found on the box across four runs and **every one was invisible in the artefact it produced**: the funnel's over-credit, the detour's forever-re-entry, and then two in the **builder** — a floor rule anchored only on the goal, which let a source sit at the goal's level (`|anchor − source|` 0.000, satisfied *exactly*) a storey below the agent's start, and a constant `t_anom = 30` that landed the alarm on the last step of a 31-step episode. **Three of the four were `fake` constants or rules falsified by measurement**, so `t_anom` is now **derived per episode** from a straight-line lower bound on the earliest step the find can end on — an argument rather than a guess — and `RunConfig.t_anom` becomes a pin. The one that changed the agent: **the realizable climb livelocked against any obstacle** (`move_forward` its only translation, the gradient choosing where forward pointed, and the planner bypassed entirely during INVESTIGATE), so the detour now names a **probe point** and routes to it through the same pool and follower SEARCH uses — §4.1's greedy rule untouched, its answer now a place rather than a step. Two things were deliberately **not** done and are stated as such: the controller's completion-over-interrupt precedence would also have turned a red run green and is a ticket-23 decision the spec does not contradict; and the collision flag is recorded but **not consumed**, because sliding is off so a wall already reads as the stall branch's plateau (a branch was built, then reverted when four wall geometries came back byte-identical). §9's builder numbers are now measured: criterion 7's 0.5 s ceiling is ~7.6x the measured max, §3.1's tolerance never fired (pre-onset spread 0.001..0.001, ADR-0009's unrendered bed exactly), the 120-step sub-budget used 4. **One defect found and not fixed**: `source_is_visible` has been false at every step of every box episode including at 0.117 m, and the listener sits *exactly* 1.5 m above a source placed at a floor-level view point — see the fog below.
 
+- [27 — The hermeticity re-run and the phase-3 deletion commit](issues/27-hermeticity-and-the-deletion-commit.md) — **The destination. SMOKE GREEN on all nine criteria with the delete set moved out, then 253 tracked files deleted in one commit.** Phase 2 became a script rather than a hand procedure (`hermeticity_gate.sh` + `reset_manifest.py`), and **criterion 9 stopped being structurally NOT_RUN**: hermeticity is not a property of two runs, it is *absence during this one*, which was simply never written down — so the gate brackets the run with two verifications and records them, and an ordinary run still reads NOT_RUN. Three defects found on the way, each the same shape. **(a) The carried `nrun` printed a pid and ran nothing** — ticket 10's "as-is" carry moved the notify trio from one level deep to three while all three self-references stayed repo-relative, so the box trip this ticket opens with had no launcher; and the first fix was *green against the bug*, because a reference to a doomed path resolves fine while the doomed path still exists. That is phase 2's own argument in miniature, and the fix is a skeleton holding only what survives. **(b) The gate called a pre-existing CLAP failure a leak** — a red without the old trees is evidence only against the arm where they are present, so the box suite now runs on both sides and `suite_result.compare` separates leaks (fatal) from a sick environment (loud, not a hermeticity verdict). **(c) The gate exited 0 without producing the verdict**, printing the judge command instead of running it; the trap judges now and its exit code is the gate's. **Corrects its own prerequisites: the tag `archive/pre-clean-room-2026-08-01` never existed** on any remote — phase 0's rollback half was recorded as landed and was not — replaced by `archive/pre-reset-2026-08-06`, named for what it is. The manifest's job changed rather than ended: its test flipped from *these exist* to *these stay gone*, and the gate is kept working so a `git revert` restores a tree it can still check.
+
 ## Not yet specified
 
 <!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
+
+> **THE MAP IS DONE (2026-08-06).** Ticket 27 resolved: the smoke is green on the box, green again
+> with the old trees moved out, and both trees are deleted. Every ticket 01–27 is closed and the
+> destination sentence is true. What is left below is fog that outlived the map — it belongs to
+> whatever effort comes next, and that effort should be chartered rather than resumed.
+>
+> One loose end that is not fog and not a decision: **the box sweep**. `soundspaces-spike` is still
+> on the box, and the suspected ~9.3 GB `data/` duplicate is unconfirmed. Neither gates anything;
+> the semantic-annotation question they were bundled with is decided (**keep**).
 
 **How high off the floor does the anomaly source sound from?** Ticket 26's four box runs put
 `source_is_visible` at false on every one of 352 steps, including at 0.117 m from the source
@@ -113,7 +124,7 @@ Ticket 23 built `agent/` the same day and surfaced no new *question*, but it did
 Ticket 24 built `report/` + `env_check.py` on 2026-08-05 and surfaced no new question either, but it did find a **contradiction inside ADR-0013** (the one-importer rule versus its own licence for `env_check`'s enum probe) — resolved in place with a two-entry allowlist and a use-it-or-lose-it test, not deferred.
 Ticket 25 wired `task/` the same day and surfaced no new *question*, but it surfaced two facts the tree did not have: **`earshot/vlm.py` is named by ADR-0013 and was never built**, so `Detector.CAPTION` and the captioner room label raise rather than run (both R2, out of scope here); and **the tree is now a runnable program that has never been run**, because no session on this Mac can load habitat-sim.
 
-The frontier is now **27 alone**; 20 through 26 are done.
+The frontier is **empty**; 20 through 27 are done.
 
 **27 is claimed and half-built (2026-08-05).** Its Mac half landed — the gate is a script rather than a hand procedure (`earshot/tools/hermeticity_gate.sh` + `reset_manifest.py`), criterion 9 is answerable off a recorded artefact instead of operator memory, and the delete list is audited against `git ls-files` with the counts pinned.
 Two things a session picking this up should know before touching it.
@@ -127,7 +138,10 @@ Two of 45 box tests failed on `clap_instantiable` and the gate called it a leak;
 The lesson generalises past this gate: every claim of the form *X broke because of the change* needs the arm where the change is absent, and this map has three of them now (the notify test's skeleton, the delete-set bracketing, this).
 
 **Second box run (`hermetic-2`, exit 0): phase 2 ran clean and the prediction held exactly** — control 43/45, hermetic 43/45, no leaks, the two CLAP failures classified as pre-existing by measurement. The smoke completed with the delete set gone: onset 4 → INVESTIGATE 4 → RESUME 7 → goal 33, funnel PRIMARY_RESUMED, audio max 59.5 ms against a 0.5 s ceiling, `hermeticity.json` complete, tree restored.
-**And the gate exited 0 without evaluating the nine criteria** — it printed the judge command instead of running it, which is a green that has not asked the question the deletion is gated on. The trap judges now, and its exit code is the gate's. The criteria themselves are still unrun as of this line: one command on the box, no re-run needed.
+**And the gate exited 0 without evaluating the nine criteria** — it printed the judge command instead of running it, which is a green that has not asked the question the deletion is gated on. The trap judges now, and its exit code is the gate's.
+
+**The judge then ran: SMOKE GREEN, all nine.** Criterion 2's **+8 vertex gap** (335,370 held against 335,362 submitted) is ticket 16's finding reproducing exactly — the direct evidence that invariant 1 reads the *engine's* geometry rather than the caller's claim about it. Criterion 4's `t_anom 4` is ticket 26's per-episode derivation rather than the falsified `fake` constant. Criterion 7 has 8.4x headroom.
+**Phase 3 followed in one commit: 253 tracked files, `CLAUDE.md` rewritten inside it, 580 lines to 110.** And one last correction of the kind this map has been making all along — **the rollback tag ticket 27 recorded as a landed prerequisite did not exist** on any remote. Phase 0 was two halves and only ticket 14's ran. Found by checking rather than by needing it; replaced with `archive/pre-reset-2026-08-06`, named for what it actually is.
 
 ```
 20 scaffold  ✓ resolved 2026-08-04
@@ -140,7 +154,10 @@ The lesson generalises past this gate: every claim of the form *X broke because 
                                 26 smoke green on the box ✓ resolved 2026-08-05
                                             │
                                             ▼
-              27 hermeticity + the deletion commit   ← the frontier: 27
+              27 hermeticity + the deletion commit ✓ resolved 2026-08-06
+                                            │
+                                            ▼
+                                     the destination
 ```
 
 **Ticket 26 resolved on 2026-08-05: criteria 1–8 green on the box, 9 deferred to 27 by construction.** The detail is in its resolution comment and gisted above; what follows is the arc it took, kept because four of its findings were defects that produced correct-looking records.

@@ -49,34 +49,46 @@ def _git(*args):
 
 
 class TestManifestDescribesThisTree(unittest.TestCase):
+    """The reset landed on 2026-08-06, so these assertions are inverted from what they were.
+
+    Before the deletion commit they read *every entry still exists, at the tracked-file
+    count it was audited at* — the guard against an irreversible commit widening under a
+    stale list. After it, the same list is the record of what went and the live question
+    is whether it stays gone: a partial revert, or a directory restored by habit rather
+    than by decision, both show up here.
+    """
+
     def test_git_is_available(self):
         """Absence is red, not skipped — a skipped audit reads exactly like a passing one."""
         proc = _git("rev-parse", "--is-inside-work-tree")
         self.assertEqual(proc.returncode, 0,
-                         "no git here, so the counts below cannot be audited")
+                         "no git here, so nothing below is actually being checked")
 
-    def test_every_entry_exists(self):
-        missing = [e.path for e in DELETE_SET if not (REPO_ROOT / e.path).exists()]
+    def test_every_entry_is_gone_from_the_working_tree(self):
+        back = [e.path for e in DELETE_SET if (REPO_ROOT / e.path).exists()]
         self.assertEqual(
-            missing, [],
-            "the manifest names paths that are already gone: {}. Either the reset has "
-            "partly happened, or the list is describing a tree that no longer exists."
-            .format(missing),
+            back, [],
+            "the reset deleted these and they are present again: {}. If that was a "
+            "deliberate revert, revert this test with it; if it was not, something "
+            "restored them without deciding to.".format(back),
         )
 
-    def test_tracked_file_counts_still_match(self):
-        drifted = []
+    def test_every_entry_is_gone_from_the_index(self):
+        """Absent from disk is not the same as absent from git — check the index too."""
+        tracked = []
         for entry in DELETE_SET:
             proc = _git("ls-files", "--", entry.path)
             count = len([ln for ln in proc.stdout.splitlines() if ln.strip()])
-            if count != entry.tracked_files:
-                drifted.append((entry.path, entry.tracked_files, count))
+            if count:
+                tracked.append((entry.path, count))
         self.assertEqual(
-            drifted, [],
-            "tracked-file counts moved since the audit (path, audited, now): {}. This is "
-            "not a test to update in passing — the deletion is irreversible, so look at "
-            "what arrived or left first.".format(drifted),
+            tracked, [],
+            "git still tracks files under paths the reset deleted: {}".format(tracked),
         )
+
+    def test_the_recorded_counts_are_the_ones_that_were_deleted(self):
+        """253 tracked files went. The per-entry numbers are the audit that licensed it."""
+        self.assertEqual(sum(e.tracked_files for e in DELETE_SET), 253)
 
     def test_survivors_are_outside_every_delete_entry(self):
         doomed = [pathlib.Path(p) for p in delete_paths()]
@@ -89,14 +101,15 @@ class TestManifestDescribesThisTree(unittest.TestCase):
                     "{} would be deleted with {}".format(keep, d),
                 )
 
-    def test_the_carried_notify_trio_is_not_in_the_delete_set(self):
-        """`scripts/` goes wholesale; the trio survives only because it was copied out.
+    def test_the_carried_notify_trio_survived_the_delete(self):
+        """`scripts/` went wholesale; the trio survives only because it was copied out.
 
         Ticket 27's phrasing ("except the three notify files already carried") reads as an
-        exception to the delete if you are skimming. It is not — it names why nothing is
-        lost. This asserts the copy that survives is the one at the new location.
+        exception to the delete if you are skimming. It was not — it named why nothing was
+        lost. This is the assertion that the naming was true.
         """
         self.assertIn("scripts", delete_paths())
+        self.assertFalse((REPO_ROOT / "scripts").exists())
         for name in ("notify-run.sh", "notify_email.py", "test_notify_email.py"):
             self.assertTrue((REPO_ROOT / "earshot/tools/notify" / name).is_file(), name)
 
@@ -116,13 +129,15 @@ class TestVerify(unittest.TestCase):
         self.assertFalse(evidence["complete"])
         self.assertEqual(evidence["still_present"], ["scripts"])
 
-    def test_the_real_repo_is_not_hermetic_yet(self):
-        """The delete set is present right now, so a `--verify-absent` here must fail.
+    def test_the_real_repo_is_hermetic_now(self):
+        """Before the reset this asserted the opposite, and that was the load-bearing
+        direction: a verifier returning "complete" against a tree that still held the
+        delete set would have let the gate pass without moving anything.
 
-        Pins the direction of the check. A verifier that returned "complete" against the
-        live tree would make the gate pass without moving anything.
+        That risk is gone with the subject. What is left is the plain fact — the working
+        tree no longer contains any of it.
         """
-        self.assertFalse(verify(REPO_ROOT, when="now")["complete"])
+        self.assertTrue(verify(REPO_ROOT, when="now")["complete"])
 
 
 class TestRecord(unittest.TestCase):
@@ -230,10 +245,19 @@ class TestCliRoundTrip(unittest.TestCase):
             c = _hermeticity(record, str(run_dir))
         self.assertEqual(c.status, CriterionStatus.PASS, c.detail)
 
-    def test_verify_absent_exits_nonzero_against_the_live_repo(self):
-        proc = self._cli("--verify-absent", "--root", str(REPO_ROOT))
+    def test_verify_absent_still_reports_a_survivor(self):
+        """The exit-1 path, kept exercised now that the live repo no longer triggers it.
+
+        Before the reset this ran against the real tree. A check whose failing arm can no
+        longer be reached in practice is one that quietly stops meaning anything, so it
+        plants a survivor instead of losing the arm (ADR-0014: both directions).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            (pathlib.Path(td) / "scripts").mkdir()
+            proc = self._cli("--verify-absent", "--root", td)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("STILL PRESENT", proc.stderr)
+        self.assertIn("scripts", proc.stderr)
 
 
 if __name__ == "__main__":
