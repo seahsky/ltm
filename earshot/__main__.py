@@ -75,7 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--t-anom",
         type=int,
         default=defaults.t_anom,
-        help="the step the anomaly source starts PLAYING (§2.5: not when it is heard)",
+        help="pin the step the anomaly source starts PLAYING (§2.5: not when it is "
+        "heard). Omit to derive one per episode from its own start-to-goal distance, "
+        "which is what keeps the onset inside the find it interrupts",
     )
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument(
@@ -135,7 +137,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         category=args.category,
         n_episodes=int(args.n_episodes),
         max_steps=int(args.max_steps),
-        t_anom=int(args.t_anom),
+        t_anom=None if args.t_anom is None else int(args.t_anom),
         seed=int(args.seed),
         localization=Localization(args.localization),
         detector=Detector(args.detector),

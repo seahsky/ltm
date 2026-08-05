@@ -108,35 +108,53 @@ def stage_label(value):
 
 
 def recompute_funnel(report, audit):
-    """The ladder, from the record. Where it disagrees with the file, say which is which.
+    """The ladder, cross-read against the flags it was built from.
 
-    Only the two stages the abort path can inflate are recomputed. ``investigated`` is
-    not in either artefact — that is itself the finding, since it is the sole difference
-    between "reached the source" and "gave up on the step budget", and the ladder turns
-    the second into the first.
+    **This section used to accuse the ladder and no longer does.** It was written while
+    ``_funnel_stage`` read each flag independently, so the budget abort — which sets
+    ``resumed`` with ``investigated`` False — promoted a stage-4 episode to 6 and the
+    first box run printed 6/6 over five aborted detours. The ladder is nesting-enforced
+    now and stage 6 requires reaching the source, so an ``aborted`` + ``resumed`` pair is
+    the ordinary shape of a detour that gave up, not a symptom. Kept because the pair is
+    still worth reading beside the stage, and because a probe that keeps crying wolf
+    teaches the reader to stop looking.
+
+    ``investigated`` is in neither artefact, so this cross-reads what is there rather than
+    recomputing the stage.
     """
-    rule("derived: the funnel, recomputed from the record")
+    rule("derived: the funnel, cross-read against the record")
     stated = audit.get("funnel_stage")
     aborted = report.get("investigate_aborted")
     resumed = report.get("resumed")
     onset = (audit.get("onset") or {}).get("onset_step")
+    t_anom = audit.get("t_anom")
 
     print("  stated funnel_stage      : {}".format(stage_label(stated)))
     print("  report.investigate_aborted: {}".format(aborted))
     print("  report.resumed            : {}".format(resumed))
     print("  onset.onset_step          : {}".format(onset))
+    print("  audit.t_anom              : {}  (derived per episode)".format(t_anom))
 
-    if aborted and resumed:
+    n_steps = len(audit.get("steps") or [])
+    if t_anom is not None and n_steps and n_steps <= int(t_anom) + 1:
         print(
-            "\n  MISMATCH. The episode resumed BECAUSE the detour hit its step budget,\n"
-            "  not because it reached the source. `_funnel_stage` promotes on `resumed`\n"
-            "  and the ladder then credits SOURCE_REACHED beneath it, so a stage-4 run\n"
-            "  prints 6/6. The truthful stage is INVESTIGATE_ENTERED."
+            "\n  THE ANOMALY ARRIVED TOO LATE TO BE ONE. The episode ran {} steps and the\n"
+            "  source started sounding at {}, so there was no search left to interrupt.\n"
+            "  `derive_t_anom` exists to make this impossible; seeing it means the find\n"
+            "  ended earlier than the straight-line bound said it could.".format(
+                n_steps, t_anom)
+        )
+    elif stated is not None and int(stated) >= 6:
+        print("\n  Stage 6: the detour reached the source and the primary resumed.")
+    elif aborted and resumed:
+        print(
+            "\n  The detour hit its step budget and resumed without reaching the source.\n"
+            "  Stage 4 is the truthful reading and the ladder now reports it as one."
         )
     elif aborted:
         print("\n  Detour aborted and did not resume — stage 4 at most.")
     elif resumed:
-        print("\n  Resumed with no abort recorded: the ladder's premise holds here.")
+        print("\n  Resumed with no abort recorded.")
     else:
         print("\n  Neither flag set; nothing to reconcile.")
 

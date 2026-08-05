@@ -173,6 +173,15 @@ class TestTheFullLoop(unittest.TestCase):
         self.assertTrue(onset.provenance_asserted)
         self.assertEqual(self.result.report.heard_at_step, onset.onset_step)
 
+    def test_the_audit_records_the_t_anom_this_episode_actually_ran(self):
+        """It is derived per episode now, so the configuration does not know it.
+
+        ``funnel_stage`` is computed from ``t_anom`` and sits in the same record, so an
+        audit that omitted it would carry a stage nobody could re-derive — and smoke
+        criterion 4 states §3.1's first invariant against it.
+        """
+        self.assertEqual(self.result.audit.t_anom, self.anomaly_episode.t_anom)
+
     def test_the_testimony_and_the_answer_key_are_disjoint_artefacts(self):
         """ADR-0013's boundary, on the objects this loop actually produced.
 

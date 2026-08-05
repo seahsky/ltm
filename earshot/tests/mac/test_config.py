@@ -135,6 +135,18 @@ class TestTheCli(unittest.TestCase):
         config = config_from_args(build_parser().parse_args(["--run-dir", "runs/x"]))
         self.assertEqual(config, RunConfig(run_dir="runs/x"))
 
+    def test_omitting_t_anom_leaves_it_unpinned_rather_than_at_a_constant(self):
+        """The flag is a pin now, and its absence means "derive one per episode".
+
+        A default step index is what put the smoke's anomaly on the last step of its
+        episode: 30 was chosen against the 500-step budget, and the find ended at 30.
+        ``None`` is the behaviour, so it is asserted rather than left to the defaults
+        round-trip above, which would pass whatever the number was.
+        """
+        config = config_from_args(build_parser().parse_args(["--run-dir", "runs/x"]))
+        self.assertIsNone(config.t_anom)
+        self.assertIsNone(config.as_dict()["t_anom"])
+
     def test_every_flag_reaches_the_config(self):
         """Set every one to something that is not its default, and read them all back."""
         config = config_from_args(

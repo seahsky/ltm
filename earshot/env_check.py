@@ -89,12 +89,22 @@ NUMPY_MAX_EXCLUSIVE = (1, 24)
 # because it is free and because it names the number that moved.
 TORCH_MIN_VERSION = (2, 1)
 
+PINNED_PROBE = "pinned_versions_match"
+
+# `earshot/tools/ss2-constraints.txt`, relative to this file — this module sits at layer
+# () and imports nothing inside the package, so it cannot ask another module where the
+# tree is.
+CONSTRAINTS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tools", "ss2-constraints.txt"
+)
+
 REQUIRED_PROBES: FrozenSet[str] = frozenset(
     {
         "numpy_below_1_24",
         "torch_min_version",
         "torch_cuda_allocation",
         "habitat_sim_audio_enum_member",
+        PINNED_PROBE,
     }
 )
 
@@ -469,6 +479,86 @@ def probe_clap_instantiable(model_id: str = CLAP_MODEL_ID) -> Probe:
     )
 
 
+def probe_pinned_versions() -> Probe:
+    """Is this the `ss2` env at all, or merely *an* env that can import the same names?
+
+    **The gap the box found on 2026-08-05.** A run launched from `ltm-embodied` — torch
+    2.8.0+cu128, habitat-sim 0.3.3 — passed three of the four probes above. Only numpy
+    caught it, and only by luck: `TORCH_MIN_VERSION` is a **floor** while the pin is
+    `torch==2.2.2`, and the habitat probe asks whether the audio enum member resolves,
+    which 0.3.3 answers yes to. Had that env carried numpy 1.23, the whole gate would
+    have gone green and the episode would have produced numbers off a stack no
+    measurement on this map was ever taken on.
+
+    That is ticket 13's defect in its third costume: first a version-blind *skip*, then a
+    check that passed on mere importability, now a **floor where the pin is exact**. The
+    capability probes cannot see it by construction — the wrong env is not incapable, it
+    is *different* — so this one is deliberately provenance-shaped.
+
+    It does not replace them. Ticket 17's rule was that enforcement is capability-shaped
+    *because* a version check would have printed green through the whole of ticket 13,
+    and that still holds for everything above; this is the one question a capability
+    cannot answer, asked alongside rather than instead.
+
+    Reuses `compare_resolved_against_constraints` verbatim, so the `2.2.2+cu118` local
+    version is handled the way the bootstrap already handles it — one rule, not two.
+
+    **habitat-sim is out of this probe's reach twice over, and both are deliberate.** It
+    is not in the constraints file at all — a source install at SHA `4f61e321`, which a
+    freeze records as a path and cannot compare — and reading `habitat_sim.__version__`
+    here would spend ADR-0013's one-importer exemption a second time, which
+    `test_layering` correctly refused. Its version is already in the report:
+    `probe_habitat_sim_audio_enum_member` holds the exemption and prints it. Pinning that
+    version is a separate question needing a measurement from the good env, and a guessed
+    constant would fail it — worse than an honest gap.
+    """
+    try:
+        from importlib import metadata
+    except Exception as exc:  # pragma: no cover - 3.8 and below only
+        return Probe(PINNED_PROBE, ProbeStatus.NOT_RUN,
+                     "importlib.metadata unavailable: {}".format(exc))
+
+    text = _read(CONSTRAINTS_PATH)
+    if text is None:
+        return Probe(PINNED_PROBE, ProbeStatus.NOT_RUN,
+                     "cannot read {} — the pins are unverified, which is not "
+                     "satisfied".format(CONSTRAINTS_PATH))
+    pins = parse_pins(text)
+    if not pins:
+        return Probe(PINNED_PROBE, ProbeStatus.NOT_RUN,
+                     "{} parsed to no pins at all".format(CONSTRAINTS_PATH))
+
+    resolved = {}
+    for name in pins:
+        try:
+            resolved[name] = metadata.version(name)
+        except Exception:
+            continue  # absent: `compare_resolved_against_constraints` reports it as inert
+    comparison = compare_resolved_against_constraints(pins, resolved)
+
+    measured = _measured(
+        n_pinned=str(comparison.n_pinned),
+        **{name: version for name, version in sorted(resolved.items())}
+    )
+    if comparison.skew or comparison.inert:
+        detail = "; ".join(
+            ["{} pinned {} but resolved {}".format(*row) for row in comparison.skew]
+            + ["{} pinned but not installed".format(name) for name in comparison.inert]
+        )
+        return Probe(
+            PINNED_PROBE,
+            ProbeStatus.FAIL,
+            "{} — check which env is active before chasing a pip layer".format(detail),
+            measured,
+        )
+    return Probe(
+        PINNED_PROBE,
+        ProbeStatus.PASS,
+        "{} pin(s) match ss2-constraints.txt".format(comparison.n_pinned),
+        measured,
+    )
+
+
 def run_probes(*, clap: bool = False) -> List[Probe]:
     """Every required probe, plus CLAP when requested. The box half of the split."""
     probes = [
@@ -476,6 +566,7 @@ def run_probes(*, clap: bool = False) -> List[Probe]:
         probe_torch_min_version(),
         probe_torch_cuda_allocation(),
         probe_habitat_sim_audio_enum_member(),
+        probe_pinned_versions(),
     ]
     if clap:
         probes.append(probe_clap_instantiable())

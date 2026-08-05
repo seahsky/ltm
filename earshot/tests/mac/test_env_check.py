@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import pathlib
 import tempfile
 import unittest
@@ -25,7 +26,10 @@ from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.env_check import (
     CLAP_PROBE,
+    CONSTRAINTS_PATH,
+    PINNED_PROBE,
     REQUIRED_PROBES,
+    TORCH_MIN_VERSION,
     EnvCheckError,
     EnvReport,
     Probe,
@@ -37,7 +41,9 @@ from earshot.env_check import (
     main,
     parse_pins,
     parse_resolved,
+    probe_pinned_versions,
 )
+from earshot.env_check import _version_tuple
 
 
 def _passing(names=None):
@@ -167,6 +173,57 @@ class TestAssertEnvRaisesOnAnythingButGreen(unittest.TestCase):
         }
         self.assertIn("assert_green", called)
         self.assertIn("run_probes", called)
+
+
+class TestTheWrongEnvIsCaught(unittest.TestCase):
+    """The gap the box found on 2026-08-05, as the numbers that found it.
+
+    A run launched from `ltm-embodied` — **torch 2.8.0+cu128, habitat-sim 0.3.3, numpy
+    1.26.4** — passed three of the four original probes. Only numpy failed, and only by
+    luck: `TORCH_MIN_VERSION` is a floor of `(2, 1)` while the pin is `torch==2.2.2`, and
+    the habitat probe asks whether the audio enum member *resolves*, which 0.3.3 answers
+    yes to. Give that env numpy 1.23 and the whole gate goes green on a stack no
+    measurement on this map was taken on.
+
+    Ticket 13's defect in its third costume: a version-blind skip, then a check that
+    passed on mere importability, now a floor where the pin is exact.
+    """
+
+    def test_the_torch_floor_does_not_catch_the_wrong_env(self):
+        """Stated as a fact about the floor, so nobody re-derives it from a failed run."""
+        self.assertGreaterEqual(_version_tuple("2.8.0+cu128"), TORCH_MIN_VERSION)
+
+    def test_the_pin_comparison_does(self):
+        """The same env, judged on the pins instead."""
+        result = compare_resolved_against_constraints(
+            {"torch": "2.2.2", "numpy": "1.23.5"},
+            {"torch": "2.8.0+cu128", "numpy": "1.26.4"},
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.skew,
+            (("numpy", "1.23.5", "1.26.4"), ("torch", "2.2.2", "2.8.0+cu128")),
+        )
+
+    def test_the_probe_is_required_so_it_cannot_be_dropped_quietly(self):
+        self.assertIn(PINNED_PROBE, expected_probes())
+        self.assertIn(PINNED_PROBE, expected_probes(clap=True))
+
+    def test_the_constraints_file_it_reads_is_the_one_the_bootstrap_installs_from(self):
+        """A probe pointed at a file that is not there is NOT_RUN, never green — but a
+        probe pointed at the *wrong* file would be green and meaningless."""
+        self.assertTrue(os.path.exists(CONSTRAINTS_PATH), CONSTRAINTS_PATH)
+        self.assertTrue(CONSTRAINTS_PATH.endswith("tools/ss2-constraints.txt"))
+        pins = parse_pins(open(CONSTRAINTS_PATH, encoding="utf-8").read())
+        self.assertEqual(pins.get("torch"), "2.2.2")
+        self.assertEqual(pins.get("numpy"), "1.23.5")
+
+    def test_the_real_probe_runs_and_reports_rather_than_raising(self):
+        """It runs here, in an env that is deliberately not `ss2` — so it must FAIL
+        cleanly rather than blow up, which is how a Mac exercises it at all."""
+        probe = probe_pinned_versions()
+        self.assertEqual(probe.name, PINNED_PROBE)
+        self.assertIsNot(probe.status, ProbeStatus.PASS)
 
 
 class TestTheProvenanceComparison(unittest.TestCase):

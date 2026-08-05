@@ -1,15 +1,22 @@
 """The episode builder: where the one anomaly source goes, and what it is called.
 
-Task spec §2.1-§2.2 and ADR-0010. One positioned source per episode, on the primary
-goal's floor at ``|Δy| < 1.0 m``, and far enough from the primary goal in ``xz`` that
-investigating it is a real detour rather than a second route to the goal.
+Task spec §2.1-§2.2 and ADR-0010. One positioned source per episode, within ``|Δy| < 1.0
+m`` of **both the primary goal and the episode start**, and far enough from the primary
+goal in ``xz`` that investigating it is a real detour rather than a second route to it.
 
 **The floor rule is checked here and nowhere else.** ADR-0010 moved it from invariant to
 builder policy: with no grid and no ``nearest`` there is nothing to snap silently, so
 there is no runtime guard and none is needed. What survives is the *controller* argument
 — a greedy energy climb over ``move_forward`` / ``turn_left`` / ``turn_right`` cannot
-fund a stair-climb, and across floors it fails in a specific ugly way, walking into a
-wall while the energy rises through the ceiling.
+fund a stair-climb.
+
+**Measured, not predicted.** ADR-0010 guessed the failure would look like walking into a
+wall while the energy rises through the ceiling. Ticket 26's first full box episode shows
+otherwise, and the real shape is worse to diagnose: the agent walked **cleanly** — 62
+forwards, 0 collisions, 15.5 m — for its whole 120-step budget on the floor above the
+source, while the measured RMS *fell* 0.0407 -> 0.0121 as it chased sound leaking through
+a stairwell, and ``source_is_visible`` stayed false at all 153 steps. Nothing looked
+broken. That is why the rule now covers the start as well as the goal.
 
 **Audibility is not screened (§2.5).** Nothing here renders, computes an RIR, or asks
 how loud the source will be from anywhere — pre-screening would reintroduce offline
@@ -41,6 +48,7 @@ object** for the detector to visually confirm.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -54,9 +62,37 @@ __all__ = [
     "DatasetBuild",
     "goal_table",
     "primary_anchor",
+    "derive_t_anom",
     "place_anomaly_source",
     "build_anomaly_episodes",
 ]
+
+# provenance: source — `sim.world`'s action spec (`step_size_m=0.25`). One `move_forward`
+# advances the agent at most this far, and with `allow_sliding=False` a collided one
+# advances less. It bounds travel-per-step from **above**, which is the direction that
+# makes a step count derived from a distance a genuine lower bound.
+FORWARD_STEP_M = 0.25
+
+# provenance: source — `agent.config.DetectorConfig.oracle_radius_m`. The find ends when
+# the agent is within this of a primary goal view point, so this much of the route is
+# never walked and comes off the distance before it is turned into steps.
+ARRIVAL_RADIUS_M = 1.0
+
+# Both are duplicated rather than imported: this module may not reach into `sim` (the
+# navmesh never sees a candidate here) and `sim/world.py` imports torch at module scope,
+# so a Mac cannot load it at all. `test_task_dataset.py` reads both definitions out of
+# their own source with `ast` and fails if these drift.
+
+# provenance: fake — how far into the find the agent gets before the anomaly starts. Any
+# value below 1 makes the derived `t_anom` strictly earlier than the earliest step the
+# find can end on (`derive_t_anom` carries the argument); a half puts the interrupt near
+# the middle of the search rather than at either end of it.
+T_ANOM_FRACTION = 0.5
+
+# provenance: fake — §3.1's first invariant is checked on each pre-onset step, so a
+# `t_anom` of 0 leaves it unexercised and `assert_provenance` says so rather than
+# passing. Three readings is the smallest number that is not one.
+T_ANOM_FLOOR_STEPS = 3
 
 
 class PlacementError(ValueError):
@@ -83,9 +119,15 @@ class SourcePlacement:
 
     The three measurements are recorded rather than merely checked: ``separation_m`` and
     ``height_difference_m`` are what ADR-0010's rule is about, and
-    ``height_difference_to_start_m`` is the number the ADR does *not* constrain but the
-    controller pays for — if the agent starts a storey below the goal, the detour is a
-    stair-climb no matter how faithful the source placement is.
+    ``height_difference_to_start_m`` is the start-to-source drop the controller pays for.
+
+    **That last one used to be recorded and unconstrained, and the box closed the gap.**
+    The reasoning was that the number would say so afterwards — but it never reached a
+    run's metrics (the audit surfaced ``source_dy_m``, the *anchor* difference, which read
+    0.000), so ticket 26's first full episode ran as a silent null with its source 2.6 m
+    below the agent's start. The floor rule now covers both anchors and this field is
+    bounded by it; ``runner`` publishes it as ``source_dy_start_m`` so a future violation
+    is visible in the record rather than inferred from raw coordinates.
     """
 
     position: Xyz
@@ -212,6 +254,58 @@ def primary_anchor(episode: Episode) -> Xyz:
     )
 
 
+def derive_t_anom(
+    episode: Episode,
+    *,
+    fraction: float = T_ANOM_FRACTION,
+    floor_steps: int = T_ANOM_FLOOR_STEPS,
+) -> int:
+    """The step this episode's anomaly starts playing, derived from its own geometry.
+
+    **Why this is not a constant.** It was one — ``t_anom = 30``, tagged ``fake``, chosen
+    "low enough that a 500-step episode has room for the detour and the resume". That
+    reasoning measures against the step *budget*, and under an oracle STOP the binding
+    constraint is the *find*: the episode ends when the agent reaches its primary goal,
+    not when the budget runs out. The smoke's second box episode found its bed at step 30
+    after 3.75 m and 15 forwards — the same step the source started sounding — so the
+    anomaly arrived on the last step of the run and the loop under test never ran. A
+    number chosen against 500 was spent on an episode that lasted 31.
+
+    So it is derived per episode, from the one thing that decides how long the find is:
+
+    - ``reach`` — the straight-line ``xz`` distance from the start to the nearest primary
+      view point. A straight line is never longer than the navmesh route, so this is a
+      lower bound on the distance the agent must actually cover.
+    - minus ``ARRIVAL_RADIUS_M``, the part of that route the oracle STOP means is never
+      walked.
+    - divided by ``FORWARD_STEP_M``, an upper bound on travel per step, which turns a
+      lower-bound distance into a lower bound on the number of steps.
+
+    Every approximation therefore leans the same way — earlier — and the result is that
+    the find **cannot** end before ``floor((reach - radius) / step)``. Taking ``fraction``
+    of that lands the onset strictly inside the search, by an argument rather than by a
+    guess about any particular scene.
+
+    The one exception is stated rather than hidden: ``floor_steps`` wins when the goal is
+    within about two metres of the start, and in that episode the find can end before the
+    source ever sounds. That is a degenerate episode — there is no search to interrupt —
+    and §2.5's rule applies, so it shows up as a funnel stage rather than being screened.
+
+    Pin ``RunConfig.t_anom`` to an integer to override this; ``None`` means derive.
+    """
+    view_points = episode.view_points()
+    if not view_points:
+        raise PlacementError(
+            "episode {} publishes no goal view points, so there is no distance to derive "
+            "t_anom from".format(episode.episode_id)
+        )
+    start = episode.start_position
+    reach = min(start.horizontal_distance_to(point.position) for point in view_points)
+    walk_m = max(0.0, reach - ARRIVAL_RADIUS_M)
+    earliest_end = int(math.floor(walk_m / FORWARD_STEP_M))
+    return max(int(floor_steps), int(math.floor(float(fraction) * earliest_end)))
+
+
 def _primary_keep_out(episode: Episode) -> Tuple[Xyz, ...]:
     """Every point the source must stay clear of: all primary view points and objects.
 
@@ -242,14 +336,34 @@ def place_anomaly_source(
        object standing at it.
     2. It clears ``min_sep_m`` in ``xz`` from **every** primary goal view point and
        object position — the decoupling.
-    3. It is within ``max_dy_m`` of the primary anchor in ``y`` — ADR-0010's floor rule,
-       checked **before** the nearest-first tie-break, which would otherwise actively
-       prefer a cross-floor candidate for being ``xz``-near.
+    3. It is within ``max_dy_m`` in ``y`` of **both** the primary anchor and the episode
+       start — ADR-0010's floor rule, checked **before** the nearest-first tie-break,
+       which would otherwise actively prefer a cross-floor candidate for being ``xz``-near.
+
+       **Both anchors, and the start was the one that was missing.** HM3D ObjectNav
+       episodes routinely begin a storey from their goal: the smoke's episode 0 starts at
+       y +2.064 with its nearest bed view point at y -0.536, 2.6 m apart with an authored
+       geodesic of 5.98 m via stairs. Measuring only against the anchor let a source sit
+       at the goal's level and pass — ``|anchor - source|`` 0.000 — while a full storey
+       below where the agent begins. The episode was then legal by this function's own
+       test and unwinnable in practice: the onset fired at step 30 with the agent still
+       upstairs, and a greedy energy climb cannot take stairs. It spent its whole 120-step
+       budget on the wrong floor, 62 forwards and 0 collisions, while the measured RMS
+       *fell* 0.0407 -> 0.0121 chasing sound through a stairwell. Smoke criterion 5 was
+       unreachable by construction.
+
+       ``t_anom`` is why it must be both rather than either: the anomaly fires mid-episode,
+       so the agent may be on the start's floor or the goal's, and only a source within
+       reach of both is climbable either way. The side effect is the right one — in a
+       cross-floor episode the two anchors are further apart than ``max_dy_m``, so nothing
+       qualifies and the episode is skipped with a reason instead of running as a silent
+       null.
     4. Among survivors: a different category first, then the nearest.
 
     Nothing about audibility is consulted, and nothing renders (§2.5).
     """
     anchor = primary_anchor(episode)
+    start = episode.start_position
     keep_out = _primary_keep_out(episode)
     primary_category = episode.object_category
 
@@ -268,7 +382,9 @@ def place_anomaly_source(
             if separation < float(min_sep_m):
                 n_too_near += 1
                 continue
-            if abs(position.height_difference_to(anchor)) > float(max_dy_m):
+            if abs(position.height_difference_to(anchor)) > float(max_dy_m) or abs(
+                position.height_difference_to(start)
+            ) > float(max_dy_m):
                 n_wrong_floor += 1
                 continue
             qualifying.append(
@@ -282,11 +398,25 @@ def place_anomaly_source(
             )
 
     if not qualifying:
+        # When the start and the anchor are themselves more than `max_dy_m` apart, NO
+        # candidate can satisfy both and the count above says "another floor" for a
+        # reason that is about the episode rather than the scene. Said plainly, because
+        # a skip reason that only blamed the scene is what let this run as a silent null.
+        start_to_anchor = abs(start.height_difference_to(anchor))
+        cross_floor = (
+            " The episode's own start is {:.2f} m in y from its primary anchor, which "
+            "already exceeds the {:.2f} m rule, so no placement could have qualified: "
+            "this episode spans floors and the greedy climb cannot take stairs.".format(
+                start_to_anchor, float(max_dy_m)
+            )
+            if start_to_anchor > float(max_dy_m)
+            else ""
+        )
         raise PlacementError(
             "no object in {} is >= {:.2f} m (xz) from every {!r} goal AND within "
-            "{:.2f} m in y of the primary anchor (rejected: {} too near, {} on another "
-            "floor, {} with no view point). The scene cannot express a decoupled anomaly "
-            "response for this episode.".format(
+            "{:.2f} m in y of BOTH the primary anchor and the episode start (rejected: "
+            "{} too near, {} on another floor, {} with no view point). The scene cannot "
+            "express a decoupled anomaly response for this episode.{}".format(
                 episode.scene_label,
                 float(min_sep_m),
                 primary_category,
@@ -294,6 +424,7 @@ def place_anomaly_source(
                 n_too_near,
                 n_wrong_floor,
                 n_no_view_point,
+                cross_floor,
             )
         )
 
@@ -318,7 +449,7 @@ def build_anomaly_episodes(
     dataset: EpisodeDataset,
     *,
     anomaly_class: str,
-    t_anom: int,
+    t_anom: Optional[int] = None,
     category: Optional[str] = None,
     n_episodes: Optional[int] = None,
     min_sep_m: float = 3.0,
@@ -329,6 +460,12 @@ def build_anomaly_episodes(
     ``category`` filters the **primary** goal only; the source is still drawn from every
     category in the scene, which is what makes a different-category source available at
     all.
+
+    ``t_anom`` is a pin. ``None`` — the default — derives one per episode from that
+    episode's own start-to-goal distance (``derive_t_anom``), so the anomaly lands inside
+    the find it is supposed to interrupt rather than at a step index chosen once for every
+    scene. An integer forces that value on every episode, which is what an experiment
+    holding the onset fixed wants and what the ``--t-anom`` flag is for.
 
     Episodes whose placement fails are skipped with the reason recorded rather than
     aborting the build — a scene that can express three of its episodes should run three.
@@ -366,7 +503,7 @@ def build_anomaly_episodes(
                 episode=episode,
                 source=placement,
                 anomaly_class=str(anomaly_class),
-                t_anom=int(t_anom),
+                t_anom=derive_t_anom(episode) if t_anom is None else int(t_anom),
             )
         )
 

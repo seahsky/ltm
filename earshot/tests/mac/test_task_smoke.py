@@ -171,9 +171,36 @@ class TestEachCriterionHasARedPath(unittest.TestCase):
 
     def test_4_zero_t_anom_has_no_pre_onset_steps_to_want(self):
         onset = OnsetRecord(onset_step=0, n_pre_onset_readings=0, provenance_asserted=True)
-        v = judge(report=report(), audit=audit(onset=onset), env_report=env(),
+        v = judge(report=report(), audit=audit(onset=onset, t_anom=0), env_report=env(),
                   run_config={"audio_step_ceiling_s": CEILING_S, "t_anom": 0})
         self.assertIs(status_of(v, 4), CriterionStatus.PASS)
+
+    def test_4_an_unpinned_run_takes_the_bound_off_the_episode(self):
+        """``t_anom`` is derived per episode, so an unpinned run's configuration does not
+        know it and the record is the only place it exists.
+
+        Without this the criterion goes quiet on exactly the runs the smoke performs: a
+        ``None`` in the config used to skip the check, so an episode with no pre-onset
+        reading at all would have passed §3.1's first invariant by omission.
+        """
+        onset = OnsetRecord(onset_step=31, n_pre_onset_readings=0, provenance_asserted=True)
+        v = judge(report=report(), audit=audit(onset=onset, t_anom=16), env_report=env(),
+                  run_config={"audio_step_ceiling_s": CEILING_S, "t_anom": None})
+        self.assertIs(status_of(v, 4), CriterionStatus.FAIL)
+
+    def test_4_a_pin_the_episode_disagrees_with_is_a_build_that_did_not_obey(self):
+        """Both numbers exist on a pinned run, and a mismatch means the episode did not
+        get the onset step the run asked for — which nothing else would notice."""
+        v = judge(report=report(), audit=audit(t_anom=9), env_report=env(),
+                  run_config={"audio_step_ceiling_s": CEILING_S, "t_anom": T_ANOM})
+        self.assertIs(status_of(v, 4), CriterionStatus.FAIL)
+
+    def test_4_a_bound_recorded_nowhere_is_not_run_rather_than_passed(self):
+        """Neither the config nor the record has one, so the invariant has nothing to be
+        checked against. Reporting PASS there is the shape ticket 16 keeps finding."""
+        v = judge(report=report(), audit=audit(t_anom=None), env_report=env(),
+                  run_config={"audio_step_ceiling_s": CEILING_S, "t_anom": None})
+        self.assertIs(status_of(v, 4), CriterionStatus.NOT_RUN)
 
     def test_5_an_aborted_detour_never_reached_check(self):
         """The over-credit ticket 26 found: stage 4 is not the full loop."""
