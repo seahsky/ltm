@@ -85,7 +85,8 @@ def main(argv):
     start_y = float(episode.start_position.y)
     anchor = primary_anchor(episode)
     anchor_y = float(anchor.y)
-    view_ys = [float(vp.position.y) for vp in episode.view_points]
+    # `view_points` is a method, not a property (`episodes.Episode.view_points`).
+    view_ys = [float(vp.position.y) for vp in episode.view_points()]
 
     print("\n  run:      {}  episode {}".format(run_dir, index))
     print("  scene:    {}".format(label))
