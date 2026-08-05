@@ -99,14 +99,46 @@ class PlannerConfig:
 class ControllerConfig:
     """The interrupt-resume machine's two numbers. No `enabled` flag (ADR-0008)."""
 
-    # provenance: fake — task spec §9's first "left to the builder" number, still
-    # unmeasured. The detour's step sub-budget; on overflow the controller aborts and
-    # resumes the primary task rather than spending the whole episode climbing.
-    # Generous rather than tight: at 0.25 m/step and 30 degree turns, 40 steps is a few
-    # metres of travel plus the turns a stall costs, and an abort is a funnel stage
-    # (§6) rather than a failure, so the cost of it being too small is a silently
-    # truncated investigation.
-    investigate_max_steps: int = 40
+    # provenance: fake — task spec §9's first "left to the builder" number, set by ticket
+    # 26 against a measurement rather than an estimate. The detour's step sub-budget; on
+    # overflow the controller aborts and resumes the primary task rather than spending the
+    # whole episode climbing.
+    #
+    # **40 was never enough, and the abort hid it.** The abort left `investigated` False,
+    # SEARCH's guard read only that, and the detour was re-entered — so the budget was
+    # per-attempt with nothing bounding the aggregate, and the first box episode spent
+    # about 210 of its 250 steps on six of them. The fake stall-turn climb in
+    # `test_task_runner` reaches a source 5.4 m away, starting 180 degrees backwards, in
+    # **59 steps** — it passed under a 40-step budget only because a second attempt
+    # started from a better pose.
+    #
+    # 120 is that 59 with room for a longer detour or a worse start: about 11 steps per
+    # metre in the fake (0.25 m/step, plus the turn-and-re-probe a reversal costs), so it
+    # covers roughly 11 m. Against `max_steps` 250 it leaves 130 steps for the primary,
+    # and because the abort is now terminal it is the whole detour's cost — strictly less
+    # than the 240 the first box run actually spent. The cost of it being too small is a
+    # silently truncated investigation; too large costs primary steps the smoke does not
+    # require to succeed (§8).
+    investigate_max_steps: int = 120
+
+    # provenance: fake — how far ahead the realizable detour puts the probe point it
+    # routes to. The climb reads a *direction* from live energy; this turns it into a
+    # place, so the navmesh follower can go there around whatever is in the way.
+    #
+    # Sized against `PlannerConfig.compass_dist_m` (1.5 m), a little longer so the probe
+    # clears the obstacle that blocked the last forward rather than landing on it. Too
+    # short and the snap puts it back at the agent's feet; too long and the cue that
+    # chose it is stale before the follower arrives — which is what `decision_period`
+    # bounds on the primary task and what the per-step re-query bounds here.
+    investigate_probe_m: float = 2.0
+
+    # provenance: fake — the heading offset a stall applies to the probe, in degrees.
+    # The carried rule answers `turn_left` / `turn_right`; this is how far that turn is
+    # worth in a *place* rather than in an action. It is deliberately larger than the
+    # simulator's 30-degree turn increment: a probe one turn-step off the blocked
+    # heading snaps back onto the same obstacle, which is the livelock ticket 26
+    # measured.
+    investigate_probe_turn_deg: float = 60.0
 
     # provenance: source — the ORACLE arm's arrival radius, and **only** the oracle
     # arm's (§4.2). In the realizable arm arrival is peak-or-plateau plus visual

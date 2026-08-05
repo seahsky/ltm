@@ -63,7 +63,7 @@ class FakeWorld:
     every observation would make the criterion untestable here.
     """
 
-    def __init__(self, start=Xyz(0.0, 0.0, 0.0), yaw=0.0, blocked=False):
+    def __init__(self, start=Xyz(0.0, 0.0, 0.0), yaw=0.0, blocked=False, wall=None):
         self._pose = Pose(position=start, yaw_rad=float(yaw))
         self.n_renders = 0
         self.n_steps = 0
@@ -71,6 +71,17 @@ class FakeWorld:
         # `blocked` makes `snap_point` return None for everything, which is the
         # off-navmesh case `reachability.assert_pool` turns into an EmptyPoolError.
         self.blocked = bool(blocked)
+        # `wall` is a predicate on the destination position: True means a `move_forward`
+        # that would land there does not, and `step` returns habitat's collision flag.
+        # The room is empty without one, which is what left the runner's use of that flag
+        # unpinned until ticket 26 — every fake forward moved, so a test could not tell
+        # whether the runner passed the flag on or dropped it.
+        #
+        # This blocks hard where habitat SLIDES along the surface. The strict case is the
+        # one worth faking: it is what the flag is for (a forward that bought nothing) and
+        # a fake that slid would need a wall normal, which is geometry this room does not
+        # have. `tests/box/test_world_box.py` owns the real contact behaviour.
+        self.wall = wall
         self.draws = []
 
     # -- observing -------------------------------------------------------
@@ -98,9 +109,16 @@ class FakeWorld:
         ticket 23 found in the tree it replaced.
         """
         position, yaw = self._pose.position, self._pose.yaw_rad
+        collided = False
         if action == "move_forward":
             dx, dz = forward_xz(yaw)
-            position = Xyz(position.x + dx * STEP_SIZE_M, position.y, position.z + dz * STEP_SIZE_M)
+            destination = Xyz(
+                position.x + dx * STEP_SIZE_M, position.y, position.z + dz * STEP_SIZE_M
+            )
+            if self.wall is not None and self.wall(destination):
+                collided = True
+            else:
+                position = destination
         elif action == "turn_left":
             yaw += TURN_RAD
         elif action == "turn_right":
@@ -109,7 +127,7 @@ class FakeWorld:
             raise ValueError("unknown action {!r} — STOP never reaches the simulator".format(action))
         self._pose = Pose(position=position, yaw_rad=yaw)
         self.n_steps += 1
-        return False
+        return collided
 
     # -- pose ------------------------------------------------------------
 

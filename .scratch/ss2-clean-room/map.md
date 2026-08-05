@@ -110,6 +110,16 @@ The frontier is now **26 alone**; 21 through 25 are done.
                           27 hermeticity + the deletion commit
 ```
 
+**Ticket 26 is claimed and part-done (2026-08-05), and it moved a decision the map had treated as settled.**
+`task/smoke.py` exists — §8's nine criteria as a pure `judge()`, every one with a tested red path, criterion 9 NOT_RUN by construction so no run reads green while hermeticity is outstanding.
+The four defects the first box episode handed forward are closed: the funnel's over-credit (criterion 5's own measurement), the detour's forever-re-entry, §9's sub-budget set against measurement (40 → 120; 40 was never enough and the re-entry hid it), and the collision flag now recorded in §3.2 — and deliberately **not** consumed, since sliding is off so a wall already reads as the stall branch's plateau.
+
+The one that changed the arm: **the realizable climb livelocks against any obstacle**, measured, budget-independent, ending pressed flat against the wall with zero lateral movement.
+`move_forward` was its only translation and the gradient chose where forward pointed, so no sequence of its actions could go around anything — and during INVESTIGATE the agent bypassed the planner entirely.
+So the detour now names a **probe point** and routes to it through the same pool and follower SEARCH uses, staying realizable (heading from live energy and the lateral sign, no source coordinate).
+**§4.1's "the greedy rule is unchanged" survives** — the rule is untouched and still the single source of the decision; what changed is that its answer becomes a place rather than a step.
+Whether the follower actually gets around a wall is a navmesh capability no Mac can settle, so it is `tests/box/test_investigate_route_box.py` and it must run **before** any smoke result is trusted.
+
 Five things earlier tickets left for the tickets that own them, so they are not lost between sessions:
 
 - **Ticket 26's trip opens with ticket 25's undelivered "Done when": one episode, end to end, on the box.** The tree is built and Mac-green but has never executed — this Mac cannot load habitat-sim, and every box result on this map has come from the operator running a driver and pasting the log back. One prerequisite the tree cannot supply itself: `python -m earshot.audio.clips --out-dir data/anomaly_audio` stages the ESC-50 recordings once, and there is deliberately no synthetic fallback, so a missing staging raises with the fetch command in the message. Then `python -m earshot --run-dir runs/ss2-first-episode --n-episodes 1 --max-steps 250`.

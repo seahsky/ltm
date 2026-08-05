@@ -450,6 +450,7 @@ def run_episode(
     min_d2g: Optional[float] = None
     min_d2source = float("inf")
     stopped = False
+    collided = False  # no action has been taken yet, so nothing has been hit
     wall_clock_0 = time.perf_counter()
 
     for step in range(int(cfg.max_steps)):
@@ -531,6 +532,9 @@ def run_episode(
             energy_history=energy,
             lateral_sign=lateral,
             visual_confirm=visual_confirm,
+            # Last step's collision, which is the only tense available: the flag comes
+            # back from the action, so the climb reacts to the wall it just hit rather
+            # than to one it has not touched yet.
             pose=pose,
         )
         if state.mode is NavMode.INVESTIGATE or decision.mode is NavMode.INVESTIGATE:
@@ -544,18 +548,23 @@ def run_episode(
         if decision.force_requery:
             proposer.request_replan()
 
-        action: Optional[str] = decision.realizable_action
+        # **Both localization arms steer through the pool** (ticket 26). The realizable
+        # arm used to hand back a low-level action applied straight to the simulator,
+        # which left the detour with no planner and no map: `move_forward` was its only
+        # translation and the energy gradient chose where forward pointed, so a blocked
+        # line to the source was a measured livelock. It now names a probe point the same
+        # way the oracle arm names the source, and the follower routes to it.
+        # `realizable_action` survives on the decision as the diagnostic of what the cue
+        # said, and is no longer the thing that moves the agent.
+        action: Optional[str] = None
         if decision.mode is NavMode.COMPLETE:
             # The primary STOP, which is a task decision and never reaches the simulator
             # (`sim.world.step` refuses it). Recorded as the action taken, because "the
             # episode ended here and why" is exactly what the per-step record is for.
             action = ACT_STOP
         elif action is None:
-            divert = (
-                _divert_candidate(decision.investigate_waypoint, pose)
-                if decision.investigate_waypoint is not None
-                else None
-            )
+            target = decision.investigate_waypoint or decision.investigate_probe
+            divert = _divert_candidate(target, pose) if target is not None else None
             waypoint, action, step_counters = _steer(
                 proposer,
                 pose,
@@ -569,14 +578,25 @@ def run_episode(
             for key, value in step_counters.items():
                 counters[key] = counters.get(key, 0) + int(value)
 
+        displacement: Optional[float] = None
         if action is not None and action != ACT_STOP:
             before = pose.position
-            world.step(action)
+            # `World.step` returns habitat's collision flag and the first version of this
+            # loop discarded it, which left nothing in §3.2's record separating a forward
+            # that moved from one that hit a wall — the one number that decides whether a
+            # stalled climb is obstacle-blind or merely short of budget.
+            collided = bool(world.step(action))
             after = world.pose().position
-            path_len += math.hypot(after.x - before.x, after.z - before.z)
+            displacement = math.hypot(after.x - before.x, after.z - before.z)
+            path_len += displacement
             n_actions += 1
-        elif action is None:
-            n_no_action += 1
+        else:
+            # A STOP or a step not taken collides with nothing, and carrying the previous
+            # step's flag forward would have the climb turning away from a wall it is no
+            # longer facing.
+            collided = False
+            if action is None:
+                n_no_action += 1
 
         steps.append(
             StepRecord(
@@ -587,6 +607,8 @@ def run_episode(
                 source_is_visible=handle.source_is_visible(),
                 action=action,
                 audio_render_s=float(audio_s),
+                collided=collided,
+                displacement_m=displacement,
             )
         )
 
@@ -783,20 +805,32 @@ def _funnel_stage(
 ) -> FunnelStage:
     """§6's staged funnel, as the highest stage this episode reached.
 
-    The stages nest, so this is a ladder rather than a classification: an episode that
-    resumed necessarily investigated. ``T_ANOM_REACHED`` is ``n_steps > t_anom`` because
-    the step indices are zero-based — an episode of exactly ``t_anom`` steps ended on the
-    step *before* the source started playing.
+    The stages nest, so this is a ladder rather than a classification. ``T_ANOM_REACHED``
+    is ``n_steps > t_anom`` because the step indices are zero-based — an episode of
+    exactly ``t_anom`` steps ended on the step *before* the source started playing.
+
+    **The nesting is enforced rather than assumed** (ticket 26). The first version read
+    each flag independently on the premise that *an episode that resumed necessarily
+    investigated*, and the abort path falsifies it: the step-budget abort transitions
+    straight to RESUME with ``investigated`` False, so a stage-4 episode was promoted to
+    6 and the first box run printed a 6/6 funnel while its own trace showed six
+    INVESTIGATE entries and five aborts. Smoke criterion 5 is read off this number, so an
+    over-credited stage is the gate asserting a loop that did not run.
     """
     stage = FunnelStage.RUN
     if n_steps > int(t_anom):
         stage = FunnelStage.T_ANOM_REACHED
-    if onset_fired:
-        stage = FunnelStage.ONSET_FIRED
-    if entered_investigate:
-        stage = FunnelStage.INVESTIGATE_ENTERED
-    if investigated:
-        stage = FunnelStage.SOURCE_REACHED
+    if stage < FunnelStage.T_ANOM_REACHED:
+        return stage
+    if not onset_fired:
+        return stage
+    stage = FunnelStage.ONSET_FIRED
+    if not entered_investigate:
+        return stage
+    stage = FunnelStage.INVESTIGATE_ENTERED
+    if not investigated:
+        return stage
+    stage = FunnelStage.SOURCE_REACHED
     if resumed:
         stage = FunnelStage.PRIMARY_RESUMED
     return stage

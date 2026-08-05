@@ -214,6 +214,102 @@ class TestTheFullLoop(unittest.TestCase):
         )
 
 
+class TestAWallTheClimbWalksInto(unittest.TestCase):
+    """Ticket 26's box finding, reproduced at the seam it broke at.
+
+    The first box episode walked 110 forwards for 6.57 m of path and never reached
+    line-of-sight. Rising loudness kept saying forward into a wall the rule could not
+    see, and a blocked forward does not move, so the next reading is not *lower* and the
+    stall branch never fires either — the climb pushes the same wall until the sub-budget
+    aborts.
+
+    **This fixture is what stopped ticket 26 from shipping a collision branch on the
+    climb.** With ``allow_sliding`` False a collided forward does not move, the RMS is a
+    pure function of pose, so the reading repeats and ADR-0011's stall branch already
+    turns — measured over four wall geometries, trajectories byte-identical with the rule
+    reading the flag and ignoring it. The flag's job is the record, not the rule.
+
+    It then produced the finding that *did* change the arm: the climb never escaped, in
+    any geometry, ending pressed flat against the wall with **zero lateral movement** and
+    unchanged by tripling the step budget. ``move_forward`` was its only translation and
+    the gradient chose where forward pointed, so no sequence of its actions could go
+    around anything. The detour now names a probe point and the follower routes to it.
+
+    **This fixture cannot show that fix working, and does not claim to.** The fake
+    follower steers in a straight line (``_task_fakes.FakeWorld.follower``), so it walks
+    into the wall on the way to a probe behind it and the livelock persists here for a
+    reason that is the fake's, not the system's. Routing is a navmesh capability and
+    ``tests/box/test_investigate_route_box.py`` exercises it (ADR-0014). What this holds is
+    the record, and the symptom, so a regression to blind stepping is still visible on a
+    Mac.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # A wall 1 m ahead, across the agent's path to a source directly beyond it. The
+        # climb's honest move is forward; the wall is what makes forward useless.
+        cls.world = FakeWorld(
+            start=Xyz(0.0, 0.0, 0.0), yaw=0.0, wall=lambda p: p.z < -1.0
+        )
+        cls.source = Xyz(0.0, 0.0, -5.0)
+        cls.handle = FakeAudioSensorHandle(cls.world, cls.source)
+        cls.anomaly_episode = make_anomaly_episode(
+            source=cls.source, t_anom=0, episode=make_episode(start_yaw=0.0)
+        )
+        cls.cfg = make_config(max_steps=40, t_anom=0)
+        cls.result = run(
+            cls.world, cls.handle, cls.anomaly_episode, cls.cfg, calibration=CALIBRATION
+        )
+
+    def test_the_record_separates_a_wall_from_a_step_that_moved(self):
+        summary = self.result.audit.forward_summary()
+        self.assertGreater(summary["n_forward"], 0)
+        self.assertGreater(
+            summary["n_collided"], 0, "the wall was never hit, so this proves nothing"
+        )
+
+    def test_a_collided_forward_is_recorded_as_displacing_nothing(self):
+        walls = [
+            row
+            for row in self.result.audit.steps
+            if row.action == "move_forward" and row.collided
+        ]
+        self.assertTrue(walls)
+        for row in walls:
+            self.assertAlmostEqual(row.displacement_m, 0.0)
+
+    def test_a_wall_reads_as_a_plateau_so_no_collision_branch_was_needed(self):
+        """A collided forward repeats the reading, and a repeat is not ``rising``.
+
+        Which is why the flag is recorded and not consumed: a collision branch would emit
+        the turn the stall branch emits anyway.
+
+        The comparison is with the step *after* the collision, not before it. Each row's
+        ``measured_rms`` is the reading the loop took **before** that row's action, so the
+        pose a collision failed to change shows up as the *next* row repeating this one.
+        """
+        rows = self.result.audit.steps
+        first_wall = next(
+            i for i, row in enumerate(rows) if row.action == "move_forward" and row.collided
+        )
+        self.assertAlmostEqual(
+            rows[first_wall + 1].measured_rms, rows[first_wall].measured_rms
+        )
+
+    def test_the_symptom_is_still_visible_here_because_the_fake_cannot_route(self):
+        """The guard against a regression to blind stepping, and the fake's stated limit.
+
+        The straight-line follower walks into the wall on the way to a probe behind it, so
+        the collision rate stays high here even with the detour routed through the pool.
+        That is a property of ``FakeWorld.follower``, not of the system —
+        ``tests/box/test_investigate_route_box.py`` is what settles routing. What this
+        pins is that the record still shows the wall, so a silent return to stepping
+        ``move_forward`` blindly does not pass unnoticed.
+        """
+        summary = self.result.audit.forward_summary()
+        self.assertGreater(summary["n_collided"] / summary["n_forward"], 0.5)
+
+
 class TestTheStallTurnsTowardTheSource(unittest.TestCase):
     """ADR-0011's third rule, and the frame convention it rests on.
 
@@ -271,7 +367,19 @@ class TestTheStallTurnsTowardTheSource(unittest.TestCase):
         self.assertEqual(turns[0].action, wanted)
 
     def test_it_still_reaches_the_source(self):
-        """The whole point of the cue: a climb that starts backwards recovers."""
+        """The whole point of the cue: a climb that starts backwards recovers.
+
+        **This assertion means more than it used to, and it is now §9's budget guard.**
+        Ticket 26 made the abort terminal for the interrupt, so an episode that aborted
+        can never later reach — which makes ``SOURCE_REACHED`` proof that the whole climb
+        fitted inside one ``investigate_max_steps``. It did not before: this climb needs
+        **59 steps**, the budget was 40, and it reached the source on a *re-entry* whose
+        second attempt started from a pose the first had already improved. The test
+        passed on the strength of the bug it was meant to be independent of.
+
+        So lowering the sub-budget below what a real climb costs now fails here, with
+        this docstring as the reason.
+        """
         self.assertGreaterEqual(
             self.result.audit.funnel_stage, FunnelStage.SOURCE_REACHED
         )
@@ -450,6 +558,40 @@ class TestTheFunnelLadder(unittest.TestCase):
                 )
             ),
             FunnelStage.PRIMARY_RESUMED,
+        )
+
+    def test_an_aborted_detour_that_resumed_did_not_reach_the_source(self):
+        """The ladder's premise is falsified by the abort path, and the first box run hit it.
+
+        ``an episode that resumed necessarily investigated`` is false: the abort
+        transitions straight to RESUME with ``investigated`` False, so a monotone ladder
+        promoted a stage-4 episode to 6 and the run printed a 6/6 funnel while its own
+        trace showed six INVESTIGATE entries and five aborts. Criterion 5 is read off
+        this number, so the over-credit is not cosmetic — it is the smoke asserting the
+        loop ran on an episode where CHECK was never reached.
+        """
+        aborted = dict(
+            n_steps=100,
+            t_anom=30,
+            onset_fired=True,
+            entered_investigate=True,
+            investigated=False,
+            resumed=True,
+        )
+        self.assertEqual(_funnel_stage(**aborted), FunnelStage.INVESTIGATE_ENTERED)
+
+    def test_resuming_without_ever_entering_cannot_climb_either(self):
+        """Same rule, one rung lower: the stages nest or they mean nothing."""
+        self.assertEqual(
+            _funnel_stage(
+                n_steps=100,
+                t_anom=30,
+                onset_fired=True,
+                entered_investigate=False,
+                investigated=False,
+                resumed=True,
+            ),
+            FunnelStage.ONSET_FIRED,
         )
 
     def test_an_episode_that_ended_before_t_anom_did_not_reach_stage_two(self):
