@@ -57,6 +57,7 @@ from earshot.types import Xyz
 
 __all__ = [
     "PlacementError",
+    "EmptyDatasetError",
     "SourcePlacement",
     "AnomalyEpisode",
     "DatasetBuild",
@@ -105,6 +106,30 @@ class PlacementError(ValueError):
     raises rather than returning a degenerate placement, because a source at the goal is
     the exact degeneracy this module exists to prevent.
     """
+
+
+class EmptyDatasetError(PlacementError):
+    """No episode in this scene could be built at all — a 0% yield, which is DATA.
+
+    Separate from ``PlacementError`` because the two are answered differently. One episode
+    that cannot be placed is attrition and gets skipped; a whole scene that cannot is the
+    most informative point a yield denominator has, and it must reach disk before the run
+    stops. It therefore carries the whole ``DatasetBuild`` — every candidate and its
+    reason — rather than the first five formatted into a message.
+
+    yield-1 is why. ``mL8ThkuaVTM`` offered 99 candidates and placed none, in both of that
+    tag's invocations. The raise happened before ``write_run_summary``, so the scene left
+    no record, so ``yield_report`` aggregated 19 scenes and called it the yield of 20 —
+    excluding the only one that yielded nothing.
+
+    It still raises. A run asked for episodes and produced none, and that is a failure for
+    whoever asked; what changes is that the failure is now written down first.
+    """
+
+    def __init__(self, message: str, *, scene_label: str, build: "DatasetBuild") -> None:
+        super().__init__(message)
+        self.scene_label = scene_label
+        self.build = build
 
 
 @dataclass(frozen=True)
@@ -471,6 +496,14 @@ def build_anomaly_episodes(
     aborting the build — a scene that can express three of its episodes should run three.
     An empty result raises, because a build that produced nothing and said so only in a
     list is a run that would otherwise start and immediately do nothing.
+
+    **The empty result is still a measurement**, and it raises as ``EmptyDatasetError``
+    carrying the whole build so the caller can write it down before the run stops. That
+    distinction cost the yield-1 sweep its most informative scene: ``mL8ThkuaVTM`` offered
+    99 candidates and could place none of them — a true 0% yield, the single number a
+    denominator most wants — and because the raise carried nothing but a message, the
+    scene left no ``summary.json`` and ``yield_report`` never saw it. The tool that
+    measures attrition was blind to total attrition, in the direction that flatters.
     """
     table = goal_table(dataset)
     candidates = [
@@ -508,11 +541,13 @@ def build_anomaly_episodes(
         )
 
     if not built:
-        raise PlacementError(
+        raise EmptyDatasetError(
             "no episode in {} could be built ({} candidate(s), all skipped):\n  {}".format(
                 dataset.scene_label,
                 len(candidates),
                 "\n  ".join("{}: {}".format(eid, why) for eid, why in skipped[:5]),
-            )
+            ),
+            scene_label=dataset.scene_label,
+            build=DatasetBuild(episodes=(), skipped=tuple(skipped)),
         )
     return DatasetBuild(episodes=tuple(built), skipped=tuple(skipped))

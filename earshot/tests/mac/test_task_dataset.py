@@ -358,6 +358,30 @@ class TestBuild(unittest.TestCase):
         with self.assertRaises(PlacementError):
             build_anomaly_episodes(scene, anomaly_class="alarm", t_anom=30)
 
+    def test_the_empty_build_is_carried_on_the_raise_so_it_can_be_written_down(self):
+        """A 0% yield is the most informative point a denominator has, and yield-1 lost
+        it: `mL8ThkuaVTM` placed none of 99 candidates and left no record, so the yield
+        report aggregated the scenes that yielded something and called it the yield of
+        all of them. The message formats five reasons; the caller needs all of them."""
+        from earshot.task.dataset import EmptyDatasetError
+
+        goals = [make_goal(Xyz(0.0, 0.0, 0.0))]
+        scene = dataset([make_episode(episode_id=str(i), category="chair", goals=goals)
+                         for i in range(9)])
+        with self.assertRaises(EmptyDatasetError) as caught:
+            build_anomaly_episodes(scene, anomaly_class="alarm", t_anom=30)
+        error = caught.exception
+        self.assertEqual(error.scene_label, scene.scene_label)
+        self.assertEqual(error.build.episodes, ())
+        self.assertEqual(len(error.build.skipped), 9,
+                         "all nine, not the five the message formats")
+        self.assertTrue(all(why for _, why in error.build.skipped))
+
+    def test_it_is_still_a_placement_error_so_existing_handlers_hold(self):
+        from earshot.task.dataset import EmptyDatasetError
+
+        self.assertTrue(issubclass(EmptyDatasetError, PlacementError))
+
     def test_the_category_filter_is_on_the_primary_goal_only(self):
         """The source is still drawn from every category, which is what keeps a
         different-category source available under a single-category run."""

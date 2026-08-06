@@ -88,7 +88,7 @@ from earshot.report.audit import (
     OnsetRecord,
     StepRecord,
 )
-from earshot.task.dataset import AnomalyEpisode, build_anomaly_episodes
+from earshot.task.dataset import AnomalyEpisode, EmptyDatasetError, build_anomaly_episodes
 from earshot.task.episodes import available_scenes, find_scenes_dir, find_split_dir, load_scene
 from earshot.types import NoRouteError, Pose, Xyz
 
@@ -920,15 +920,41 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
     split_dir = find_split_dir(cfg.split, root=cfg.data_root)
     scenes_dir = find_scenes_dir(root=cfg.data_root)
     dataset = _pick_scene(split_dir, scenes_dir, cfg.scene)
-    build = build_anomaly_episodes(
-        dataset,
-        anomaly_class=cfg.anomaly_class,
-        t_anom=cfg.t_anom,
-        category=cfg.category,
-        n_episodes=cfg.n_episodes,
-        min_sep_m=cfg.min_source_sep_m,
-        max_dy_m=cfg.max_source_dy_m,
-    )
+    try:
+        build = build_anomaly_episodes(
+            dataset,
+            anomaly_class=cfg.anomaly_class,
+            t_anom=cfg.t_anom,
+            category=cfg.category,
+            n_episodes=cfg.n_episodes,
+            min_sep_m=cfg.min_source_sep_m,
+            max_dy_m=cfg.max_source_dy_m,
+        )
+    except EmptyDatasetError as exc:
+        # A 0% yield is the most informative point a denominator has, and it used to reach
+        # nobody: the raise happened here, before `write_run_summary`, so a scene that
+        # could place nothing left no record and `yield_report` aggregated the scenes that
+        # yielded *something* while calling the result the yield of all of them. yield-1
+        # lost `mL8ThkuaVTM` (99 candidates, 0 placed) that way, in both invocations.
+        #
+        # Written, then re-raised. The record is the measurement; the raise is still true
+        # — a run asked for episodes and produced none.
+        say(exc.build.summary())
+        write_run_summary(
+            cfg.run_dir,
+            RunSummary(
+                run_dir=str(cfg.run_dir),
+                scene_label=exc.scene_label,
+                n_episodes=0,
+                # Every stage zero, spelled out rather than left empty: a funnel with no
+                # keys and a funnel of zeros read the same to `dict.get(..., 0)` and mean
+                # different things to a person.
+                funnel={stage.name: 0 for stage in FunnelStage},
+                skipped=exc.build.skipped,
+            ).as_dict(),
+            overwrite=cfg.overwrite,
+        )
+        raise
     say(build.summary())
 
     clip_path = resolve_anomaly_clip(cfg.anomaly_class, cfg.anomaly_clip, cfg.audio.clip_dir)

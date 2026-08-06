@@ -102,5 +102,55 @@ class TestLoad(unittest.TestCase):
             self.assertEqual(load_summaries(td), [])
 
 
+class TestAZeroYieldSceneReachesTheReport(unittest.TestCase):
+    """yield-1's `mL8ThkuaVTM` offered 99 candidates and placed none — a true 0% yield,
+    the single point a denominator most wants — and it appeared nowhere in the 41%.
+
+    `build_anomaly_episodes` raised before `write_run_summary`, so the scene left no
+    record and `aggregate` pooled the nineteen scenes that yielded *something*. The tool
+    that measures attrition could not see total attrition, in the direction that
+    flatters. `EmptyDatasetError` now carries the build so `runner.run` writes it first;
+    this is the arithmetic that record buys, asserted against a summary built by the real
+    `RunSummary` rather than a hand-typed dict.
+    """
+
+    @staticmethod
+    def _zero_yield(scene, n_skipped):
+        from earshot.report.audit import FunnelStage
+        from earshot.task.runner import RunSummary
+
+        reason = ("no object in {} is >= 3.00 m (xz) from every 'bed' goal AND within "
+                  "1.00 m in y of BOTH the primary anchor and the episode start "
+                  "(rejected: 7 too near, 2 on another floor, 0 with no view point)")
+        return RunSummary(
+            run_dir="runs/x/{}".format(scene),
+            scene_label=scene,
+            n_episodes=0,
+            funnel={stage.name: 0 for stage in FunnelStage},
+            skipped=tuple((str(i), reason.format(scene)) for i in range(n_skipped)),
+        ).as_dict()
+
+    def test_the_scene_is_counted_and_reads_as_zero_rather_than_absent(self):
+        agg = aggregate([summary("good", 20), self._zero_yield("mL8ThkuaVTM", 99)])
+        self.assertEqual(agg["n_scenes"], 2)
+        row = next(r for r in agg["per_scene"] if r["scene"] == "mL8ThkuaVTM")
+        self.assertEqual((row["built"], row["skipped"], row["offered"]), (0, 99, 99))
+        self.assertEqual(row["yield"], 0.0)
+
+    def test_dropping_it_is_what_biased_the_headline_up(self):
+        """The whole point, stated as the comparison: same scenes, one record present or
+        absent, and the yield moves in the direction that flatters."""
+        with_it = aggregate([summary("good", 20), self._zero_yield("mL8ThkuaVTM", 99)])
+        without = aggregate([summary("good", 20)])
+        self.assertLess(with_it["yield"], without["yield"])
+
+    def test_its_rejection_reasons_still_attribute_to_rules(self):
+        """A 0% scene is exactly the one whose rules you want named."""
+        agg = aggregate([self._zero_yield("mL8ThkuaVTM", 3)])
+        self.assertEqual(agg["rules"]["too_near"], 21)
+        self.assertEqual(agg["rules"]["on_another_floor"], 6)
+        self.assertEqual(agg["unattributed_skips"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

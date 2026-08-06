@@ -197,6 +197,7 @@ fi
 FAILED=""
 N_OK=0
 GATE_RED=""
+ZERO_YIELD=""
 for scene in "$@"; do
   banner "[3/4] $scene"
   python -m earshot --run-dir "$OUT_DIR/$scene" --scene "$scene" \
@@ -204,8 +205,19 @@ for scene in "$@"; do
       ${CATEGORY:+--category "$CATEGORY"}
   ec=$?
   if [ "$ec" -ne 0 ]; then
-    echo "  WARN: $scene exited $ec — continuing"
-    FAILED="$FAILED $scene"
+    # A scene that could place NO episode still writes its summary.json now
+    # (EmptyDatasetError carries the build), so it is a measured 0% rather than a
+    # scene that broke — yield-1's mL8ThkuaVTM, 99 candidates and none placed, which
+    # the old code lost entirely. It still exits nonzero, because a run asked for
+    # episodes and produced none; it is listed apart so the FAILED line means "could
+    # not be measured" and nothing else.
+    if [ -f "$OUT_DIR/$scene/summary.json" ]; then
+      echo "  $scene: 0 episode(s) buildable — a measured 0% yield, counted below"
+      ZERO_YIELD="$ZERO_YIELD $scene"
+    else
+      echo "  WARN: $scene exited $ec — continuing"
+      FAILED="$FAILED $scene"
+    fi
     continue
   fi
   N_OK=$((N_OK + 1))
@@ -236,6 +248,10 @@ banner "[4/4] yield"
 python -m earshot.tools.yield_report "$OUT_DIR"
 echo
 echo "  $N_OK of $# scene(s) completed."
+if [ -n "$ZERO_YIELD" ]; then
+  echo "  ZERO YIELD (measured, counted in the totals above — the scene cannot pose the"
+  echo "  task at all, which is the denominator's most informative point):$ZERO_YIELD"
+fi
 if [ -n "$FAILED" ]; then
   # NOT "excluded from the totals above" — that line was false, and it was false in the
   # direction that flatters. `yield_report` aggregates every summary.json under OUT_DIR;
@@ -254,6 +270,12 @@ echo "  why a detour ended: python -m earshot.tools.detour_report $OUT_DIR/<scen
 # CONTINUE-ON-FAILURE is about not abandoning the sweep, not about calling it a success.
 # yield-1 lost 12 of 20 scenes, pooled a second run's records into its headline, and
 # arrived as a green tick because this line used to read `exit 0`.
+#
+# ZERO_YIELD is deliberately NOT here. A scene that can pose no episode was *measured*,
+# and its record is in the totals — that is the sweep doing its job, not failing at it.
+# The rule being kept is "a criterion that could not be evaluated is never green", and a
+# yield of zero was evaluated. `yield_report.aggregate` draws the identical line in code:
+# `None`, not 0.0, only when nothing was offered.
 if [ -n "$FAILED" ] || [ -n "$GATE_RED" ]; then
   exit 1
 fi
