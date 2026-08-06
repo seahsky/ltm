@@ -21,7 +21,7 @@ generously rather than tightly. The first box calibration is what turns ``bed_rm
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 __all__ = ["AudioConfig"]
 
@@ -71,6 +71,27 @@ class AudioConfig:
     # when the bed and anomaly distributions overlap (§2.3); moving `onset_rms` by hand
     # is named in the spec as the wrong fix.
     global_volume: float = 1.0
+
+    # `None` keeps `spec.ACOUSTICS_PRESET`'s 500. This overrides that one key and nothing
+    # else, because it is the only knob in the preset that trades ACCURACY for speed
+    # rather than speed alone.
+    #
+    # **Why it is now a run-time knob.** `yield-1` and `detour-1` ran the same scene under
+    # the same configuration and 4 of 20 episodes came out with different outcomes. The
+    # onset step was identical in all twenty, so the trigger is deterministic; the render
+    # is not — the calibration threshold moved up to 13%, separation 2.5 dB, and the live
+    # RMS at the trigger pose 24%. The navmesh `seed` is fixed and does not touch this:
+    # it seeds pose DRAWS, and the same poses were rendering differently.
+    #
+    # `indirectRayCount` is the reason. Ticket 06 cut it 5000 -> 500 for a 63x speedup,
+    # which is a Monte Carlo estimate with a tenth of the samples, and the variance is the
+    # price that was paid without being measured. It is the dominant cost lever and
+    # roughly linear, so this is also the one field where a number can be traded back:
+    # criterion 7's ceiling is 0.5 s/step and `detour-1` measured mean 0.059, max 0.099.
+    #
+    # Recorded on the audit through `run_config`, so a run's variance can always be read
+    # against the ray count that produced it.
+    indirect_ray_count: Optional[int] = None
 
     # provenance: source — carried from the old tree's `--anomaly-clip` default. The
     # ESC-50 staging directory `clips.fetch_esc50_clips` writes and

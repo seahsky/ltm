@@ -52,6 +52,9 @@ nrun bash earshot/tools/yield_sweep.sh --tag <fresh-tag>
 # why a detour ended: metres walked per metre of gap closed, abandoned vs reached
 python -m earshot.tools.detour_report runs/<tag>/<scene>
 
+# is the run-to-run variance a knob or a fact? (~1.5h at the defaults)
+nrun bash earshot/tools/ray_variance.sh --tag <fresh-tag>
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```

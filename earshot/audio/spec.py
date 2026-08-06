@@ -113,11 +113,20 @@ def audio_config_mapping(
     default on this branch, and it is also the assumption the entire lateral cue rests
     on, so it is asserted at the one place that can.
     """
+    # `acoustics` replaces the whole preset and is the low-level escape hatch the tests
+    # use. `config.indirect_ray_count` overrides ONE key of whichever base is in force and
+    # is what a run sets, because it is the only preset entry that trades accuracy for
+    # speed rather than speed alone — see `AudioConfig.indirect_ray_count` for the
+    # measurement that made it a knob. Applied after, so it wins over either base and a
+    # run's ray count is always the number `run_config` records.
+    base = dict(ACOUSTICS_PRESET if acoustics is None else acoustics)
+    if config.indirect_ray_count is not None:
+        base["indirectRayCount"] = int(config.indirect_ray_count)
     return {
         "enableMaterials": False,
         "channelLayout": {"type": binaural_layout, "channelCount": 2},
         "acousticsConfig": dict(
-            ACOUSTICS_PRESET if acoustics is None else acoustics,
+            base,
             sampleRate=float(config.sample_rate),
             globalVolume=float(config.global_volume),
         ),
