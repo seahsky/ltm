@@ -929,6 +929,7 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
             n_episodes=cfg.n_episodes,
             min_sep_m=cfg.min_source_sep_m,
             max_dy_m=cfg.max_source_dy_m,
+            min_start_sep_m=cfg.min_source_start_sep_m,
         )
     except EmptyDatasetError as exc:
         # A 0% yield is the most informative point a denominator has, and it used to reach

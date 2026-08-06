@@ -66,6 +66,7 @@ __all__ = [
     "derive_t_anom",
     "place_anomaly_source",
     "build_anomaly_episodes",
+    "MIN_SOURCE_START_SEP_M",
 ]
 
 # provenance: source — `sim.world`'s action spec (`step_size_m=0.25`). One `move_forward`
@@ -94,6 +95,21 @@ T_ANOM_FRACTION = 0.5
 # `t_anom` of 0 leaves it unexercised and `assert_provenance` says so rather than
 # passing. Three readings is the smallest number that is not one.
 T_ANOM_FLOOR_STEPS = 3
+
+# provenance: MEASURED — `detour-1`, 2026-08-06, and the one constant on this map that is
+# not a guess. That run's `d_min` (closest approach during the detour) came out bimodal
+# with no overlap: the eight detours that reached the source ended at 0.31-0.78 m, the
+# twelve that did not plateaued at 2.06-9.26 m. 2.0 m sits in the empty gap between them.
+#
+# So a source closer than this to the agent's start is one the agent is *already inside
+# the outcome of*: episode 18 of that run placed one 0.75 m away and the loop closed in
+# two steps, INVESTIGATE at 5 and RESUME at 7, counting as one of the eight successes.
+# Below the gap there is no detour to measure, which makes the episode a null dressed as
+# a pass — the failure mode §2.5 and ADR-0014 are both about.
+#
+# It costs yield, and the cost is not yet known: every yield measured before this rule
+# existed is an OVERESTIMATE and has to be re-measured, not adjusted.
+MIN_SOURCE_START_SEP_M = 2.0
 
 
 class PlacementError(ValueError):
@@ -352,6 +368,7 @@ def place_anomaly_source(
     *,
     min_sep_m: float = 3.0,
     max_dy_m: float = 1.0,
+    min_start_sep_m: float = MIN_SOURCE_START_SEP_M,
 ) -> SourcePlacement:
     """Choose the one positioned source for this episode, or raise.
 
@@ -361,6 +378,22 @@ def place_anomaly_source(
        object standing at it.
     2. It clears ``min_sep_m`` in ``xz`` from **every** primary goal view point and
        object position — the decoupling.
+    2b. It clears ``min_start_sep_m`` in ``xz`` from the episode START, so there is an
+       investigation to run at all.
+
+       **The mirror of rule 2, and it was missing.** Rule 2 keeps the source away from
+       the *goal*; nothing kept it away from the *agent*. `detour-1`'s episode 18 placed
+       one 0.75 m from the start — inside the arrival radius before the anomaly had
+       sounded — and it counted as a completed anomaly-response loop: INVESTIGATE at step
+       5, RESUME at step 7, two steps of detour. One of that run's eight successes was a
+       source already at the agent's feet, which makes 8/20 read as 7/20 honestly.
+
+       It is measured against the start rather than against the pose at ``t_anom``,
+       because the builder runs before anything is simulated and the agent's position
+       when the anomaly fires is not knowable here. The start is a lower bound on it in
+       the only direction that matters: an agent that has walked away from a source
+       placed ``min_start_sep_m`` off has a real detour either way, and one that has
+       walked *toward* it was heading there anyway.
     3. It is within ``max_dy_m`` in ``y`` of **both** the primary anchor and the episode
        start — ADR-0010's floor rule, checked **before** the nearest-first tie-break,
        which would otherwise actively prefer a cross-floor candidate for being ``xz``-near.
@@ -394,7 +427,7 @@ def place_anomaly_source(
 
     # (separation, same_category, category, position, object_id)
     qualifying: List[Tuple[float, bool, str, Xyz, Optional[str]]] = []
-    n_too_near = n_wrong_floor = n_no_view_point = 0
+    n_too_near = n_wrong_floor = n_no_view_point = n_at_the_start = 0
     for category in sorted(table):
         for goal in table[category]:
             position = _first_view_point(goal)
@@ -406,6 +439,12 @@ def place_anomaly_source(
             )
             if separation < float(min_sep_m):
                 n_too_near += 1
+                continue
+            # Counted apart from `too_near`: "the source would be on top of the goal" and
+            # "the source would be on top of the agent" are different degeneracies, and a
+            # yield report that pooled them would name the wrong rule to revisit.
+            if position.horizontal_distance_to(start) < float(min_start_sep_m):
+                n_at_the_start += 1
                 continue
             if abs(position.height_difference_to(anchor)) > float(max_dy_m) or abs(
                 position.height_difference_to(start)
@@ -438,15 +477,18 @@ def place_anomaly_source(
             else ""
         )
         raise PlacementError(
-            "no object in {} is >= {:.2f} m (xz) from every {!r} goal AND within "
-            "{:.2f} m in y of BOTH the primary anchor and the episode start (rejected: "
-            "{} too near, {} on another floor, {} with no view point). The scene cannot "
-            "express a decoupled anomaly response for this episode.{}".format(
+            "no object in {} is >= {:.2f} m (xz) from every {!r} goal AND >= {:.2f} m "
+            "(xz) from the episode start AND within {:.2f} m in y of BOTH the primary "
+            "anchor and the episode start (rejected: {} too near, {} at the start, "
+            "{} on another floor, {} with no view point). The scene cannot express a "
+            "decoupled anomaly response for this episode.{}".format(
                 episode.scene_label,
                 float(min_sep_m),
                 primary_category,
+                float(min_start_sep_m),
                 float(max_dy_m),
                 n_too_near,
+                n_at_the_start,
                 n_wrong_floor,
                 n_no_view_point,
                 cross_floor,
@@ -479,6 +521,7 @@ def build_anomaly_episodes(
     n_episodes: Optional[int] = None,
     min_sep_m: float = 3.0,
     max_dy_m: float = 1.0,
+    min_start_sep_m: float = MIN_SOURCE_START_SEP_M,
 ) -> DatasetBuild:
     """Build up to ``n_episodes`` anomaly episodes from one scene's ObjectNav episodes.
 
@@ -526,7 +569,8 @@ def build_anomaly_episodes(
             break
         try:
             placement = place_anomaly_source(
-                episode, table, min_sep_m=min_sep_m, max_dy_m=max_dy_m
+                episode, table, min_sep_m=min_sep_m, max_dy_m=max_dy_m,
+                min_start_sep_m=min_start_sep_m,
             )
         except PlacementError as exc:
             skipped.append((episode.episode_id, str(exc)))
