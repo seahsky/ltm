@@ -22,12 +22,14 @@ from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.report.agent import AgentReport, missing_schema_keys
 from earshot.report.artifacts import (
+    RUN_SUMMARY_NAME,
     ArtifactExistsError,
     episode_paths,
     read_agent_report,
     read_episode,
     write_env_report,
     write_episode,
+    write_run_summary,
 )
 from earshot.report.audit import EpisodeAudit, FunnelStage, OnsetRecord, StepRecord
 from earshot.types import Pose, Xyz
@@ -220,6 +222,65 @@ class TestTheWriteIsSafe(unittest.TestCase):
                 write_episode(tmp, 0, _agent_report(), _audit())
             agent_path, _ = episode_paths(tmp, 0)
             self.assertTrue(agent_path.exists())
+
+
+class TestTheRunSummary(unittest.TestCase):
+    """`summary.json` — the attrition number, in an artefact rather than a console line.
+
+    ``RunSummary.skipped`` is how many of a scene's ObjectNav episodes could not express a
+    decoupled anomaly response, and why. It bounds every ``n`` the experiment matrix can
+    quote, and until this landed it existed only in stdout. The carried notifier had been
+    digesting ``runs/*/summary.json`` into every emailed run report the whole time,
+    finding nothing, and saying so in a line nobody read as a defect.
+    """
+
+    def _summary(self, **over):
+        payload = {
+            "run_dir": "runs/x",
+            "scene": "4ok3usBNeis",
+            "n_episodes": 1,
+            "n_skipped": 1,
+            "funnel": {"RUN": 1, "PRIMARY_RESUMED": 1},
+            "skipped": [{
+                "episode_id": "0",
+                "reason": "no object in 4ok3usBNeis is >= 3.00 m (xz) from every 'bed' "
+                          "goal (rejected: 11 too near, 4 on another floor, 0 with no "
+                          "view point).\nThis episode spans floors.",
+            }],
+        }
+        payload.update(over)
+        return payload
+
+    def test_it_round_trips_with_the_reasons_whole(self):
+        """First-lining the reason would drop the per-rule counts, which are the point."""
+        with tempfile.TemporaryDirectory() as td:
+            path = write_run_summary(td, self._summary())
+            back = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(path.name, RUN_SUMMARY_NAME)
+        self.assertEqual(back["n_skipped"], 1)
+        self.assertIn("11 too near", back["skipped"][0]["reason"])
+        self.assertIn("spans floors", back["skipped"][0]["reason"],
+                      "the reason was truncated to its first line")
+
+    def test_it_refuses_to_overwrite_like_every_other_artefact(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_run_summary(td, self._summary())
+            with self.assertRaises(ArtifactExistsError):
+                write_run_summary(td, self._summary())
+            write_run_summary(td, self._summary(n_episodes=9), overwrite=True)
+
+    def test_the_notifier_looks_for_exactly_this_name(self):
+        """The seam that was silently broken: two files, one name, no shared constant.
+
+        ``notify_email.py`` is stdlib-only and standalone by design, so it cannot import
+        this module — it globs ``runs/*/summary.json`` as a literal. Pinned here rather
+        than trusted, because the last time these two disagreed it went unnoticed across
+        every run report since the rebuild.
+        """
+        notifier = (pathlib.Path(__file__).resolve().parents[3]
+                    / "earshot/tools/notify/notify_email.py")
+        text = notifier.read_text(encoding="utf-8").replace("'", '"')
+        self.assertIn('"{}"'.format(RUN_SUMMARY_NAME), text)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ __all__ = [
     "episode_paths",
     "write_env_report",
     "write_episode",
+    "write_run_summary",
     "read_agent_report",
     "read_audit",
     "read_episode",
@@ -51,6 +52,14 @@ PathLike = Union[str, "os.PathLike"]
 
 ENV_REPORT_NAME = "env_report.json"
 EPISODES_DIR = "episodes"
+
+# The whole-run record. The name is not free: `earshot/tools/notify/notify_email.py`
+# digests `runs/*/summary.json` into the emailed report, and because the clean room never
+# wrote one, every run report since the rebuild has said "No summary.json updated during
+# this run — none found". The carried notifier was looking for a file the new tree had
+# stopped producing, which is the same carried-verbatim seam that broke `nrun`'s own
+# dispatch paths.
+RUN_SUMMARY_NAME = "summary.json"
 
 
 class ArtifactExistsError(RuntimeError):
@@ -126,6 +135,23 @@ def write_env_report(
     """
     root, _ = run_paths(run_dir)
     return _write_json(root / ENV_REPORT_NAME, dict(report), overwrite=overwrite)
+
+
+def write_run_summary(
+    run_dir: PathLike, summary: Mapping[str, Any], *, overwrite: bool = False
+) -> pathlib.Path:
+    """``runs/<tag>/summary.json`` — what the whole run reached, and what it could not build.
+
+    A mapping for the same reason ``write_env_report`` takes one: ``RunSummary`` lives in
+    ``task/``, which imports this module, so naming its type here would invert the layer
+    graph. ``task/runner.run`` calls ``write_run_summary(run_dir, summary.as_dict())``.
+
+    Written **last**, after every episode, because a summary is a claim about a completed
+    run: a crash half way through should leave the episodes it did write and no summary
+    over them, rather than a summary describing a run that did not finish.
+    """
+    root, _ = run_paths(run_dir)
+    return _write_json(root / RUN_SUMMARY_NAME, dict(summary), overwrite=overwrite)
 
 
 def write_episode(
