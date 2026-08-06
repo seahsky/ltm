@@ -116,8 +116,29 @@ def tail_lines(path: Path, n: int) -> str:
 # run digests
 # ----------------------------------------------------------------------
 
-def _digest_one(run_dir: Path, summary_path: Path) -> dict:
-    d = {"name": run_dir.name, "error": None}
+# The funnel stages `RunSummary.as_dict` writes, and the two the digest leads with.
+# `T_ANOM_REACHED` is the denominator the run's own summary() prints against (§6), so the
+# rates here are the same rates the terminal showed rather than a second convention.
+FUNNEL_DENOMINATOR = "T_ANOM_REACHED"
+FUNNEL_REPORTED = ("ONSET_FIRED", "SOURCE_REACHED", "PRIMARY_RESUMED")
+
+
+def _rate(numerator, denominator) -> str:
+    if not isinstance(numerator, int) or not isinstance(denominator, int) or denominator <= 0:
+        return "?"
+    return f"{numerator}/{denominator} ({numerator / denominator:.0%})"
+
+
+def _digest_one(run_dir: Path, summary_path: Path, *, name: str = "") -> dict:
+    """One `summary.json` as a report row.
+
+    Reads the keys `RunSummary.as_dict` actually writes. It used to read
+    `ablation.setting`, `n_memory_chosen` and `ltm_counts_final`, which belonged to the
+    tree the 2026-08-06 reset deleted — so after the rebuild every column would have
+    rendered `?` even once the file was found. A digest of question marks is worse than
+    no digest: it reads as a run that produced nothing.
+    """
+    d = {"name": name or run_dir.name, "error": None}
     try:
         s = json.loads(summary_path.read_text())
     except (OSError, ValueError) as e:
@@ -126,38 +147,63 @@ def _digest_one(run_dir: Path, summary_path: Path) -> dict:
     if not isinstance(s, dict):
         d["error"] = "malformed summary.json (not an object)"
         return d
-    abl = s.get("ablation") or {}
-    d["setting"] = abl.get("setting", "?")
-    d["episodes"] = (f"{s.get('n_episodes_completed', '?')}/"
-                     f"{s.get('n_episodes_attempted', '?')}")
-    sspls = [ep.get("soft_spl") for ep in s.get("episodes", [])
-             if isinstance(ep, dict)
-             and isinstance(ep.get("soft_spl"), (int, float))]
-    d["mean_soft_spl"] = (sum(sspls) / len(sspls)) if sspls else None
-    d["n_memory_chosen"] = s.get("n_memory_chosen", "?")
-    ltm = s.get("ltm_counts_final") or {}
-    d["ltm_counts"] = (f"{ltm.get('fine', '?')}/{ltm.get('mid', '?')}/"
-                       f"{ltm.get('coarse', '?')}")
-    fails = [k for k, v in (s.get("pass_conditions") or {}).items() if v is False]
-    d["gate_fails"] = ", ".join(fails) if fails else "—"
+    d["scene"] = s.get("scene", "?")
+    built = s.get("n_episodes")
+    skipped = s.get("n_skipped")
+    d["built"] = built if isinstance(built, int) else "?"
+    d["skipped"] = skipped if isinstance(skipped, int) else "?"
+    offered = (built + skipped) if isinstance(built, int) and isinstance(skipped, int) else 0
+    # None, not 0%, when nothing was offered — `yield_report.aggregate` draws the same
+    # line: a yield of zero and no data are different claims.
+    d["yield"] = f"{built / offered:.0%}" if offered else "?"
+    funnel = s.get("funnel") if isinstance(s.get("funnel"), dict) else {}
+    denominator = funnel.get(FUNNEL_DENOMINATOR)
+    for stage in FUNNEL_REPORTED:
+        d[stage] = _rate(funnel.get(stage), denominator)
     return d
 
 
+# How deep under `runs/` a summary.json may sit. A single run writes
+# runs/<tag>/summary.json; a SWEEP writes runs/<tag>/<scene>/summary.json, one level
+# further down. Scanning only depth 1 is why the yield-1 sweep emailed "No summary.json
+# updated during this run — none found" on the same page as "records:
+# runs/yield-1/<scene>/summary.json": the digest section was structurally blind to every
+# sweep this repo has ever run. Bounded rather than a recursive walk, so a deep runs/
+# tree cannot turn a notifier into a filesystem crawl.
+MAX_SUMMARY_DEPTH = 2
+
+# `report.artifacts.RUN_SUMMARY_NAME`, spelled again. This module is stdlib-only and
+# standalone by design so it cannot import that constant, and
+# `test_report_artifacts.test_the_notifier_looks_for_exactly_this_name` is what keeps the
+# two spellings honest. Named rather than inlined into the glob pattern below: the last
+# version buried it inside a `"/".join(...)` expression, which is a literal the seam test
+# cannot see and a rename this file would silently survive.
+SUMMARY_NAME = "summary.json"
+
+
 def discover_run_digests(runs_dir: Path, start_ts: float) -> list:
-    """Digest every runs/*/summary.json modified after start_ts.
+    """Digest every summary.json under runs/, to MAX_SUMMARY_DEPTH, modified after start_ts.
     Tolerates malformed files (digest with an 'error' note); never raises."""
     runs_dir = Path(runs_dir)
     digests = []
     if not runs_dir.is_dir():
         return digests
-    for run_dir in sorted(runs_dir.iterdir()):
-        summary = run_dir / "summary.json"
+    for depth in range(1, MAX_SUMMARY_DEPTH + 1):
+        pattern = "/".join(["*"] * depth + [SUMMARY_NAME])
         try:
-            if not summary.is_file() or summary.stat().st_mtime <= start_ts:
-                continue
+            found = sorted(runs_dir.glob(pattern))
         except OSError:
             continue
-        digests.append(_digest_one(run_dir, summary))
+        for summary in found:
+            try:
+                if not summary.is_file() or summary.stat().st_mtime <= start_ts:
+                    continue
+            except OSError:
+                continue
+            # Named by the path relative to runs/, not by the leaf: a sweep's rows are
+            # all scene labels, and "ziup5kvtCCR" alone does not say which sweep.
+            digests.append(_digest_one(summary.parent, summary,
+                                       name=str(summary.parent.relative_to(runs_dir))))
     return digests
 
 
@@ -183,29 +229,30 @@ def build_report(*, command, exit_code, start_ts, end_ts, commit, hostname,
         f"- **Start:** {iso(start_ts)}",
         f"- **End:** {iso(end_ts)}",
         "",
-        "## Run digests (runs/*/summary.json updated during this run)",
+        "## Run digests (summary.json updated during this run)",
         "",
     ]
     if not digests:
         lines.append("_No summary.json updated during this run — none found._")
     else:
         lines += [
-            "| run | setting | eps | mean soft_spl | mem_chosen "
-            "| ltm f/m/c | gate fails |",
-            "|---|---|---|---|---|---|---|",
+            "| run | scene | built | skipped | yield "
+            "| onset | source reached | resumed |",
+            "|---|---|---|---|---|---|---|---|",
+            # The funnel columns are fractions of T_ANOM_REACHED, which is the
+            # denominator §6 names and the one the run's own terminal summary used.
         ]
         for d in digests:
             if d.get("error"):
-                lines.append(f"| {d['name']} | — | — | — | — | — "
+                lines.append(f"| {d['name']} | — | — | — | — | — | — "
                              f"| ⚠️ {d['error']} |")
                 continue
-            mss = d.get("mean_soft_spl")
-            mss = f"{mss:.4g}" if isinstance(mss, (int, float)) else "?"
             lines.append(
-                f"| {d['name']} | {d.get('setting', '?')} "
-                f"| {d.get('episodes', '?')} | {mss} "
-                f"| {d.get('n_memory_chosen', '?')} "
-                f"| {d.get('ltm_counts', '?')} | {d.get('gate_fails', '—')} |")
+                f"| {d['name']} | {d.get('scene', '?')} "
+                f"| {d.get('built', '?')} | {d.get('skipped', '?')} "
+                f"| {d.get('yield', '?')} | {d.get('ONSET_FIRED', '?')} "
+                f"| {d.get('SOURCE_REACHED', '?')} "
+                f"| {d.get('PRIMARY_RESUMED', '?')} |")
     lines += [
         "",
         "## Terminal output (tail)",

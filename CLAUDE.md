@@ -42,8 +42,15 @@ python -m earshot.audio.clips --out-dir data/anomaly_audio
 # one episode, end to end
 python -m earshot --run-dir runs/<tag> --n-episodes 1 --max-steps 250
 
-# the nine acceptance criteria, judged off the run directory
-python -m earshot.task.smoke --run-dir runs/<tag>
+# the nine acceptance criteria, tallied over EVERY episode in the run directory
+python -m earshot.task.smoke --run-dir runs/<tag>          # --episode N judges just one
+
+# how much of HM3D can pose the task at all — one directory is one run, so the tag
+# must be fresh; nonzero exit if any scene failed or any scene's gate went red
+nrun bash earshot/tools/yield_sweep.sh --tag <fresh-tag>
+
+# why a detour ended: metres walked per metre of gap closed, abandoned vs reached
+python -m earshot.tools.detour_report runs/<tag>/<scene>
 
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh

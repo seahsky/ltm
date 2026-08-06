@@ -17,6 +17,11 @@ _Avoid_: main goal, objective.
 The interrupt behavior — hear an abnormal sound, go to its source, check it, then resume the primary find-task.
 _Avoid_: audio goal, sound goal (retired framing where sound == target).
 
+**Abandoned investigation**:
+An anomaly response where the onset fired and the detour was entered, but the detour's step sub-budget ran out before the source was reached, so the agent resumed the primary find-task having never arrived.
+A failure of the anomaly response, not a third outcome: it counts against Anomaly-response SR.
+_Avoid_: resume, abort (both name the transition, neither says the source was never reached); reading a "RESUME" log line as evidence the source was found.
+
 **Mission**:
 One episode = the primary find-task PLUS the anomaly response. "Mission complete" is not a single number — see Find-SR and Anomaly-response SR.
 

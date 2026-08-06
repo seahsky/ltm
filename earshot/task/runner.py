@@ -635,6 +635,10 @@ def run_episode(
                 audio_render_s=float(audio_s),
                 collided=collided,
                 displacement_m=displacement,
+                # The pose the reading was taken AT, not the one the action left behind:
+                # `measured_rms` on this row was rendered here, and pairing the energy
+                # with the place it was measured is the whole point of recording it.
+                position=pose.position,
             )
         )
 
