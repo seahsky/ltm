@@ -52,6 +52,37 @@ class TestConfigMapping(unittest.TestCase):
         self.assertNotIn("sampleRate", ACOUSTICS_PRESET)
         self.assertNotIn("globalVolume", ACOUSTICS_PRESET)
 
+    def test_the_ray_count_is_overridable_from_the_config(self):
+        """The knob behind the reproducibility finding: two runs of the same scene at
+        500 rays disagreed on 4 of 20 episode outcomes, and `indirectRayCount` is the
+        only preset entry that trades render ACCURACY for speed rather than speed alone."""
+        mapping = audio_config_mapping(AudioConfig(indirect_ray_count=2500), fakes.BINAURAL)
+        self.assertEqual(mapping["acousticsConfig"]["indirectRayCount"], 2500)
+        self.assertEqual(ACOUSTICS_PRESET["indirectRayCount"], 500,
+                         "the override must not write through to the module constant")
+
+    def test_none_leaves_the_preset_alone(self):
+        mapping = audio_config_mapping(AudioConfig(), fakes.BINAURAL)
+        self.assertEqual(mapping["acousticsConfig"]["indirectRayCount"], 500)
+
+    def test_it_overrides_one_key_and_leaves_the_rest_of_the_preset(self):
+        acoustics = audio_config_mapping(
+            AudioConfig(indirect_ray_count=2500), fakes.BINAURAL)["acousticsConfig"]
+        for key, value in ACOUSTICS_PRESET.items():
+            if key != "indirectRayCount":
+                self.assertEqual(acoustics[key], value, key)
+
+    def test_the_config_override_wins_over_an_explicit_preset(self):
+        """`acoustics` replaces the base wholesale; the config field then overrides one
+        key of whatever base is in force, so a run's ray count is always the number
+        `run_config` records."""
+        mapping = audio_config_mapping(
+            AudioConfig(indirect_ray_count=2500), fakes.BINAURAL,
+            acoustics={"indirectRayCount": 17, "indirectRayDepth": 5},
+        )
+        self.assertEqual(mapping["acousticsConfig"]["indirectRayCount"], 2500)
+        self.assertEqual(mapping["acousticsConfig"]["indirectRayDepth"], 5)
+
     def test_materials_are_off_explicitly_not_inherited(self):
         """ADR-0007 is a decision; this is the line that states it in code."""
         self.assertIs(audio_config_mapping(AudioConfig(), fakes.BINAURAL)["enableMaterials"], False)

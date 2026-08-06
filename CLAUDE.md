@@ -70,6 +70,13 @@ python -m earshot.tools.funnel_diff runs/<before-tag> runs/<after-tag>
 # subtracting it, and needs no flip-rate estimate: the flips ARE the discordant pairs
 python -m earshot.tools.episode_diff runs/<before-tag> runs/<after-tag>
 
+# is the run-to-run variance a knob or a fact? One scene, several ray counts, N repeats
+# each (~1.5h at the defaults). `flip_report` reads the arms back: the aggregate rate AND
+# the fraction of episodes whose outcome is not unanimous, which is the one that decides
+# how many repeats a matrix cell needs
+nrun bash earshot/tools/ray_variance.sh --tag <fresh-tag>
+python -m earshot.tools.flip_report runs/<tag>-r500-* runs/<tag>-r2500-*
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```
