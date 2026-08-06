@@ -80,7 +80,7 @@ from earshot.config import Detector, Localization, RunConfig
 from earshot.env_check import assert_env
 from earshot.metrics import compute_benchmark_spl, compute_soft_spl
 from earshot.report.agent import AgentReport
-from earshot.report.artifacts import write_env_report, write_episode
+from earshot.report.artifacts import write_env_report, write_episode, write_run_summary
 from earshot.report.audit import (
     CalibrationRecord,
     EpisodeAudit,
@@ -137,6 +137,32 @@ class RunSummary:
     n_episodes: int
     funnel: Dict[str, int]
     skipped: Tuple[Tuple[str, str], ...] = ()
+
+    def as_dict(self) -> Dict[str, Any]:
+        """The whole-run record, for `summary.json`.
+
+        ``skipped`` is the reason this is written rather than printed. It is the run's
+        **attrition** — how many of a scene's ObjectNav episodes could not express a
+        decoupled anomaly response, and why — and until now it existed only in a console
+        line. A number that bounds every ``n`` a paper can quote does not belong in a log
+        the next reader will not have.
+
+        The reasons are kept whole, not first-line'd like ``summary()`` does for the
+        terminal: the builder's skip text carries the per-rule counts (*"11 too near, 4 on
+        another floor, 0 with no view point"*), which is the difference between knowing the
+        yield and knowing which rule is costing it.
+        """
+        return {
+            "run_dir": self.run_dir,
+            "scene": self.scene_label,
+            "n_episodes": self.n_episodes,
+            "n_skipped": len(self.skipped),
+            "funnel": dict(self.funnel),
+            "skipped": [
+                {"episode_id": episode_id, "reason": reason}
+                for episode_id, reason in self.skipped
+            ],
+        }
 
     def summary(self) -> str:
         lines = [
@@ -1004,4 +1030,5 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
         skipped=build.skipped,
     )
     say(summary.summary())
+    write_run_summary(cfg.run_dir, summary.as_dict(), overwrite=cfg.overwrite)
     return summary
