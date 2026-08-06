@@ -257,7 +257,8 @@ MAX_TALLY_DETAILS = 3
 MAX_TALLY_NOTES = 6
 
 
-def tally(verdicts: Sequence[SmokeVerdict]) -> RunVerdict:
+def tally(verdicts: Sequence[SmokeVerdict],
+          labels: Optional[Sequence[Any]] = None) -> RunVerdict:
     """Pool per-episode verdicts into per-criterion counts. Pure.
 
     Pure for the same reason ``judge`` is (ticket 19's third row): *given n episodes of
@@ -268,10 +269,20 @@ def tally(verdicts: Sequence[SmokeVerdict]) -> RunVerdict:
     criterion added to ``judge`` shows up here without a second edit — but an episode
     that is missing one is a shorter tuple, and ``n`` per criterion is therefore counted
     rather than assumed equal to ``n_episodes``.
+
+    ``labels`` names the episode each verdict came from, and the first version omitted it.
+    The detour-1 run printed criterion 5 three times as *"funnel stage 4
+    (INVESTIGATE_ENTERED) — CHECK and RESUME must both be reached"*, identical and
+    anonymous, which is a verdict with the measurement thrown away — the exact failure
+    this tally exists to prevent (ADR-0014). "ep 7: funnel stage 4" is a line you can go
+    and read the audit for.
     """
+    tags = list(labels) if labels is not None else []
     order: list = []
     counts: dict = {}
-    for verdict in verdicts:
+    for position, verdict in enumerate(verdicts):
+        tag = ("ep {}: ".format(tags[position])
+               if position < len(tags) else "")
         for criterion in verdict.criteria:
             key = int(criterion.number)
             if key not in counts:
@@ -284,7 +295,7 @@ def tally(verdicts: Sequence[SmokeVerdict]) -> RunVerdict:
             else:
                 row["fail" if criterion.status is CriterionStatus.FAIL else "not_run"] += 1
                 if len(row["details"]) < MAX_TALLY_DETAILS and criterion.detail:
-                    row["details"].append(criterion.detail)
+                    row["details"].append(tag + criterion.detail)
 
     tallies = tuple(
         CriterionTally(
@@ -698,7 +709,7 @@ def episode_indices(run_dir: str) -> Tuple[int, ...]:
 def judge_every_episode(run_dir: str) -> RunVerdict:
     """Judge every episode in ``run_dir`` and tally the nine criteria over all of them."""
     indices = episode_indices(run_dir)
-    return tally([judge_run_dir(run_dir, index=i) for i in indices])
+    return tally([judge_run_dir(run_dir, index=i) for i in indices], labels=indices)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
