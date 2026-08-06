@@ -86,6 +86,18 @@ class StepRecord:
     way to tell which, because ``World.step`` returns habitat's collision flag and the
     runner discarded it. Path length cannot substitute — habitat slides an agent along a
     wall, so a collided forward displaces a little rather than nothing.
+
+    ``position`` is the yield-1 addition, for the question *that* run could not answer:
+    **was the detour converging when the budget cut it off?** Twelve of twenty episodes
+    spent exactly ``investigate_max_steps`` and abandoned the investigation, and nothing
+    on disk separated "the source was too far for 120 steps" from "the climb wandered".
+    Displacement says the agent moved and ``measured_rms`` is only a proxy for where it
+    moved *to*; a position plus the audit's ``source_xyz`` is the distance itself.
+
+    It is recorded here and nowhere near ``AgentReport``: a position the agent may keep
+    is its own pose, which §5.1 already carries as ``stopped_at_pose``. What makes this
+    privileged is the *pairing* with ``source_xyz``, which is why the derived series
+    lives on ``EpisodeAudit`` rather than on this row.
     """
 
     step: int
@@ -97,6 +109,7 @@ class StepRecord:
     audio_render_s: Optional[float] = None
     collided: Optional[bool] = None
     displacement_m: Optional[float] = None
+    position: Optional[Xyz] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -109,10 +122,12 @@ class StepRecord:
             "audio_render_s": self.audio_render_s,
             "collided": self.collided,
             "displacement_m": self.displacement_m,
+            "position": None if self.position is None else list(self.position.as_tuple()),
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "StepRecord":
+        position = data.get("position")
         return cls(
             step=int(data["step"]),
             measured_rms=float(data["measured_rms"]),
@@ -123,6 +138,10 @@ class StepRecord:
             audio_render_s=data.get("audio_render_s"),
             collided=data.get("collided"),
             displacement_m=data.get("displacement_m"),
+            # Absent on every record written before yield-1, and absent is not (0, 0, 0):
+            # a run from before this field means the distance is unknown, which the
+            # derived series reports as None rather than as a distance to the origin.
+            position=None if position is None else Xyz.from_sequence(position),
         )
 
 
@@ -262,6 +281,27 @@ class EpisodeAudit:
         construction, which is the pairing an analyst actually reads.
         """
         return tuple(row.source_is_visible for row in self.steps)
+
+    @property
+    def distance_to_source_history(self) -> Tuple[Optional[float], ...]:
+        """Horizontal distance from the agent to the source, per step. Derived.
+
+        The pairing that makes ``StepRecord.position`` privileged, kept on this side of
+        ADR-0013's boundary and derived rather than stored for the same reason
+        ``source_is_visible_history`` is: two copies of one series is a drift trap.
+
+        ``None`` where either half is missing — a record from before the position field
+        existed, or an episode with no source. A gap reads as unknown; substituting a
+        number there is how an un-measured detour would come to look like a converging
+        one.
+        """
+        source = self.source_xyz
+        if source is None:
+            return tuple(None for _ in self.steps)
+        return tuple(
+            None if row.position is None else row.position.horizontal_distance_to(source)
+            for row in self.steps
+        )
 
     @property
     def n_render_steps(self) -> int:

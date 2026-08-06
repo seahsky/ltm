@@ -356,5 +356,133 @@ class TestTheSummaryIsReadable(unittest.TestCase):
         self.assertIn("SMOKE GREEN", all_pass.summary())
 
 
+class TestTheTallyOverN(unittest.TestCase):
+    """`tally` is pure, so *given n episodes of which some fail, does the run go red*
+    is the same third-row question `judge` answers, one denominator up. It is the
+    assertion a gate judging episode 0 could never make: at yield-1's 8/20 loop rate,
+    judging index 0 is a coin flip printed as a verdict."""
+
+    @staticmethod
+    def _verdict(*statuses):
+        """One episode's nine, from nine statuses."""
+        from earshot.task.smoke import Criterion, SmokeVerdict
+
+        return SmokeVerdict(criteria=tuple(
+            Criterion(n, "c{}".format(n), s, "detail {}".format(n))
+            for n, s in enumerate(statuses, start=1)))
+
+    @classmethod
+    def _all(cls, status):
+        return cls._verdict(*([status] * 9))
+
+    def test_every_episode_passing_is_the_only_green_for_a_non_rate_criterion(self):
+        from earshot.task.smoke import tally
+
+        run = tally([self._all(CriterionStatus.PASS)] * 20)
+        self.assertTrue(run.green)
+        self.assertEqual(run.n_episodes, 20)
+        self.assertEqual([t.n_pass for t in run.tallies], [20] * 9)
+
+    def test_one_failing_episode_reddens_a_criterion_that_must_hold_everywhere(self):
+        """19/20 renders is a run whose audio dropped a step, not a 95% pass."""
+        from earshot.task.smoke import tally
+
+        bad = self._verdict(*([CriterionStatus.FAIL] + [CriterionStatus.PASS] * 8))
+        run = tally([self._all(CriterionStatus.PASS)] * 19 + [bad])
+        self.assertIn(1, run.failed)
+        self.assertFalse(run.green)
+
+    def test_criterion_5_is_a_rate_and_a_partial_loop_rate_is_not_red(self):
+        """yield-1's ziup5kvtCCR: 8 of 20 resumed. That is a finding, not a broken gate."""
+        from earshot.task.smoke import tally
+
+        resumed = self._all(CriterionStatus.PASS)
+        aborted = self._verdict(*([CriterionStatus.PASS] * 4 + [CriterionStatus.FAIL]
+                                  + [CriterionStatus.PASS] * 4))
+        run = tally([resumed] * 8 + [aborted] * 12)
+        five = next(t for t in run.tallies if t.number == 5)
+        self.assertEqual((five.n_pass, five.n), (8, 20))
+        self.assertTrue(five.ok)
+        self.assertTrue(run.green)
+        self.assertIn("40%", five.line())
+
+    def test_a_loop_that_never_once_ran_is_the_vacuous_arm_and_goes_red(self):
+        from earshot.task.smoke import tally
+
+        aborted = self._verdict(*([CriterionStatus.PASS] * 4 + [CriterionStatus.FAIL]
+                                  + [CriterionStatus.PASS] * 4))
+        run = tally([aborted] * 20)
+        self.assertIn(5, run.failed)
+
+    def test_not_run_is_counted_apart_from_fail_and_is_still_not_green(self):
+        from earshot.task.smoke import tally
+
+        run = tally([self._all(CriterionStatus.NOT_RUN)])
+        self.assertFalse(run.green)
+        self.assertEqual([t.n_not_run for t in run.tallies], [1] * 9)
+        self.assertIn("NOT RUN", run.summary())
+
+    def test_no_episodes_is_red_rather_than_vacuously_green(self):
+        from earshot.task.smoke import tally
+
+        self.assertFalse(tally([]).green)
+
+    def test_the_failing_measurements_survive_into_the_tally(self):
+        """ADR-0014: a verdict with the numbers thrown away is not decidable."""
+        from earshot.task.smoke import tally
+
+        bad = self._verdict(*([CriterionStatus.FAIL] + [CriterionStatus.PASS] * 8))
+        run = tally([bad] * 20)
+        one = next(t for t in run.tallies if t.number == 1)
+        self.assertEqual(one.details, ("detail 1",) * 3)  # bounded, not all twenty
+        self.assertIn("detail 1", one.line())
+
+    def test_a_repeated_disclosure_collapses_but_is_not_dropped(self):
+        from earshot.task.smoke import SmokeVerdict, tally
+
+        one = SmokeVerdict(criteria=self._all(CriterionStatus.PASS).criteria,
+                           notes=("oracle STOP",))
+        run = tally([one] * 20)
+        self.assertEqual(run.notes.count("oracle STOP"), 1)
+
+    def test_per_episode_notes_are_bounded_and_say_how_many_were_dropped(self):
+        from earshot.task.smoke import MAX_TALLY_NOTES, SmokeVerdict, tally
+
+        run = tally([
+            SmokeVerdict(criteria=self._all(CriterionStatus.PASS).criteria,
+                         notes=("{} forwards collided".format(i),))
+            for i in range(20)
+        ])
+        self.assertEqual(len(run.notes), MAX_TALLY_NOTES + 1)
+        self.assertIn("further per-episode note(s) not shown", run.notes[-1])
+
+
+class TestItFindsEveryEpisodeOnDisk(unittest.TestCase):
+    """`episode_indices` reads filenames, not `summary.json`, because the summary is
+    written last and the run worth judging is often the one that did not finish."""
+
+    def test_it_returns_the_indices_in_order(self):
+        import json
+        import tempfile
+
+        from earshot.report.artifacts import run_paths
+        from earshot.task.smoke import episode_indices
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, episodes = run_paths(tmp)
+            episodes.mkdir(parents=True)
+            for i in (2, 0, 11):
+                (episodes / "ep{:04d}.audit.json".format(i)).write_text(json.dumps({}))
+            self.assertEqual(episode_indices(tmp), (0, 2, 11))
+
+    def test_no_episodes_directory_is_an_empty_tuple_rather_than_a_crash(self):
+        import tempfile
+
+        from earshot.task.smoke import episode_indices
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(episode_indices(tmp), ())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

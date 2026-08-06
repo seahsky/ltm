@@ -260,5 +260,101 @@ class TestNotifierFindsTheRepoRoot(unittest.TestCase):
                         "it is not the repo root and .env will never be found")
 
 
+class TestTheDigestFindsAndReadsASweep(unittest.TestCase):
+    """The fourth instance of the same class of bug, found in the yield-1 report.
+
+    `discover_run_digests` scanned `runs/<dir>/summary.json`, one level. A single run
+    writes there; a SWEEP writes `runs/<tag>/<scene>/summary.json`, one level further
+    down. So the yield-1 email said "No summary.json updated during this run — none
+    found" on the same page as "records: runs/yield-1/<scene>/summary.json".
+
+    And finding the file was only half of it: every column the digest rendered came from
+    `ablation.setting` / `n_memory_chosen` / `ltm_counts_final`, keys of the tree the
+    2026-08-06 reset deleted. Fixing the depth alone would have produced a table of `?`,
+    which reads as a run that produced nothing. Both halves are asserted here, against a
+    record written by the real `RunSummary.as_dict` rather than a hand-typed one.
+    """
+
+    @staticmethod
+    def _summary(scene, built=20, skipped=0, funnel=None):
+        from earshot.report.audit import FunnelStage
+        from earshot.task.runner import RunSummary
+
+        counts = {stage.name: 0 for stage in FunnelStage}
+        counts.update(funnel or {})
+        return RunSummary(run_dir="runs/x", scene_label=scene, n_episodes=built,
+                          funnel=counts,
+                          skipped=tuple(("ep{}".format(i), "no") for i in range(skipped)))
+
+    def _write(self, root, relative, summary):
+        import json
+
+        path = pathlib.Path(root) / relative / "summary.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(summary.as_dict()))
+        return path
+
+    def test_a_sweeps_summaries_are_two_levels_down_and_are_found(self):
+        from earshot.tools.notify.notify_email import discover_run_digests
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = pathlib.Path(tmp)
+            self._write(runs, "yield-2/sceneA", self._summary("sceneA"))
+            self._write(runs, "yield-2/sceneB", self._summary("sceneB"))
+            digests = discover_run_digests(runs, start_ts=0)
+            self.assertEqual({d["name"] for d in digests},
+                             {"yield-2/sceneA", "yield-2/sceneB"})
+
+    def test_a_single_run_one_level_down_still_works(self):
+        from earshot.tools.notify.notify_email import discover_run_digests
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = pathlib.Path(tmp)
+            self._write(runs, "solo", self._summary("sceneA"))
+            digests = discover_run_digests(runs, start_ts=0)
+            self.assertEqual([d["name"] for d in digests], ["solo"])
+
+    def test_a_summary_from_before_the_run_is_not_digested(self):
+        from earshot.tools.notify.notify_email import discover_run_digests
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = pathlib.Path(tmp)
+            self._write(runs, "old/sceneA", self._summary("sceneA"))
+            self.assertEqual(discover_run_digests(runs, start_ts=time.time() + 60), [])
+
+    def test_the_columns_read_the_schema_the_runner_actually_writes(self):
+        """No `?` anywhere: the digest and `RunSummary.as_dict` are the same schema."""
+        from earshot.tools.notify.notify_email import _digest_one
+
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self._summary("ziup5kvtCCR", built=20, skipped=5, funnel={
+                "RUN": 20, "T_ANOM_REACHED": 20, "ONSET_FIRED": 20,
+                "INVESTIGATE_ENTERED": 20, "SOURCE_REACHED": 8, "PRIMARY_RESUMED": 8})
+            path = self._write(tmp, "yield-2/ziup5kvtCCR", summary)
+            d = _digest_one(path.parent, path)
+            self.assertIsNone(d["error"])
+            self.assertEqual(d["scene"], "ziup5kvtCCR")
+            self.assertEqual((d["built"], d["skipped"]), (20, 5))
+            self.assertEqual(d["yield"], "80%")
+            self.assertEqual(d["PRIMARY_RESUMED"], "8/20 (40%)")
+            self.assertNotIn("?", "".join(str(v) for v in d.values() if v is not None))
+
+    def test_a_malformed_summary_is_a_warning_row_rather_than_a_crash(self):
+        from earshot.tools.notify.notify_email import _digest_one
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "summary.json"
+            path.write_text("{not json")
+            self.assertIn("malformed", _digest_one(path.parent, path)["error"])
+
+    def test_a_run_that_offered_nothing_reports_no_yield_rather_than_zero(self):
+        """`yield_report.aggregate` draws the same line: no data is not a measurement."""
+        from earshot.tools.notify.notify_email import _digest_one
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "empty", self._summary("sceneA", built=0, skipped=0))
+            self.assertEqual(_digest_one(path.parent, path)["yield"], "?")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

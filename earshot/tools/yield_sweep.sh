@@ -18,12 +18,22 @@
 # the funnel at n >> 1, none of which need memory or a detector.
 #
 # CONTINUE-ON-FAILURE, deliberately: one scene that cannot load must not cost the other
-# nineteen. Failures are listed at the end and the aggregate says how many scenes it is
-# over, so a partial sweep cannot read as a complete one.
+# nineteen. But continuing is not passing — the exit code is NONZERO if any scene failed.
+# yield-1 lost 12 of 20 scenes and emailed a green tick, because this script ended in an
+# unconditional `exit 0`. CLAUDE.md's rule is that a criterion which could not be
+# evaluated is never green, and a sweep missing 60% of its scenes is that rule's case.
+#
+# ONE DIRECTORY IS ONE RUN, enforced before any work starts. yield-1 reused its tag: the
+# per-scene ArtifactExistsError fired correctly on the scenes that already had records,
+# the sweep swallowed it, and `yield_report` then globbed the leftovers from the earlier
+# invocation in with the fresh ones. The 41% it printed was a pool of two runs with
+# nothing on disk saying so, under a line claiming failures were excluded. The pre-flight
+# below makes that arithmetic correct by construction rather than by inspection.
 #
 # Flags: --tag T, --n-episodes N (default 20), --max-steps M (default 250),
 #        --scenes "a b c" (default: every scene with a mesh), --category C, --limit N,
-#        --out-dir DIR (default runs/<tag>), --no-pull.
+#        --out-dir DIR (default runs/<tag>), --no-pull, --force (reuse a non-empty
+#        out-dir; mixes runs, and says so in the report).
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then :; else
   echo "ERROR: execute this script, don't source it — its exit calls would kill your shell." >&2
@@ -44,6 +54,7 @@ CATEGORY=""
 LIMIT=0
 OUT_DIR=""
 NO_PULL=0
+FORCE=0
 
 need_value() { [ "$1" -ge 2 ] || { echo "FATAL: $2 needs a value"; exit 2; }; }
 while [ $# -gt 0 ]; do
@@ -56,13 +67,35 @@ while [ $# -gt 0 ]; do
     --limit)       need_value $# "$1"; LIMIT="$2";      shift 2 ;;
     --out-dir)     need_value $# "$1"; OUT_DIR="$2";    shift 2 ;;
     --no-pull)     NO_PULL=1;                           shift ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    --force)       FORCE=1;                             shift ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
 done
 OUT_DIR="${OUT_DIR:-runs/$TAG}"
 
 banner() { printf '\n========== %s ==========\n' "$1"; }
+
+# --- ONE DIRECTORY IS ONE RUN --------------------------------------------
+# FIRST, before the pull, the env and the scene discovery, because it depends on nothing
+# but OUT_DIR and because the whole cost of getting it wrong is paid at the END: yield-1
+# ran for 1h17m and then pooled two invocations into a single 41% under a line claiming
+# it had not. Everything under OUT_DIR now came from this run, which is what makes
+# `yield_report`'s glob correct by construction rather than by inspection. The per-scene
+# ArtifactExistsError stays as the second line of defence; it cannot be the first,
+# because by the time it fires the scenes before it have already run.
+if [ -d "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
+  if [ "$FORCE" = 0 ]; then
+    echo "FATAL: $OUT_DIR already exists and is not empty."
+    echo "       One directory is one run. Re-using it mixes two sweeps into one"
+    echo "       aggregate with nothing on disk saying so — which is exactly what"
+    echo "       yield-1 did, and its 41% was a pool of two runs."
+    echo "       Pass a fresh --tag, or --force if replacing it is the intent."
+    exit 1
+  fi
+  echo "WARN: --force — reusing a non-empty $OUT_DIR. Records from an earlier run will"
+  echo "      be pooled into the aggregate below and cannot be told apart."
+fi
 
 # --- 1. self-update by re-exec (bash runs the body it loaded, not the file) -
 if [ "$NO_PULL" = 0 ]; then
@@ -73,9 +106,15 @@ if [ "$NO_PULL" = 0 ]; then
   if [ -n "$_self_before" ] && [ "$_self_before" != "$_self_after" ] && [ -z "${_REEXEC:-}" ]; then
     echo "  this script changed in the pull — re-execing the new body"
     export _REEXEC=1
+    # `--force` has to survive the re-exec or the new body refuses the out-dir the old
+    # body was told to reuse, and a deliberate overwrite turns into a FATAL half a second
+    # in. Held as a variable rather than a `$(...)`: a command substitution here runs
+    # under `pipefail` and its exit status is the re-exec's.
+    _force_flag=""
+    [ "$FORCE" = 1 ] && _force_flag="--force"
     exec bash "$0" --tag "$TAG" --n-episodes "$N_EPISODES" --max-steps "$MAX_STEPS" \
          ${SCENES:+--scenes "$SCENES"} ${CATEGORY:+--category "$CATEGORY"} \
-         --limit "$LIMIT" --out-dir "$OUT_DIR"
+         --limit "$LIMIT" --out-dir "$OUT_DIR" ${_force_flag:+--force}
   fi
 else
   banner "[1/4] git pull SKIPPED (--no-pull)"
@@ -143,8 +182,21 @@ fi
 echo "  $# scene(s): $*"
 mkdir -p "$OUT_DIR"
 
+# --- criterion 9's evidence, armed once around the whole sweep ------------
+# `reset_manifest --verify-absent` is a filesystem existence check over the delete set,
+# so it costs milliseconds and there is no reason a sweep should leave criterion 9
+# NOT_RUN. NOT_RUN is red (CLAUDE.md), and a criterion that is structurally red on every
+# ordinary run is one the reader learns to skip — which is how a never-armed canary read
+# as a pass in the first place. Green here means measured, not excused.
+HERM_BEFORE="$OUT_DIR/.hermeticity-before.json"
+if ! python -m earshot.tools.reset_manifest --verify-absent --when before > "$HERM_BEFORE"; then
+  echo "WARN: could not record the pre-run hermeticity check — criterion 9 will be NOT_RUN"
+  rm -f "$HERM_BEFORE"
+fi
+
 FAILED=""
 N_OK=0
+GATE_RED=""
 for scene in "$@"; do
   banner "[3/4] $scene"
   python -m earshot --run-dir "$OUT_DIR/$scene" --scene "$scene" \
@@ -154,8 +206,28 @@ for scene in "$@"; do
   if [ "$ec" -ne 0 ]; then
     echo "  WARN: $scene exited $ec — continuing"
     FAILED="$FAILED $scene"
-  else
-    N_OK=$((N_OK + 1))
+    continue
+  fi
+  N_OK=$((N_OK + 1))
+
+  # §8's nine over EVERY episode of this scene, not over episode 0. The gate reads the
+  # run directory the scene just wrote, so it costs no simulator time — and until now a
+  # sweep evaluated none of the nine at all: 20 scenes, 1h17m, zero criteria.
+  if [ -f "$HERM_BEFORE" ]; then
+    # stderr is NOT suppressed: `--verify-absent` prints "STILL PRESENT: <paths>" there,
+    # and that list is the entire diagnostic. A criterion 9 that went red with the reason
+    # discarded is the shape of failure this repo keeps paying for.
+    python -m earshot.tools.reset_manifest --verify-absent --when after \
+        > "$OUT_DIR/$scene/.hermeticity-after.json" \
+      && python -m earshot.tools.reset_manifest --write-record \
+           --run-dir "$OUT_DIR/$scene" --before "$HERM_BEFORE" \
+           --after "$OUT_DIR/$scene/.hermeticity-after.json" \
+           --commit "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+           >/dev/null \
+      || echo "  WARN: hermeticity incomplete for $scene — criterion 9 will not be green"
+  fi
+  if ! python -m earshot.task.smoke --run-dir "$OUT_DIR/$scene"; then
+    GATE_RED="$GATE_RED $scene"
   fi
 done
 
@@ -165,8 +237,24 @@ python -m earshot.tools.yield_report "$OUT_DIR"
 echo
 echo "  $N_OK of $# scene(s) completed."
 if [ -n "$FAILED" ]; then
-  echo "  FAILED (excluded from the totals above, so a partial sweep cannot read as a"
-  echo "  complete one):$FAILED"
+  # NOT "excluded from the totals above" — that line was false, and it was false in the
+  # direction that flatters. `yield_report` aggregates every summary.json under OUT_DIR;
+  # a scene that failed AFTER writing one is in the table. What the pre-flight guarantees
+  # is narrower and true: every record here came from THIS run.
+  echo "  FAILED:$FAILED"
+  echo "  A scene that failed after writing its summary.json is still counted above."
+  echo "  The totals are over the scenes with a record, not over the $# attempted."
+fi
+if [ -n "$GATE_RED" ]; then
+  echo "  SMOKE RED (§8 criteria, tallied over every episode):$GATE_RED"
 fi
 echo "  records: $OUT_DIR/<scene>/summary.json"
+echo "  why a detour ended: python -m earshot.tools.detour_report $OUT_DIR/<scene>"
+
+# CONTINUE-ON-FAILURE is about not abandoning the sweep, not about calling it a success.
+# yield-1 lost 12 of 20 scenes, pooled a second run's records into its headline, and
+# arrived as a green tick because this line used to read `exit 0`.
+if [ -n "$FAILED" ] || [ -n "$GATE_RED" ]; then
+  exit 1
+fi
 exit 0

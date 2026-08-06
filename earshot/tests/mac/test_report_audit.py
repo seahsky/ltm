@@ -129,6 +129,29 @@ class TestTheDerivedSeries(unittest.TestCase):
         self.assertAlmostEqual(summary["total_s"], 0.084)
         self.assertEqual(audit.n_render_steps, 3)
 
+    def test_distance_to_source_is_derived_from_the_position_and_the_source(self):
+        """The pairing that made `StepRecord.position` privileged, and the number
+        yield-1 could not produce: was the abandoned detour getting closer?"""
+        audit = EpisodeAudit(
+            source_xyz=Xyz(0.0, 0.0, 0.0),
+            steps=(StepRecord(0, 1e-3, position=Xyz(6.0, 0.0, 0.0)),
+                   StepRecord(1, 1e-3, position=Xyz(0.0, 0.0, 3.0)),
+                   StepRecord(2, 1e-3, position=Xyz(3.0, 9.9, 4.0))),
+        )
+        # Horizontal: the third row is 9.9 m up and still 5 m away, because a source a
+        # storey above is ADR-0003's fabricated audio, not a source 11 m distant.
+        self.assertEqual(audit.distance_to_source_history, (6.0, 3.0, 5.0))
+
+    def test_a_step_without_a_position_reads_none_rather_than_a_distance(self):
+        """Every record written before the field existed. Substituting a number there is
+        how an un-measured detour would come to look like a converging one."""
+        audit = EpisodeAudit(source_xyz=Xyz(0.0, 0.0, 0.0), steps=_steps())
+        self.assertEqual(audit.distance_to_source_history, (None, None, None))
+
+    def test_an_episode_with_no_source_has_no_distances(self):
+        audit = EpisodeAudit(steps=(StepRecord(0, 1e-3, position=Xyz(6.0, 0.0, 0.0)),))
+        self.assertEqual(audit.distance_to_source_history, (None,))
+
     def test_a_step_with_no_render_is_not_counted_as_rendered(self):
         """Smoke criterion 1 is "render count equals step count exactly", so a step
         whose audio did not render has to be visibly missing rather than assumed."""
@@ -208,6 +231,22 @@ class TestTheAuditRoundTrips(unittest.TestCase):
     def test_every_field_survives(self):
         original = self._audit()
         self.assertEqual(EpisodeAudit.from_dict(original.as_dict()), original)
+
+    def test_a_position_survives_the_json_as_a_position(self):
+        """`_steps()` deliberately carries none — it stands for a pre-yield-1 record —
+        so the new field needs its own round trip or it round-trips only as absent."""
+        original = EpisodeAudit(
+            source_xyz=Xyz(1.0, 0.0, 2.0),
+            steps=(StepRecord(0, 1e-3, position=Xyz(4.0, 0.25, -1.5)),
+                   StepRecord(1, 1e-3, position=None)),
+        )
+        restored = EpisodeAudit.from_dict(original.as_dict())
+        self.assertEqual(restored, original)
+        self.assertEqual(restored.steps[0].position, Xyz(4.0, 0.25, -1.5))
+        self.assertIsNone(restored.steps[1].position,
+                          "an absent position must not round-trip into the origin")
+        self.assertEqual(restored.distance_to_source_history,
+                         original.distance_to_source_history)
 
     def test_the_derived_keys_are_re_derived_rather_than_trusted(self):
         """A hand-edited history that disagrees with its own step rows must not survive.

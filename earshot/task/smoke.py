@@ -1,6 +1,16 @@
 """Task spec §8's nine acceptance criteria, judged off a run directory.
 
-    python -m earshot.task.smoke --run-dir runs/<tag>
+    python -m earshot.task.smoke --run-dir runs/<tag>              # every episode
+    python -m earshot.task.smoke --run-dir runs/<tag> --episode 3  # just one
+
+**The default is every episode, and it was not always.** ``judge_run_dir`` answers the
+nine over ONE episode, index 0, which is the right shape for the one-episode smoke this
+module was built for and the wrong shape for anything else. The yield-1 sweep ran twenty
+episodes in each of twenty scenes and evaluated none of them; had it called this module it
+would have judged episode 0 of twenty, and criterion 5 passed in 8 of those 20 — a coin
+flip printed as a gate. ``tally`` makes n the denominator, which is also the first time
+criteria 1/2/3/7 assert anything: "audio rendered at every step" is a claim about a run,
+not about the first episode of one.
 
 **The gate ticket 10's irreversible deletion commit hangs off.** Every criterion is
 answered from the artefacts a run already writes — ``env_report.json``, and each episode's
@@ -42,8 +52,13 @@ __all__ = [
     "CriterionStatus",
     "Criterion",
     "SmokeVerdict",
+    "CriterionTally",
+    "RunVerdict",
+    "RATE_CRITERIA",
     "judge",
     "judge_run_dir",
+    "judge_every_episode",
+    "tally",
     "main",
 ]
 
@@ -74,6 +89,21 @@ MIN_SCENE_VERTICES = 10_000
 # `env_report.json` does. `tests/mac/test_reset_manifest.py` asserts the two agree.
 HERMETICITY_NAME = "hermeticity.json"
 HERMETICITY_SCHEMA = "earshot.hermeticity/1"
+
+# Criteria that are a RATE over n rather than an assertion that must hold on every
+# episode. Only criterion 5 qualifies, and the line is between what the harness did and
+# what the agent did: 1/2/3/7 say the audio rendered live at every step within its
+# ceiling, 4 says the onset can only have been the anomaly, 6/8/9 say the artefacts and
+# the environment are what they claim — every one of those must hold in all n or the run
+# is not measuring what it says. Criterion 5 says the agent reached the source and got
+# back, which is the capability under study; demanding 20/20 of it turns the gate into a
+# performance bar and it goes red for the one reason that is a finding rather than a bug.
+#
+# It is not exempt, only re-shaped: `tally` still fails it at 0/n. That is ADR-0014's
+# vacuous arm — a loop that never once ran is a loop that is not wired, and the funnel
+# printing stage 6 for an episode that never reached the source is exactly how this
+# criterion was over-credited before ticket 26 enforced the ladder.
+RATE_CRITERIA = frozenset({5})
 
 
 class CriterionStatus(Enum):
@@ -134,6 +164,153 @@ class SmokeVerdict:
             )
         )
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class CriterionTally:
+    """One criterion counted across every episode of a run.
+
+    ``details`` keeps the measurement off the first few episodes that did not pass,
+    because ADR-0014's rule is that a box result is only decidable when it prints what it
+    measured, and "criterion 7: 18/20" without a number is a verdict with the evidence
+    thrown away. Bounded rather than complete: twenty identical failures say the same
+    thing three times over.
+    """
+
+    number: int
+    name: str
+    n_pass: int = 0
+    n_fail: int = 0
+    n_not_run: int = 0
+    details: Tuple[str, ...] = ()
+
+    @property
+    def n(self) -> int:
+        return self.n_pass + self.n_fail + self.n_not_run
+
+    @property
+    def ok(self) -> bool:
+        """Green iff every episode passed — unless this is a rate, which needs one."""
+        if self.n == 0:
+            return False
+        if self.number in RATE_CRITERIA:
+            return self.n_pass > 0
+        return self.n_pass == self.n
+
+    def line(self) -> str:
+        mark = "PASS" if self.ok else "FAIL"
+        rate = "{}/{}".format(self.n_pass, self.n)
+        if self.number in RATE_CRITERIA and self.n:
+            rate += " ({:.0%})".format(self.n_pass / self.n)
+        head = "  {}. {:<7} {:<34} {}".format(self.number, mark, self.name, rate)
+        if self.n_not_run:
+            head += "  [{} NOT RUN]".format(self.n_not_run)
+        if self.details:
+            head += "\n" + "\n".join("       {}".format(d) for d in self.details)
+        return head
+
+
+@dataclass(frozen=True)
+class RunVerdict:
+    """§8's nine criteria over every episode of one run, as counts rather than one verdict.
+
+    ``judge_run_dir`` answers "did episode 0 pass", which at a 40% loop rate is a coin
+    flip dressed as a gate — the yield-1 sweep ran twenty episodes a scene and judged
+    none of them. This is the same nine criteria with n as the denominator, so criteria
+    1/2/3/7 become a real assertion (they must hold at every step of every episode) and
+    criterion 5 becomes the funnel it always was.
+    """
+
+    n_episodes: int = 0
+    tallies: Tuple[CriterionTally, ...] = ()
+    notes: Tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def failed(self) -> Tuple[int, ...]:
+        return tuple(t.number for t in self.tallies if not t.ok)
+
+    @property
+    def green(self) -> bool:
+        return bool(self.tallies) and not self.failed
+
+    def summary(self) -> str:
+        lines = ["task spec §8 — acceptance criteria over {} episode(s):".format(
+            self.n_episodes)]
+        lines.extend(t.line() for t in self.tallies)
+        lines.extend("  note: {}".format(n) for n in self.notes)
+        lines.append(
+            "GREEN" if self.green else "RED — criteria {}".format(
+                ", ".join(str(n) for n in self.failed)))
+        return "\n".join(lines)
+
+
+# How many failing measurements a tally keeps per criterion. Three is enough to tell one
+# systematic failure from three unrelated ones and short enough to read in an email.
+MAX_TALLY_DETAILS = 3
+
+# Notes are per-episode, and two kinds arrive mixed: §8's required disclosures, which are
+# identical across episodes and collapse to one line, and the per-episode collision counts,
+# which carry different numbers every time and would otherwise print n of them. `judge`
+# emits the disclosures first, so first-seen order keeps them and the cap falls on the
+# numeric ones. The count of what was dropped is printed rather than elided silently —
+# CLAUDE.md's rule about a bounded report that reads as a complete one.
+MAX_TALLY_NOTES = 6
+
+
+def tally(verdicts: Sequence[SmokeVerdict]) -> RunVerdict:
+    """Pool per-episode verdicts into per-criterion counts. Pure.
+
+    Pure for the same reason ``judge`` is (ticket 19's third row): *given n episodes of
+    which some fail, does the run go red* is answerable on a Mac with injected verdicts,
+    and it is the assertion that a gate judging episode 0 could never make.
+
+    Criterion numbering comes from the verdicts rather than from a constant, so a
+    criterion added to ``judge`` shows up here without a second edit — but an episode
+    that is missing one is a shorter tuple, and ``n`` per criterion is therefore counted
+    rather than assumed equal to ``n_episodes``.
+    """
+    order: list = []
+    counts: dict = {}
+    for verdict in verdicts:
+        for criterion in verdict.criteria:
+            key = int(criterion.number)
+            if key not in counts:
+                order.append(key)
+                counts[key] = {"name": criterion.name, "pass": 0, "fail": 0,
+                               "not_run": 0, "details": []}
+            row = counts[key]
+            if criterion.status is CriterionStatus.PASS:
+                row["pass"] += 1
+            else:
+                row["fail" if criterion.status is CriterionStatus.FAIL else "not_run"] += 1
+                if len(row["details"]) < MAX_TALLY_DETAILS and criterion.detail:
+                    row["details"].append(criterion.detail)
+
+    tallies = tuple(
+        CriterionTally(
+            number=key,
+            name=counts[key]["name"],
+            n_pass=counts[key]["pass"],
+            n_fail=counts[key]["fail"],
+            n_not_run=counts[key]["not_run"],
+            details=tuple(counts[key]["details"]),
+        )
+        for key in sorted(order)
+    )
+    # Notes are per-episode disclosures (the oracle-STOP one is required by §8), and
+    # twenty copies of the same sentence is not a disclosure. De-duplicated in first-seen
+    # order rather than sorted, so the required disclosure keeps its position.
+    notes: list = []
+    for verdict in verdicts:
+        for note in verdict.notes:
+            if note not in notes:
+                notes.append(note)
+    if len(notes) > MAX_TALLY_NOTES:
+        dropped = len(notes) - MAX_TALLY_NOTES
+        notes = notes[:MAX_TALLY_NOTES] + [
+            "{} further per-episode note(s) not shown; the full set is in each "
+            "episode's audit.json".format(dropped)]
+    return RunVerdict(n_episodes=len(verdicts), tallies=tallies, notes=tuple(notes))
 
 
 def _metric(audit: EpisodeAudit, key: str) -> Optional[float]:
@@ -498,18 +675,55 @@ def judge_run_dir(run_dir: str, *, index: int = 0) -> SmokeVerdict:
     )
 
 
+def episode_indices(run_dir: str) -> Tuple[int, ...]:
+    """Every episode index with an audit record under ``run_dir``, in order.
+
+    Read off the filenames rather than off ``summary.json``'s ``n_episodes``, because
+    ``write_run_summary`` is written last and a run that crashed part way through has
+    episodes on disk and no summary over them. Judging what is there is the point: a gate
+    that needs the summary cannot judge the run that failed to produce one.
+    """
+    _, episodes = run_paths(run_dir)
+    if not episodes.is_dir():
+        return ()
+    found = []
+    for path in episodes.glob("ep*.audit.json"):
+        try:
+            found.append(int(path.name[2:6]))
+        except ValueError:  # not one of ours; ignore rather than crash the gate
+            continue
+    return tuple(sorted(found))
+
+
+def judge_every_episode(run_dir: str) -> RunVerdict:
+    """Judge every episode in ``run_dir`` and tally the nine criteria over all of them."""
+    indices = episode_indices(run_dir)
+    return tally([judge_run_dir(run_dir, index=i) for i in indices])
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--run-dir", required=True, help="a directory `python -m earshot` wrote")
-    parser.add_argument("--episode", type=int, default=0, help="episode index to judge")
+    parser.add_argument("--episode", type=int, default=None,
+                        help="judge ONE episode by index; default judges every episode "
+                             "in the run and tallies the criteria over all of them")
     args = parser.parse_args(argv)
 
     if not pathlib.Path(args.run_dir).is_dir():
         print("no such run directory: {}".format(args.run_dir))
         return 2
-    verdict = judge_run_dir(args.run_dir, index=args.episode)
-    print(verdict.summary())
-    return 0 if verdict.green else 1
+    if args.episode is not None:
+        verdict = judge_run_dir(args.run_dir, index=args.episode)
+        print(verdict.summary())
+        return 0 if verdict.green else 1
+    if not episode_indices(args.run_dir):
+        # NOT_RUN, never green: a run directory with no episodes is a gate with nothing
+        # to judge, and that has to read differently from nine passes.
+        print("no episode records under {} — nothing to judge".format(args.run_dir))
+        return 2
+    run_verdict = judge_every_episode(args.run_dir)
+    print(run_verdict.summary())
+    return 0 if run_verdict.green else 1
 
 
 if __name__ == "__main__":  # pragma: no cover
