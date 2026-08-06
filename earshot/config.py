@@ -130,6 +130,16 @@ class RunConfig:
     # that decouples the source from the primary goal, and the same-floor band.
     min_source_sep_m: float = 3.0
     max_source_dy_m: float = 1.0
+    # provenance: MEASURED — `detour-1`, the mirror of `min_source_sep_m`: that keeps the
+    # source off the GOAL, this keeps it off the AGENT.
+    #
+    # Spelled again rather than imported: ADR-0013 puts `config` at
+    # ("audio.config", "agent.config", "types"), so it cannot name `task.dataset`, where
+    # the rule and the measurement that set it live. All three of these builder numbers
+    # are duplicated that way and only this one is held — `tests/mac/test_config.py`
+    # asserts every one against `task.dataset`, which is the same mechanism
+    # `test_report_artifacts` uses for the notifier's copy of `summary.json`.
+    min_source_start_sep_m: float = 2.0
 
     # -- smoke criterion 7 ----------------------------------------------
     # provenance: fake — the per-step wall-clock ceiling, and §9 leaves it to the
@@ -181,6 +191,7 @@ class RunConfig:
             "clap": bool(self.clap),
             "min_source_sep_m": float(self.min_source_sep_m),
             "max_source_dy_m": float(self.max_source_dy_m),
+            "min_source_start_sep_m": float(self.min_source_start_sep_m),
             "audio_step_ceiling_s": float(self.audio_step_ceiling_s),
             "overwrite": bool(self.overwrite),
             "audio": dataclasses.asdict(self.audio),

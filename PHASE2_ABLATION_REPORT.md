@@ -3484,3 +3484,85 @@ GPU-free pre-screen that converts a multi-day ablation into an 8-minute decision
 `GATE_RESULT=` marker), `embodied_memory/scripts/build_instance_caption_corpus.py` (+`test_`),
 `scripts/race-caprl-gate.sh`. Commits lifelong `85e9dd9` / main `b258058`. Data:
 `runs/caprl-gate/{captions.json,gate.log}` (RACE).
+
+---
+
+# detour-1 — the detour budget is NOT the binding constraint: the approach STALLS outside 2 m, with a clean bimodal gap (RACE, 2026-08-06)
+
+**Run dir:** `runs/detour-1/ziup5kvtCCR` (20 episodes, one scene, S1, oracle STOP, `clap=False`).
+**Read with:** `python -m earshot.tools.detour_report runs/detour-1/ziup5kvtCCR`.
+**Supersedes:** the `yield-1` funnel, whose 41% yield pooled two or three invocations under one tag.
+
+## The question
+
+`yield-1` showed 12 of 20 episodes in `ziup5kvtCCR` resuming at *exactly* `onset_step + investigate_max_steps`.
+Two diagnoses fit that identically and imply opposite fixes: **short of steps** (120 is a `fake` constant argued from one synthetic 5.4 m source, so derive it per episode the way `t_anom` already is) or **the climb wandered** (a bigger budget then buys a longer wander at the cost of the primary find).
+Nothing on disk separated them: the record held `measured_rms` (an energy proxy for where the agent was) and `displacement_m` (that it moved at all), never *where*.
+`StepRecord.position` closed that gap; this is the first run that carries it.
+
+## The measurement
+
+`d_min` — the closest the agent ever got to the source during the detour — is **bimodal with no overlap**:
+
+| arm | n | `d_min`, every episode (m) |
+|---|---|---|
+| reached | 8 | 0.31, 0.49, 0.53, 0.56, 0.59, 0.63, 0.74, 0.78 |
+| abandoned | 12 | 2.06, 2.09, 2.13, 2.19, 2.34, 2.75, 2.76, 4.63, 4.64, 4.77, 5.97, 9.26 |
+
+A clean gap between 0.78 m and 2.06 m, a factor of 2.6, nothing in between.
+Seven of the twelve abandoned plateau in a tight **2.06–2.76 m** band.
+
+Medians by arm:
+
+| arm | n | detour steps | `d_onset` | closed | walked | walked/closed | collisions |
+|---|---|---|---|---|---|---|---|
+| abandoned | 12 | 121 | 8.19 | 3.04 | 10.75 | **2.3** | 0% |
+| reached | 8 | 121 | 6.00 | 5.43 | 13.58 | **2.4** | 0% |
+
+## What it establishes
+
+1. **The budget is not the binding constraint, and the derived-budget lever is CLOSED before it was built.**
+   Nothing was still converging when the 120-step budget cut it off — every abandoned detour had plateaued.
+   Four had sources within 4.2 m *and* 120 steps to cover them: ep 14 walked **16.74 m to close 0.36 m on a source 2.49 m away**; ep 12 walked 14.50 m to close 1.36 m; ep 19 walked 12.75 m to close 0.76 m.
+   More steps buy nothing for an agent that has stopped making progress.
+
+2. **The failing detours are not less efficient.** `walked/closed` is 2.3 abandoned against 2.4 reached.
+   Whatever stops them is not path quality.
+
+3. **"The climb wanders" was the symptom, not the mechanism.** The abandoned arm does move slower (~0.089 m/step against ~0.15), which is what an earlier displacement-only reading of `yield-1` called wandering — but at *identical* efficiency.
+   That is what a stalled agent looks like: turn, re-probe, turn again, rarely commit to a forward. The plateau causes the turning.
+
+4. **Distance barely predicts the outcome.** `d_onset` medians are 8.19 abandoned against 6.00 reached, with heavy overlap: ep 10 reached a source 8.56 m out; ep 14 failed one at 2.49 m.
+   Ep 16 stalled at 9.26 m having walked 4.75 m while ep 14 stalled at 2.13 m having walked 16.74 m — the same outcome from opposite behaviour, so the terminal approach is not failing by one mechanism.
+
+5. **Render noise is a weaker candidate than it looked.** The energy gradient is steepest near the source, so a noisy render should hurt *least* at 2 m, which is exactly where these stall.
+
+6. **One of the eight successes is degenerate.** Ep 18's `d_onset` is **0.75 m** — the source was already inside the arrival radius when the anomaly fired (INVESTIGATE at step 5, RESUME at step 7).
+   The builder enforces a 3 m keep-out from every *goal* but has no minimum from the agent's *start*, so an anomaly can sound at the agent's feet and count as a completed loop.
+   Honest Anomaly-response SR for this run is **7/20**, not 8/20. A minimum source-to-start separation is the fix and it will cost yield, so the denominator must be re-measured after it lands.
+
+## Reproducibility — 4 of 20 episodes flip between runs
+
+`yield-1` and `detour-1` ran the same scene under the same configuration (the only intervening code change records `StepRecord.position`, a read of an already-computed pose).
+Both funnels report 8/20 source-reached, but **not the same eight**:
+
+| | episodes |
+|---|---|
+| stable reached | 2, 4, 6, 8, 10, 18 |
+| stable abandoned | 0, 3, 7, 9, 11, 12, 13, 15, 16, 19 |
+| flipped to abandoned | 1, 14 |
+| flipped to reached | 5, 17 |
+
+The onset step is identical in all 20 episodes, so the trigger is deterministic.
+The audio is not: the calibration threshold moves up to ±13% between runs (ep 1: 0.01106 → 0.00958; ep 6: 0.01070 → 0.01180), separation up to 2.5 dB (ep 1: 41.74 → 39.25), and the live render at the trigger pose up to 24% (ep 1: 0.0995 → 0.0753).
+That is what a ray-traced geometric-acoustics renderer is. The onset survives it because the alarm sits ~40 dB over the bed.
+
+**Consequence for every future matrix:** per-episode outcome instability is ~20% here, so a paired S3−S1 delta needs repeats or a fixed seed before a per-episode difference means anything. The aggregate landing on 8/20 twice is partly luck.
+
+## Verdict
+
+Derived-budget lever **CLOSED without spending a matrix hour** — the second time this project's `$0`-gate-first discipline has pre-empted a build.
+The next lever is the **terminal approach**: what the CHECK does between 2 m and 0.8 m, and why seven of twelve detours settle just outside it.
+`investigate_max_steps = 120` stays as it is; it is not doing harm and it is not the limiter.
+
+**File index.** `earshot/tools/detour_report.py` (+`tests/mac/test_detour_report.py`), `StepRecord.position` and `EpisodeAudit.distance_to_source_history` in `earshot/report/audit.py`. Data: `runs/detour-1/ziup5kvtCCR` (RACE).

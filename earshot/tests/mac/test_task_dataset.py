@@ -328,6 +328,116 @@ class TestPlacement(unittest.TestCase):
             place_anomaly_source(episode, table(sofa=[Xyz(5.0, 0.9, 0.0)]))
 
 
+class TestTheSourceIsKeptOffTheAgentToo(unittest.TestCase):
+    """The mirror of the 3 m goal keep-out, and it was missing until `detour-1`.
+
+    That run's episode 18 placed a source 0.75 m from the agent's start — inside the
+    arrival radius before the anomaly had sounded — and it counted as a completed
+    anomaly-response loop: INVESTIGATE at step 5, RESUME at step 7. One of eight
+    successes was a source at the agent's feet, so 8/20 read honestly is 7/20.
+
+    Both arms, per ADR-0014: the near candidate is REJECTED and the far one is still
+    taken. A rule only ever seen accepting is a rule that has never run.
+    """
+
+    @staticmethod
+    def _episode(start=Xyz(0.0, 0.0, 0.0)):
+        """Primary goal 10 m out along +x, so the goal keep-out cannot be what fires."""
+        return make_episode(category="chair", start=start,
+                            goals=[make_goal(Xyz(10.0, 0.0, 0.0), category="chair")])
+
+    def test_a_source_at_the_agents_feet_is_rejected(self):
+        episode = self._episode()
+        near = table(chair=[Xyz(10.0, 0.0, 0.0)], sofa=[Xyz(1.0, 0.0, 0.0)])
+        with self.assertRaises(PlacementError) as caught:
+            place_anomaly_source(episode, near)
+        self.assertIn("at the start", str(caught.exception))
+        self.assertIn("1 at the start", str(caught.exception))
+
+    def test_a_source_beyond_the_bar_is_still_taken(self):
+        """The healthy arm: same geometry, the candidate moved past the bar."""
+        episode = self._episode()
+        far = table(chair=[Xyz(10.0, 0.0, 0.0)], sofa=[Xyz(0.0, 0.0, 5.0)])
+        placement = place_anomaly_source(episode, far)
+        self.assertEqual(placement.position, Xyz(0.0, 0.0, 5.0))
+
+    def test_the_near_candidate_loses_to_the_far_one_rather_than_failing_the_episode(self):
+        """Nearest-first would otherwise actively prefer the degenerate candidate."""
+        episode = self._episode()
+        both = table(chair=[Xyz(10.0, 0.0, 0.0)],
+                     sofa=[Xyz(1.0, 0.0, 0.0), Xyz(0.0, 0.0, 5.0)])
+        self.assertEqual(place_anomaly_source(episode, both).position, Xyz(0.0, 0.0, 5.0))
+
+    def test_the_bar_is_measured_from_the_start_not_from_the_goal(self):
+        """Move the START and the same candidate flips from legal to degenerate, with
+        the goal untouched — which is what makes this a different rule from `too_near`."""
+        candidate = table(chair=[Xyz(10.0, 0.0, 0.0)], sofa=[Xyz(0.0, 0.0, 5.0)])
+        self.assertTrue(place_anomaly_source(self._episode(), candidate))
+        moved = self._episode(start=Xyz(0.0, 0.0, 4.0))  # now 1 m from the candidate
+        with self.assertRaises(PlacementError) as caught:
+            place_anomaly_source(moved, candidate)
+        self.assertIn("1 at the start", str(caught.exception))
+
+    def test_the_bar_is_configurable_and_zero_restores_the_old_behaviour(self):
+        """Every yield measured before this rule is an overestimate, and reproducing one
+        needs the rule off rather than a correction applied to the number."""
+        episode = self._episode()
+        near = table(chair=[Xyz(10.0, 0.0, 0.0)], sofa=[Xyz(1.0, 0.0, 0.0)])
+        placement = place_anomaly_source(episode, near, min_start_sep_m=0.0)
+        self.assertEqual(placement.position, Xyz(1.0, 0.0, 0.0))
+
+    def test_it_is_counted_apart_from_too_near(self):
+        """On top of the goal and on top of the agent are different degeneracies; a
+        report that pooled them would name the wrong rule to revisit."""
+        episode = self._episode()
+        mixed = table(chair=[Xyz(10.0, 0.0, 0.0)],   # the goal itself: 0 m from itself
+                      sofa=[Xyz(9.0, 0.0, 0.0)],      # 1 m from the goal
+                      bed=[Xyz(1.0, 0.0, 0.0)])       # 1 m from the start
+        with self.assertRaises(PlacementError) as caught:
+            place_anomaly_source(episode, mixed)
+        message = str(caught.exception)
+        self.assertIn("2 too near", message)
+        self.assertIn("1 at the start", message)
+
+    def test_the_yield_report_can_read_the_new_rule_back_out(self):
+        """The skip reason is prose that `yield_report` parses; a rule it cannot parse
+        shows up as `unattributed` and the per-rule totals under-count by that much."""
+        from earshot.tools.yield_report import aggregate
+
+        episode = self._episode()
+        near = table(chair=[Xyz(10.0, 0.0, 0.0)], sofa=[Xyz(1.0, 0.0, 0.0)])
+        try:
+            place_anomaly_source(episode, near)
+        except PlacementError as exc:
+            reason = str(exc)
+        agg = aggregate([{"scene": "FAKE", "n_episodes": 0,
+                          "skipped": [{"episode_id": "0", "reason": reason}]}])
+        self.assertEqual(agg["rules"]["at_the_start"], 1)
+        self.assertEqual(agg["unattributed_skips"], 0)
+
+
+class TestTheConfigAndTheBuilderAgree(unittest.TestCase):
+    """ADR-0013 puts `config` at ("audio.config", "agent.config", "types"), so it cannot
+    import `task.dataset` and the builder's three numbers are spelled twice. That is the
+    drift trap ticket 24 named; this is the mechanism `test_report_artifacts` already
+    uses for the notifier's copy of `summary.json`, applied to all three."""
+
+    def test_every_placement_default_matches_the_builder(self):
+        import inspect
+
+        from earshot.config import RunConfig
+
+        signature = inspect.signature(place_anomaly_source)
+        cfg = RunConfig(run_dir="x")
+        for config_field, parameter in (("min_source_sep_m", "min_sep_m"),
+                                        ("max_source_dy_m", "max_dy_m"),
+                                        ("min_source_start_sep_m", "min_start_sep_m")):
+            self.assertEqual(
+                getattr(cfg, config_field), signature.parameters[parameter].default,
+                "RunConfig.{} and place_anomaly_source({}=) have drifted".format(
+                    config_field, parameter))
+
+
 class TestBuild(unittest.TestCase):
     def test_it_builds_what_it_can_and_reports_what_it_cannot(self):
         """Placement attrition is a scene property and is counted, never swallowed.
@@ -357,6 +467,30 @@ class TestBuild(unittest.TestCase):
         scene = dataset([make_episode(goals=[make_goal(Xyz(0.0, 0.0, 0.0))])])
         with self.assertRaises(PlacementError):
             build_anomaly_episodes(scene, anomaly_class="alarm", t_anom=30)
+
+    def test_the_empty_build_is_carried_on_the_raise_so_it_can_be_written_down(self):
+        """A 0% yield is the most informative point a denominator has, and yield-1 lost
+        it: `mL8ThkuaVTM` placed none of 99 candidates and left no record, so the yield
+        report aggregated the scenes that yielded something and called it the yield of
+        all of them. The message formats five reasons; the caller needs all of them."""
+        from earshot.task.dataset import EmptyDatasetError
+
+        goals = [make_goal(Xyz(0.0, 0.0, 0.0))]
+        scene = dataset([make_episode(episode_id=str(i), category="chair", goals=goals)
+                         for i in range(9)])
+        with self.assertRaises(EmptyDatasetError) as caught:
+            build_anomaly_episodes(scene, anomaly_class="alarm", t_anom=30)
+        error = caught.exception
+        self.assertEqual(error.scene_label, scene.scene_label)
+        self.assertEqual(error.build.episodes, ())
+        self.assertEqual(len(error.build.skipped), 9,
+                         "all nine, not the five the message formats")
+        self.assertTrue(all(why for _, why in error.build.skipped))
+
+    def test_it_is_still_a_placement_error_so_existing_handlers_hold(self):
+        from earshot.task.dataset import EmptyDatasetError
+
+        self.assertTrue(issubclass(EmptyDatasetError, PlacementError))
 
     def test_the_category_filter_is_on_the_primary_goal_only(self):
         """The source is still drawn from every category, which is what keeps a

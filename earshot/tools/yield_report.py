@@ -36,6 +36,10 @@ __all__ = ["RULE_PATTERNS", "aggregate", "format_report", "main"]
 # is the better fix and is noted on the ticket rather than done here.
 RULE_PATTERNS = (
     ("too_near", re.compile(r"(\d+)\s+too near")),
+    # Distinct from `too_near`: that one is "on top of the GOAL", this one is "on top of
+    # the AGENT". Pooling them would name the wrong rule to revisit, which is the whole
+    # reason this report is per-rule and not just per-scene.
+    ("at_the_start", re.compile(r"(\d+)\s+at the start")),
     ("on_another_floor", re.compile(r"(\d+)\s+on another floor")),
     ("no_view_point", re.compile(r"(\d+)\s+with no view point")),
 )

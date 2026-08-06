@@ -437,6 +437,26 @@ class TestTheTallyOverN(unittest.TestCase):
         self.assertEqual(one.details, ("detail 1",) * 3)  # bounded, not all twenty
         self.assertIn("detail 1", one.line())
 
+    def test_a_detail_names_the_episode_it_came_from(self):
+        """detour-1 printed criterion 5 three times, identical and anonymous:
+        "funnel stage 4 (INVESTIGATE_ENTERED)" with nothing saying which episode. That is
+        a measurement you cannot go and read."""
+        from earshot.task.smoke import tally
+
+        bad = self._verdict(*([CriterionStatus.FAIL] + [CriterionStatus.PASS] * 8))
+        good = self._all(CriterionStatus.PASS)
+        run = tally([good, bad, good, bad], labels=[0, 1, 2, 3])
+        one = next(t for t in run.tallies if t.number == 1)
+        self.assertEqual(one.details, ("ep 1: detail 1", "ep 3: detail 1"))
+
+    def test_unlabelled_verdicts_still_tally(self):
+        """`labels` is optional, so a caller with no episode identity is not broken."""
+        from earshot.task.smoke import tally
+
+        bad = self._verdict(*([CriterionStatus.FAIL] + [CriterionStatus.PASS] * 8))
+        one = next(t for t in tally([bad]).tallies if t.number == 1)
+        self.assertEqual(one.details, ("detail 1",))
+
     def test_a_repeated_disclosure_collapses_but_is_not_dropped(self):
         from earshot.task.smoke import SmokeVerdict, tally
 

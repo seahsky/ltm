@@ -57,6 +57,7 @@ from earshot.types import Xyz
 
 __all__ = [
     "PlacementError",
+    "EmptyDatasetError",
     "SourcePlacement",
     "AnomalyEpisode",
     "DatasetBuild",
@@ -65,6 +66,7 @@ __all__ = [
     "derive_t_anom",
     "place_anomaly_source",
     "build_anomaly_episodes",
+    "MIN_SOURCE_START_SEP_M",
 ]
 
 # provenance: source — `sim.world`'s action spec (`step_size_m=0.25`). One `move_forward`
@@ -94,6 +96,21 @@ T_ANOM_FRACTION = 0.5
 # passing. Three readings is the smallest number that is not one.
 T_ANOM_FLOOR_STEPS = 3
 
+# provenance: MEASURED — `detour-1`, 2026-08-06, and the one constant on this map that is
+# not a guess. That run's `d_min` (closest approach during the detour) came out bimodal
+# with no overlap: the eight detours that reached the source ended at 0.31-0.78 m, the
+# twelve that did not plateaued at 2.06-9.26 m. 2.0 m sits in the empty gap between them.
+#
+# So a source closer than this to the agent's start is one the agent is *already inside
+# the outcome of*: episode 18 of that run placed one 0.75 m away and the loop closed in
+# two steps, INVESTIGATE at 5 and RESUME at 7, counting as one of the eight successes.
+# Below the gap there is no detour to measure, which makes the episode a null dressed as
+# a pass — the failure mode §2.5 and ADR-0014 are both about.
+#
+# It costs yield, and the cost is not yet known: every yield measured before this rule
+# existed is an OVERESTIMATE and has to be re-measured, not adjusted.
+MIN_SOURCE_START_SEP_M = 2.0
+
 
 class PlacementError(ValueError):
     """No object in this scene can carry the anomaly source for this episode.
@@ -105,6 +122,30 @@ class PlacementError(ValueError):
     raises rather than returning a degenerate placement, because a source at the goal is
     the exact degeneracy this module exists to prevent.
     """
+
+
+class EmptyDatasetError(PlacementError):
+    """No episode in this scene could be built at all — a 0% yield, which is DATA.
+
+    Separate from ``PlacementError`` because the two are answered differently. One episode
+    that cannot be placed is attrition and gets skipped; a whole scene that cannot is the
+    most informative point a yield denominator has, and it must reach disk before the run
+    stops. It therefore carries the whole ``DatasetBuild`` — every candidate and its
+    reason — rather than the first five formatted into a message.
+
+    yield-1 is why. ``mL8ThkuaVTM`` offered 99 candidates and placed none, in both of that
+    tag's invocations. The raise happened before ``write_run_summary``, so the scene left
+    no record, so ``yield_report`` aggregated 19 scenes and called it the yield of 20 —
+    excluding the only one that yielded nothing.
+
+    It still raises. A run asked for episodes and produced none, and that is a failure for
+    whoever asked; what changes is that the failure is now written down first.
+    """
+
+    def __init__(self, message: str, *, scene_label: str, build: "DatasetBuild") -> None:
+        super().__init__(message)
+        self.scene_label = scene_label
+        self.build = build
 
 
 @dataclass(frozen=True)
@@ -327,6 +368,7 @@ def place_anomaly_source(
     *,
     min_sep_m: float = 3.0,
     max_dy_m: float = 1.0,
+    min_start_sep_m: float = MIN_SOURCE_START_SEP_M,
 ) -> SourcePlacement:
     """Choose the one positioned source for this episode, or raise.
 
@@ -336,6 +378,22 @@ def place_anomaly_source(
        object standing at it.
     2. It clears ``min_sep_m`` in ``xz`` from **every** primary goal view point and
        object position — the decoupling.
+    2b. It clears ``min_start_sep_m`` in ``xz`` from the episode START, so there is an
+       investigation to run at all.
+
+       **The mirror of rule 2, and it was missing.** Rule 2 keeps the source away from
+       the *goal*; nothing kept it away from the *agent*. `detour-1`'s episode 18 placed
+       one 0.75 m from the start — inside the arrival radius before the anomaly had
+       sounded — and it counted as a completed anomaly-response loop: INVESTIGATE at step
+       5, RESUME at step 7, two steps of detour. One of that run's eight successes was a
+       source already at the agent's feet, which makes 8/20 read as 7/20 honestly.
+
+       It is measured against the start rather than against the pose at ``t_anom``,
+       because the builder runs before anything is simulated and the agent's position
+       when the anomaly fires is not knowable here. The start is a lower bound on it in
+       the only direction that matters: an agent that has walked away from a source
+       placed ``min_start_sep_m`` off has a real detour either way, and one that has
+       walked *toward* it was heading there anyway.
     3. It is within ``max_dy_m`` in ``y`` of **both** the primary anchor and the episode
        start — ADR-0010's floor rule, checked **before** the nearest-first tie-break,
        which would otherwise actively prefer a cross-floor candidate for being ``xz``-near.
@@ -369,7 +427,7 @@ def place_anomaly_source(
 
     # (separation, same_category, category, position, object_id)
     qualifying: List[Tuple[float, bool, str, Xyz, Optional[str]]] = []
-    n_too_near = n_wrong_floor = n_no_view_point = 0
+    n_too_near = n_wrong_floor = n_no_view_point = n_at_the_start = 0
     for category in sorted(table):
         for goal in table[category]:
             position = _first_view_point(goal)
@@ -381,6 +439,12 @@ def place_anomaly_source(
             )
             if separation < float(min_sep_m):
                 n_too_near += 1
+                continue
+            # Counted apart from `too_near`: "the source would be on top of the goal" and
+            # "the source would be on top of the agent" are different degeneracies, and a
+            # yield report that pooled them would name the wrong rule to revisit.
+            if position.horizontal_distance_to(start) < float(min_start_sep_m):
+                n_at_the_start += 1
                 continue
             if abs(position.height_difference_to(anchor)) > float(max_dy_m) or abs(
                 position.height_difference_to(start)
@@ -413,15 +477,18 @@ def place_anomaly_source(
             else ""
         )
         raise PlacementError(
-            "no object in {} is >= {:.2f} m (xz) from every {!r} goal AND within "
-            "{:.2f} m in y of BOTH the primary anchor and the episode start (rejected: "
-            "{} too near, {} on another floor, {} with no view point). The scene cannot "
-            "express a decoupled anomaly response for this episode.{}".format(
+            "no object in {} is >= {:.2f} m (xz) from every {!r} goal AND >= {:.2f} m "
+            "(xz) from the episode start AND within {:.2f} m in y of BOTH the primary "
+            "anchor and the episode start (rejected: {} too near, {} at the start, "
+            "{} on another floor, {} with no view point). The scene cannot express a "
+            "decoupled anomaly response for this episode.{}".format(
                 episode.scene_label,
                 float(min_sep_m),
                 primary_category,
+                float(min_start_sep_m),
                 float(max_dy_m),
                 n_too_near,
+                n_at_the_start,
                 n_wrong_floor,
                 n_no_view_point,
                 cross_floor,
@@ -454,6 +521,7 @@ def build_anomaly_episodes(
     n_episodes: Optional[int] = None,
     min_sep_m: float = 3.0,
     max_dy_m: float = 1.0,
+    min_start_sep_m: float = MIN_SOURCE_START_SEP_M,
 ) -> DatasetBuild:
     """Build up to ``n_episodes`` anomaly episodes from one scene's ObjectNav episodes.
 
@@ -471,6 +539,14 @@ def build_anomaly_episodes(
     aborting the build — a scene that can express three of its episodes should run three.
     An empty result raises, because a build that produced nothing and said so only in a
     list is a run that would otherwise start and immediately do nothing.
+
+    **The empty result is still a measurement**, and it raises as ``EmptyDatasetError``
+    carrying the whole build so the caller can write it down before the run stops. That
+    distinction cost the yield-1 sweep its most informative scene: ``mL8ThkuaVTM`` offered
+    99 candidates and could place none of them — a true 0% yield, the single number a
+    denominator most wants — and because the raise carried nothing but a message, the
+    scene left no ``summary.json`` and ``yield_report`` never saw it. The tool that
+    measures attrition was blind to total attrition, in the direction that flatters.
     """
     table = goal_table(dataset)
     candidates = [
@@ -493,7 +569,8 @@ def build_anomaly_episodes(
             break
         try:
             placement = place_anomaly_source(
-                episode, table, min_sep_m=min_sep_m, max_dy_m=max_dy_m
+                episode, table, min_sep_m=min_sep_m, max_dy_m=max_dy_m,
+                min_start_sep_m=min_start_sep_m,
             )
         except PlacementError as exc:
             skipped.append((episode.episode_id, str(exc)))
@@ -508,11 +585,13 @@ def build_anomaly_episodes(
         )
 
     if not built:
-        raise PlacementError(
+        raise EmptyDatasetError(
             "no episode in {} could be built ({} candidate(s), all skipped):\n  {}".format(
                 dataset.scene_label,
                 len(candidates),
                 "\n  ".join("{}: {}".format(eid, why) for eid, why in skipped[:5]),
-            )
+            ),
+            scene_label=dataset.scene_label,
+            build=DatasetBuild(episodes=(), skipped=tuple(skipped)),
         )
     return DatasetBuild(episodes=tuple(built), skipped=tuple(skipped))

@@ -107,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--min-source-sep-m", type=float, default=defaults.min_source_sep_m)
     parser.add_argument("--max-source-dy-m", type=float, default=defaults.max_source_dy_m)
+    parser.add_argument("--min-source-start-sep-m", type=float,
+                        default=defaults.min_source_start_sep_m)
     parser.add_argument(
         "--audio-step-ceiling-s",
         type=float,
@@ -146,6 +148,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         clap=bool(args.clap),
         min_source_sep_m=float(args.min_source_sep_m),
         max_source_dy_m=float(args.max_source_dy_m),
+        min_source_start_sep_m=float(args.min_source_start_sep_m),
         audio_step_ceiling_s=float(args.audio_step_ceiling_s),
         overwrite=bool(args.overwrite),
     )
