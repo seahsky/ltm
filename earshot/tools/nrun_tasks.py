@@ -314,9 +314,11 @@ def format_plan(task: NrunTask) -> str:
     this?" confirmation — the one string that must not lie.
     """
     mode, targets = kill_targets(task)
+    # No PGID line: `MODE`+`TARGETS` already say what will be signalled, and a field the
+    # menu does not read is a field that can drift out from under it unnoticed. The pgid
+    # is in `--json` for anyone debugging the classification itself.
     return "\n".join([
         "PID {}".format(task.pid),
-        "PGID {}".format(task.pgid),
         "STARTED {}".format(task.started),
         "ELAPSED {}".format(format_elapsed(task.etimes)),
         "COMMAND {}".format(task.command),
