@@ -232,6 +232,8 @@ class CalibrationRecord:
     n_poses: int
     global_volume: float
     passed: bool = True
+    render_scatter: Optional[float] = None
+    scatter_repeats: int = 0
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -241,6 +243,14 @@ class CalibrationRecord:
             "n_poses": int(self.n_poses),
             "global_volume": float(self.global_volume),
             "passed": bool(self.passed),
+            # The climb's threshold, per episode. `None` means it was not measured, and
+            # the run then used the pre-`detour-2` `1e-6` — a distinction the record has
+            # to keep, because "the windowed rule ran" and "the windowed rule ran against
+            # a real noise floor" are different claims about the same run.
+            "render_scatter": (
+                None if self.render_scatter is None else float(self.render_scatter)
+            ),
+            "scatter_repeats": int(self.scatter_repeats),
         }
 
     @classmethod
@@ -252,6 +262,11 @@ class CalibrationRecord:
             n_poses=int(data["n_poses"]),
             global_volume=float(data["global_volume"]),
             passed=bool(data.get("passed", True)),
+            render_scatter=(
+                None if data.get("render_scatter") is None
+                else float(data["render_scatter"])
+            ),
+            scatter_repeats=int(data.get("scatter_repeats", 0)),
         )
 
 

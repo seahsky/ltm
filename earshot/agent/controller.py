@@ -62,6 +62,8 @@ __all__ = [
     "InvestigationEvent",
     "ControllerState",
     "ControllerDecision",
+    "RISING_WINDOW",
+    "is_rising",
     "realizable_investigate_step",
     "realizable_investigate_probe",
     "is_diverting",
@@ -86,12 +88,72 @@ ACT_TURN_RIGHT = "turn_right"
 ACT_STOP = "stop"
 
 
+# How many readings back the rise is judged against. One (the old behaviour) compares two
+# adjacent samples, and `detour-2` measured what that costs: 325 of 336 plateau windows
+# were a SINGLE step with zero travel — the agent leaving FORWARD for one tick and turning
+# — while the windows that could be fitted showed the cue was recoverable (sig/sc 6.12 and
+# 7.41, both arms, both runs). Five is the scale of those dropouts and still short against
+# a 121-step detour, so a real climb is blunted by at most a few steps.
+RISING_WINDOW = 5
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(float(v) for v in values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return 0.5 * (ordered[middle - 1] + ordered[middle])
+
+
+def is_rising(
+    energy_history: Sequence[float],
+    *,
+    eps: float,
+    window: int = RISING_WINDOW,
+) -> bool:
+    """Is the agent getting louder, judged against a window rather than one sample?
+
+    Two changes from the single-step test this replaces, and both are forced by measurement
+    rather than taste:
+
+    **The baseline is a median, not the previous reading.** One unlucky render on a rising
+    gradient used to answer "not rising" and send the agent into a turn. A median over the
+    preceding ``window`` readings needs most of them to be wrong before it moves, and the
+    renderer's disagreement is scatter about a level rather than a trend.
+
+    **``eps`` is the renderer's own scatter, passed in per episode** (`calibration.
+    render_scatter`), not a constant. The value it replaces was ``1e-6`` against a measured
+    residual of ~2.8e-3 — about three thousand times too small, which makes the comparison
+    a coin flip wherever the field is flat. A threshold at 1 sigma asks the rise to clear
+    the noise it is being read through.
+
+    Short histories degrade to the old behaviour by construction: with one prior reading
+    the median IS that reading, so early steps behave as they always did.
+
+    **Rotations are not filtered out, deliberately.** `turn_left`/`turn_right` change the
+    measured RMS without changing distance (see below), so a forward-only baseline is the
+    tempting fix — but which action produced a reading is decided *after* the controller
+    runs, and threading it back turns a pure predicate into a stateful one for a correction
+    the median already absorbs: a turn-driven reading is scatter about the pose's level,
+    which is exactly what a median is robust to. If the turn contamination turns out to be
+    biased rather than symmetric, that is the next thing to measure, and the per-step
+    record already carries the action to measure it with.
+    """
+    history = [float(e) for e in energy_history if e is not None]
+    if len(history) < 2:
+        return True  # nothing to compare against yet, so probe forward
+    current = history[-1]
+    baseline = history[-(int(window) + 1) : -1]
+    return current > _median(baseline) + float(eps)
+
+
 def realizable_investigate_step(
     energy_history: Sequence[float],
     lateral_sign: int,
     visual_confirm: bool,
     *,
     eps: float = 1e-6,
+    window: int = RISING_WINDOW,
 ) -> str:
     """One greedy step of realizable anomaly-source localization (ADR-0011). Carried verbatim.
 
@@ -128,9 +190,7 @@ def realizable_investigate_step(
     history = [float(e) for e in energy_history if e is not None]
     if not history:
         return ACT_FORWARD  # no reading yet, probe forward
-    current = history[-1]
-    previous = history[-2] if len(history) >= 2 else None
-    rising = previous is None or current > previous + float(eps)
+    rising = is_rising(history, eps=eps, window=window)
     if visual_confirm and not rising:
         return ACT_STOP
     if rising:
@@ -321,6 +381,7 @@ def step_controller(
     lateral_sign: int = 0,
     visual_confirm: bool = False,
     pose: Optional[Pose] = None,
+    rising_eps: float = 1e-6,
 ) -> Tuple[ControllerState, ControllerDecision]:
     """Advance the machine one tick. Returns ``(next_state, decision)``.
 
@@ -367,7 +428,8 @@ def step_controller(
                 )
                 if realizable:
                     entry = realizable_investigate_step(
-                        energy_history or [], lateral_sign, visual_confirm
+                        energy_history or [], lateral_sign, visual_confirm,
+                        eps=rising_eps,
                     )
                     return nxt, ControllerDecision(
                         mode=NavMode.INVESTIGATE,
@@ -398,7 +460,7 @@ def step_controller(
         action = None
         if realizable:
             action = realizable_investigate_step(
-                energy_history or [], lateral_sign, visual_confirm
+                energy_history or [], lateral_sign, visual_confirm, eps=rising_eps
             )
         arrived = (action == ACT_STOP) if realizable else bool(arrived_at_source)
 
