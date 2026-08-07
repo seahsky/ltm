@@ -232,7 +232,15 @@ if [ -n "$missing" ]; then
   fi
 fi
 echo "  GL/EGL dev libs OK"
-echo "  nproc: $(nproc)  (threadCount is a free speed knob — ticket 06)"
+echo "  nproc: $(nproc)  (threadCount tops out ~4x here, not an order of magnitude)"
+# MEMORY, printed before anything can be killed by the lack of it. The box inventory
+# recorded cores, GPU, disk and GLIBC and never once recorded RAM, so the single
+# resource that can take the host down was the one nothing wrote down. `nproc` above is
+# deliberately still shown: the gap between it and the job count below IS the diagnosis
+# when a pod's quota is smaller than its node.
+awk '/MemTotal:|MemAvailable:/ {printf "  %-13s %.1f GiB\n", $1, $2/1048576}' \
+    /proc/meminfo 2>/dev/null || echo "  meminfo: unreadable"
+python "$REPO_ROOT/earshot/tools/build_jobs.py" >/dev/null || true
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
   | sed 's/^/  gpu: /' || echo "  gpu: nvidia-smi unavailable"
 
@@ -311,7 +319,25 @@ else
     echo "  stale half-configured build dir — wiping $SIM_DIR/build"
     rm -rf "$SIM_DIR/build"
   fi
-  export CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
+  # NOT `$(nproc)`, which is what this line used to say and which crashed the box.
+  # `nproc` ignores a cgroup CPU quota, so a four-CPU pod on a large node reports the
+  # node's count and starts that many compilers; and core count is the wrong budget
+  # anyway, because magnum's and bullet's heavy translation units peak in the low
+  # gigabytes each and memory is what runs out first. A build that OOMs the host does
+  # not fail, it takes the host down — and `nrun` then sends no mail, so the symptom is
+  # silence rather than a red run. `build_jobs.py` takes the smaller of the CPU budget
+  # and what RAM can hold, and prints its reasoning to stderr, into this log.
+  #
+  # Run by PATH, not `-m`: the env is half-built here and executing the file directly
+  # imports no package. A failure to compute it falls back to ONE job — slow, and the
+  # only fallback that cannot repeat the crash.
+  CMAKE_BUILD_PARALLEL_LEVEL="$(python "$REPO_ROOT/earshot/tools/build_jobs.py")"
+  case "${CMAKE_BUILD_PARALLEL_LEVEL:-}" in
+    ''|*[!0-9]*)
+      echo "  WARN: could not size the build — falling back to 1 job"
+      CMAKE_BUILD_PARALLEL_LEVEL=1 ;;
+  esac
+  export CMAKE_BUILD_PARALLEL_LEVEL
   # The conda cross-toolchain's triplet stops cmake searching Ubuntu's multiarch
   # dir, so magnum's find_package(OpenGL) misses the GLVND libs even with
   # libglvnd-dev installed. Point find_library/find_path at the system GL stack.
