@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, List, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from earshot.audio.clips import render_through_ir, rms
 
@@ -36,7 +36,10 @@ __all__ = [
     "CalibrationResult",
     "ANOMALY_LOW_PERCENTILE",
     "MIN_SEPARATION_DB",
+    "SCATTER_REPEATS",
     "sweep_anomaly_rms",
+    "sweep_render_scatter",
+    "render_scatter_of",
     "calibrate_onset",
     "band_poses",
 ]
@@ -81,6 +84,8 @@ class CalibrationResult:
     n_poses: int
     global_volume: float
     passed: bool = True
+    render_scatter: Optional[float] = None
+    scatter_repeats: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -94,6 +99,10 @@ class CalibrationResult:
             "n_poses": self.n_poses,
             "global_volume": self.global_volume,
             "passed": self.passed,
+            "render_scatter": (
+                None if self.render_scatter is None else float(self.render_scatter)
+            ),
+            "scatter_repeats": int(self.scatter_repeats),
         }
 
 
@@ -112,6 +121,59 @@ def sweep_anomaly_rms(
     silent unit error — the kind that shows up as a threshold that never fires.
     """
     return [rms(render_through_ir(render_at(pose), clip)) for pose in poses]
+
+
+# provenance: fake — how many times one pose is re-rendered to size the renderer's own
+# non-determinism. Three is the smallest n with a middle value, so a single outlier does
+# not become the estimate, and the cost is two extra renders per episode (~1.2 s against
+# `detour-2`'s 8m26s over 20 episodes, 0.3%). Raising it buys a tighter estimate and
+# nothing else; the consumer is a threshold, not a published number.
+SCATTER_REPEATS = 3
+
+
+def sweep_render_scatter(
+    pose: Any, render_at: Callable[[Any], Any], clip: Any, repeats: int = SCATTER_REPEATS
+) -> List[float]:
+    """The received RMS at **one** pose, rendered ``repeats`` times.
+
+    This is the measurement `detour-1` and `detour-2` both wanted and neither had. The
+    sweep above samples 16 poses at *different* distances, so its spread is the distance
+    gradient — the signal. Re-rendering a *fixed* pose holds distance, geometry and clip
+    constant, so everything left is the ray-traced renderer disagreeing with itself, which
+    is the quantity a "did it get louder?" test has to clear.
+
+    Same path as `sweep_anomaly_rms` deliberately: measured through `render_through_ir`,
+    because a threshold derived on the IR's own energy and applied to a received signal is
+    the silent unit error that file already warns about.
+    """
+    n = int(repeats)
+    if n < 2:
+        raise CalibrationError(
+            "render scatter needs at least 2 repeats to have a spread at all, got "
+            "{}".format(n)
+        )
+    return [rms(render_through_ir(render_at(pose), clip)) for _ in range(n)]
+
+
+def render_scatter_of(samples: Sequence[float]) -> float:
+    """Sample standard deviation of repeats at one pose. The noise floor of a comparison.
+
+    Sample (``n - 1``) rather than population, because these are a handful of draws from
+    the renderer's distribution and not the whole of it. With `SCATTER_REPEATS = 3` the
+    difference is a factor of 1.22 — not decorative at this n.
+
+    Zero is a legitimate return and is **not** special-cased: a renderer that agreed with
+    itself exactly across repeats would be a finding, and burying it under a floor would
+    hide it. The caller decides what a zero threshold means.
+    """
+    values = [float(v) for v in samples]
+    if len(values) < 2:
+        raise CalibrationError(
+            "render scatter needs at least 2 samples, got {}".format(len(values))
+        )
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return math.sqrt(variance)
 
 
 def _percentile(values: Sequence[float], percentile: float) -> float:
@@ -140,6 +202,7 @@ def calibrate_onset(
     global_volume: float = 1.0,
     low_percentile: float = ANOMALY_LOW_PERCENTILE,
     min_separation_db: float = MIN_SEPARATION_DB,
+    scatter_samples: Sequence[float] = (),
 ) -> CalibrationResult:
     """Place ``onset_rms`` strictly between the bed and the anomaly, or fail the gate.
 
@@ -153,6 +216,12 @@ def calibrate_onset(
     names ``globalVolume`` because that is the correction §2.3 allows. Deliberately
     *not* a returned ``passed=False`` result: a caller who can carry on past a failed
     gate is a caller who will.
+
+    ``scatter_samples`` are repeats at ONE pose (`sweep_render_scatter`), and they do not
+    touch the threshold — they ride along because the episode's own record is where a
+    per-episode noise estimate belongs, and because the climb downstream needs it. Empty
+    is allowed and leaves ``render_scatter`` None, which every consumer must read as "not
+    measured" rather than "zero".
     """
     bed = float(bed_rms)
     samples = [float(v) for v in anomaly_rms]
@@ -189,8 +258,11 @@ def calibrate_onset(
                 float(low_percentile), low, len(samples), float(global_volume),
             )
         )
+    scatter = [float(v) for v in scatter_samples]
     ordered = sorted(samples)
     return CalibrationResult(
+        render_scatter=render_scatter_of(scatter) if len(scatter) >= 2 else None,
+        scatter_repeats=len(scatter),
         onset_rms=math.sqrt(bed * low),
         bed_rms=bed,
         anomaly_low=low,

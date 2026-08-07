@@ -132,6 +132,43 @@ RISING_EPS = float(
 # so nothing is dropped silently, and `--min-span` moves it.
 DEFAULT_MIN_SPAN_M = 0.25
 
+# Where the histogram's buckets fall, in steps. The 1 bucket is its own because a
+# one-step window is the single-step test flickering rather than a stall, and 20+ is its
+# own because that is long enough for the agent to have translated somewhere had it
+# wanted to — `RISING_WINDOW` is 5, so a window four times that is not the estimator.
+LENGTH_BUCKETS = (1, 2, 5, 10, 20)
+
+# At or above this, a window is "long": counted separately so the share of plateaued
+# steps living in genuine stalls is readable next to the share living in dropouts.
+LONG_WINDOW_STEPS = 10
+
+
+def _length_histogram(windows: Sequence[Mapping[str, Any]]) -> List[Tuple[str, int]]:
+    """Window lengths bucketed, as ``(label, count)`` in ascending order.
+
+    Buckets rather than raw lengths because the question is which of two mechanisms owns
+    the mass, not what the exact distribution is. A list of pairs rather than a dict so
+    the order survives JSON without the reader having to re-sort it.
+    """
+    edges = list(LENGTH_BUCKETS)
+    counts = [0] * len(edges)
+    for window in windows:
+        steps = int(window.get("n_steps") or 0)
+        for index in reversed(range(len(edges))):
+            if steps >= edges[index]:
+                counts[index] += 1
+                break
+    labels: List[str] = []
+    for index, edge in enumerate(edges):
+        upper = edges[index + 1] if index + 1 < len(edges) else None
+        if upper is None:
+            labels.append("{}+".format(edge))
+        elif upper == edge + 1:
+            labels.append(str(edge))
+        else:
+            labels.append("{}-{}".format(edge, upper - 1))
+    return list(zip(labels, counts))
+
 
 def _median(values: Sequence[float]) -> Optional[float]:
     """Median, or None for an empty sample. Median rather than mean because n is ~10 and
@@ -456,6 +493,16 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
             "n_fitted": len(fitted),
             "window_steps": _median([w.get("n_steps") for w in windows]),
             "longest_steps": _median([t.get("longest_plateau_steps") for t in rows]),
+            # **The median is 1 and hides everything.** `detour-2` reported a median
+            # window of one step with zero travel while 60% of detour steps sat inside a
+            # window — arithmetic that only works if a long tail exists that the median
+            # cannot show. A tail of long, genuinely-stalled windows and a hail of
+            # one-step dropouts are different mechanisms with different fixes, so the
+            # distribution is reported rather than a middle value standing in for it.
+            "length_histogram": _length_histogram(windows),
+            "steps_in_long_windows": sum(
+                int(w.get("n_steps") or 0) for w in windows
+                if int(w.get("n_steps") or 0) >= LONG_WINDOW_STEPS),
             "d_start_m": _median([w.get("d_start_m") for w in windows]),
             "d_span_m": _median([w.get("d_span_m") for w in windows]),
             "slope_per_m": _median([w.get("slope_per_m") for w in fitted]),
@@ -551,6 +598,30 @@ def format_report(agg: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _histogram_lines(plateaus: Mapping[str, Any]) -> List[str]:
+    """Window length against count, per arm. What the median could not show."""
+    arms = [(name, plateaus.get(name) or {}) for name in (ABANDONED, REACHED)]
+    histograms = [(name, arm.get("length_histogram") or []) for name, arm in arms]
+    if not any(rows for _name, rows in histograms):
+        return []
+    labels = [label for label, _count in histograms[0][1]]
+    lines = ["", "  window length in steps, by count — a 1 is the test flickering, a long",
+             "  one is an agent that stayed put with room to move:"]
+    lines.append("  {:<12} {}".format(
+        "arm", " ".join("{:>6}".format(label) for label in labels)))
+    for name, rows in histograms:
+        lines.append("  {:<12} {}".format(
+            name, " ".join("{:>6}".format(count) for _label, count in rows)))
+    for name, arm in arms:
+        long_steps = arm.get("steps_in_long_windows")
+        if long_steps is None:
+            continue
+        lines.append(
+            "  {:<12} {} plateaued step(s) sit in windows of {}+ steps".format(
+                name, long_steps, LONG_WINDOW_STEPS))
+    return lines
+
+
 def _plateau_lines(agg: Mapping[str, Any]) -> List[str]:
     """The plateau half of the report: is the cue exhausted, or is the test missing it?"""
     plateaus = agg.get("plateaus") or {}
@@ -579,6 +650,7 @@ def _plateau_lines(agg: Mapping[str, Any]) -> List[str]:
     lines.append("  sig/sc is |slope| x d_span over the residual SD — above 1 the cue was")
     lines.append("  recoverable from these traces and the single-step test is what missed")
     lines.append("  it; below 1 the render buries it at this ray count.")
+    lines.extend(_histogram_lines(plateaus))
 
     for name in (ABANDONED, REACHED):
         arm = plateaus.get(name) or {}

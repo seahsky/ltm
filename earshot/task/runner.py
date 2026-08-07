@@ -70,6 +70,7 @@ from earshot.audio.calibration import (
     band_poses,
     calibrate_onset,
     sweep_anomaly_rms,
+    sweep_render_scatter,
 )
 from earshot.audio.clap import heard_clip_for_clap, is_anomaly
 from earshot.audio.clips import load_anomaly_clip, render_through_ir, resolve_anomaly_clip, rms
@@ -272,8 +273,22 @@ def calibrate_episode(
         return handle.audio_of(observation)
 
     samples = sweep_anomaly_rms(poses, render_at, clip)
+
+    # The renderer's disagreement with itself, measured at ONE pose so distance is held
+    # constant — the sweep above cannot supply this, because its 16 poses sit at different
+    # distances and its spread is the gradient rather than the noise. The MIDDLE pose by
+    # target distance, because `poses` comes back ordered by `band_poses` and the middle of
+    # the audible band is where the climb actually stalls: `detour-2` put the abandoned
+    # arm's plateau windows at a median 5.34 m and the reached arm's at 2.74 m.
+    scatter: List[float] = []
+    if poses:
+        scatter = sweep_render_scatter(poses[len(poses) // 2], render_at, clip)
+
     result = calibrate_onset(
-        cfg.audio.bed_rms, samples, global_volume=cfg.audio.global_volume
+        cfg.audio.bed_rms,
+        samples,
+        global_volume=cfg.audio.global_volume,
+        scatter_samples=scatter,
     )
     return result, poses
 
@@ -562,6 +577,15 @@ def run_episode(
             # back from the action, so the climb reacts to the wall it just hit rather
             # than to one it has not touched yet.
             pose=pose,
+            # The rise has to clear the renderer's own scatter, measured on THIS episode's
+            # geometry. `None` means the calibration did not measure it, and the fallback
+            # is the old `1e-6` — which is not a safe default so much as the previous
+            # behaviour, kept so a caller that skips the scatter render still runs. The
+            # audit records which of the two was in force.
+            rising_eps=(
+                1e-6 if calibration.render_scatter is None
+                else float(calibration.render_scatter)
+            ),
         )
         if state.mode is NavMode.INVESTIGATE or decision.mode is NavMode.INVESTIGATE:
             entered_investigate = True
@@ -781,6 +805,8 @@ def run_episode(
             n_poses=calibration.n_poses,
             global_volume=calibration.global_volume,
             passed=calibration.passed,
+            render_scatter=calibration.render_scatter,
+            scatter_repeats=calibration.scatter_repeats,
         ),
         audio_context=getattr(handle, "report", None),
         steps=tuple(steps),
