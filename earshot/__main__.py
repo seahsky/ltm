@@ -31,9 +31,11 @@ dataset. The smoke runs without it (§4.3: one sound, the anomaly by constructio
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 from typing import Optional, Sequence
 
+from earshot.agent.config import ControllerConfig
 from earshot.audio.clips import ANOMALY_CLASSES
 from earshot.config import Detector, Localization, RunConfig
 
@@ -116,6 +118,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="smoke criterion 7's per-step audio ceiling; recorded, asserted by the smoke",
     )
     parser.add_argument(
+        "--rising-eps-scale",
+        type=float,
+        default=defaults.controller.rising_eps_scale,
+        help=(
+            "multiples of the renderer's measured scatter a rise must clear; 0 lets the "
+            "median window do the work alone (detour-3 ran 1.0 and cost 4 of 7 reaches)"
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="replace artefacts already in --run-dir (they are refused by default)",
@@ -151,6 +162,8 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         min_source_start_sep_m=float(args.min_source_start_sep_m),
         audio_step_ceiling_s=float(args.audio_step_ceiling_s),
         overwrite=bool(args.overwrite),
+        controller=dataclasses.replace(
+            ControllerConfig(), rising_eps_scale=float(args.rising_eps_scale)),
     )
 
 

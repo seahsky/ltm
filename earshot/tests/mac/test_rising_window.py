@@ -28,7 +28,8 @@ from earshot.audio.calibration import (
     render_scatter_of,
     sweep_render_scatter,
 )
-from earshot.tools.detour_report import _length_histogram
+from earshot.__main__ import build_parser, config_from_args
+from earshot.tools.detour_report import _length_histogram, rising_flags
 
 # provenance: measured — the residual SD `detour-2` reported for both arms (2.8e-3
 # abandoned, 3.0e-3 reached). The old threshold, three thousand times smaller.
@@ -163,6 +164,45 @@ class RenderScatterTest(unittest.TestCase):
         """`None` and `0.0` mean opposite things and the record must not conflate them."""
         result = calibrate_onset(0.001, [0.01, 0.02, 0.03], scatter_samples=[])
         self.assertIsNone(result.as_dict()["render_scatter"])
+
+
+class EpsScaleReachesTheConfigTest(unittest.TestCase):
+    """A flag that quietly stops reaching the config is the bug this file guards.
+
+    The sweep this exists for is worthless if every cell silently runs the default, and
+    an overnight sweep cannot notice that it did.
+    """
+
+    def test_the_flag_lands_on_the_controller_config(self):
+        for scale in ("0.0", "0.45", "1.0"):
+            args = build_parser().parse_args(
+                ["--run-dir", "runs/x", "--rising-eps-scale", scale])
+            self.assertEqual(
+                config_from_args(args).controller.rising_eps_scale, float(scale))
+
+    def test_the_default_is_the_measured_ceiling_not_one_sigma(self):
+        """`detour-3` ran 1.0 and lost 4 of 7 reaches. The default must not be 1.0."""
+        args = build_parser().parse_args(["--run-dir", "runs/x"])
+        self.assertEqual(config_from_args(args).controller.rising_eps_scale, 0.45)
+
+
+class ReplayMatchesTheRuleTest(unittest.TestCase):
+    """`detour-3` at 68% agreement: the replay carried the rule's body as a copied line."""
+
+    def test_rising_flags_agrees_with_the_rule_step_for_step(self):
+        series = [0.010, 0.012, 0.0115, 0.014, 0.0135, 0.016, 0.0155, 0.018]
+        flags = rising_flags(series, eps=MEASURED_SCATTER)
+        expected = [
+            is_rising(series[: i + 1], eps=MEASURED_SCATTER) for i in range(len(series))
+        ]
+        self.assertEqual(flags, expected)
+
+    def test_a_replay_at_the_wrong_eps_disagrees(self):
+        """The control arm: this is what 68% looked like, reproduced deliberately."""
+        series = [0.0100, 0.0102, 0.0098, 0.0101, 0.0099, 0.0103, 0.0101]
+        self.assertNotEqual(
+            rising_flags(series, eps=MEASURED_SCATTER),
+            rising_flags(series, eps=OLD_EPS, window=1))
 
 
 class LengthHistogramTest(unittest.TestCase):

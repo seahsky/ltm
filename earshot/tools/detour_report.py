@@ -88,6 +88,8 @@ from earshot.agent.controller import (
     ACT_STOP,
     ACT_TURN_LEFT,
     ACT_TURN_RIGHT,
+    RISING_WINDOW,
+    is_rising,
     realizable_investigate_step,
 )
 from earshot.report.artifacts import ENV_REPORT_NAME, episode_paths, read_audit, run_paths
@@ -178,27 +180,33 @@ def _median(values: Sequence[float]) -> Optional[float]:
     return statistics.median(clean) if clean else None
 
 
-def rising_flags(rms: Sequence[float], *, eps: float = RISING_EPS) -> List[bool]:
+def rising_flags(
+    rms: Sequence[float], *, eps: float = RISING_EPS, window: int = RISING_WINDOW
+) -> List[bool]:
     """``realizable_investigate_step``'s own ``rising``, recomputed per step. Pure.
 
-    Carried verbatim from the rule::
-
-        rising = previous is None or current > previous + eps
+    **Delegates to `is_rising` rather than re-spelling it.** It used to carry the rule's
+    body as a copied line, and `detour-3` is what that cost: the controller moved to a
+    windowed median and this did not, so the replay agreed with the record on 68% of
+    steps and every window, slope and histogram in that report described a controller
+    that had not run. The rule is imported now, so the shape cannot drift the way the
+    constant already could not.
 
     **Computed over the WHOLE episode, then sliced to the detour** — never over the
     window alone. The controller's ``energy_history`` has been accumulating since step 0,
-    so at the first detour step ``previous`` is the reading from the step *before* the
-    onset, and a window-local recomputation would call that step rising by default and
-    invent a forward the agent never took. ``ENERGY_HISTORY`` is 8 and the rule reads two
-    entries, so the runner's trimming cannot affect this.
+    so at the first detour step the baseline is drawn from readings *before* the onset,
+    and a window-local recomputation would call that step rising by default and invent a
+    forward the agent never took.
+
+    ``ENERGY_HISTORY`` is 8 and `RISING_WINDOW` is 5, so the runner's trimming still
+    cannot affect this — but the margin is now 3 readings rather than 6. A window raised
+    past 7 would start reading history the agent had already discarded, and the replay
+    would silently diverge again.
     """
-    flags: List[bool] = []
-    previous: Optional[float] = None
-    for value in rms:
-        current = float(value)
-        flags.append(previous is None or current > previous + float(eps))
-        previous = current
-    return flags
+    return [
+        is_rising(rms[: index + 1], eps=float(eps), window=int(window))
+        for index in range(len(rms))
+    ]
 
 
 def rule_action(rising: bool, lateral_sign: Optional[int]) -> str:
@@ -417,7 +425,18 @@ def trace_one(
     # --- the plateau half ------------------------------------------------
     # `rising` over the WHOLE episode, then keyed back to the detour by step number.
     # See `rising_flags`: a window-local recomputation invents a forward at the onset.
-    all_flags = rising_flags([r.measured_rms for r in audit.steps])
+    # **The episode's OWN eps, off the record.** It is per-episode now (the renderer's
+    # measured scatter times a configured scale), so a replay that used a module default
+    # would be reconstructing a controller that never ran — which is exactly how
+    # `detour-3` came back at 68% agreement. Records written before the field landed
+    # carry None and fall back to the rule's signature default, which is what those runs
+    # actually used.
+    eps = getattr(audit, "rising_eps", None)
+    row["rising_eps"] = eps
+    all_flags = rising_flags(
+        [r.measured_rms for r in audit.steps],
+        eps=RISING_EPS if eps is None else float(eps),
+    )
     flag_by_step = {r.step: f for r, f in zip(audit.steps, all_flags)}
     flags = [flag_by_step[r.step] for r in steps]
 

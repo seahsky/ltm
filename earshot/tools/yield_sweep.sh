@@ -53,6 +53,7 @@ SCENES=""
 CATEGORY=""
 LIMIT=0
 OUT_DIR=""
+EPS_SCALE=""
 NO_PULL=0
 FORCE=0
 
@@ -68,6 +69,7 @@ while [ $# -gt 0 ]; do
     --out-dir)     need_value $# "$1"; OUT_DIR="$2";    shift 2 ;;
     --no-pull)     NO_PULL=1;                           shift ;;
     --force)       FORCE=1;                             shift ;;
+    --rising-eps-scale) need_value $# "$1"; EPS_SCALE="$2"; shift 2 ;;
     -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
@@ -114,6 +116,7 @@ if [ "$NO_PULL" = 0 ]; then
     [ "$FORCE" = 1 ] && _force_flag="--force"
     exec bash "$0" --tag "$TAG" --n-episodes "$N_EPISODES" --max-steps "$MAX_STEPS" \
          ${SCENES:+--scenes "$SCENES"} ${CATEGORY:+--category "$CATEGORY"} \
+         ${EPS_SCALE:+--rising-eps-scale "$EPS_SCALE"} \
          --limit "$LIMIT" --out-dir "$OUT_DIR" ${_force_flag:+--force}
   fi
 else
@@ -202,7 +205,8 @@ for scene in "$@"; do
   banner "[3/4] $scene"
   python -m earshot --run-dir "$OUT_DIR/$scene" --scene "$scene" \
       --n-episodes "$N_EPISODES" --max-steps "$MAX_STEPS" \
-      ${CATEGORY:+--category "$CATEGORY"}
+      ${CATEGORY:+--category "$CATEGORY"} \
+      ${EPS_SCALE:+--rising-eps-scale "$EPS_SCALE"}
   ec=$?
   if [ "$ec" -ne 0 ]; then
     # A scene that could place NO episode still writes its summary.json now
