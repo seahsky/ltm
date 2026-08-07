@@ -639,6 +639,12 @@ def run_episode(
                 # `measured_rms` on this row was rendered here, and pairing the energy
                 # with the place it was measured is the whole point of recording it.
                 position=pose.position,
+                # What the CUE said, beside what the agent DID. Since ticket 26 the two
+                # differ — the rule names a probe and the follower routes to it — and
+                # until now only the follower's half was written down, which left an
+                # analyst able to recompute the rule but with nothing to check the
+                # recomputation against.
+                realizable_action=decision.realizable_action,
             )
         )
 

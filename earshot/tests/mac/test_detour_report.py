@@ -12,17 +12,30 @@ reached ones are the control, and this asserts they are reported side by side (C
 a claim that X failed because of Y needs the arm where Y is absent).
 """
 
+import inspect
 import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
 
+from earshot.agent.controller import (
+    ACT_FORWARD,
+    ACT_STOP,
+    ACT_TURN_LEFT,
+    ACT_TURN_RIGHT,
+    realizable_investigate_step,
+)
 from earshot.report.audit import EpisodeAudit, FunnelStage, OnsetRecord, StepRecord
 from earshot.tools.detour_report import (
     ABANDONED,
     NO_DETOUR,
     REACHED,
+    RISING_EPS,
     aggregate,
+    fit_slope,
     format_report,
+    plateau_windows,
+    rising_flags,
+    rule_action,
     trace_one,
 )
 from earshot.types import Xyz
@@ -153,6 +166,224 @@ class TestTheTwoArms(unittest.TestCase):
         self.assertIn(ABANDONED, text)
         self.assertIn(REACHED, text)
         self.assertIn("carry no per-step position", text)
+
+
+def rms_steps(pairs, *, onset=ONSET_STEP, action=None, realizable=None, lateral=0):
+    """Steps from explicit ``(distance, measured_rms)`` pairs.
+
+    The helper above pins ``measured_rms`` at a constant because the questions it serves
+    are about distance. The plateau questions are about the *energy*, so this one lets a
+    test say what the render did at each pose — which is the whole input to `rising`.
+
+    ``realizable`` takes one action for every step, or a sequence for one per step. The
+    per-step form is what the reconstruction check needs: the FIRST detour step has no
+    predecessor in the window and so is always rising, and a test that hands it a turn is
+    asserting against the rule rather than against the tool.
+    """
+    per_step = realizable if isinstance(realizable, (list, tuple)) else [realizable] * len(pairs)
+    return tuple(
+        StepRecord(step=onset + i, measured_rms=float(rms), position=Xyz(float(d), 0.0, 0.0),
+                   displacement_m=0.25, lateral_sign=lateral, action=action,
+                   realizable_action=per_step[i])
+        for i, (d, rms) in enumerate(pairs)
+    )
+
+
+def rms_audit(pairs, *, stage=FunnelStage.INVESTIGATE_ENTERED, index=0, **kwargs):
+    return EpisodeAudit(
+        episode_index=index,
+        source_xyz=SOURCE,
+        funnel_stage=stage,
+        onset=OnsetRecord(onset_step=ONSET_STEP),
+        steps=rms_steps(pairs, **kwargs),
+    )
+
+
+class TestTheRulesOwnPredicate(unittest.TestCase):
+    """`rising` and the turn it implies, carried rather than re-invented."""
+
+    def test_the_epsilon_is_the_rules_own_default(self):
+        """The drift guard. Two copies of this constant is two controllers."""
+        signature = inspect.signature(realizable_investigate_step)
+        self.assertEqual(RISING_EPS, signature.parameters["eps"].default)
+
+    def test_the_first_reading_is_rising_and_a_repeat_is_not(self):
+        self.assertEqual(rising_flags([0.05, 0.05]), [True, False])
+
+    def test_a_rise_inside_epsilon_does_not_count(self):
+        """The rule needs `current > previous + eps`, not merely `>`."""
+        self.assertEqual(rising_flags([0.05, 0.05 + RISING_EPS / 2]), [True, False])
+        self.assertEqual(rising_flags([0.05, 0.05 + RISING_EPS * 10]), [True, True])
+
+    def test_the_rule_forwards_while_rising_and_turns_by_the_lateral_sign(self):
+        self.assertEqual(rule_action(True, -1), ACT_FORWARD)
+        self.assertEqual(rule_action(False, 1), ACT_TURN_RIGHT)
+        self.assertEqual(rule_action(False, -1), ACT_TURN_LEFT)
+
+    def test_an_ambiguous_or_absent_sign_scans_left_like_the_rule_does(self):
+        self.assertEqual(rule_action(False, 0), ACT_TURN_LEFT)
+        self.assertEqual(rule_action(False, None), ACT_TURN_LEFT)
+
+    def test_the_reconstruction_matches_the_rule_it_reconstructs(self):
+        """Both halves against the real function, not against a copy of its body."""
+        history = [0.05, 0.05, 0.06]
+        for i in range(1, len(history) + 1):
+            window = history[:i]
+            flag = rising_flags(window)[-1]
+            self.assertEqual(
+                rule_action(flag, -1),
+                realizable_investigate_step(window, -1, False),
+            )
+
+
+class TestPlateauWindows(unittest.TestCase):
+    def test_maximal_runs_of_not_rising_are_the_windows(self):
+        self.assertEqual(plateau_windows([True, False, False, True, False]),
+                         [(1, 3), (4, 5)])
+
+    def test_a_run_that_reaches_the_end_is_closed(self):
+        self.assertEqual(plateau_windows([True, False, False]), [(1, 3)])
+
+    def test_an_always_rising_climb_has_no_plateau(self):
+        self.assertEqual(plateau_windows([True, True, True]), [])
+
+    def test_a_flat_trace_is_one_window_not_many(self):
+        self.assertEqual(plateau_windows([False, False, False]), [(0, 3)])
+
+    def test_rising_is_computed_over_the_episode_not_the_detour(self):
+        """The specific bug: a window-local recompute calls the onset step rising.
+
+        The detour starts at ONSET_STEP + 1 here and the reading has not changed since the
+        step before it, so the agent was already plateaued when it diverted. Slicing first
+        and recomputing second would invent a FORWARD the agent never took.
+        """
+        row = trace_one(rms_audit([(3.0, 0.05), (3.0, 0.05), (3.0, 0.05)]))
+        self.assertEqual(row["n_plateaus"], 1)
+        self.assertEqual(row["plateau_steps"], 2)
+        self.assertEqual(row["plateaus"][0]["start_step"], ONSET_STEP + 1)
+
+
+class TestFitSlope(unittest.TestCase):
+    def test_a_clean_line_recovers_its_slope_and_scatters_nothing(self):
+        slope, resid = fit_slope([1.0, 2.0, 3.0, 4.0], [0.10, 0.08, 0.06, 0.04])
+        self.assertAlmostEqual(slope, -0.02)
+        self.assertAlmostEqual(resid, 0.0)
+
+    def test_two_points_fit_a_line_but_report_no_scatter(self):
+        """A line through two points leaves nothing to scatter; None, never 0.0, which
+        would read as a noiseless measurement rather than an unmeasurable one."""
+        slope, resid = fit_slope([1.0, 2.0], [0.10, 0.08])
+        self.assertAlmostEqual(slope, -0.02)
+        self.assertIsNone(resid)
+
+    def test_an_agent_that_never_moved_has_no_slope(self):
+        self.assertEqual(fit_slope([2.0, 2.0, 2.0], [0.05, 0.09, 0.04]), (None, None))
+
+    def test_one_point_is_not_a_fit(self):
+        self.assertEqual(fit_slope([2.0], [0.05]), (None, None))
+
+
+class TestTheTwoDiagnoses(unittest.TestCase):
+    """The measurement this half exists for: is the cue exhausted, or missed?"""
+
+    def test_a_real_plateau_reads_flat_while_the_agent_keeps_moving(self):
+        """The agent closes 1.25 m of gap and the render does not budge. Cue exhausted.
+
+        The window is the six steps AFTER the onset: the first detour step has nothing
+        before it inside the episode and so is rising by the rule's own definition.
+        """
+        row = trace_one(rms_audit([(3.0, 0.05)] + [(3.0 - 0.25 * i, 0.05) for i in range(1, 7)]))
+        window = row["plateaus"][0]
+        self.assertEqual(window["n_steps"], 6)
+        self.assertFalse(window["static"])
+        self.assertAlmostEqual(window["slope_per_m"], 0.0)
+        self.assertAlmostEqual(window["d_span_m"], 1.25)
+
+    def test_a_spurious_plateau_keeps_a_negative_slope_under_the_jitter(self):
+        """A live gradient the single-step test cannot see.
+
+        The agent is being carried AWAY from the source and the render tracks it: quieter
+        at every step, so `rising` is false at every step, so the rule answers a turn at
+        every step and the whole stretch is one window. But regressed against distance the
+        cue is unmistakable — louder near, quieter far, a clean negative slope well clear
+        of its own scatter. This is the (ii) signature: the field was informative and the
+        one-step comparison could not use it.
+        """
+        pairs = [(1.9, 0.0720),
+                 (2.0, 0.0700), (2.2, 0.0679), (2.4, 0.0662),
+                 (2.6, 0.0639), (2.8, 0.0621), (3.0, 0.0600)]
+        row = trace_one(rms_audit(pairs))
+        window = row["plateaus"][0]
+        self.assertEqual(window["n_steps"], 6)
+        self.assertLess(window["slope_per_m"], 0.0)
+        self.assertAlmostEqual(window["d_span_m"], 1.0)
+        # The rays-1 gate: the cue clears its own noise by a wide margin here, so a
+        # windowed estimator would have found it and the ray count is not the lever.
+        self.assertGreater(window["signal_to_scatter"], 1.0)
+
+    def test_an_agent_turning_in_place_is_static_and_its_slope_is_withheld(self):
+        """The ill-conditioned case, reported rather than regressed: no translation means
+        no test of the field, and a slope fitted here would be noise wearing a number."""
+        row = trace_one(rms_audit([(2.3, 0.05), (2.3, 0.06), (2.3, 0.04), (2.3, 0.07)]))
+        window = row["plateaus"][0]
+        self.assertTrue(window["static"])
+        self.assertIsNone(window["slope_per_m"])
+        self.assertIsNone(window["signal_to_scatter"])
+        self.assertEqual(row["n_static_plateaus"], 1)
+
+    def test_static_windows_are_counted_in_the_aggregate_not_dropped(self):
+        agg = aggregate([trace_one(rms_audit([(2.3, 0.05)] * 4, index=0))])
+        arm = agg["plateaus"][ABANDONED]
+        self.assertEqual(arm["n_windows"], 1)
+        self.assertEqual(arm["n_static"], 1)
+        self.assertEqual(arm["n_fitted"], 0)
+
+
+class TestTheReconstructionCheck(unittest.TestCase):
+    """ADR-0014's both arms: the check passing, and the check firing."""
+
+    def test_a_record_that_agrees_reads_as_fully_checked(self):
+        """Rising on the first detour step, plateaued after: FORWARD then two turns."""
+        row = trace_one(rms_audit(
+            [(3.0, 0.05), (2.8, 0.05), (2.6, 0.05)],
+            realizable=[ACT_FORWARD, ACT_TURN_LEFT, ACT_TURN_LEFT], lateral=-1))
+        self.assertEqual(row["n_rule_checked"], 3)
+        self.assertEqual(row["n_rule_agree"], 3)
+        self.assertEqual(aggregate([row])["rule_check"]["agreement"], 1.0)
+
+    def test_a_record_that_disagrees_is_caught_and_named(self):
+        """Forced failure: the trace is plateaued so the rule must answer a turn, and the
+        record says the cue answered FORWARD. Silence here would let every plateau above
+        rest on a model of the controller no one had tested."""
+        row = trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05), (2.6, 0.05)],
+                                  realizable=ACT_FORWARD, lateral=-1))
+        self.assertEqual(row["n_rule_checked"], 3)
+        self.assertEqual(row["n_rule_agree"], 1)  # the rising first step, and nothing else
+        text = format_report(aggregate([row]))
+        self.assertIn("DISAGREEMENT IS THE FINDING", text)
+
+    def test_a_stop_is_excluded_by_name_rather_than_counted_as_a_disagreement(self):
+        """The rule's STOP needs `visual_confirm`, which no record carries."""
+        row = trace_one(rms_audit([(3.0, 0.05), (0.4, 0.05)],
+                                  realizable=ACT_STOP, lateral=-1))
+        self.assertEqual(row["n_rule_checked"], 0)
+        self.assertEqual(row["n_rule_stop"], 2)
+
+    def test_a_pre_field_record_reads_unvalidated_and_says_so(self):
+        """yield-2's shape. 0/0 must never render as agreement."""
+        agg = aggregate([trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)]))])
+        self.assertEqual(agg["rule_check"]["n_checked"], 0)
+        self.assertIsNone(agg["rule_check"]["agreement"])
+        self.assertIn("RECONSTRUCTION UNVALIDATED", format_report(agg))
+
+    def test_the_plateau_table_names_both_arms(self):
+        text = format_report(aggregate([
+            trace_one(rms_audit([(3.0, 0.05)] * 4, index=0)),
+            trace_one(rms_audit([(3.0, 0.05), (0.4, 0.05)], index=1,
+                                stage=FunnelStage.PRIMARY_RESUMED)),
+        ]))
+        self.assertIn("plateau windows", text)
+        self.assertIn("sig/sc", text)
 
 
 if __name__ == "__main__":

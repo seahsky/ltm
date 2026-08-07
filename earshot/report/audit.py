@@ -98,6 +98,21 @@ class StepRecord:
     is its own pose, which §5.1 already carries as ``stopped_at_pose``. What makes this
     privileged is the *pairing* with ``source_xyz``, which is why the derived series
     lives on ``EpisodeAudit`` rather than on this row.
+
+    ``realizable_action`` is what the **cue** said, and ``action`` is what the agent
+    **did**. They are different since ticket 26 put a planner in the detour:
+    ``realizable_investigate_step`` now names a probe point and the follower routes to
+    it, so ``action`` is the follower's and the carried rule's own answer survived only
+    on ``ControllerDecision.realizable_action``, which nothing persisted.
+
+    That gap is why it is here. ``rising`` is exactly reconstructible from
+    ``measured_rms``, so an analyst can recompute what the rule *should* have answered —
+    but with no record of what it *did* answer there is nothing to check the
+    reconstruction against, and an unvalidated model of the controller is not a
+    measurement. Recording both makes the pair falsifiable: recomputed against recorded,
+    on data that already exists. ``None`` on a step where the rule did not run (the
+    oracle arm, or any step outside INVESTIGATE), which is a different claim from the
+    rule having answered nothing.
     """
 
     step: int
@@ -110,6 +125,7 @@ class StepRecord:
     collided: Optional[bool] = None
     displacement_m: Optional[float] = None
     position: Optional[Xyz] = None
+    realizable_action: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -123,6 +139,7 @@ class StepRecord:
             "collided": self.collided,
             "displacement_m": self.displacement_m,
             "position": None if self.position is None else list(self.position.as_tuple()),
+            "realizable_action": self.realizable_action,
         }
 
     @classmethod
@@ -142,6 +159,11 @@ class StepRecord:
             # a run from before this field means the distance is unknown, which the
             # derived series reports as None rather than as a distance to the origin.
             position=None if position is None else Xyz.from_sequence(position),
+            # Absent on every record written before this field landed, and absent reads
+            # as "the rule's answer was not recorded", never as "the rule answered
+            # nothing" — the plateau replay must be able to tell an unvalidatable old
+            # record from a step where the carried rule genuinely did not run.
+            realizable_action=data.get("realizable_action"),
         )
 
 
