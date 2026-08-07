@@ -248,6 +248,18 @@ def describe_environment() -> Dict[str, str]:
     These four are the identity of the thing under test: ``CUDA_VISIBLE_DEVICES``
     changes what the allocation probe even means, and ``HABITAT_SIM_LOG`` is the pin the
     audio guard's canary depends on.
+
+    **Memory is deliberately NOT here**, and the reason is this function's own rule. The
+    box inventory behind ``docs/race-box-runbook.md`` §1 recorded GLIBC, cores, GPU, disk
+    and mesh coverage but never RAM, which is the resource ``bootstrap_ss2.sh`` then
+    oversubscribed by sizing its build from ``nproc`` — a crash rather than a failure,
+    because the host dies and no report is sent. The obvious fix was to record it here.
+    ADR-0013's graph refused it: ``env_check`` imports nothing intra-package, because it
+    is what a half-built tree runs to find out what it is missing, and the layering gate
+    caught the attempt. Reading memory would mean either a second copy of
+    ``tools/build_jobs.py``'s cgroup arithmetic or a leaf that is no longer a leaf.
+    So the measurement lives with the build that needs it, in ``runs/ss2-bootstrap``, and
+    this docstring is the pointer rather than a silence someone rediscovers.
     """
     return {
         "python": sys.version.split()[0],
