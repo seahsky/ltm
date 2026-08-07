@@ -14,6 +14,12 @@
 # re-implementing its nohup/disown dance — that file is safe to source by construction
 # (it returns early) and copying four lines of detachment logic is how the two drift.
 #
+# IT CANNOT ACTIVATE CONDA FOR YOU. A child process never changes its parent's
+# environment, so neither this menu nor bootstrap (which activates ss2 inside its own
+# process, detached) can leave you sitting in ss2. Items that must run in the env use
+# `conda run -n ss2` explicitly; the menu tells you the `conda activate` line to run
+# yourself.
+#
 # Discovery, the log lookup and the kill-safety rule live in `earshot/tools/nrun_tasks.py`,
 # unit-tested on a Mac against captured `ps` output; this file reads its `--plan` output
 # and sends the signals. Everything with a real failure mode is on the tested side.
@@ -27,6 +33,25 @@ cd "$REPO_ROOT" || { echo "FATAL: cannot cd to repo root"; exit 1; }
 
 NOTIFY_RUN="$REPO_ROOT/earshot/tools/notify/notify-run.sh"
 LOG_DIR="$REPO_ROOT/runs"
+MINICONDA="${HOME}/miniconda3"
+SS2_ENV="ss2"
+
+# THE MENU CANNOT ACTIVATE ANYTHING IN YOUR SHELL, and bootstrap can't either — it
+# `conda activate`s inside its own process (and runs detached besides), so a green build
+# leaves your prompt exactly where it was. That is not fixable from here; only `source`
+# crosses a process boundary. What IS fixable is the wrong answer it invites: run
+# `env_check` with whatever `python3` the menu was launched under and it reports on `base`
+# — a red verdict on an env that is fine, or a green one on an env no episode will use.
+# So anything that must run INSIDE ss2 goes through `conda run -n ss2`, explicitly, and
+# never through an inherited interpreter.
+#
+# --no-capture-output because these are progress-printing tools; conda's default swallows
+# the stream and hands it back at the end, which reads as a hang on a multi-minute stage.
+SS2=("$MINICONDA/bin/conda" run -n "$SS2_ENV" --no-capture-output)
+
+# The task scan is deliberately NOT in ss2: it reads `ps` and `/proc` with the standard
+# library only, and requiring the env would make "what is running?" unanswerable on
+# exactly the broken-env day you most need to ask it.
 PY="${PYTHON:-python3}"
 TASKS=("$PY" -m earshot.tools.nrun_tasks --log-dir "$LOG_DIR")
 
@@ -44,6 +69,12 @@ if [ ! -t 0 ]; then
   exit 2
 fi
 
+if [ ! -x "$MINICONDA/bin/conda" ]; then
+  echo "FATAL: no conda at $MINICONDA/bin/conda — every env item here needs it."
+  echo "See docs/race-box-runbook.md for how the box is provisioned."
+  exit 1
+fi
+
 if [ ! -f "$NOTIFY_RUN" ]; then
   echo "FATAL: no notify-run.sh at $NOTIFY_RUN — broken checkout."
   exit 1
@@ -58,28 +89,65 @@ pause() {
 
 # --- env setup submenu -----------------------------------------------------
 
-env_menu() {
-  local choice
-  while true; do
-    cat <<'EOF'
+ss2_exists() {
+  [ -d "$MINICONDA/envs/$SS2_ENV" ]
+}
 
-  env setup
+# Said after every launch that builds or uses the env, because the one thing an operator
+# expects to happen here and never can is their prompt changing.
+say_activate() {
+  echo
+  echo "  NOTE: nothing here changes YOUR shell — a child process cannot activate an env"
+  echo "        in its parent. To work in ss2 yourself:"
+  echo "          conda activate $SS2_ENV"
+  echo "          source earshot/tools/notify/notify-run.sh   # and to get \`nrun\`"
+}
+
+env_menu() {
+  local choice ec
+  while true; do
+    if ss2_exists; then
+      echo
+      echo "  env setup — ss2 present at $MINICONDA/envs/$SS2_ENV"
+    else
+      echo
+      echo "  env setup — ss2 DOES NOT EXIST yet (option 2 builds it)"
+    fi
+    cat <<'EOF'
   ---------
-  1) env_check --strict     seconds, read-only — "is this env fine?"
+  1) env_check --strict     seconds, read-only — "is ss2 fine?" (runs inside ss2)
   2) bootstrap_ss2.sh       the ss2 rebuild, detached under nrun
-  3) stage ESC-50 clips     into data/anomaly_audio, detached
+  3) stage ESC-50 clips     into data/anomaly_audio, detached, inside ss2
   4) box_gate.sh            the box suite, detached
   b) back
 EOF
     read -r -p "  > " choice
     case "$choice" in
       1)
-        "$PY" -m earshot.env_check --strict
-        echo "  [earshot] env_check exit $?"
+        if ! ss2_exists; then
+          echo "  no $SS2_ENV env to check — build it with option 2 first."
+        else
+          "${SS2[@]}" python -m earshot.env_check --strict
+          ec=$?
+          echo "  [earshot] env_check exit $ec"
+        fi
         pause
         ;;
-      2) nrun bash earshot/tools/bootstrap_ss2.sh; pause ;;
-      3) nrun "$PY" -m earshot.audio.clips --out-dir data/anomaly_audio; pause ;;
+      2)
+        # NOT wrapped in `conda run`: bootstrap creates the env and does its own
+        # activation, so running it inside the env it is about to build is circular.
+        nrun bash earshot/tools/bootstrap_ss2.sh
+        say_activate
+        pause
+        ;;
+      3)
+        if ! ss2_exists; then
+          echo "  no $SS2_ENV env — build it with option 2 first."
+        else
+          nrun "${SS2[@]}" python -m earshot.audio.clips --out-dir data/anomaly_audio
+        fi
+        pause
+        ;;
       4) nrun bash earshot/tools/box_gate.sh; pause ;;
       b|B) return 0 ;;
       *) echo "  ? $choice" ;;
