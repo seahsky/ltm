@@ -30,23 +30,79 @@ invented constant deciding "converging" from "wandering", because the two are se
 by an order of magnitude in ``walked_per_metre_closed`` and a classifier would only hide
 which. Box results on this map have been decidable exactly when they printed what they
 measured (ADR-0014).
+
+The plateau half — why the terminal approach stalls
+---------------------------------------------------
+
+``detour-1`` left one question open and named it the next lever: seven of twelve
+abandoned detours settle in a tight 2.06–2.76 m band, and nothing said why. Reading the
+carried rule (``agent/controller.realizable_investigate_step``) narrows it to one line::
+
+    rising = current > previous + eps
+    if visual_confirm and not rising:  STOP
+    if rising:                         FORWARD
+    else:                              TURN
+
+**No branch advances a plateaued agent.** Not rising and not confirmed is a turn, and
+``visual_confirm`` is the ``OracleDetector`` at ``oracle_radius_m`` — 1.0 m, *geodesic*,
+carried over from Find-SR's primary ring. ``detour-1``'s empty gap, 0.78 m to 2.06 m,
+straddles exactly that radius.
+
+So the stall has two candidate mechanisms and they imply opposite fixes:
+
+- **the plateau is real** — the binaural gradient genuinely flattens out around 2 m, no
+  forward would have raised it, and the lever is the arrival criterion.
+- **the plateau is spurious** — the gradient is still climbing, but ``rising`` is a
+  *single-step* comparison and ``detour-1`` measured the live render moving 24% between
+  identical runs. One unlucky reading on a rising gradient sends the agent into a turn,
+  and the lever is the estimator, not the acoustics.
+
+``measured_rms`` is the same value the controller fed into ``energy_history``, so
+``rising`` is **exactly reconstructible** from the record and the plateau windows below
+are the controller's own predicate rather than a band someone chose. Within each window
+this reports the slope of ``measured_rms`` against distance-to-source, its residual
+scatter, and how far the agent actually travelled while plateaued.
+
+**A window the agent barely moved through cannot answer the question**, and that is
+reported rather than regressed: with the agent turning in place the distance series is
+near-constant, the regression is ill-conditioned, and a slope computed from it would be
+noise wearing a number's clothes. Those windows are counted as ``static`` — which is
+itself a third finding, because an agent that never translated never tested the field.
+
+Still no verdict here. This prints the slope distribution and the reader decides.
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
+import math
 import pathlib
 import statistics
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+import textwrap
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from earshot.agent.controller import (
+    ACT_FORWARD,
+    ACT_STOP,
+    ACT_TURN_LEFT,
+    ACT_TURN_RIGHT,
+    realizable_investigate_step,
+)
 from earshot.report.artifacts import ENV_REPORT_NAME, episode_paths, read_audit, run_paths
-from earshot.report.audit import EpisodeAudit, FunnelStage
+from earshot.report.audit import EpisodeAudit, FunnelStage, StepRecord
 
 __all__ = [
     "ABANDONED",
     "REACHED",
     "NO_DETOUR",
+    "RISING_EPS",
+    "DEFAULT_MIN_SPAN_M",
+    "rising_flags",
+    "rule_action",
+    "plateau_windows",
+    "fit_slope",
     "trace_one",
     "aggregate",
     "format_report",
@@ -58,6 +114,24 @@ ABANDONED = "abandoned"  # entered INVESTIGATE, spent the budget, never reached 
 REACHED = "reached"      # got there; the control arm for the above
 NO_DETOUR = "no_detour"  # onset never fired, or the episode ended before it could
 
+# READ from the carried rule's own signature, never re-spelled here. Two copies of one
+# constant is the drift trap this tree has already paid for once: a replay that
+# reconstructs `rising` with a different epsilon than the agent used is not a replay, it
+# is a second controller that happens to resemble the first. `test_detour_report` holds
+# this against the signature so a change there fails loudly rather than silently
+# re-defining every plateau ever measured.
+RISING_EPS = float(
+    inspect.signature(realizable_investigate_step).parameters["eps"].default
+)
+
+# provenance: fake — the distance a plateau window must span before its slope is worth
+# fitting, in metres. NOT a verdict threshold: it decides whether a regression is
+# *defined*, not whether a plateau is real. A turning agent holds distance almost
+# constant, so the denominator of the slope goes to zero and the fit explodes; below this
+# span the window is reported as `static` and its slope withheld. Both counts are printed,
+# so nothing is dropped silently, and `--min-span` moves it.
+DEFAULT_MIN_SPAN_M = 0.25
+
 
 def _median(values: Sequence[float]) -> Optional[float]:
     """Median, or None for an empty sample. Median rather than mean because n is ~10 and
@@ -67,7 +141,171 @@ def _median(values: Sequence[float]) -> Optional[float]:
     return statistics.median(clean) if clean else None
 
 
-def trace_one(audit: EpisodeAudit, *, budget: Optional[int] = None) -> Dict[str, Any]:
+def rising_flags(rms: Sequence[float], *, eps: float = RISING_EPS) -> List[bool]:
+    """``realizable_investigate_step``'s own ``rising``, recomputed per step. Pure.
+
+    Carried verbatim from the rule::
+
+        rising = previous is None or current > previous + eps
+
+    **Computed over the WHOLE episode, then sliced to the detour** — never over the
+    window alone. The controller's ``energy_history`` has been accumulating since step 0,
+    so at the first detour step ``previous`` is the reading from the step *before* the
+    onset, and a window-local recomputation would call that step rising by default and
+    invent a forward the agent never took. ``ENERGY_HISTORY`` is 8 and the rule reads two
+    entries, so the runner's trimming cannot affect this.
+    """
+    flags: List[bool] = []
+    previous: Optional[float] = None
+    for value in rms:
+        current = float(value)
+        flags.append(previous is None or current > previous + float(eps))
+        previous = current
+    return flags
+
+
+def rule_action(rising: bool, lateral_sign: Optional[int]) -> str:
+    """What the carried rule answers, given ``rising`` and the lateral sign. Pure.
+
+    The rule's third input, ``visual_confirm``, is **not recorded per step** — and for
+    the arm this tool exists to explain it does not need to be. ``visual_confirm`` can
+    only change the answer where ``rising`` is false, and there it produces a STOP; an
+    abandoned episode by definition never STOPped, so the confirm was false at every one
+    of its steps and the answer is determined by these two alone.
+
+    That is why the check this feeds is exact on the abandoned arm and only a lower bound
+    on the reached one, whose final step may legitimately differ.
+    """
+    if rising:
+        return ACT_FORWARD
+    if lateral_sign is not None and int(lateral_sign) > 0:
+        return ACT_TURN_RIGHT
+    return ACT_TURN_LEFT  # negative, zero, and absent all scan left (the rule's default)
+
+
+def plateau_windows(flags: Sequence[bool]) -> List[Tuple[int, int]]:
+    """Maximal runs of consecutive not-rising steps, as ``[start, end)`` index pairs. Pure.
+
+    This is the plateau *as the controller sees it*: the stretch over which the rule had
+    stopped answering FORWARD. A window of one step is still a window — the agent turned
+    once and recovered — and it is reported rather than filtered, because the difference
+    between one long stall and forty brief ones is the difference between the two
+    diagnoses this tool exists to separate.
+    """
+    windows: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    for index, rising in enumerate(flags):
+        if not rising and start is None:
+            start = index
+        elif rising and start is not None:
+            windows.append((start, index))
+            start = None
+    if start is not None:
+        windows.append((start, len(flags)))
+    return windows
+
+
+def fit_slope(
+    distances: Sequence[float], rms: Sequence[float]
+) -> Tuple[Optional[float], Optional[float]]:
+    """Least-squares slope of ``rms`` on ``distance``, and the residual SD. Pure.
+
+    Returns ``(slope, residual_sd)`` in RMS-units per metre. **A negative slope is a live
+    gradient** — louder as the distance falls — and that sign convention is the whole
+    reading: flat means the cue is exhausted, clearly negative means the cue was still
+    there and the single-step test missed it.
+
+    ``(None, None)`` when the fit is not defined: fewer than two points, or a distance
+    series with no spread at all. The residual SD is ``None`` at exactly two points,
+    where a line through both leaves nothing to scatter — reported as absent rather than
+    as a scatter of zero, which would read as a noiseless measurement.
+
+    Written out rather than taken from ``statistics``: ``linear_regression`` and
+    ``covariance`` are 3.10, and this suite runs on 3.9 (ADR-0014).
+    """
+    xs = [float(x) for x in distances]
+    ys = [float(y) for y in rms]
+    n = len(xs)
+    if n < 2 or n != len(ys):
+        return None, None
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx <= 0.0:
+        return None, None
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    slope = sxy / sxx
+    if n == 2:
+        return slope, None
+    intercept = mean_y - slope * mean_x
+    residuals = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    return slope, math.sqrt(residuals / (n - 2))
+
+
+def _plateau_rows(
+    steps: Sequence[StepRecord],
+    distances: Sequence[Optional[float]],
+    flags: Sequence[bool],
+    *,
+    min_span_m: float,
+) -> List[Dict[str, Any]]:
+    """One row per plateau window inside the detour. Pure."""
+    rows: List[Dict[str, Any]] = []
+    for start, end in plateau_windows(flags):
+        window = list(range(start, end))
+        known = [i for i in window if distances[i] is not None]
+        span = None
+        if known:
+            values = [float(distances[i]) for i in known]
+            span = max(values) - min(values)
+        rms = [float(steps[i].measured_rms) for i in window]
+        row: Dict[str, Any] = {
+            "start_step": int(steps[start].step),
+            "n_steps": len(window),
+            "d_start_m": distances[start],
+            "d_span_m": span,
+            "rms_span": (max(rms) - min(rms)) if rms else None,
+            "n_forward": sum(1 for i in window if steps[i].action == ACT_FORWARD),
+            # A window with no measurable travel is `static`: the agent turned in place,
+            # never translated, and so never put the field to the test. Its slope is
+            # withheld rather than fitted — see DEFAULT_MIN_SPAN_M.
+            "static": span is None or span < float(min_span_m),
+        }
+        if row["static"] or len(known) < 2:
+            row["slope_per_m"] = None
+            row["residual_sd"] = None
+        else:
+            row["slope_per_m"], row["residual_sd"] = fit_slope(
+                [float(distances[i]) for i in known],
+                [float(steps[i].measured_rms) for i in known],
+            )
+        # **The rays-1 gate, in one ratio.** How much RMS the gradient delivers across
+        # this window (|slope| x the distance actually travelled) against how much the
+        # render scatters around the line. Well above 1 means a windowed estimator could
+        # have recovered the cue from these very traces and the fix is the estimator;
+        # well below 1 means the cue is buried at 500 rays and ray count becomes a lever.
+        # A ratio, so it needs no constant to read.
+        #
+        # `None` where the scatter is absent OR exactly zero. Zero is the two-point fit
+        # and the synthetic trace, never a rendered one — a ray-traced window with no
+        # residual at all would itself be the finding, and reporting an unbounded ratio
+        # there (or an `Infinity` that is not valid JSON) would bury it. The window's
+        # slope and residual are both printed, so the reader sees the case directly.
+        slope, scatter = row["slope_per_m"], row["residual_sd"]
+        row["signal_to_scatter"] = (
+            (abs(float(slope)) * float(span) / float(scatter))
+            if slope is not None and scatter and span else None
+        )
+        rows.append(row)
+    return rows
+
+
+def trace_one(
+    audit: EpisodeAudit,
+    *,
+    budget: Optional[int] = None,
+    min_span_m: float = DEFAULT_MIN_SPAN_M,
+) -> Dict[str, Any]:
     """One episode's detour, as measurements. Pure.
 
     The detour **window** is ``[onset_step, onset_step + budget]``, clipped to the
@@ -138,6 +376,44 @@ def trace_one(audit: EpisodeAudit, *, budget: Optional[int] = None) -> Dict[str,
     rms = [float(r.measured_rms) for r in steps]
     row["rms_onset"] = rms[0] if rms else None
     row["rms_max"] = max(rms) if rms else None
+
+    # --- the plateau half ------------------------------------------------
+    # `rising` over the WHOLE episode, then keyed back to the detour by step number.
+    # See `rising_flags`: a window-local recomputation invents a forward at the onset.
+    all_flags = rising_flags([r.measured_rms for r in audit.steps])
+    flag_by_step = {r.step: f for r, f in zip(audit.steps, all_flags)}
+    flags = [flag_by_step[r.step] for r in steps]
+
+    plateaus = _plateau_rows(steps, window, flags, min_span_m=min_span_m)
+    row["plateaus"] = plateaus
+    row["n_plateaus"] = len(plateaus)
+    row["plateau_steps"] = sum(int(p["n_steps"]) for p in plateaus)
+    row["longest_plateau_steps"] = max(
+        (int(p["n_steps"]) for p in plateaus), default=0)
+    row["n_static_plateaus"] = sum(1 for p in plateaus if p["static"])
+    # The consistency signal that survives without `realizable_action`: the carried rule
+    # answers FORWARD only while rising, so the follower's forwards should thin out
+    # inside the windows. A ratio rather than a test — it corroborates the reconstruction
+    # without being able to prove it.
+    in_plateau = sum(int(p["n_forward"]) for p in plateaus)
+    row["forward_in_plateau"] = in_plateau
+    row["forward_total"] = sum(1 for r in steps if r.action == ACT_FORWARD)
+
+    # The exact check, armed only on records that carry what the CUE said. Absent on
+    # every run before `StepRecord.realizable_action` landed, and absent is reported as
+    # unvalidated rather than as agreement — an unchecked reconstruction that reads as a
+    # checked one is the failure mode this field exists to close.
+    stops = sum(1 for r in steps if r.realizable_action == ACT_STOP)
+    checkable = [
+        (r, f) for r, f in zip(steps, flags)
+        if r.realizable_action is not None and r.realizable_action != ACT_STOP
+    ]
+    row["n_rule_checked"] = len(checkable)
+    row["n_rule_agree"] = sum(
+        1 for r, f in checkable if rule_action(f, r.lateral_sign) == r.realizable_action)
+    # Never re-derivable from the two above: the rule's STOP needs `visual_confirm`,
+    # which no record carries, so these steps are excluded from the check by name.
+    row["n_rule_stop"] = stops
     return row
 
 
@@ -163,17 +439,71 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
                 for r in rows]),
         }
 
+    def _plateau(name: str) -> Dict[str, Any]:
+        """The plateau windows of one arm, pooled over its episodes."""
+        rows = arms.get(name) or []
+        windows: List[Mapping[str, Any]] = []
+        for trace in rows:
+            windows.extend(trace.get("plateaus") or [])
+        fitted = [w for w in windows if w.get("slope_per_m") is not None]
+        forward_in = sum(int(t.get("forward_in_plateau") or 0) for t in rows)
+        forward_all = sum(int(t.get("forward_total") or 0) for t in rows)
+        plateau_steps = sum(int(t.get("plateau_steps") or 0) for t in rows)
+        detour_steps = sum(int(t.get("detour_steps") or 0) for t in rows)
+        return {
+            "n_windows": len(windows),
+            "n_static": sum(1 for w in windows if w.get("static")),
+            "n_fitted": len(fitted),
+            "window_steps": _median([w.get("n_steps") for w in windows]),
+            "longest_steps": _median([t.get("longest_plateau_steps") for t in rows]),
+            "d_start_m": _median([w.get("d_start_m") for w in windows]),
+            "d_span_m": _median([w.get("d_span_m") for w in windows]),
+            "slope_per_m": _median([w.get("slope_per_m") for w in fitted]),
+            "residual_sd": _median([w.get("residual_sd") for w in fitted]),
+            "signal_to_scatter": _median([w.get("signal_to_scatter") for w in fitted]),
+            # Fraction of the detour spent with the rule no longer answering FORWARD.
+            "plateau_step_share": (
+                (plateau_steps / detour_steps) if detour_steps else None),
+            # The corroborating signal: forwards inside the windows against forwards
+            # overall. The rule cannot answer FORWARD while plateaued, so a
+            # reconstruction that is right predicts this sits well below the step share.
+            "forward_share_in_plateau": (
+                (forward_in / forward_all) if forward_all else None),
+        }
+
     positioned = sum(1 for t in traces if t.get("d_onset_m") is not None)
+    checked = sum(int(t.get("n_rule_checked") or 0) for t in traces)
+    agreed = sum(int(t.get("n_rule_agree") or 0) for t in traces)
     return {
         "n_episodes": len(traces),
         "n_with_position": positioned,
         "arms": {name: _arm(name) for name in (ABANDONED, REACHED, NO_DETOUR)},
+        "plateaus": {name: _plateau(name) for name in (ABANDONED, REACHED)},
+        # The abort condition, pooled. `n_rule_checked` is zero on every run written
+        # before `StepRecord.realizable_action`, and zero here means UNVALIDATED — the
+        # reconstruction was never put to a test — which format_report says in words
+        # rather than leaving a 0/0 to be read as agreement.
+        "rule_check": {
+            "n_checked": checked,
+            "n_agree": agreed,
+            "n_stop_excluded": sum(int(t.get("n_rule_stop") or 0) for t in traces),
+            "agreement": (agreed / checked) if checked else None,
+        },
         "per_episode": sorted(traces, key=lambda r: int(r.get("episode") or 0)),
     }
 
 
 def _fmt(value: Any, spec: str = "{:.2f}") -> str:
     return "n/a" if value is None else spec.format(value)
+
+
+def _wrap(text: str) -> List[str]:
+    """A prose paragraph at the table's width, indented to sit under it.
+
+    The verdict sentences are the part of this report a reader acts on, and an unwrapped
+    300-character line in a terminal is one they skim past.
+    """
+    return textwrap.wrap(text, width=78, initial_indent="  ", subsequent_indent="  ")
 
 
 def format_report(agg: Mapping[str, Any]) -> str:
@@ -216,10 +546,79 @@ def format_report(agg: Mapping[str, Any]) -> str:
             "n/a rather than zero — records written before StepRecord.position landed. "
             "Re-run to measure them.".format(
                 agg["n_episodes"] - agg["n_with_position"], agg["n_episodes"]))
+
+    lines.extend(_plateau_lines(agg))
     return "\n".join(lines)
 
 
-def load_traces(run_dir: str) -> List[Dict[str, Any]]:
+def _plateau_lines(agg: Mapping[str, Any]) -> List[str]:
+    """The plateau half of the report: is the cue exhausted, or is the test missing it?"""
+    plateaus = agg.get("plateaus") or {}
+    if not plateaus:
+        return []
+    lines = ["", "plateau windows (maximal runs where the carried rule stopped answering",
+             "FORWARD — its own predicate, recomputed from measured_rms):"]
+    lines.append("  {:<12} {:>4}  {:>6}  {:>6}  {:>7}  {:>7}  {:>9}  {:>8}  {:>7}".format(
+        "arm", "wins", "static", "steps", "d_start", "d_span", "slope/m", "resid", "sig/sc"))
+    for name in (ABANDONED, REACHED):
+        arm = plateaus.get(name) or {}
+        lines.append(
+            "  {:<12} {:>4}  {:>6}  {:>6}  {:>7}  {:>7}  {:>9}  {:>8}  {:>7}".format(
+                name,
+                arm.get("n_windows", 0),
+                "{}/{}".format(arm.get("n_static", 0), arm.get("n_windows", 0)),
+                _fmt(arm.get("window_steps"), "{:.0f}"),
+                _fmt(arm.get("d_start_m")),
+                _fmt(arm.get("d_span_m")),
+                _fmt(arm.get("slope_per_m"), "{:+.2e}"),
+                _fmt(arm.get("residual_sd"), "{:.1e}"),
+                _fmt(arm.get("signal_to_scatter"), "{:.2f}")))
+    lines.append("")
+    lines.append("  slope is measured_rms against distance-to-source: NEGATIVE is a live")
+    lines.append("  gradient (louder as the gap closes), flat is a cue that has run out.")
+    lines.append("  sig/sc is |slope| x d_span over the residual SD — above 1 the cue was")
+    lines.append("  recoverable from these traces and the single-step test is what missed")
+    lines.append("  it; below 1 the render buries it at this ray count.")
+
+    for name in (ABANDONED, REACHED):
+        arm = plateaus.get(name) or {}
+        share = arm.get("plateau_step_share")
+        forward = arm.get("forward_share_in_plateau")
+        if share is None and forward is None:
+            continue
+        lines.append(
+            "  {:<12} {} of detour steps plateaued; {} of its forwards fell inside "
+            "a window".format(name, _fmt(share, "{:.0%}"), _fmt(forward, "{:.0%}")))
+
+    check = agg.get("rule_check") or {}
+    lines.append("")
+    if not check.get("n_checked"):
+        # NOT a silent pass. Nothing here was validated, and a reader who cannot tell
+        # that from a validated run will trust a reconstruction no one checked.
+        lines.extend(_wrap(
+            "RECONSTRUCTION UNVALIDATED — no record carries "
+            "StepRecord.realizable_action, so what the cue SAID was never compared "
+            "against what was recomputed. Every plateau above rests on an unchecked "
+            "model of the controller. Re-run to arm the check."))
+    else:
+        lines.extend(_wrap(
+            "reconstruction checked on {} step(s): {} agree ({}). {} STOP step(s) "
+            "excluded — the rule's STOP needs visual_confirm and no record carries "
+            "it.".format(
+                check["n_checked"], check["n_agree"],
+                _fmt(check.get("agreement"), "{:.1%}"),
+                check.get("n_stop_excluded", 0))))
+        if (check.get("agreement") or 0.0) < 1.0:
+            lines.extend(_wrap(
+                "DISAGREEMENT IS THE FINDING, not a rounding error: the model of the "
+                "controller above is wrong wherever these differ, and nothing derived "
+                "from it should be read until that is explained."))
+    return lines
+
+
+def load_traces(
+    run_dir: str, *, min_span_m: float = DEFAULT_MIN_SPAN_M
+) -> List[Dict[str, Any]]:
     """Every episode's detour trace, with the budget read from the run's own env_report."""
     from earshot.task.smoke import episode_indices
 
@@ -234,7 +633,8 @@ def load_traces(run_dir: str) -> List[Dict[str, Any]]:
     traces = []
     for index in episode_indices(str(root)):
         _, audit_path = episode_paths(root, index)
-        traces.append(trace_one(read_audit(audit_path), budget=budget))
+        traces.append(
+            trace_one(read_audit(audit_path), budget=budget, min_span_m=min_span_m))
     return traces
 
 
@@ -242,12 +642,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", help="a directory `python -m earshot` wrote")
     parser.add_argument("--json", action="store_true", help="emit the aggregate as JSON")
+    parser.add_argument(
+        "--min-span", type=float, default=DEFAULT_MIN_SPAN_M,
+        help="metres a plateau window must span before its slope is fitted rather than "
+             "reported static (default {:.2f})".format(DEFAULT_MIN_SPAN_M))
     args = parser.parse_args(argv)
 
     if not pathlib.Path(args.run_dir).is_dir():
         print("no such run directory: {}".format(args.run_dir))
         return 2
-    traces = load_traces(args.run_dir)
+    traces = load_traces(args.run_dir, min_span_m=args.min_span)
     if not traces:
         print("no episode records under {} — nothing to trace".format(args.run_dir))
         return 2
