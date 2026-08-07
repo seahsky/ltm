@@ -301,6 +301,17 @@ class EpisodeAudit:
     calibration: Optional[CalibrationRecord] = None
     audio_context: Optional[AudioContextReport] = None
     steps: Tuple[StepRecord, ...] = ()
+    # The threshold the greedy climb actually ran with: the renderer's measured scatter
+    # times `ControllerConfig.rising_eps_scale`. It lives HERE and not on
+    # `CalibrationRecord`, which is a strict projection of `CalibrationResult` — the
+    # calibration measures the scatter, the controller decides what multiple of it counts.
+    #
+    # Recorded rather than recomputed by any reader. `detour-3` was read against a replay
+    # that assumed the old single-step rule and agreed with the record on 68% of steps,
+    # which made every window, slope and histogram in that report a description of a
+    # controller that had not run. A tool that has to guess the predicate guesses wrong
+    # eventually; `None` means the run predates the field.
+    rising_eps: Optional[float] = None
     # provenance: runtime — whatever the run's metric layer computed. Held as a mapping
     # rather than as fields because §6 deliberately reports several numbers that are
     # NOT headlines (soft-SPL is computed and not led with, benchmark SPL is computed
@@ -409,6 +420,7 @@ class EpisodeAudit:
                 self.audio_context.as_dict() if self.audio_context is not None else None
             ),
             "steps": [row.as_dict() for row in self.steps],
+            "rising_eps": None if self.rising_eps is None else float(self.rising_eps),
             "source_is_visible_history": list(self.source_is_visible_history),
             "audio_render_summary": self.audio_render_summary(),
             "forward_summary": self.forward_summary(),
@@ -449,6 +461,9 @@ class EpisodeAudit:
                 else None
             ),
             steps=tuple(StepRecord.from_dict(row) for row in data.get("steps", ())),
+            rising_eps=(
+                None if data.get("rising_eps") is None else float(data["rising_eps"])
+            ),
             metrics=dict(data.get("metrics", {})),
         )
 

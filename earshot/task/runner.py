@@ -475,6 +475,17 @@ def run_episode(
     start_anomaly_rms = rms(render_through_ir(handle.audio_of(observation), clip))
     n_renders_before = int(getattr(world, "n_renders", 0))
 
+    # The climb's threshold, fixed for the episode: the renderer's measured scatter times
+    # the configured multiple. `None` scatter means the calibration did not measure it and
+    # the run falls back to the pre-`detour-2` 1e-6 — not a safe default, just the previous
+    # behaviour, kept so a caller that skips the scatter render still runs. Recorded on the
+    # audit either way, because "the windowed rule ran" and "it ran against a real noise
+    # floor" are different claims about the same run.
+    rising_eps = (
+        1e-6 if calibration.render_scatter is None
+        else float(calibration.render_scatter) * float(cfg.controller.rising_eps_scale)
+    )
+
     steps: List[StepRecord] = []
     energy: List[float] = []
     counters: Dict[str, int] = {}
@@ -582,10 +593,7 @@ def run_episode(
             # is the old `1e-6` — which is not a safe default so much as the previous
             # behaviour, kept so a caller that skips the scatter render still runs. The
             # audit records which of the two was in force.
-            rising_eps=(
-                1e-6 if calibration.render_scatter is None
-                else float(calibration.render_scatter)
-            ),
+            rising_eps=rising_eps,
         )
         if state.mode is NavMode.INVESTIGATE or decision.mode is NavMode.INVESTIGATE:
             entered_investigate = True
@@ -808,6 +816,7 @@ def run_episode(
             render_scatter=calibration.render_scatter,
             scatter_repeats=calibration.scatter_repeats,
         ),
+        rising_eps=rising_eps,
         audio_context=getattr(handle, "report", None),
         steps=tuple(steps),
         metrics=metrics,

@@ -121,6 +121,26 @@ class ControllerConfig:
     # require to succeed (§8).
     investigate_max_steps: int = 120
 
+    # provenance: MEASURED, and the measurement is `detour-3`. How many multiples of the
+    # renderer's own scatter a rise must clear before the climb calls it a rise. The
+    # scatter itself is measured per episode (`calibration.render_scatter`); this is the
+    # only part left to choose.
+    #
+    # **1.0 cost 4 of 7 source-reaches.** `detour-3` ran at one sigma and returned 3/20
+    # against 7/20, with median walked distance collapsing 9.75 m -> 4.00 m: an agent
+    # that turns instead of moving. The reason is in the same run's slopes — the reached
+    # arm climbs 2.18e-2 per metre, which at 0.25 m/step is ~5.5e-3 of rise per step,
+    # against a scatter of ~2-3e-3. Per-step signal and per-step noise are the SAME
+    # ORDER, so a threshold at one sigma sits inside the distribution of genuine rises
+    # and vetoes most of them.
+    #
+    # The window is what buys the margin, not the threshold: a median of
+    # `RISING_WINDOW` readings has a standard error near `scatter / sqrt(window)`, which
+    # at 5 is 0.45. That is the principled ceiling and this default sits under it.
+    # Zero is not "no protection" — it is the window doing the work alone, which is the
+    # arm `detour-3` never ran.
+    rising_eps_scale: float = 0.45
+
     # provenance: fake — how far ahead the realizable detour puts the probe point it
     # routes to. The climb reads a *direction* from live energy; this turns it into a
     # place, so the navmesh follower can go there around whatever is in the way.
