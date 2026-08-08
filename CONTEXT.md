@@ -2,7 +2,7 @@
 
 Glossary for the audio-cued anomaly-response experiment (ICRA-2027 arc).
 The task: an agent runs a primary find-task; an anomaly sound interrupts; it investigates the source, resumes, and reports.
-This file is a glossary, not a spec — implementation lives in `embodied_memory/`.
+This file is a glossary, not a spec — implementation lives in `earshot/`.
 
 ## Language
 
@@ -18,9 +18,10 @@ The interrupt behavior — hear an abnormal sound, go to its source, check it, t
 _Avoid_: audio goal, sound goal (retired framing where sound == target).
 
 **Abandoned investigation**:
-An anomaly response where the onset fired and the detour was entered, but the detour's step sub-budget ran out before the source was reached, so the agent resumed the primary find-task having never arrived.
+An anomaly response where the onset fired and the detour was entered, but the agent resumed the primary find-task having never reached the source.
 A failure of the anomaly response, not a third outcome: it counts against Anomaly-response SR.
-_Avoid_: resume, abort (both name the transition, neither says the source was never reached); reading a "RESUME" log line as evidence the source was found.
+The step sub-budget expiring is how the detour ends, not why it ended: `detour-1` measured every abandoned detour as already plateaued when the budget cut it off, so a definition that names the budget names a mechanism the data refuted.
+_Avoid_: resume, abort (both name the transition, neither says the source was never reached); reading a "RESUME" log line as evidence the source was found; naming the step budget as the cause.
 
 **Mission**:
 One episode = the primary find-task PLUS the anomaly response. "Mission complete" is not a single number — see Find-SR and Anomaly-response SR.
@@ -97,6 +98,20 @@ An onset that fired on anything other than the anomaly. Diagnosed by **onset pro
 `onset_step` compared to `t_anom`. An onset before `t_anom` cannot be the anomaly, because the anomaly is not playing yet.
 This is the one check that distinguishes a working interrupt from a vacuum cleaner, and it is invisible in `summary.json` — it lives in the `[audio] onset @step` log line.
 _Avoid_: reading `n_audio_onset_fired` as evidence the anomaly was heard (it counts onsets, not causes), and reading `n_audio_gate_rejected=0` as "the gate had nothing to reject" (onset is one-shot, so 0 means the gate ACCEPTED the first over-threshold tick).
+
+### The realizable climb
+
+**Render scatter**:
+The ray-traced renderer disagreeing with itself — the spread of received RMS across repeated renders at ONE fixed pose, holding distance, geometry and clip constant.
+It is the noise floor any "did it get louder?" test has to clear, and it is measured per episode rather than assumed.
+It is NOT the calibration sweep's spread: those poses sit at different distances, so their spread is the distance gradient, which is the very thing a rise is being read for.
+_Avoid_: render noise (unqualified — say scatter at a fixed pose, or say the gradient); reading an unmeasured scatter as zero (unmeasured is null, and the run then falls back to the pre-`detour-2` threshold).
+
+**Plateau window**:
+A maximal run of consecutive detour steps over which the climb's own rising predicate reads false.
+Reconstructed from the readings the controller actually used, so it is the controller's own verdict rather than a distance band a reader chose.
+Its LENGTH is the unit that matters: a hail of one-step windows and a handful of long ones are different mechanisms with different fixes.
+_Avoid_: stall, plateau (unqualified — say the window, and say how long it was).
 
 **Floor-constrained source**:
 The anomaly source sits on the primary goal's floor (`|Δy| < ~1.0 m`). Off-floor sources produce fabricated audio, because the RIR grid is rendered on one floor and `nearest` resolves by xz (ADR-0003).

@@ -22,15 +22,23 @@ from earshot.agent.controller import (
     ACT_STOP,
     ACT_TURN_LEFT,
     ACT_TURN_RIGHT,
+    RISING_WINDOW,
     realizable_investigate_step,
 )
-from earshot.report.audit import EpisodeAudit, FunnelStage, OnsetRecord, StepRecord
+from earshot.report.audit import (
+    CalibrationRecord,
+    EpisodeAudit,
+    FunnelStage,
+    OnsetRecord,
+    StepRecord,
+)
 from earshot.tools.detour_report import (
     ABANDONED,
     NO_DETOUR,
     REACHED,
     RISING_EPS,
     aggregate,
+    band_rows,
     fit_slope,
     format_report,
     plateau_windows,
@@ -234,6 +242,142 @@ class TestTheRulesOwnPredicate(unittest.TestCase):
                 rule_action(flag, -1),
                 realizable_investigate_step(window, -1, False),
             )
+
+
+class TestTheReplayFollowsTheRuleThatRan(unittest.TestCase):
+    """The drift this file did not catch the first time.
+
+    `rising_flags` used to carry the rule's body by hand. When `3f26572` replaced the
+    single-step comparison with a median-of-`RISING_WINDOW` baseline, the copy here did
+    not move, and the guard above still passed because it only checks that the *constant*
+    is not re-spelled. A replay of that run would have reconstructed windows for a
+    controller that never ran and read as evidence the fix did nothing.
+
+    Both arms per ADR-0014: the series where the two rules DISAGREE (so the assertion can
+    fail if the replay reverts), and the short series where they agree by construction.
+    """
+
+    # A live climb with one unlucky render at index 5 — the case the fix exists for.
+    # Single-step: 0.0535 < 0.0540, not rising, turn. Windowed: the median of the five
+    # before it is 0.0520, so the climb holds.
+    DIPPED = [0.0500, 0.0510, 0.0520, 0.0530, 0.0540, 0.0535, 0.0555]
+
+    def test_the_replay_holds_the_climb_where_the_single_step_rule_turned(self):
+        flags = rising_flags(self.DIPPED)
+        single_step = [
+            i == 0 or value > self.DIPPED[i - 1] + RISING_EPS
+            for i, value in enumerate(self.DIPPED)
+        ]
+        self.assertTrue(flags[5], "the windowed rule holds a climb through one bad render")
+        self.assertFalse(single_step[5], "and the rule it replaced did not — the arms differ")
+        self.assertNotEqual(flags, single_step)
+
+    def test_the_replay_equals_the_rule_step_for_step(self):
+        """Against the real function over the whole series, not a copy of its body."""
+        flags = rising_flags(self.DIPPED)
+        for i in range(1, len(self.DIPPED) + 1):
+            self.assertEqual(
+                rule_action(flags[i - 1], -1),
+                realizable_investigate_step(self.DIPPED[:i], -1, False),
+                "step {} disagrees with the rule".format(i - 1),
+            )
+
+    def test_the_runners_history_is_long_enough_for_the_window(self):
+        """The rule reads `window + 1` entries; the runner trims to `ENERGY_HISTORY`.
+
+        If the window ever outgrows the trim, the agent judges its rise against a baseline
+        shorter than the one this replay uses, and every plateau ever reported goes wrong
+        silently. Held here rather than in prose.
+        """
+        from earshot.task.runner import ENERGY_HISTORY
+
+        self.assertLessEqual(RISING_WINDOW + 1, ENERGY_HISTORY)
+
+
+class TestTheThresholdComesFromTheEpisode(unittest.TestCase):
+    """`eps` is the episode's measured scatter, not a constant — and the replay reads it.
+
+    A rise of 1e-3 per step is a live climb under the unmeasured fallback and noise under
+    a renderer that scatters 2.8e-3. Same trace, two thresholds, opposite readings: which
+    one a replay uses is not a detail.
+    """
+
+    RISES = [(6.0, 0.0500), (5.75, 0.0510), (5.5, 0.0520), (5.25, 0.0530)]
+
+    def _audit(self, scatter):
+        return EpisodeAudit(
+            episode_index=0,
+            source_xyz=SOURCE,
+            funnel_stage=FunnelStage.INVESTIGATE_ENTERED,
+            onset=OnsetRecord(onset_step=ONSET_STEP),
+            steps=rms_steps(self.RISES),
+            calibration=None if scatter is None else CalibrationRecord(
+                onset_rms=0.01, bed_rms=0.001, separation_db=40.0, n_poses=16,
+                global_volume=1.0, render_scatter=scatter, scatter_repeats=12),
+        )
+
+    def test_a_measured_floor_is_used_and_reported(self):
+        row = trace_one(self._audit(2.8e-3))
+        self.assertEqual(row["rising_eps"], 2.8e-3)
+        self.assertTrue(row["eps_measured"])
+        # 1e-3 a step cannot clear a 2.8e-3 floor: the whole detour plateaus.
+        self.assertEqual(row["plateau_steps"], len(self.RISES) - 1)
+
+    def test_an_unmeasured_episode_falls_back_and_says_so(self):
+        row = trace_one(self._audit(None))
+        self.assertEqual(row["rising_eps"], RISING_EPS)
+        self.assertFalse(row["eps_measured"])
+        # The same trace at the pre-detour-2 threshold is a climb with no plateau at all.
+        self.assertEqual(row["plateau_steps"], 0)
+
+    def test_the_report_discloses_which_threshold_was_in_force(self):
+        text = format_report(aggregate([
+            trace_one(self._audit(2.8e-3)),
+            trace_one(self._audit(None)),
+        ]))
+        self.assertIn("1 of 2 measured", text)
+        self.assertIn("UNMEASURED constant", text)
+
+
+class TestTheFieldItself(unittest.TestCase):
+    """Whether a forward step was worth anything, before any question about the rule.
+
+    Both arms: a live gradient the threshold can see, and a flat field where no threshold
+    setting recovers a climb because the field delivers nothing to clear it.
+    """
+
+    def test_a_live_gradient_reads_well_above_its_threshold(self):
+        # 0.01 RMS per metre closed; a 0.25 m step buys 2.5e-3 against a 1e-3 floor.
+        pairs = [(d, 0.10 - 0.01 * d) for d in (5.0, 4.5, 4.0, 3.5, 3.0)]
+        row = [r for r in band_rows([d for d, _ in pairs], [v for _, v in pairs], eps=1e-3)
+               if r["band"] == "3-5"][0]
+        self.assertAlmostEqual(row["rise_over_eps"], 2.5, places=6)
+        self.assertLess(row["slope_per_m"], 0.0, "negative slope is a live gradient")
+
+    def test_a_flat_field_reads_at_zero_however_the_threshold_is_set(self):
+        pairs = [(d, 0.05) for d in (5.0, 4.5, 4.0, 3.5, 3.0)]
+        row = [r for r in band_rows([d for d, _ in pairs], [v for _, v in pairs], eps=1e-3)
+               if r["band"] == "3-5"][0]
+        self.assertAlmostEqual(row["rise_over_eps"], 0.0, places=9)
+
+    def test_a_band_that_gets_quieter_on_approach_reads_negative_not_strong(self):
+        """The sign arm. |slope| would report a null or an occluder as a powerful cue and
+        send the next lever at the estimator."""
+        pairs = [(d, 0.02 + 0.01 * d) for d in (5.0, 4.5, 4.0, 3.5, 3.0)]
+        row = [r for r in band_rows([d for d, _ in pairs], [v for _, v in pairs], eps=1e-3)
+               if r["band"] == "3-5"][0]
+        self.assertAlmostEqual(row["rise_over_eps"], -2.5, places=6)
+
+    def test_a_band_the_agent_never_entered_is_absent_not_zero(self):
+        rows = {r["band"]: r for r in band_rows([5.0, 4.0], [0.05, 0.06], eps=1e-3)}
+        self.assertEqual(rows["0-1"]["n_steps"], 0)
+        self.assertIsNone(rows["0-1"]["rise_over_eps"])
+
+    def test_the_bands_reach_the_report(self):
+        pairs = [(d, 0.10 - 0.01 * d) for d in (5.0, 4.5, 4.0, 3.5, 3.0, 2.5)]
+        text = format_report(aggregate([trace_one(rms_audit(pairs))]))
+        self.assertIn("rise/eps", text)
+        self.assertIn("2-3", text)
 
 
 class TestPlateauWindows(unittest.TestCase):

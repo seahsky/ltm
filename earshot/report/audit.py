@@ -234,9 +234,15 @@ class CalibrationRecord:
     passed: bool = True
     render_scatter: Optional[float] = None
     scatter_repeats: int = 0
+    profile: Tuple[Tuple[float, float], ...] = ()
 
     def as_dict(self) -> Dict[str, Any]:
         return {
+            # The sweep's own (distance, rms) pairs — the field the climb has to climb.
+            # The four percentiles below summarise the level and drop the distance axis,
+            # and every question about whether a gradient EXISTS at a given range needs
+            # the axis. Sixteen pairs, rendered anyway to place the threshold.
+            "profile": [[float(d), float(r)] for d, r in self.profile],
             "onset_rms": float(self.onset_rms),
             "bed_rms": float(self.bed_rms),
             "separation_db": float(self.separation_db),
@@ -267,6 +273,10 @@ class CalibrationRecord:
                 else float(data["render_scatter"])
             ),
             scatter_repeats=int(data.get("scatter_repeats", 0)),
+            profile=tuple(
+                (float(pair[0]), float(pair[1]))
+                for pair in (data.get("profile") or ())
+            ),
         )
 
 
