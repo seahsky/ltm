@@ -526,7 +526,18 @@ def trace_one(
         steps = [row_ for row_ in steps if row_.step <= int(onset_step) + int(budget)]
     row["detour_steps"] = len(steps)
 
-    distances = audit.distance_to_source_history
+    # **The axis, chosen explicitly and named in the output.** Horizontal `xz` distance is
+    # derivable from any record that carries a position; the navmesh route is only on runs
+    # written after it landed. They agree in one room and diverge past it — `eps-1` read a
+    # gradient that INVERTED beyond 5 m on the `xz` axis, which is either a real inversion
+    # or the axis failing at exactly the range where another room starts, and that record
+    # could not separate them. Prefer the route wherever it exists, and say which was used
+    # rather than leaving a reader to assume the better one.
+    geodesic = audit.geodesic_to_source_history
+    horizontal = audit.distance_to_source_history
+    axis = "geodesic" if any(d is not None for d in geodesic) else "horizontal"
+    distances = geodesic if axis == "geodesic" else horizontal
+    row["distance_axis"] = axis
     by_step = {r.step: d for r, d in zip(audit.steps, distances)}
     window = [by_step.get(r.step) for r in steps]
     known = [d for d in window if d is not None]
@@ -712,6 +723,7 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         float(t["rising_eps"]) for t in traces
         if t.get("eps_measured") and t.get("rising_eps") is not None
     ]
+    axes = sorted({str(t["distance_axis"]) for t in traces if t.get("distance_axis")})
     positioned = sum(1 for t in traces if t.get("d_onset_m") is not None)
     checked = sum(int(t.get("n_rule_checked") or 0) for t in traces)
     agreed = sum(int(t.get("n_rule_agree") or 0) for t in traces)
@@ -721,6 +733,10 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "arms": {name: _arm(name) for name in (ABANDONED, REACHED, NO_DETOUR)},
         "plateaus": {name: _plateau(name) for name in (ABANDONED, REACHED)},
         "bands": _bands(),
+        # Which distance every number above is measured against. A list, because a run
+        # directory can hold records from either side of the field landing and a report
+        # that averaged the two axes would be pooling two different measurements.
+        "distance_axes": axes,
         # Which threshold the run's climbs actually ran at. `min`/`max` rather than a
         # single number on purpose: `eps` is a sample SD over `SCATTER_REPEATS` renders,
         # so its spread across episodes is the estimator's own noise, and a run whose bar
@@ -844,8 +860,22 @@ def _band_lines(agg: Mapping[str, Any]) -> List[str]:
     bands = agg.get("bands") or []
     if not bands:
         return []
+    axes = agg.get("distance_axes") or []
     lines = ["", "the field, by distance to source — what one 0.25 m forward buys against",
              "the threshold it has to clear:"]
+    if axes:
+        lines.append("  axis: {}".format(" AND ".join(axes)))
+    if "horizontal" in axes:
+        lines.extend(_wrap(
+            "READ THE FAR BANDS WITH CARE — horizontal xz distance is not the path the "
+            "sound takes. Past a few metres the agent is usually in another room, where "
+            "xz shrinks and the walk does not, so an inverted gradient out there may be "
+            "the axis rather than the field. Re-run to record the navmesh route."))
+    if len(axes) > 1:
+        lines.extend(_wrap(
+            "TWO AXES IN ONE REPORT: some episodes carry the route and some do not, so "
+            "the bands below pool measurements taken against different distances. Judge "
+            "them apart or re-run the lot."))
     lines.append("  {:<8} {:>5}  {:>7}  {:>10}  {:>9}  {:>12}".format(
         "band m", "n_ep", "steps", "slope/m", "resid", "rise/eps"))
     for row in bands:

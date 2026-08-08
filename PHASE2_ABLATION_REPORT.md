@@ -3657,4 +3657,41 @@ Both reads run against eps-1's existing audits:
 
 Two recording changes landed with them and take effect on the next run: `SCATTER_REPEATS` 3 → 12 (a 3-sample SD carries ~50% relative error, so the climb's threshold was swinging ~3× between episodes on estimator noise alone), and the calibration sweep's 16 `(distance, rms)` pairs persisted to `CalibrationRecord.profile` — a curve that was being rendered and discarded every episode.
 
-**File index.** `climb_eps`/`UNMEASURED_EPS` in `earshot/agent/controller.py`; `band_rows`, `BAND_EDGES_M`, `_eps_lines`, `_band_lines` in `earshot/tools/detour_report.py`; `CalibrationResult.profile` in `earshot/audio/calibration.py`; `CalibrationRecord.profile` in `earshot/report/audit.py`; `tests/mac/test_detour_report.py`, `tests/mac/test_rising_window.py`, `tests/mac/test_task_runner.py`. Data: `runs/eps-1/<scene>` (RACE). See ADR-0015 for the placement rule that fixed this denominator.
+## What the reads said (`runs/eps-1/ziup5kvtCCR`, 2026-08-08)
+
+**The reconstruction is validated for the first time: 2203 of 2203 steps agree**, 0 excluded. Every number below rests on a checked model of the controller rather than an assumed one — `detour-1` and `detour-2` both read RECONSTRUCTION UNVALIDATED.
+
+**The fix did what it claimed. The one-step dropout hail is gone.**
+
+| abandoned-arm plateau windows | `detour-2` | `eps-1` |
+|---|---|---|
+| 1 step long | 325/336 (**97%**) | 37/106 (**35%**) |
+| 20+ steps long | — | 21 |
+| plateaued steps inside windows of 10+ | — | 1526 |
+
+What is left is genuine long stalls: 87 of 106 abandoned windows are `static` (the agent never translated through them), median window 3 steps, and 85% of abandoned detour steps sit inside one.
+
+**`eps` was measured on 20/20 episodes and ranged 3.61e-4 to 7.59e-3 — a 21× spread within one run.** That is the 3-sample estimator's own noise, measured. The `SCATTER_REPEATS` 3 → 12 change was argued from arithmetic before this run; it is now argued from the run.
+
+**The critical-distance hypothesis is refuted, and the sign inverts instead of flattening.**
+
+| band (m) | slope/m | band residual | rise/eps | rise/step ÷ band residual |
+|---|---|---|---|---|
+| 0–1 | −2.73e-2 | 1.1e-2 | 1.81 | 0.62 |
+| 1–2 | −4.12e-2 | 1.2e-2 | 2.73 | 0.86 |
+| 2–3 | −2.23e-2 | 8.2e-3 | 1.70 | 0.68 |
+| 3–5 | −1.71e-2 | 7.0e-3 | 1.88 | 0.61 |
+| 5–8 | **+1.67e-2** | 9.7e-3 | **−1.20** | — |
+| 8+ | **+1.22e-2** | 1.1e-2 | **−2.68** | — |
+
+**The far bands are not trustworthy and the axis is why.** This was read against horizontal `xz` distance (`EpisodeAudit.distance_to_source_history`), and past a few metres the agent is usually in another room, where `xz` shrinks while the walk and the sound's path do not. A real inversion and a failing axis are indistinguishable here. `StepRecord.geodesic_to_source` now records the route so the next run can separate them; the calibration profile samples the same field at 16 poses chosen independently of the controller, which this table's steps are not.
+
+**The finding that outlives the axis question is in the last column.** Inside 5 m, where `xz` and the acoustic path agree, one 0.25 m forward step buys **0.61 to 0.86 of the band's own residual scatter** — below 1 in every band, including 2–3 m where the detours die. The cue is real and it is smaller than the variation a single pose-to-pose comparison is read through, so **no threshold on a single reading can recover it**. `eps` compounds this: it sizes the *renderer* (median 3.3e-3) while the scatter the agent walks through is 7e-3 to 1.2e-2, two to three times larger.
+
+The estimator arc is therefore **not closed — it was half-fixed**. `3f26572` averaged the baseline side and left the current reading carrying full σ. `is_rising` now compares two adjacent window means against a bar that is the larger of `eps` and `RISING_SIGMAS` standard errors of the observed dispersion, so signal grows with the window while noise falls as its square root, and the bar is measured on the agent's own trace rather than on the renderer alone. `ENERGY_HISTORY` is derived from `RISING_WINDOW` rather than picked — it was 8 against a rule needing 6, and the two-sided rule needs 10.
+
+**`detour-1`'s "clean bimodal gap, no overlap" no longer holds.** The abandoned arm now includes `d_min` 0.86 m and 1.17 m, inside the range that run's reached arm occupied. (0.86 m horizontal is not necessarily inside a 1.0 m *geodesic* arrival ring, so this is not yet a claim that the arrival rule missed an arrival.)
+
+**Still unscored.** None of this is the `yield-2` subtraction, and the funnel number remains uncompared.
+
+**File index.** `climb_eps`/`UNMEASURED_EPS`/`RISING_SIGMAS`/`MIN_DISPERSION_SAMPLES` and the two-sided `is_rising` in `earshot/agent/controller.py`; `ENERGY_HISTORY` and `route_to_source` in `earshot/task/runner.py`; `band_rows`, `BAND_EDGES_M`, `_eps_lines`, `_band_lines`, the axis selection in `trace_one` in `earshot/tools/detour_report.py`; `CalibrationResult.profile` in `earshot/audio/calibration.py`; `CalibrationRecord.profile` and `StepRecord.geodesic_to_source` in `earshot/report/audit.py`; `tests/mac/test_detour_report.py`, `tests/mac/test_rising_window.py`, `tests/mac/test_task_runner.py`. Data: `runs/eps-1/<scene>` (RACE). See ADR-0015 for the placement rule that fixed this denominator.

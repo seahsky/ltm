@@ -283,15 +283,17 @@ class TestTheReplayFollowsTheRuleThatRan(unittest.TestCase):
             )
 
     def test_the_runners_history_is_long_enough_for_the_window(self):
-        """The rule reads `window + 1` entries; the runner trims to `ENERGY_HISTORY`.
+        """The rule reads `2 * window` entries; the runner trims to `ENERGY_HISTORY`.
 
-        If the window ever outgrows the trim, the agent judges its rise against a baseline
-        shorter than the one this replay uses, and every plateau ever reported goes wrong
-        silently. Held here rather than in prose.
+        If the reach ever outgrows the trim, the agent judges its rise against a baseline
+        shorter than the one this replay uses — the replay sees the whole series and the
+        agent saw a truncated one — and every plateau ever reported goes wrong silently.
+        It has already happened once: `ENERGY_HISTORY` was 8 against a rule that needed 6,
+        and the two-sided rule needs 10. Held here rather than in prose.
         """
         from earshot.task.runner import ENERGY_HISTORY
 
-        self.assertLessEqual(RISING_WINDOW + 1, ENERGY_HISTORY)
+        self.assertLessEqual(2 * RISING_WINDOW, ENERGY_HISTORY)
 
 
 class TestTheThresholdComesFromTheEpisode(unittest.TestCase):
@@ -337,6 +339,58 @@ class TestTheThresholdComesFromTheEpisode(unittest.TestCase):
         ]))
         self.assertIn("1 of 2 measured", text)
         self.assertIn("UNMEASURED constant", text)
+
+
+class TestTheDistanceAxis(unittest.TestCase):
+    """Which distance the field was read against, chosen explicitly and printed.
+
+    `eps-1` read an INVERTED gradient beyond 5 m on the horizontal axis. At that range the
+    agent is usually in another room, where `xz` shrinks and the walk does not, so the
+    record could not separate a real inversion from the axis failing. Both arms here: the
+    route used where it exists, the horizontal fallback labelled and caveated where it
+    does not.
+    """
+
+    PAIRS = [(6.0, 0.030), (5.0, 0.036), (4.0, 0.045), (3.0, 0.060)]
+
+    def _audit(self, routes):
+        steps = tuple(
+            StepRecord(step=ONSET_STEP + i, measured_rms=rms,
+                       position=Xyz(float(d), 0.0, 0.0), displacement_m=0.25,
+                       geodesic_to_source=route)
+            for i, ((d, rms), route) in enumerate(zip(self.PAIRS, routes)))
+        return EpisodeAudit(
+            episode_index=0, source_xyz=SOURCE,
+            funnel_stage=FunnelStage.INVESTIGATE_ENTERED,
+            onset=OnsetRecord(onset_step=ONSET_STEP), steps=steps)
+
+    def test_the_route_is_used_where_the_record_carries_it(self):
+        """A pose 3 m away in xz and 11 m away by navmesh is 11 m from the source."""
+        row = trace_one(self._audit([14.0, 13.0, 12.0, 11.0]))
+        self.assertEqual(row["distance_axis"], "geodesic")
+        self.assertEqual(row["d_min_m"], 11.0)
+
+    def test_an_older_record_falls_back_and_is_labelled(self):
+        row = trace_one(self._audit([None, None, None, None]))
+        self.assertEqual(row["distance_axis"], "horizontal")
+        self.assertEqual(row["d_min_m"], 3.0)
+
+    def test_the_report_carries_the_caveat_only_on_the_horizontal_axis(self):
+        horizontal = format_report(aggregate([trace_one(self._audit([None] * 4))]))
+        self.assertIn("axis: horizontal", horizontal)
+        self.assertIn("READ THE FAR BANDS WITH CARE", horizontal)
+
+        routed = format_report(aggregate([trace_one(self._audit([14.0, 13.0, 12.0, 11.0]))]))
+        self.assertIn("axis: geodesic", routed)
+        self.assertNotIn("READ THE FAR BANDS WITH CARE", routed)
+
+    def test_a_run_holding_both_kinds_of_record_says_so(self):
+        """Pooling two axes into one band table would average two different measurements."""
+        text = format_report(aggregate([
+            trace_one(self._audit([14.0, 13.0, 12.0, 11.0])),
+            trace_one(self._audit([None] * 4)),
+        ]))
+        self.assertIn("TWO AXES IN ONE REPORT", text)
 
 
 class TestTheFieldItself(unittest.TestCase):
