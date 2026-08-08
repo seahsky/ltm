@@ -104,9 +104,21 @@ ACT_STOP = "stop"
 RISING_WINDOW = 5
 
 # provenance: fake — how many standard errors the gap between the two windows must clear.
-# One, because the quantity it multiplies is measured rather than assumed and a larger
-# bar would cost forwards on a cue `eps-1` measured as real but small.
-RISING_SIGMAS = 1.0
+#
+# **ZERO ON THIS BRANCH. This is an experimental arm, not a landing.** `cast-1` put the
+# cast's own contribution at +14 episodes and still finished 34 below `yield-2`, whose
+# only advantage is a threshold so low it fired on noise. Since the cast is positive, the
+# deficit is carried by how permissive the rising test is — and the losses concentrate in
+# scenes that scored 13/20 under the coin flip, which is where a permissive test pays.
+#
+# At zero the bar is `max(eps, 0)` = `eps`, the renderer's own measured scatter, and the
+# field-dispersion term is dropped. That holds the cast fixed and moves ONE thing, which
+# is the only remaining confound between this controller and the bug it is losing to.
+#
+# Merge only if the sweep says so. At 1.0 the bar also clears the field's pose-to-pose
+# variation, which `eps-1` measured at two to three times the renderer's — the argument
+# for that is in `is_rising` and is not withdrawn by running this arm.
+RISING_SIGMAS = 0.0
 
 # Below this many readings the dispersion term is not estimated. A sample SD over two or
 # three points is mostly its own noise, and at n=2 it exactly cancels the difference it is
@@ -177,6 +189,7 @@ def is_rising(
     *,
     eps: float,
     window: int = RISING_WINDOW,
+    sigmas: float = RISING_SIGMAS,
 ) -> bool:
     """Is the agent getting louder, judged as a trend between two windows?
 
@@ -205,6 +218,11 @@ def is_rising(
     ``eps`` stays as a floor: a renderer that agreed with itself exactly would put ``s``
     near zero, and a comparison with no floor at all would answer FORWARD to arithmetic
     dust.
+
+    ``sigmas`` is an argument and not just a module constant, for the reason ``cast_steps``
+    is: at zero the dispersion term drops out entirely and the bar is ``eps`` alone, which
+    is a controller arm that has to be assertable in the same suite as the shipped one
+    rather than only on whichever branch is checked out.
 
     **Means, not medians, now that both sides are windows.** A median is the right summary
     of a baseline whose failure mode is one bad render; it is the wrong one for a window
@@ -237,7 +255,7 @@ def is_rising(
     pooled = recent + baseline
     if len(pooled) >= MIN_DISPERSION_SAMPLES:
         dispersion = _sample_sd(pooled) * math.sqrt(2.0 / len(recent))
-        bar = max(bar, RISING_SIGMAS * dispersion)
+        bar = max(bar, float(sigmas) * dispersion)
     return gap > bar
 
 

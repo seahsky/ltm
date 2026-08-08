@@ -217,13 +217,23 @@ class TwoSidedWindowTest(unittest.TestCase):
         The two window means differ by more than the renderer's scatter, so a rule sized
         only on `eps` answers FORWARD to a field with no trend in it. The dispersion term
         is measured on the agent's own readings and refuses.
+
+        **Both arms are asserted here rather than one of them being whichever constant is
+        checked out.** `RISING_SIGMAS` is a controller arm under test — `cast-1` left the
+        threshold as the only remaining confound against the pre-fix accident — so what
+        each setting DOES has to be provable in one suite. At zero this series is a
+        forward; at one it is not, and that difference is precisely what a sweep over it
+        is buying.
         """
         half = len(self.NOISY_FLAT) // 2
         baseline = self.NOISY_FLAT[:half]
         recent = self.NOISY_FLAT[half:]
         gap = sum(recent) / half - sum(baseline) / half
         self.assertGreater(gap, MEASURED_SCATTER, "an eps-only bar would answer FORWARD")
-        self.assertFalse(is_rising(self.NOISY_FLAT, eps=MEASURED_SCATTER))
+        self.assertFalse(is_rising(self.NOISY_FLAT, eps=MEASURED_SCATTER, sigmas=1.0))
+        self.assertTrue(
+            is_rising(self.NOISY_FLAT, eps=MEASURED_SCATTER, sigmas=0.0),
+            "and with the dispersion term dropped it is exactly the eps-only bar")
 
     def test_eps_is_still_the_floor_when_the_readings_barely_scatter(self):
         """A quiet renderer must not let arithmetic dust through.
