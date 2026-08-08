@@ -35,11 +35,13 @@ from earshot.audio.clips import synthetic_burst
 from earshot.audio.lateral import LATERAL_AMBIGUOUS, bearing_lateral_sign
 from earshot.config import Detector, Localization, RunConfig
 from earshot.report.agent import SCHEMA_FIELDS
-from earshot.report.audit import FunnelStage
+from earshot.report.audit import CalibrationRecord, FunnelStage
 from earshot.task.runner import (
+    CALIBRATION_DRAWS,
     DIVERT_CANDIDATE_ID,
     _divert_candidate,
     _funnel_stage,
+    calibrate_episode,
     calibration_poses,
     make_detector,
     run_episode,
@@ -527,6 +529,73 @@ class TestCalibrationPoses(unittest.TestCase):
 
         with self.assertRaises(CalibrationError):
             calibration_poses(Islanded(), Xyz(0.0, 0.0, 0.0), (1.0, 8.0), 4, n_draws=8)
+
+
+class TestTheCalibrationProfile(unittest.TestCase):
+    """The sweep's distance axis, kept rather than summarised away.
+
+    `calibrate_onset` reduces sixteen rendered poses to four percentiles, which say how
+    loud the anomaly is and cannot say whether it gets louder as you approach. That curve
+    is the premise of an energy-gradient climb and it was being computed and discarded
+    every episode.
+    """
+
+    def _calibrate(self, world):
+        source = Xyz(3.0, 0.0, 0.0)
+        handle = FakeAudioSensorHandle(world, source)
+        result, poses = calibrate_episode(
+            world, handle, source, CLIP, make_config())
+        return result, poses
+
+    def test_the_profile_carries_one_pair_per_pose_and_falls_with_distance(self):
+        world = FakeWorld()
+        result, poses = self._calibrate(world)
+        self.assertEqual(len(result.profile), len(poses))
+        by_distance = sorted(result.profile)
+        self.assertGreater(
+            by_distance[0][1], by_distance[-1][1],
+            "the nearest pose must be the loudest, or the axis is not the axis")
+
+    def test_a_pose_with_no_route_is_dropped_rather_than_recorded_at_zero(self):
+        """The forced-failure arm (ADR-0014).
+
+        A distance that could not be measured entering the profile as ``0.0`` would put a
+        phantom sample at the source, which is where the gradient is steepest — it would
+        manufacture the very cue the profile exists to test for.
+        """
+        class LosesOnePose(FakeWorld):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def geodesic_distance(self, start, ends):
+                self.calls += 1
+                # The pose draw comes first and takes CALIBRATION_DRAWS calls; the next
+                # call is the profile's first pose.
+                if self.calls == CALIBRATION_DRAWS + 1:
+                    return None
+                return super().geodesic_distance(start, ends)
+
+        result, poses = self._calibrate(LosesOnePose())
+        self.assertEqual(len(result.profile), len(poses) - 1)
+        self.assertTrue(all(distance > 0.0 for distance, _rms in result.profile))
+
+    def test_the_profile_survives_the_audit_round_trip(self):
+        record = CalibrationRecord(
+            onset_rms=0.01, bed_rms=0.001, separation_db=40.0, n_poses=2,
+            global_volume=1.0, profile=((1.0, 0.5), (8.0, 0.1)))
+        self.assertEqual(
+            CalibrationRecord.from_dict(record.as_dict()).profile,
+            ((1.0, 0.5), (8.0, 0.1)))
+
+    def test_a_record_written_before_the_profile_existed_reads_as_absent(self):
+        """Empty, not a flat field: `()` means nobody measured, and nothing may infer
+        from it that the level did not change with distance."""
+        payload = CalibrationRecord(
+            onset_rms=0.01, bed_rms=0.001, separation_db=40.0, n_poses=2,
+            global_volume=1.0).as_dict()
+        del payload["profile"]
+        self.assertEqual(CalibrationRecord.from_dict(payload).profile, ())
 
 
 class TestTheFunnelLadder(unittest.TestCase):

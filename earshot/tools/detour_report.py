@@ -70,6 +70,28 @@ noise wearing a number's clothes. Those windows are counted as ``static`` — wh
 itself a third finding, because an agent that never translated never tested the field.
 
 Still no verdict here. This prints the slope distribution and the reader decides.
+
+The field half — is there a gradient to climb at all
+-----------------------------------------------------
+
+Both halves above are about the *rule*: whether it answered FORWARD, and whether a
+better estimator would have. Neither can say whether a forward step was worth taking,
+and that is a property of the room rather than of the controller. In a furnished space
+the reverberant field takes over past the critical distance, where received level stops
+falling with distance — and `detour-1`'s abandoned detours settle in a 2.06–2.76 m band
+that is exactly where a critical distance would sit. If the field is flat out there, no
+threshold and no ray count recovers a climb, and the entire estimator arc is tuning a
+test against a signal that is not present.
+
+``band_rows`` measures it from the same traces: per distance band, the slope of
+``measured_rms`` on distance-to-source over every detour step, the level one 0.25 m
+forward buys, and that rise in units of the episode's own ``eps``. Signed, so a band
+where approaching is *quieter* cannot masquerade as a strong cue.
+
+**The threshold in force is printed with it.** Since `3f26572` `eps` is measured per
+episode, and a run whose episodes fell back to the unmeasured constant ran a different
+controller from one whose episodes did not — a distinction the run's own console output
+cannot make, because the runner prints ``onset_rms`` and the separation and stops there.
 """
 
 from __future__ import annotations
@@ -88,8 +110,12 @@ from earshot.agent.controller import (
     ACT_STOP,
     ACT_TURN_LEFT,
     ACT_TURN_RIGHT,
+    RISING_WINDOW,
+    climb_eps,
+    is_rising,
     realizable_investigate_step,
 )
+from earshot.task.dataset import FORWARD_STEP_M
 from earshot.report.artifacts import ENV_REPORT_NAME, episode_paths, read_audit, run_paths
 from earshot.report.audit import EpisodeAudit, FunnelStage, StepRecord
 
@@ -99,6 +125,8 @@ __all__ = [
     "NO_DETOUR",
     "RISING_EPS",
     "DEFAULT_MIN_SPAN_M",
+    "BAND_EDGES_M",
+    "band_rows",
     "rising_flags",
     "rule_action",
     "plateau_windows",
@@ -120,9 +148,20 @@ NO_DETOUR = "no_detour"  # onset never fired, or the episode ended before it cou
 # is a second controller that happens to resemble the first. `test_detour_report` holds
 # this against the signature so a change there fails loudly rather than silently
 # re-defining every plateau ever measured.
+#
+# **This is the UNMEASURED fallback, not the threshold a run used.** Since `3f26572` the
+# climb's `eps` is the renderer's own scatter, measured per episode, and `trace_one` reads
+# it off the audit. This value is what an episode with no scatter measurement fell back
+# to, and it is the default here only so a caller replaying a hand-built series has one.
 RISING_EPS = float(
     inspect.signature(realizable_investigate_step).parameters["eps"].default
 )
+
+# Distance-to-source bands, in metres, that the detour's steps are bucketed into. The
+# edges are the ones the arc has already named: 1.0 is `oracle_radius_m`, the arrival
+# ring; 2.0-3.0 is where `detour-1` found seven of twelve abandoned detours plateaued;
+# beyond that is the far field the climb has to cross to get there at all.
+BAND_EDGES_M = (0.0, 1.0, 2.0, 3.0, 5.0, 8.0)
 
 # provenance: fake — the distance a plateau window must span before its slope is worth
 # fitting, in metres. NOT a verdict threshold: it decides whether a regression is
@@ -178,26 +217,38 @@ def _median(values: Sequence[float]) -> Optional[float]:
     return statistics.median(clean) if clean else None
 
 
-def rising_flags(rms: Sequence[float], *, eps: float = RISING_EPS) -> List[bool]:
+def rising_flags(
+    rms: Sequence[float],
+    *,
+    eps: float = RISING_EPS,
+    window: int = RISING_WINDOW,
+) -> List[bool]:
     """``realizable_investigate_step``'s own ``rising``, recomputed per step. Pure.
 
-    Carried verbatim from the rule::
+    **Delegates to ``controller.is_rising`` rather than re-spelling it, and this file has
+    already paid for the alternative once.** The first version carried the rule's body by
+    hand — ``current > previous + eps`` — and when `3f26572` replaced that with a
+    median-of-``window`` baseline the copy here did not move. A replay of `eps-1` would
+    then have reconstructed plateau windows for a controller that never ran, printed the
+    same hail of one-step windows the fix was written to remove, and read as evidence the
+    fix did nothing. The rule is imported now, so it cannot drift again.
 
-        rising = previous is None or current > previous + eps
+    ``eps`` is the episode's own threshold, not a constant: `trace_one` reads it off the
+    audit's calibration record through the same `climb_eps` the runner used.
 
     **Computed over the WHOLE episode, then sliced to the detour** — never over the
     window alone. The controller's ``energy_history`` has been accumulating since step 0,
-    so at the first detour step ``previous`` is the reading from the step *before* the
-    onset, and a window-local recomputation would call that step rising by default and
-    invent a forward the agent never took. ``ENERGY_HISTORY`` is 8 and the rule reads two
-    entries, so the runner's trimming cannot affect this.
+    so at the first detour step the baseline is drawn from readings *before* the onset,
+    and a window-local recomputation would call that step rising by default and invent a
+    forward the agent never took. ``ENERGY_HISTORY`` is 8 and the rule reads
+    ``window + 1`` entries, so at ``RISING_WINDOW`` of 5 the runner's trimming cannot
+    affect this — a guard in `test_detour_report` holds that inequality.
     """
     flags: List[bool] = []
-    previous: Optional[float] = None
+    history: List[float] = []
     for value in rms:
-        current = float(value)
-        flags.append(previous is None or current > previous + float(eps))
-        previous = current
+        history.append(float(value))
+        flags.append(is_rising(history, eps=float(eps), window=int(window)))
     return flags
 
 
@@ -277,6 +328,90 @@ def fit_slope(
     intercept = mean_y - slope * mean_x
     residuals = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
     return slope, math.sqrt(residuals / (n - 2))
+
+
+def _band_label(index: int) -> str:
+    """``"2-3"`` for a bounded band, ``"8+"`` for the open one."""
+    low = BAND_EDGES_M[index]
+    if index + 1 >= len(BAND_EDGES_M):
+        return "{:.0f}+".format(low)
+    return "{:.0f}-{:.0f}".format(low, BAND_EDGES_M[index + 1])
+
+
+def band_rows(
+    distances: Sequence[Optional[float]],
+    rms: Sequence[float],
+    *,
+    eps: float,
+) -> List[Dict[str, Any]]:
+    """The field itself: how much loudness a step buys, by distance from the source. Pure.
+
+    **This is the question every threshold above is downstream of, and nothing has asked
+    it.** The plateau windows say the rule stopped answering FORWARD; they cannot say
+    whether a forward would have helped. That depends on the gradient at the distance the
+    agent was standing, against the noise the gradient is read through — and in a
+    furnished room the reverberant field takes over past the critical distance, where
+    level stops falling with distance and there is no gradient left to climb at any ray
+    count or any threshold.
+
+    Per band: the least-squares slope of ``measured_rms`` on distance-to-source over
+    every detour step in that band, the rise one 0.25 m forward buys (``|slope| x
+    FORWARD_STEP_M``), and that rise over this episode's own ``eps``.
+
+    **``rise_over_eps`` is the number to read, and it is dimensionless by construction.**
+    RMS units differ between episodes — different sources, rooms and gains — so raw
+    slopes cannot be pooled across them, while a rise measured in units of the threshold
+    it has to clear can. Between 0 and 1 a single forward step cannot, on average,
+    produce a reading the rule will call rising, and the climb is being asked to clear a
+    bar the field does not deliver. Above 1 the field is informative at that distance and
+    a stall there is the estimator or the arrival rule, not the acoustics.
+
+    **It is signed, and the sign is not decoration.** The rise is ``-slope x step``: a
+    negative slope is level rising as the gap closes, which is the cue, so it comes out
+    positive. A NEGATIVE ratio is a band where approaching the source makes it quieter —
+    a standing-wave null, an occluder, or the reverberant field beating the direct path —
+    and an unsigned ``|slope|`` would report exactly that as a strong cue and send the
+    next lever at the estimator.
+
+    No verdict and no classifier: the ratio is printed per band and the reader decides,
+    which is this file's rule (ADR-0014).
+    """
+    rows: List[Dict[str, Any]] = []
+    threshold = float(eps)
+    for index, low in enumerate(BAND_EDGES_M):
+        high = BAND_EDGES_M[index + 1] if index + 1 < len(BAND_EDGES_M) else None
+        picked = [
+            (float(d), float(r))
+            for d, r in zip(distances, rms)
+            if d is not None and float(d) >= low and (high is None or float(d) < high)
+        ]
+        row: Dict[str, Any] = {
+            "band": _band_label(index),
+            "n_steps": len(picked),
+            "d_span_m": (
+                max(d for d, _r in picked) - min(d for d, _r in picked)
+                if picked else None
+            ),
+            "slope_per_m": None,
+            "residual_sd": None,
+            "rise_per_step": None,
+            "rise_over_eps": None,
+        }
+        if len(picked) >= 2:
+            slope, residual = fit_slope([d for d, _r in picked], [r for _d, r in picked])
+            row["slope_per_m"] = slope
+            row["residual_sd"] = residual
+            if slope is not None:
+                # Signed: distance DECREASES as the agent approaches, so the level change
+                # a forward step buys is `-slope x step`.
+                rise = -float(slope) * FORWARD_STEP_M
+                row["rise_per_step"] = rise
+                # `eps` is never zero here — `climb_eps` returns the unmeasured fallback
+                # rather than 0.0 — but the guard stays: a zero threshold would make this
+                # infinite, which is not valid JSON and would bury the case that produced it.
+                row["rise_over_eps"] = (rise / threshold) if threshold else None
+        rows.append(row)
+    return rows
 
 
 def _plateau_rows(
@@ -365,12 +500,23 @@ def trace_one(
     else:
         outcome = ABANDONED
 
+    # The threshold THIS episode's climb ran at, through the same call the runner made.
+    # Recorded per episode rather than assumed, and recorded even where there was no
+    # detour: a run that fell back to the unmeasured constant ran a different controller
+    # from one that did not, and that has to be visible in the record rather than inferred
+    # from a version number.
+    calibration = audit.calibration
+    scatter = None if calibration is None else calibration.render_scatter
+    eps = climb_eps(scatter)
+
     row: Dict[str, Any] = {
         "episode": int(audit.episode_index),
         "outcome": outcome,
         "onset_step": onset_step,
         "n_steps": len(audit.steps),
         "walked_is_upper_bound": outcome == REACHED,
+        "rising_eps": eps,
+        "eps_measured": scatter is not None,
     }
     if outcome == NO_DETOUR:
         return row
@@ -414,10 +560,17 @@ def trace_one(
     row["rms_onset"] = rms[0] if rms else None
     row["rms_max"] = max(rms) if rms else None
 
+    # --- the field half ---------------------------------------------------
+    # What a forward step was worth at each distance, before any question about whether
+    # the rule noticed. Over every detour step, not just the plateaued ones: the gradient
+    # is a property of the room, and restricting it to the windows would measure it only
+    # where the agent had already stopped believing in it.
+    row["bands"] = band_rows(window, rms, eps=eps)
+
     # --- the plateau half ------------------------------------------------
     # `rising` over the WHOLE episode, then keyed back to the detour by step number.
     # See `rising_flags`: a window-local recomputation invents a forward at the onset.
-    all_flags = rising_flags([r.measured_rms for r in audit.steps])
+    all_flags = rising_flags([r.measured_rms for r in audit.steps], eps=eps)
     flag_by_step = {r.step: f for r, f in zip(audit.steps, all_flags)}
     flags = [flag_by_step[r.step] for r in steps]
 
@@ -518,6 +671,47 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
                 (forward_in / forward_all) if forward_all else None),
         }
 
+    def _bands() -> List[Dict[str, Any]]:
+        """Band rows pooled across episodes. Medians, because n is ~20 and one episode
+        that walked into a corner should not move the number a lever is chosen against.
+
+        ``rise_over_eps`` pools legitimately and the raw slope does not: RMS units differ
+        between episodes, so a median slope is a median of incomparable numbers and is
+        printed only as context for the ratio beside it.
+        """
+        by_label: Dict[str, List[Mapping[str, Any]]] = {}
+        order: List[str] = []
+        for trace in traces:
+            for row in trace.get("bands") or []:
+                label = str(row.get("band"))
+                if label not in by_label:
+                    by_label[label] = []
+                    order.append(label)
+                by_label[label].append(row)
+        pooled: List[Dict[str, Any]] = []
+        for label in order:
+            rows = by_label[label]
+            pooled.append({
+                "band": label,
+                # Episodes that put at least two steps in this band — the ones that could
+                # contribute a slope at all. Printed so a band fitted from three episodes
+                # is not read with the confidence of one fitted from twenty.
+                "n_episodes": sum(1 for r in rows if int(r.get("n_steps") or 0) >= 2),
+                "n_steps": sum(int(r.get("n_steps") or 0) for r in rows),
+                "slope_per_m": _median([r.get("slope_per_m") for r in rows]),
+                "residual_sd": _median([r.get("residual_sd") for r in rows]),
+                "rise_over_eps": _median([r.get("rise_over_eps") for r in rows]),
+            })
+        return pooled
+
+    # MEASURED episodes only. Pooling a fallback episode in here would report the gap
+    # between 1e-6 and a real floor as the estimator's spread — three orders of magnitude
+    # of "noise" that is actually one episode running a different rule, which the count
+    # beside it already says.
+    epsilons = [
+        float(t["rising_eps"]) for t in traces
+        if t.get("eps_measured") and t.get("rising_eps") is not None
+    ]
     positioned = sum(1 for t in traces if t.get("d_onset_m") is not None)
     checked = sum(int(t.get("n_rule_checked") or 0) for t in traces)
     agreed = sum(int(t.get("n_rule_agree") or 0) for t in traces)
@@ -526,6 +720,17 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "n_with_position": positioned,
         "arms": {name: _arm(name) for name in (ABANDONED, REACHED, NO_DETOUR)},
         "plateaus": {name: _plateau(name) for name in (ABANDONED, REACHED)},
+        "bands": _bands(),
+        # Which threshold the run's climbs actually ran at. `min`/`max` rather than a
+        # single number on purpose: `eps` is a sample SD over `SCATTER_REPEATS` renders,
+        # so its spread across episodes is the estimator's own noise, and a run whose bar
+        # moved several-fold between episodes was not running one controller.
+        "eps": {
+            "n_measured": sum(1 for t in traces if t.get("eps_measured")),
+            "median": _median(epsilons),
+            "min": min(epsilons) if epsilons else None,
+            "max": max(epsilons) if epsilons else None,
+        },
         # The abort condition, pooled. `n_rule_checked` is zero on every run written
         # before `StepRecord.realizable_action`, and zero here means UNVALIDATED — the
         # reconstruction was never put to a test — which format_report says in words
@@ -594,8 +799,74 @@ def format_report(agg: Mapping[str, Any]) -> str:
             "Re-run to measure them.".format(
                 agg["n_episodes"] - agg["n_with_position"], agg["n_episodes"]))
 
+    lines.extend(_eps_lines(agg))
+    lines.extend(_band_lines(agg))
     lines.extend(_plateau_lines(agg))
     return "\n".join(lines)
+
+
+def _eps_lines(agg: Mapping[str, Any]) -> List[str]:
+    """Which threshold the climbs ran at — the disclosure the run report cannot make.
+
+    The runner prints `onset_rms` and the separation and stops there, so "the windowed
+    rule ran" and "the windowed rule ran against a real noise floor" are indistinguishable
+    from a run's console output. They are different claims and this says which one holds.
+    """
+    eps = agg.get("eps") or {}
+    n = int(agg.get("n_episodes") or 0)
+    measured = int(eps.get("n_measured") or 0)
+    if not n:
+        return []
+    lines = ["", "  the climb's threshold, per episode: {} of {} measured the renderer's "
+                 "scatter".format(measured, n)]
+    if measured < n:
+        lines.extend(_wrap(
+            "{} episode(s) fell back to the UNMEASURED constant {:.0e}, which is roughly "
+            "three thousand times under a rendered residual — on a flat field that rule "
+            "is a coin flip, and those episodes are not comparable with the rest.".format(
+                n - measured, RISING_EPS)))
+    if eps.get("median") is not None:
+        lines.append(
+            "  measured eps median {:.2e}, range {:.2e} to {:.2e}".format(
+                eps["median"], eps["min"], eps["max"]))
+        spread = (eps["max"] / eps["min"]) if eps.get("min") else None
+        if spread and spread >= 2.0:
+            lines.extend(_wrap(
+                "the bar moved {:.1f}x across the measured episodes. It is a sample SD "
+                "over a handful of repeats, so much of that spread is the estimator's own "
+                "noise rather than the rooms differing, and it is a control parameter the "
+                "experiment does not hold fixed.".format(spread)))
+    return lines
+
+
+def _band_lines(agg: Mapping[str, Any]) -> List[str]:
+    """The field: what a forward step was worth, by distance from the source."""
+    bands = agg.get("bands") or []
+    if not bands:
+        return []
+    lines = ["", "the field, by distance to source — what one 0.25 m forward buys against",
+             "the threshold it has to clear:"]
+    lines.append("  {:<8} {:>5}  {:>7}  {:>10}  {:>9}  {:>12}".format(
+        "band m", "n_ep", "steps", "slope/m", "resid", "rise/eps"))
+    for row in bands:
+        lines.append("  {:<8} {:>5}  {:>7}  {:>10}  {:>9}  {:>12}".format(
+            row.get("band", "?"),
+            row.get("n_episodes", 0),
+            row.get("n_steps", 0),
+            _fmt(row.get("slope_per_m"), "{:+.2e}"),
+            _fmt(row.get("residual_sd"), "{:.1e}"),
+            _fmt(row.get("rise_over_eps"), "{:.2f}")))
+    lines.append("")
+    lines.extend(_wrap(
+        "rise/eps is what one forward step buys in units of the threshold it has to "
+        "clear. Between 0 and 1 an average step cannot produce a reading the rule will "
+        "call rising, so no threshold setting recovers the climb there and the band is "
+        "past the field's useful range. Above 1 the cue is available and a stall in that "
+        "band is the estimator or the arrival rule, not the acoustics. NEGATIVE means "
+        "approaching made it quieter — a null or an occluder, not a cue to tune. n_ep is "
+        "how many episodes put two or more steps in the band; slope is not poolable "
+        "across episodes and is context for the ratio, not a result."))
+    return lines
 
 
 def _histogram_lines(plateaus: Mapping[str, Any]) -> List[str]:

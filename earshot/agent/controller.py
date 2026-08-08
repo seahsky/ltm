@@ -63,6 +63,8 @@ __all__ = [
     "ControllerState",
     "ControllerDecision",
     "RISING_WINDOW",
+    "UNMEASURED_EPS",
+    "climb_eps",
     "is_rising",
     "realizable_investigate_step",
     "realizable_investigate_probe",
@@ -95,6 +97,29 @@ ACT_STOP = "stop"
 # 7.41, both arms, both runs). Five is the scale of those dropouts and still short against
 # a 121-step detour, so a real climb is blunted by at most a few steps.
 RISING_WINDOW = 5
+
+# provenance: fake — the threshold the climb falls back to when the renderer's scatter was
+# not measured. It is the pre-`detour-2` constant, kept only so an episode with no
+# measurement still runs a defined rule, and it is deliberately far below any real noise
+# floor: a run that silently ran at this value is a run whose climb was a coin flip, and
+# the audit records which of the two was in force so that is visible rather than inferred.
+UNMEASURED_EPS = 1e-6
+
+
+def climb_eps(render_scatter: Optional[float]) -> float:
+    """The threshold the climb actually ran with, given the episode's measured scatter.
+
+    **One copy of the fallback policy, read by both the runner and the replay.** The
+    runner decides an episode's `eps` here and `tools/detour_report` reconstructs plateau
+    windows with the same call, so a replay cannot drift into judging `rising` at a
+    different threshold than the agent used. Two copies of this conditional would be two
+    controllers, one of which never ran.
+
+    ``None`` means *not measured* and never zero — `calibrate_onset` leaves it ``None``
+    when fewer than two repeats arrived, and a zero threshold would read as a renderer
+    that agreed with itself exactly, which would be a finding rather than a default.
+    """
+    return UNMEASURED_EPS if render_scatter is None else float(render_scatter)
 
 
 def _median(values: Sequence[float]) -> float:
@@ -152,7 +177,7 @@ def realizable_investigate_step(
     lateral_sign: int,
     visual_confirm: bool,
     *,
-    eps: float = 1e-6,
+    eps: float = UNMEASURED_EPS,
     window: int = RISING_WINDOW,
 ) -> str:
     """One greedy step of realizable anomaly-source localization (ADR-0011). Carried verbatim.
@@ -381,7 +406,7 @@ def step_controller(
     lateral_sign: int = 0,
     visual_confirm: bool = False,
     pose: Optional[Pose] = None,
-    rising_eps: float = 1e-6,
+    rising_eps: float = UNMEASURED_EPS,
 ) -> Tuple[ControllerState, ControllerDecision]:
     """Advance the machine one tick. Returns ``(next_state, decision)``.
 

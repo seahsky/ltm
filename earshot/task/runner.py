@@ -56,6 +56,7 @@ from earshot.agent.controller import (
     ACT_STOP,
     ControllerState,
     NavMode,
+    climb_eps,
     is_diverting,
     step_controller,
 )
@@ -284,11 +285,27 @@ def calibrate_episode(
     if poses:
         scatter = sweep_render_scatter(poses[len(poses) // 2], render_at, clip)
 
+    # The distance each swept sample was taken at. `calibration_poses` chose every pose BY
+    # geodesic distance and then discarded the number; re-measuring it costs one pathfinder
+    # query per pose and no render at all. It is what turns the sweep into a field profile
+    # — received level against distance — and that curve is the premise the whole climb
+    # rests on: past the critical distance the reverberant field dominates, level stops
+    # falling with distance, and no threshold or ray count recovers a gradient that is not
+    # there. Pairs whose route cannot be measured are dropped rather than defaulted, so an
+    # unroutable pose cannot enter the profile as a distance of zero.
+    profile: List[Tuple[float, float]] = []
+    for pose, sample in zip(poses, samples):
+        distance = world.geodesic_distance(pose, [source])
+        if distance is None or not math.isfinite(float(distance)):
+            continue
+        profile.append((float(distance), float(sample)))
+
     result = calibrate_onset(
         cfg.audio.bed_rms,
         samples,
         global_volume=cfg.audio.global_volume,
         scatter_samples=scatter,
+        profile=profile,
     )
     return result, poses
 
@@ -578,14 +595,12 @@ def run_episode(
             # than to one it has not touched yet.
             pose=pose,
             # The rise has to clear the renderer's own scatter, measured on THIS episode's
-            # geometry. `None` means the calibration did not measure it, and the fallback
-            # is the old `1e-6` — which is not a safe default so much as the previous
-            # behaviour, kept so a caller that skips the scatter render still runs. The
-            # audit records which of the two was in force.
-            rising_eps=(
-                1e-6 if calibration.render_scatter is None
-                else float(calibration.render_scatter)
-            ),
+            # geometry. `climb_eps` owns the `None` case — the fallback is the old `1e-6`,
+            # which is not a safe default so much as the previous behaviour, kept so a
+            # caller that skips the scatter render still runs. It lives beside the rule
+            # rather than here so `tools/detour_report` replays the same threshold this
+            # episode ran at; the audit records which of the two was in force.
+            rising_eps=climb_eps(calibration.render_scatter),
         )
         if state.mode is NavMode.INVESTIGATE or decision.mode is NavMode.INVESTIGATE:
             entered_investigate = True
@@ -807,6 +822,7 @@ def run_episode(
             passed=calibration.passed,
             render_scatter=calibration.render_scatter,
             scatter_repeats=calibration.scatter_repeats,
+            profile=calibration.profile,
         ),
         audio_context=getattr(handle, "report", None),
         steps=tuple(steps),

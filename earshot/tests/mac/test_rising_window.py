@@ -19,6 +19,8 @@ from earshot.agent.controller import (
     ACT_FORWARD,
     ACT_TURN_LEFT,
     RISING_WINDOW,
+    UNMEASURED_EPS,
+    climb_eps,
     is_rising,
     realizable_investigate_step,
 )
@@ -163,6 +165,36 @@ class RenderScatterTest(unittest.TestCase):
         """`None` and `0.0` mean opposite things and the record must not conflate them."""
         result = calibrate_onset(0.001, [0.01, 0.02, 0.03], scatter_samples=[])
         self.assertIsNone(result.as_dict()["render_scatter"])
+
+
+class ClimbEpsTest(unittest.TestCase):
+    """One copy of the fallback policy, because two would be two controllers.
+
+    The runner decided an episode's threshold with this conditional inline and
+    `detour_report` replayed it with a different one, which is how a replay ends up
+    judging `rising` at a threshold no agent ever used.
+    """
+
+    def test_a_measured_scatter_is_the_threshold(self):
+        self.assertEqual(climb_eps(MEASURED_SCATTER), MEASURED_SCATTER)
+
+    def test_unmeasured_falls_back_to_the_old_constant(self):
+        self.assertEqual(climb_eps(None), UNMEASURED_EPS)
+        self.assertEqual(UNMEASURED_EPS, OLD_EPS)
+
+    def test_a_measured_zero_stays_zero_and_is_not_read_as_unmeasured(self):
+        """THE ARM THAT MATTERS. `render_scatter_of` returns 0.0 for a renderer that
+        agreed with itself exactly, and that is a finding. Folding it into the fallback
+        would hide it behind a constant three thousand times larger than any real floor."""
+        self.assertEqual(climb_eps(0.0), 0.0)
+
+    def test_the_rule_and_the_fallback_agree_on_the_default(self):
+        """The signature default IS the fallback: `detour_report.RISING_EPS` reads it."""
+        import inspect
+
+        self.assertEqual(
+            inspect.signature(realizable_investigate_step).parameters["eps"].default,
+            UNMEASURED_EPS)
 
 
 class LengthHistogramTest(unittest.TestCase):

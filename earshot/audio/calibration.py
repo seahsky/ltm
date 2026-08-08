@@ -86,9 +86,16 @@ class CalibrationResult:
     passed: bool = True
     render_scatter: Optional[float] = None
     scatter_repeats: int = 0
+    # (distance-to-source, received RMS) for every pose the sweep visited — the FIELD
+    # PROFILE. The sweep already renders this curve to place the threshold and used to
+    # keep only four percentiles of it, which is the distance axis thrown away: the
+    # percentiles say how loud the anomaly gets, and the pairs say whether it gets louder
+    # as you approach, which is the entire premise of an energy-gradient climb.
+    profile: Tuple[Tuple[float, float], ...] = ()
 
     def as_dict(self) -> dict:
         return {
+            "profile": [[float(d), float(r)] for d, r in self.profile],
             "onset_rms": self.onset_rms,
             "bed_rms": self.bed_rms,
             "anomaly_low": self.anomaly_low,
@@ -124,11 +131,20 @@ def sweep_anomaly_rms(
 
 
 # provenance: fake — how many times one pose is re-rendered to size the renderer's own
-# non-determinism. Three is the smallest n with a middle value, so a single outlier does
-# not become the estimate, and the cost is two extra renders per episode (~1.2 s against
-# `detour-2`'s 8m26s over 20 episodes, 0.3%). Raising it buys a tighter estimate and
-# nothing else; the consumer is a threshold, not a published number.
-SCATTER_REPEATS = 3
+# non-determinism.
+#
+# **Three was too few, and the consumer is why.** A sample SD carries a relative error of
+# about 1/sqrt(2(n-1)) and a low bias of (1 - c4): at n=3 that is ~50% and ~11%, so the
+# estimate swings roughly threefold between episodes on nothing but its own noise. This
+# number is not reported — it is the `eps` in the climb's rising test, so that swing is a
+# CONTROL PARAMETER moving several-fold across episodes of one run, and two episodes in
+# the same room can be running materially different controllers. At twelve the relative
+# error is ~21% and the bias ~2%.
+#
+# The cost stays negligible because it is renders, not steps: eleven extra per episode is
+# ~6.6 s against `detour-2`'s 8m26s over 20 episodes, ~1.3%, and criterion 7's per-step
+# audio ceiling is untouched — the sweep runs once, before the episode.
+SCATTER_REPEATS = 12
 
 
 def sweep_render_scatter(
@@ -203,6 +219,7 @@ def calibrate_onset(
     low_percentile: float = ANOMALY_LOW_PERCENTILE,
     min_separation_db: float = MIN_SEPARATION_DB,
     scatter_samples: Sequence[float] = (),
+    profile: Sequence[Tuple[float, float]] = (),
 ) -> CalibrationResult:
     """Place ``onset_rms`` strictly between the bed and the anomaly, or fail the gate.
 
@@ -222,6 +239,12 @@ def calibrate_onset(
     per-episode noise estimate belongs, and because the climb downstream needs it. Empty
     is allowed and leaves ``render_scatter`` None, which every consumer must read as "not
     measured" rather than "zero".
+
+    ``profile`` is the same for the distance axis: ``(distance, rms)`` for each swept
+    pose, carried through untouched so the episode's record holds the curve rather than
+    four percentiles of it. It does not enter the threshold either. Empty is allowed, and
+    means the caller did not measure the distances — a record written before this existed
+    reads as absent rather than as a flat field.
     """
     bed = float(bed_rms)
     samples = [float(v) for v in anomaly_rms]
@@ -263,6 +286,7 @@ def calibrate_onset(
     return CalibrationResult(
         render_scatter=render_scatter_of(scatter) if len(scatter) >= 2 else None,
         scatter_repeats=len(scatter),
+        profile=tuple((float(d), float(r)) for d, r in profile),
         onset_rms=math.sqrt(bed * low),
         bed_rms=bed,
         anomaly_low=low,

@@ -3566,3 +3566,95 @@ The next lever is the **terminal approach**: what the CHECK does between 2 m and
 `investigate_max_steps = 120` stays as it is; it is not doing harm and it is not the limiter.
 
 **File index.** `earshot/tools/detour_report.py` (+`tests/mac/test_detour_report.py`), `StepRecord.position` and `EpisodeAudit.distance_to_source_history` in `earshot/report/audit.py`. Data: `runs/detour-1/ziup5kvtCCR` (RACE).
+
+---
+
+# detour-2 — the plateau was the TEST, not the field: 325 of 336 windows are one step long, and the cue sat 6x over its own scatter (RACE, 2026-08-07)
+
+**Run dir:** `runs/detour-2/<scene>` on the box (20 episodes, 8m26s, both arms present).
+**Read with:** `python -m earshot.tools.detour_report runs/detour-2/<scene>`.
+**Provenance warning:** every number here is quoted from commit `3f26572`'s message, which until this entry was the only place they survived. The run's own directory is on the box.
+
+## The question
+
+`detour-1` named the terminal approach as the next lever and left the mechanism open: seven of twelve abandoned detours settle in a tight 2.06–2.76 m band and nothing said why.
+Two candidates imply opposite fixes.
+**The plateau is real** — the gradient genuinely flattens near 2 m, no forward would have raised it, and the lever is the arrival criterion.
+**The plateau is spurious** — the gradient is still climbing but `rising` is a SINGLE-STEP comparison, and `detour-1` measured the live render moving 24% between identical runs, so one unlucky reading sends the agent into a turn and the lever is the estimator.
+
+The planned separator was `rays-1`, a ray-count sweep. It never ran: `earshot/tools/ray_variance.sh` was never written and `nrun` exited 127 on it.
+The free gate answered the question instead — `signal_to_scatter` = |slope| × d_span / residual SD, computed from traces already on disk.
+
+## The measurement
+
+| reading | abandoned | reached |
+|---|---|---|
+| `signal_to_scatter`, this run | **6.12** | **7.41** |
+| `signal_to_scatter`, recomputed on `detour-1` | **6.09** | **4.98** |
+| in-window residual SD | 2.8e-3 | 3.0e-3 |
+| plateau windows at a median distance of | 5.34 m | 2.74 m |
+
+**325 of 336 abandoned-arm plateau windows are a SINGLE step with ZERO travel.**
+The median window length is 1 while ~60% of detour steps sit inside a window — arithmetic that only works if a tail exists the median cannot show, which is why `detour_report` grew a length histogram rather than reporting a middle value.
+
+## What it establishes
+
+1. **`rays-1` is CLOSED without running.** Every ratio is far above 1, which is this run's own branch for *the cue was recoverable from 500-ray traces all along*. The 2000/5000-ray probe is not a lever. (Cost, had it been built: 5000 rays ≈ 270 ms/step ≈ 135 s/episode against 13.6 s at 500.)
+
+2. **The estimator was the mechanism, and the arithmetic is embarrassing.** The test was `current > previous + 1e-6` against a renderer whose residual is ~2.8e-3 — a threshold about three thousand times smaller than the noise it was read through. On a flat field that is a coin flip, and every losing toss left FORWARD for one tick and turned. That is the one-step window, and there are hundreds of them.
+
+3. **A one-step dropout and a long stall are different mechanisms.** Pooling them under a median is what hid this for two runs.
+
+## What it did NOT establish
+
+`signal_to_scatter` is an **in-window residual**, so it conflates render non-determinism with real non-linearity in the field, and every window it fits is one the agent was already plateaued in.
+It cannot say whether the field has a climbable gradient at a given distance — only that, where a window could be fitted, the line through it was steep against its own scatter.
+That question needed a separate measurement and did not get one until `eps-1` (below).
+
+**File index.** `RISING_WINDOW`, `is_rising` in `earshot/agent/controller.py`; `sweep_render_scatter`, `render_scatter_of` in `earshot/audio/calibration.py`; `CalibrationRecord.render_scatter` in `earshot/report/audit.py`; `_length_histogram` in `earshot/tools/detour_report.py`; `tests/mac/test_rising_window.py`. Commit `3f26572` (merged #46, HEAD `9fa2c73`).
+
+---
+
+# eps-1 — the estimator fix's validation sweep: 20 scenes GREEN, 33% source-reached, and NO VERDICT until the pre-fix arm is placed beside it (RACE, 2026-08-07)
+
+**Run:** `bash earshot/tools/yield_sweep.sh --tag eps-1`, exit 0, 2h44m, commit `9fa2c73`, host riftvm.
+**Run dirs:** `runs/eps-1/<scene>` for 20 HM3D val scenes.
+**Status: UNSCORED.** This entry records what ran and what it measured. It does not say whether the fix worked, and nothing downstream may read it as saying so.
+
+## What ran
+
+The first full sweep carrying `3f26572` — the median-of-5 baseline and the per-episode measured `eps`. Nineteen of twenty scenes completed; `mL8ThkuaVTM` is a measured zero-yield scene, counted in the denominator.
+
+| | eps-1 | yield-2 (pre-fix) |
+|---|---|---|
+| built / skipped | 365 / 651 = **36%** | 365 / 651 = **36%** |
+| source reached | **120 / 365 = 33%** | *not yet placed beside it* |
+| rejections | 9556 too_near, 2602 on_another_floor, 339 at_the_start, 0 no_view_point | — |
+
+Per-scene source-reached ranges from **1/18** (`TEEsavR23oF`) to **13/20** (`QaLdnwvtxbs`).
+Onset fired in **100% of built episodes in every scene**, as it has in every run since the bed was calibrated against it.
+
+## Why there is no verdict
+
+**The builder did not change, so `yield-2` is a free paired control.** Both sweeps built 365 of 1016 episodes with the same skip counts, so they differ only by the fix. The one subtraction that scores it — `yield-2`'s `SOURCE_REACHED` column against this one's — has not been done, and no other comparison substitutes for it:
+
+- **`detour-1`'s 8/20 on `ziup5kvtCCR` is NOT the control.** `at_the_start` landed in between, and `place_anomaly_source` reports its per-rule counts only in the `PlacementError` raised when *nothing* qualifies. A scene showing no rejections may still have had a near-start candidate rejected and a farther source substituted, and the yield report cannot see it. (eps-1 reads 3/20 on that scene. It is not comparable, and it is not nothing either.)
+- **GREEN is not evidence.** Criterion 5 is in `RATE_CRITERIA`, so it is green iff at least one episode passed; `ziup5kvtCCR`'s "PASS 7/20 (35%)" is the gate working as designed. The funnel rate is the science number and the gate never asserted it.
+- **The outcome is noisy at the episode level.** `detour-1` measured ~20% of episodes flipping between identical runs on render non-determinism alone, so a per-episode difference needs pairing before it means anything.
+
+## Two defects this run surfaced, both fixed after it
+
+1. **`detour_report` was replaying a controller that never ran.** `rising_flags` still carried the single-step rule by hand, and `RISING_EPS` read the signature default of `1e-6`, so a replay of eps-1 would have reconstructed plateau windows for the PRE-fix predicate and printed the same hail of one-step windows — reading as "the fix changed nothing" when the tool had simply not applied it. The guard test only held that the constant was not re-spelled. `rising_flags` now delegates to `controller.is_rising` and takes the episode's own `eps`.
+
+2. **No run report can say which threshold was in force.** The runner prints `onset_rms` and the separation and stops; `render_scatter` reaches `audit.json` only. "The windowed rule ran" and "the windowed rule ran against a real noise floor" are different claims and the emailed report could not distinguish them. `detour_report` now prints the count and the spread. (For eps-1 the fallback path is almost certainly unreached: `calibrate_onset` leaves `render_scatter` None only when fewer than two scatter samples arrive, and every episode logged a 16-pose sweep.)
+
+## What is measured next, at zero box cost
+
+Both reads run against eps-1's existing audits:
+
+- **`g/σ` in the stall band** — the level one 0.25 m forward buys, over that episode's own recorded scatter. Below 1 and no threshold setting recovers the climb there.
+- **the field profile** — level against distance pooled across detour steps, to read whether the 2.06–2.76 m stall band is the **critical distance**, past which the reverberant field dominates and there is no gradient to climb at any ray count. `detour-1`'s point 5 read this evidence the other way round.
+
+Two recording changes landed with them and take effect on the next run: `SCATTER_REPEATS` 3 → 12 (a 3-sample SD carries ~50% relative error, so the climb's threshold was swinging ~3× between episodes on estimator noise alone), and the calibration sweep's 16 `(distance, rms)` pairs persisted to `CalibrationRecord.profile` — a curve that was being rendered and discarded every episode.
+
+**File index.** `climb_eps`/`UNMEASURED_EPS` in `earshot/agent/controller.py`; `band_rows`, `BAND_EDGES_M`, `_eps_lines`, `_band_lines` in `earshot/tools/detour_report.py`; `CalibrationResult.profile` in `earshot/audio/calibration.py`; `CalibrationRecord.profile` in `earshot/report/audit.py`; `tests/mac/test_detour_report.py`, `tests/mac/test_rising_window.py`, `tests/mac/test_task_runner.py`. Data: `runs/eps-1/<scene>` (RACE). See ADR-0015 for the placement rule that fixed this denominator.
