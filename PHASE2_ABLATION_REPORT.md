@@ -3615,7 +3615,7 @@ That question needed a separate measurement and did not get one until `eps-1` (b
 
 ---
 
-# eps-1 — the estimator fix's validation sweep: 20 scenes GREEN, 33% source-reached, and NO VERDICT until the pre-fix arm is placed beside it (RACE, 2026-08-07)
+# eps-1 — the estimator fix is a REGRESSION: Anomaly-response SR 46.0% → 32.9% over 365 paired episodes, 15 of 16 scenes down (RACE, 2026-08-07/08)
 
 **Run:** `bash earshot/tools/yield_sweep.sh --tag eps-1`, exit 0, 2h44m, commit `9fa2c73`, host riftvm.
 **Run dirs:** `runs/eps-1/<scene>` for 20 HM3D val scenes.
@@ -3692,6 +3692,30 @@ The estimator arc is therefore **not closed — it was half-fixed**. `3f26572` a
 
 **`detour-1`'s "clean bimodal gap, no overlap" no longer holds.** The abandoned arm now includes `d_min` 0.86 m and 1.17 m, inside the range that run's reached arm occupied. (0.86 m horizontal is not necessarily inside a 1.0 m *geodesic* arrival ring, so this is not yet a claim that the arrival rule missed an arrival.)
 
-**Still unscored.** None of this is the `yield-2` subtraction, and the funnel number remains uncompared.
+## The verdict (`funnel_diff runs/yield-2 runs/eps-1`, 2026-08-08)
+
+**The fix cost 48 of 365 episodes. Anomaly-response SR 46.0% → 32.9%, −13.2 points.**
+
+All 20 scenes paired — the builder did not move between the two sweeps — and **the entire loss is at stage 5**: `ONSET_FIRED` and `INVESTIGATE_ENTERED` are 365/365 in both arms, and `PRIMARY_RESUMED` tracks `SOURCE_REACHED` exactly, so nothing was lost hearing the anomaly or getting back to the primary task.
+
+| | `yield-2` | `eps-1` |
+|---|---|---|
+| SOURCE_REACHED | 168/365 (**46.0%**) | 120/365 (**32.9%**) |
+| scenes down / up / unchanged | — | **15 / 1 / 4** |
+
+Two independent readings, neither of which the aggregate alone supports:
+
+- **Net delta against render noise.** Flips go both ways and cancel, so under a null of no effect the net has mean 0 and SD √(0.20 × 365) = 8.5 episodes. −48 is **z = −5.6**. (The first version of `funnel_diff` compared the net against the flip *count*, 73, and would have called this no result. Corrected — a net clears the SD, not the churn.)
+- **Sign across scenes**, which assumes nothing about the renderer at all: 15 of the 16 scenes that moved went down. Two-sided sign test **p = 0.0005**.
+
+## Why it lost, and what that says about the arc
+
+The pre-fix rule was `current > previous + 1e-6` against a renderer scattering 2.8e-3 — a coin flip wherever the field is flat, which is what `detour-2` diagnosed and what this fix removed. **The coin flip was the agent's only exploration.** `realizable_investigate_step` has no other branch that advances a plateaued agent: not-rising and not-confirmed is a TURN, always. At P(forward) ≈ 0.5 on flat ground the agent performed a random walk that covered distance; at a properly-thresholded P(forward) ≈ 0.1 it turns in place. eps-1's traces show exactly that — 85% of abandoned detour steps plateaued and 87 of 106 abandoned windows are `static`, the agent never translating through them.
+
+So `detour-2`'s reading was half right. The single-step test *was* reading noise. But repairing the estimator without giving the controller a deliberate way to move while un-cued removed the accidental exploration that was carrying it, and the field measurement above says why no threshold can replace it: inside 5 m one forward step buys 0.61–0.86 of the local scatter, so a correctly-calibrated single-step rule fires rarely by construction.
+
+**The lever named by this run is the plateau branch itself**, not the threshold in it. `77fbe7a` noticed "no branch advances a plateaued agent" and filed it as evidence for the estimator; it was a structural defect in its own right, and it is now the measured one.
+
+**What is not established.** That a better estimator cannot help — the two-sided window is untested against either arm. And nothing here is per-episode paired: `summary.json` records how many episodes reached the source, never which, so the 15-of-16 sign test is the strongest claim these records support.
 
 **File index.** `climb_eps`/`UNMEASURED_EPS`/`RISING_SIGMAS`/`MIN_DISPERSION_SAMPLES` and the two-sided `is_rising` in `earshot/agent/controller.py`; `ENERGY_HISTORY` and `route_to_source` in `earshot/task/runner.py`; `band_rows`, `BAND_EDGES_M`, `_eps_lines`, `_band_lines`, the axis selection in `trace_one` in `earshot/tools/detour_report.py`; `CalibrationResult.profile` in `earshot/audio/calibration.py`; `CalibrationRecord.profile` and `StepRecord.geodesic_to_source` in `earshot/report/audit.py`; `tests/mac/test_detour_report.py`, `tests/mac/test_rising_window.py`, `tests/mac/test_task_runner.py`. Data: `runs/eps-1/<scene>` (RACE). See ADR-0015 for the placement rule that fixed this denominator.

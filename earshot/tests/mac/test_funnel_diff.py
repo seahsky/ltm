@@ -128,6 +128,76 @@ class TestTheReport(unittest.TestCase):
         self.assertIn("{:.0%}".format(FLIP_RATE), text)
         self.assertIn("not paired episodes", text)
 
+
+class TestTheNoiseBound(unittest.TestCase):
+    """A net delta is compared against the SD of the flips, never against their count.
+
+    The first version of this file printed "a delta near {count} is not a result", and on
+    the `yield-2` against `eps-1` pairing that reads: 48 episodes lost is inside 73 of
+    churn, so no finding. It is a 5.6-sigma finding. Flips go both ways and cancel; the
+    count is the churn and the square root of it is what a NET has to clear.
+    """
+
+    def test_the_sd_is_the_root_of_the_count_not_the_count(self):
+        agg = diff([summary("A", 365, reached=168)], [summary("A", 365, reached=120)])
+        self.assertAlmostEqual(agg["flip_noise_episodes"], 73.0)
+        self.assertAlmostEqual(agg["delta_sd"], 8.544, places=3)
+        self.assertAlmostEqual(agg["delta_z"], -5.618, places=3)
+
+    def test_the_report_states_the_delta_in_sigmas(self):
+        text = format_report(diff([summary("A", 365, reached=168)],
+                                  [summary("A", 365, reached=120)]))
+        self.assertIn("-5.6 of those", text)
+
+    def test_an_empty_pairing_has_no_sigma_rather_than_a_zero(self):
+        agg = diff([summary("Z", 0, reached=0)], [summary("Z", 0, reached=0)])
+        self.assertIsNone(agg["delta_sd"])
+        self.assertIsNone(agg["delta_z"])
+
+
+class TestTheSignTest(unittest.TestCase):
+    """The statistic that assumes nothing about the renderer: which way each scene moved.
+
+    Episodes inside one scene share a room, a source and a renderer. Scenes are closer to
+    independent draws, so a consistent sign across them is evidence an aggregate cannot
+    give — and it is what made the `eps-1` regression unarguable at 15 scenes down of 16.
+    """
+
+    def _across(self, deltas):
+        before = [summary("s{}".format(i), 20, reached=10) for i, _ in enumerate(deltas)]
+        after = [summary("s{}".format(i), 20, reached=10 + d)
+                 for i, d in enumerate(deltas)]
+        return diff(before, after)["sign_test"]
+
+    def test_fifteen_of_sixteen_one_way_is_decisive(self):
+        sign = self._across([-1] * 15 + [+1])
+        self.assertEqual((sign["down"], sign["up"], sign["n"]), (15, 1, 16))
+        self.assertLess(sign["p_value"], 0.001)
+
+    def test_an_even_split_is_not(self):
+        sign = self._across([-1] * 8 + [+1] * 8)
+        self.assertGreater(sign["p_value"], 0.9)
+
+    def test_unchanged_scenes_are_dropped_rather_than_split(self):
+        """A scene that did not move is no evidence either way. Counting it as half a
+        success would manufacture confidence out of scenes where nothing happened."""
+        sign = self._across([-1, -1, -1, 0, 0, 0, 0])
+        self.assertEqual((sign["n"], sign["flat"]), (3, 4))
+        self.assertAlmostEqual(sign["p_value"], 0.25)
+
+    def test_no_scene_moved_at_all_has_no_p_value(self):
+        sign = self._across([0, 0, 0])
+        self.assertEqual(sign["n"], 0)
+        self.assertIsNone(sign["p_value"])
+
+    def test_the_report_prints_the_direction_count_and_p(self):
+        before = [summary("s{}".format(i), 20, reached=10) for i in range(4)]
+        after = [summary("s{}".format(i), 20, reached=10 + d)
+                 for i, d in enumerate([-1, -1, -1, +1])]
+        text = format_report(diff(before, after))
+        self.assertIn("3 down, 1 up", text)
+        self.assertIn("sign test p =", text)
+
     def test_the_labels_name_the_two_runs(self):
         text = format_report(
             diff([summary("A", 20, reached=8)], [summary("A", 20, reached=9)]),
