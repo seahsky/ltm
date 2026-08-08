@@ -109,6 +109,7 @@ import statistics
 import textwrap
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from earshot.agent.config import DetectorConfig
 from earshot.agent.controller import (
     ACT_FORWARD,
     ACT_STOP,
@@ -118,9 +119,9 @@ from earshot.agent.controller import (
     is_rising,
     realizable_investigate_step,
 )
-from earshot.task.dataset import FORWARD_STEP_M
 from earshot.report.artifacts import ENV_REPORT_NAME, episode_paths, read_audit, run_paths
 from earshot.report.audit import EpisodeAudit, FunnelStage, StepRecord
+from earshot.task.dataset import FORWARD_STEP_M
 
 __all__ = [
     "ABANDONED",
@@ -129,6 +130,7 @@ __all__ = [
     "RISING_EPS",
     "DEFAULT_MIN_SPAN_M",
     "BAND_EDGES_M",
+    "ARRIVAL_RING_M",
     "band_rows",
     "rising_flags",
     "rule_action",
@@ -160,6 +162,11 @@ NO_DETOUR = "no_detour"  # onset never fired, or the episode ended before it cou
 RISING_EPS = float(
     inspect.signature(realizable_investigate_step).parameters["eps"].default
 )
+
+# READ from the detector's own config, never re-spelled: the ring an arrival is judged
+# against is `DetectorConfig.oracle_radius_m`, and a second copy here would let the two
+# drift into disagreeing about what "reached" means.
+ARRIVAL_RING_M = float(DetectorConfig().oracle_radius_m)
 
 # Distance-to-source bands, in metres, that the detour's steps are bucketed into. The
 # edges are the ones the arc has already named: 1.0 is `oracle_radius_m`, the arrival
@@ -615,6 +622,25 @@ def trace_one(
     flag_by_step = {r.step: f for r, f in zip(audit.steps, all_flags)}
     flags = [flag_by_step[r.step] for r in steps]
 
+    # --- the arrival half ---------------------------------------------------
+    # **An abandoned episode that stood inside the ring reached the source and was not
+    # counted.** `visual_confirm` is a pure function of distance — the oracle fires at
+    # `oracle_radius_m` geodesic to the anomaly object's view points, and the source
+    # position IS one of those — so a recorded distance under the ring means the confirm
+    # fired. The rule STOPs on `visual_confirm and not rising`; an abandoned episode never
+    # STOPped; therefore `rising` was TRUE at every in-ring step, and the climb's own
+    # memory of the approach is what refused the arrival.
+    #
+    # A LOWER BOUND in two ways, both conservative: the detector minimises over ALL that
+    # object's view points so its distance is at most this one, and an episode whose
+    # record carries only the horizontal axis is measuring a different distance from the
+    # ring's (the axis is reported beside the count).
+    in_ring = [i for i, d in enumerate(window) if d is not None and float(d) <= ARRIVAL_RING_M]
+    row["n_steps_in_ring"] = len(in_ring)
+    row["n_in_ring_rising"] = sum(1 for i in in_ring if flags[i])
+    # The finding, per episode: it got there, and the funnel says it did not.
+    row["arrival_refused"] = bool(in_ring) and outcome == ABANDONED
+
     plateaus = _plateau_rows(steps, window, flags, min_span_m=min_span_m)
     row["plateaus"] = plateaus
     row["n_plateaus"] = len(plateaus)
@@ -767,6 +793,20 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "arms": {name: _arm(name) for name in (ABANDONED, REACHED, NO_DETOUR)},
         "plateaus": {name: _plateau(name) for name in (ABANDONED, REACHED)},
         "bands": _bands(),
+        # Episodes that stood inside the arrival ring and were scored as never arriving.
+        # Counted rather than described, because it is the difference between a climb that
+        # cannot find the source and a rule that will not admit it has.
+        "arrival": {
+            "ring_m": ARRIVAL_RING_M,
+            "n_refused": sum(1 for t in traces if t.get("arrival_refused")),
+            "n_abandoned": sum(1 for t in traces if t.get("outcome") == ABANDONED),
+            "steps_in_ring": sum(
+                int(t.get("n_steps_in_ring") or 0)
+                for t in traces if t.get("arrival_refused")),
+            "steps_in_ring_rising": sum(
+                int(t.get("n_in_ring_rising") or 0)
+                for t in traces if t.get("arrival_refused")),
+        },
         # Which distance every number above is measured against. A list, because a run
         # directory can hold records from either side of the field landing and a report
         # that averaged the two axes would be pooling two different measurements.
@@ -849,10 +889,40 @@ def format_report(agg: Mapping[str, Any]) -> str:
             "Re-run to measure them.".format(
                 agg["n_episodes"] - agg["n_with_position"], agg["n_episodes"]))
 
+    lines.extend(_arrival_lines(agg))
     lines.extend(_eps_lines(agg))
     lines.extend(_band_lines(agg))
     lines.extend(_plateau_lines(agg))
     return "\n".join(lines)
+
+
+def _arrival_lines(agg: Mapping[str, Any]) -> List[str]:
+    """Episodes that reached the source and were scored as not having reached it."""
+    arrival = agg.get("arrival") or {}
+    refused = int(arrival.get("n_refused") or 0)
+    abandoned = int(arrival.get("n_abandoned") or 0)
+    if not abandoned:
+        return []
+    lines = ["", "  arrivals refused: {} of {} abandoned episode(s) stood inside the "
+                 "{:.1f} m ring".format(refused, abandoned, arrival.get("ring_m", 0.0))]
+    if not refused:
+        return lines
+    in_ring = int(arrival.get("steps_in_ring") or 0)
+    rising = int(arrival.get("steps_in_ring_rising") or 0)
+    lines.extend(_wrap(
+        "The confirm is a pure function of distance, so those episodes HAD it. The rule "
+        "STOPs on confirm-and-not-rising and they never STOPped, so `rising` was true "
+        "at {} of their {} in-ring step(s) — the climb's own memory of the approach "
+        "vetoing an arrival it had already made.".format(rising, in_ring)))
+    lines.extend(_wrap(
+        "A LOWER BOUND: the detector minimises over every view point of that object, so "
+        "its distance is at most the one measured here."))
+    if "horizontal" in (agg.get("distance_axes") or []):
+        lines.extend(_wrap(
+            "AND ON THE WRONG AXIS for some or all of these episodes — the ring is "
+            "geodesic and a horizontal fallback is a different distance. Re-run to "
+            "record the route before quoting this count."))
+    return lines
 
 
 def _eps_lines(agg: Mapping[str, Any]) -> List[str]:
