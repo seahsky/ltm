@@ -3719,3 +3719,51 @@ So `detour-2`'s reading was half right. The single-step test *was* reading noise
 **What is not established.** That a better estimator cannot help — the two-sided window is untested against either arm. And nothing here is per-episode paired: `summary.json` records how many episodes reached the source, never which, so the 15-of-16 sign test is the strongest claim these records support.
 
 **File index.** `climb_eps`/`UNMEASURED_EPS`/`RISING_SIGMAS`/`MIN_DISPERSION_SAMPLES` and the two-sided `is_rising` in `earshot/agent/controller.py`; `ENERGY_HISTORY` and `route_to_source` in `earshot/task/runner.py`; `band_rows`, `BAND_EDGES_M`, `_eps_lines`, `_band_lines`, the axis selection in `trace_one` in `earshot/tools/detour_report.py`; `CalibrationResult.profile` in `earshot/audio/calibration.py`; `CalibrationRecord.profile` and `StepRecord.geodesic_to_source` in `earshot/report/audit.py`; `tests/mac/test_detour_report.py`, `tests/mac/test_rising_window.py`, `tests/mac/test_task_runner.py`. Data: `runs/eps-1/<scene>` (RACE). See ADR-0015 for the placement rule that fixed this denominator.
+
+---
+
+# cast-1 — the cast is confirmed (+14) and the calibrated threshold is the cost: a three-way against the accident (RACE, 2026-08-08)
+
+**Run:** `bash earshot/tools/yield_sweep.sh --tag cast-1`, exit 0, 2h44m, commit `11affe0`, host riftvm.
+**Read with:** `python -m earshot.tools.funnel_diff runs/eps-1 runs/cast-1` and `runs/yield-2 runs/cast-1`.
+
+## The three-way
+
+All three sweeps built the same 365 of 1016 episodes — 36% yield, identical rejection counts — so every comparison below is paired at the scene and differs only in the controller.
+
+| arm | what it is | SOURCE_REACHED |
+|---|---|---|
+| `yield-2` | `current > previous + 1e-6` against a 2.8e-3 renderer: a coin flip on flat ground | **168/365 = 46.0%** |
+| `eps-1` | median-of-5 baseline, `eps` = the renderer's measured scatter | 120/365 = 32.9% |
+| `cast-1` | two-sided window + dispersion bar, **plus scan-then-cast** (ADR-0016) | **134/365 = 36.7%** |
+
+| comparison | delta | net vs render noise | scenes down / up / flat | sign test |
+|---|---|---|---|---|
+| `eps-1` → `cast-1` (the cast alone) | **+14** | +1.6σ | 3 / 13 / 4 | **p = 0.021** |
+| `yield-2` → `cast-1` (both changes) | **−34** | −4.0σ | 13 / 4 / 3 | p = 0.049 |
+
+Every delta is at stage 5 again: `ONSET_FIRED` and `INVESTIGATE_ENTERED` are 365/365 in all three arms, and `PRIMARY_RESUMED` tracks `SOURCE_REACHED` exactly.
+
+## What it establishes
+
+1. **The exploration diagnosis was right, and the cast is a real effect.** Isolated against `eps-1` — the only comparison that changes one thing — the un-cued policy recovered **+14 of the 48 episodes** the calibrated threshold had lost, across 13 of the 16 scenes that moved. It did that while the rising bar got *stricter*: `cast-1` adds the dispersion term on top of `eps`, so the cast is paying for a harder test and still coming out ahead.
+
+   The corroboration is in the step counts. On `zt1RVoi7PcG`'s first five episodes, forwards went 46→51, 91→114, 50→59, 84→147, 82→104 against `eps-1`, with displacement rising to match. The agent moves substantially more, which is exactly what the policy was built to do.
+
+2. **The threshold is what costs the points, not the search.** The combination is still 34 episodes below the accident. Since the cast's own contribution is +14, the estimator half is carrying the whole deficit.
+
+3. **The two effects have different shapes, and the shape names the lever.** The cast's gain is broad and small — 13 scenes up, mostly +1 to +5, which is why its sign test (p = 0.021) is stronger than its net (+1.6σ). The estimator's loss is concentrated: `DYehNKdT76V` 13→5, `q3zU7Yy5E5s` 13→7, `Dd4bFSTQ8gi` 13→8, `QaLdnwvtxbs` 13→8. **Every one of those was a 13/20 scene under the coin flip.** The calibrated threshold hurts worst exactly where random forward motion was working best, which is a statement about how permissive the rising test should be rather than about where the agent should walk.
+
+## ADR-0016's falsification criterion fired
+
+That ADR states: *"A cast arm landing between them means the policy is worse than the accident it replaced."* It landed between them, and the criterion is recorded as met rather than reinterpreted.
+
+What survives is narrower than what was claimed: the cast is an improvement over the controller it was added to, and the combination it ships in is not yet an improvement over the bug. **46.0% remains the best number this project has measured, and it is still produced by an arithmetic error.**
+
+The ADR also rejected stochastic exploration on principle — a random walk has no memory of what it swept, and a stochastic controller makes every future A/B need repeats against a renderer with no seed. Both objections stand. They now cost **9.3 points**, and that is a trade to make explicitly rather than by assertion.
+
+## What is measured next
+
+`RISING_SIGMAS = 0` with the cast held fixed — the bar becomes the renderer's scatter alone, dropping the field-dispersion term. One constant, one sweep, and it separates *how permissive the rising test is* from *where the agent goes when it fires nothing*, which is the only remaining confound between `cast-1` and the accident.
+
+**File index.** `funnel_diff` comparisons over `runs/{yield-2,eps-1,cast-1}` (RACE). Controller at `earshot/agent/controller.py`, ADR-0016.
