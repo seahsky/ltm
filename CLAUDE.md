@@ -49,8 +49,13 @@ python -m earshot.task.smoke --run-dir runs/<tag>          # --episode N judges 
 # must be fresh; nonzero exit if any scene failed or any scene's gate went red
 nrun bash earshot/tools/yield_sweep.sh --tag <fresh-tag>
 
-# why a detour ended: metres walked per metre of gap closed, abandoned vs reached
+# why a detour ended: metres walked per metre of gap closed, abandoned vs reached,
+# and what one forward step was worth against the threshold it had to clear
 python -m earshot.tools.detour_report runs/<tag>/<scene>
+
+# did a change move the funnel — the arm WITHOUT it first. Refuses to subtract scenes
+# the two sweeps built differently, and prints how big a delta the renderer alone makes
+python -m earshot.tools.funnel_diff runs/<before-tag> runs/<after-tag>
 
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
