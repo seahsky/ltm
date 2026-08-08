@@ -23,6 +23,7 @@ from earshot.agent.controller import (
     ACT_TURN_LEFT,
     ACT_TURN_RIGHT,
     RISING_WINDOW,
+    next_plateau_steps,
     realizable_investigate_step,
 )
 from earshot.report.audit import (
@@ -41,6 +42,7 @@ from earshot.tools.detour_report import (
     band_rows,
     fit_slope,
     format_report,
+    plateau_index,
     plateau_windows,
     rising_flags,
     rule_action,
@@ -242,6 +244,42 @@ class TestTheRulesOwnPredicate(unittest.TestCase):
                 rule_action(flag, -1),
                 realizable_investigate_step(window, -1, False),
             )
+
+    def test_the_reconstruction_follows_the_cast_through_a_whole_plateau(self):
+        """The replay must model the un-cued branch, which is no longer just a turn.
+
+        A reconstruction that still answered TURN on every dead step would disagree with
+        the agent on most of every plateau — and this file's whole value is that the
+        recomputed action can be checked against the recorded one.
+        """
+        flat = [0.0100, 0.0102, 0.0098, 0.0101, 0.0099, 0.0103] * 4
+        flags = rising_flags(flat, eps=2.8e-3)
+        indices = plateau_index(flags)
+        for i, (flag, index) in enumerate(zip(flags, indices)):
+            self.assertEqual(
+                rule_action(flag, 1, plateau_steps=index),
+                realizable_investigate_step(
+                    flat[: i + 1], 1, False, eps=2.8e-3, plateau_steps=index),
+                "step {} disagrees with the rule".format(i))
+        self.assertIn(ACT_FORWARD,
+                      [rule_action(f, 1, plateau_steps=i)
+                       for f, i in zip(flags, indices)],
+                      "a plateau this long must contain a cast")
+
+    def test_the_replays_counter_is_the_one_the_agent_kept(self):
+        """`plateau_index` against `next_plateau_steps` iterated, which is what the runner
+        threads through `ControllerState`. Two ways of counting the same thing, and if
+        they ever disagree the reconstruction check silently measures nothing."""
+        series = [0.010, 0.011, 0.011, 0.011, 0.030, 0.030, 0.030, 0.031]
+        flags = rising_flags(series, eps=2.8e-3)
+        derived = plateau_index(flags)
+        threaded = []
+        running = 0
+        for i in range(len(series)):
+            threaded.append(running)
+            running = next_plateau_steps(
+                series[: i + 1], eps=2.8e-3, plateau_steps=running)
+        self.assertEqual(derived, threaded)
 
 
 class TestTheReplayFollowsTheRuleThatRan(unittest.TestCase):

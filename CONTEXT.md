@@ -107,6 +107,11 @@ It is the noise floor any "did it get louder?" test has to clear, and it is meas
 It is NOT the calibration sweep's spread: those poses sit at different distances, so their spread is the distance gradient, which is the very thing a rise is being read for.
 _Avoid_: render noise (unqualified — say scatter at a fixed pose, or say the gradient); reading an unmeasured scatter as zero (unmeasured is null, and the run then falls back to the pre-`detour-2` threshold).
 
+**Surge / cast**:
+The two things the climb does. **Surge** is a forward step taken because the cue rose. **Cast** is what it does when the cue is dead: a turn, then a committed run of forward steps, with successive legs alternating direction so the sweep cannot close into an orbit.
+The distinction is load-bearing because they are driven by different things — a surge is evidence, a cast is the absence of it — and because the agent had no cast at all until `eps-1` measured what that cost (ADR-0016).
+_Avoid_: search, wander (neither says whether the agent had a cue); reading a forward step as evidence the agent heard something.
+
 **Plateau window**:
 A maximal run of consecutive detour steps over which the climb's own rising predicate reads false.
 Reconstructed from the readings the controller actually used, so it is the controller's own verdict rather than a distance band a reader chose.
