@@ -18,6 +18,7 @@ from _interpreter import assert_interpreter  # noqa: F401
 from earshot.agent.controller import (
     ACT_FORWARD,
     ACT_TURN_LEFT,
+    MIN_DISPERSION_SAMPLES,
     RISING_WINDOW,
     UNMEASURED_EPS,
     climb_eps,
@@ -94,12 +95,23 @@ class RisingWindowTest(unittest.TestCase):
         self.assertTrue(is_rising(creeping, eps=OLD_EPS))
 
     def test_the_window_bounds_how_far_back_the_baseline_reaches(self):
-        """A long-dead history must not keep a stalled agent walking forward."""
-        series = [0.001] * 20 + [0.010, 0.010, 0.010, 0.010, 0.010, 0.010]
-        # the ancient quiet readings are outside the window, so the recent flat run wins
+        """A long-dead history must not keep a stalled agent walking forward.
+
+        **The reach is `2 * window` now, not `window`** — both sides are windows, so the
+        rule sees twice as far back as it did. A flat run has to be that long before it is
+        judged on itself alone, which is exactly why `ENERGY_HISTORY` is derived from
+        `RISING_WINDOW` rather than picked: the runner keeps precisely the reach and no
+        stale reading can survive into a comparison.
+        """
+        flat_run = [0.010] * (2 * RISING_WINDOW)
+        series = [0.001] * 20 + flat_run
+        # the ancient quiet readings are outside the reach, so the recent flat run wins
         self.assertFalse(is_rising(series, eps=MEASURED_SCATTER, window=RISING_WINDOW))
-        # reaching back far enough to include them would call this a rise
-        self.assertTrue(is_rising(series, eps=MEASURED_SCATTER, window=20))
+        # a flat run shorter than the reach still has them in its baseline, and the rule
+        # reads the step DOWN from 0.001 to 0.010 as the rise it is
+        self.assertTrue(is_rising(
+            [0.001] * 20 + [0.010] * RISING_WINDOW, eps=MEASURED_SCATTER,
+            window=RISING_WINDOW))
 
 
 class RisingDrivesTheRuleTest(unittest.TestCase):
@@ -165,6 +177,72 @@ class RenderScatterTest(unittest.TestCase):
         """`None` and `0.0` mean opposite things and the record must not conflate them."""
         result = calibrate_onset(0.001, [0.01, 0.02, 0.03], scatter_samples=[])
         self.assertIsNone(result.as_dict()["render_scatter"])
+
+
+class TwoSidedWindowTest(unittest.TestCase):
+    """`eps-1`'s finding, in the predicate: one step is worth less than the local scatter.
+
+    Pooled over 20 episodes, a 0.25 m forward buys 0.61-0.86 of the band's own residual in
+    every band inside 5 m — the cue is real and smaller than the variation a single
+    pose-to-pose comparison is read through. Averaging the current side as well as the
+    baseline is what makes a trend that small readable, and `eps` alone is the wrong bar
+    because it sizes the RENDERER (median 3.3e-3) rather than the field (7e-3 to 1.2e-2).
+    """
+
+    # A climb of 0.007 a step through a field that jitters by 0.010 — the measured 0.7
+    # ratio — ending on an unlucky render so the single-step comparison falls.
+    UNDER_THE_SCATTER = [0.050, 0.057, 0.064, 0.071, 0.078,
+                         0.085, 0.092, 0.099, 0.116, 0.103]
+
+    # No trend at all, jittering either side of 0.050 by more than `eps`.
+    NOISY_FLAT = [0.045, 0.055, 0.042, 0.058, 0.050,
+                  0.052, 0.060, 0.044, 0.058, 0.051]
+
+    def test_a_trend_smaller_than_the_scatter_per_step_still_reads_as_rising(self):
+        """The healthy arm. Both sides average, so five steps of cue beat one of noise."""
+        self.assertTrue(is_rising(self.UNDER_THE_SCATTER, eps=MEASURED_SCATTER))
+        # the control: the same series judged one reading against the previous one turns,
+        # because the last render came in low
+        self.assertFalse(is_rising(self.UNDER_THE_SCATTER[-2:], eps=MEASURED_SCATTER))
+
+    def test_a_noisy_flat_field_is_refused_where_an_eps_only_bar_would_not(self):
+        """THE FORCED FAILURE ARM, and the reason the bar is not `eps` alone.
+
+        The two window means differ by more than the renderer's scatter, so a rule sized
+        only on `eps` answers FORWARD to a field with no trend in it. The dispersion term
+        is measured on the agent's own readings and refuses.
+        """
+        half = len(self.NOISY_FLAT) // 2
+        baseline = self.NOISY_FLAT[:half]
+        recent = self.NOISY_FLAT[half:]
+        gap = sum(recent) / half - sum(baseline) / half
+        self.assertGreater(gap, MEASURED_SCATTER, "an eps-only bar would answer FORWARD")
+        self.assertFalse(is_rising(self.NOISY_FLAT, eps=MEASURED_SCATTER))
+
+    def test_eps_is_still_the_floor_when_the_readings_barely_scatter(self):
+        """A quiet renderer must not let arithmetic dust through.
+
+        With both windows nearly constant the dispersion term goes to almost nothing, and
+        without a floor any rise at all would answer FORWARD. `eps` is that floor, and it
+        binds in both directions here: 0.001 is refused and 0.004 is not.
+        """
+        flat_level = [0.010] * RISING_WINDOW
+        self.assertFalse(is_rising(
+            flat_level + [0.011] * RISING_WINDOW, eps=MEASURED_SCATTER))
+        self.assertTrue(is_rising(
+            flat_level + [0.014] * RISING_WINDOW, eps=MEASURED_SCATTER))
+
+    def test_a_short_history_clears_eps_alone(self):
+        """Under `MIN_DISPERSION_SAMPLES` the dispersion term is not estimated at all.
+
+        A sample SD over two or three points is mostly its own noise, and at n=2 it
+        exactly cancels the difference it is meant to bound — every early step would
+        answer "not rising" and the agent would turn on the spot from the first tick.
+        """
+        short = [0.010, 0.010, 0.020, 0.020]
+        self.assertLess(len(short), MIN_DISPERSION_SAMPLES)
+        self.assertTrue(is_rising(short, eps=MEASURED_SCATTER))
+        self.assertFalse(is_rising([0.010, 0.010, 0.0105, 0.0105], eps=MEASURED_SCATTER))
 
 
 class ClimbEpsTest(unittest.TestCase):

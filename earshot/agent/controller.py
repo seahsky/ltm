@@ -63,6 +63,8 @@ __all__ = [
     "ControllerState",
     "ControllerDecision",
     "RISING_WINDOW",
+    "RISING_SIGMAS",
+    "MIN_DISPERSION_SAMPLES",
     "UNMEASURED_EPS",
     "climb_eps",
     "is_rising",
@@ -90,13 +92,24 @@ ACT_TURN_RIGHT = "turn_right"
 ACT_STOP = "stop"
 
 
-# How many readings back the rise is judged against. One (the old behaviour) compares two
-# adjacent samples, and `detour-2` measured what that costs: 325 of 336 plateau windows
-# were a SINGLE step with zero travel — the agent leaving FORWARD for one tick and turning
-# — while the windows that could be fitted showed the cue was recoverable (sig/sc 6.12 and
-# 7.41, both arms, both runs). Five is the scale of those dropouts and still short against
-# a 121-step detour, so a real climb is blunted by at most a few steps.
+# How many readings each side of the comparison averages. One (the original behaviour)
+# compares two adjacent samples, and `detour-2` measured what that costs: 325 of 336
+# plateau windows were a SINGLE step with zero travel — the agent leaving FORWARD for one
+# tick and turning. Five is the scale of those dropouts and still short against a 121-step
+# detour, so a real climb is blunted by at most a few steps.
 RISING_WINDOW = 5
+
+# provenance: fake — how many standard errors the gap between the two windows must clear.
+# One, because the quantity it multiplies is measured rather than assumed and a larger
+# bar would cost forwards on a cue `eps-1` measured as real but small.
+RISING_SIGMAS = 1.0
+
+# Below this many readings the dispersion term is not estimated. A sample SD over two or
+# three points is mostly its own noise, and at n=2 it exactly cancels the difference it is
+# meant to bound, which would answer "not rising" to every early step. Under it the rule
+# clears `eps` alone, which is the pre-`eps-1` behaviour and is why short histories still
+# degrade to the original comparison.
+MIN_DISPERSION_SAMPLES = 6
 
 # provenance: fake — the threshold the climb falls back to when the renderer's scatter was
 # not measured. It is the pre-`detour-2` constant, kept only so an episode with no
@@ -122,12 +135,17 @@ def climb_eps(render_scatter: Optional[float]) -> float:
     return UNMEASURED_EPS if render_scatter is None else float(render_scatter)
 
 
-def _median(values: Sequence[float]) -> float:
-    ordered = sorted(float(v) for v in values)
-    middle = len(ordered) // 2
-    if len(ordered) % 2:
-        return ordered[middle]
-    return 0.5 * (ordered[middle - 1] + ordered[middle])
+def _sample_sd(values: Sequence[float]) -> float:
+    """Sample (``n - 1``) SD. Zero for fewer than two points, which the caller guards.
+
+    Sample rather than population for the same reason `calibration.render_scatter_of`
+    uses it: these are a handful of draws from a distribution, not the whole of it.
+    """
+    numbers = [float(v) for v in values]
+    if len(numbers) < 2:
+        return 0.0
+    mean = sum(numbers) / len(numbers)
+    return math.sqrt(sum((v - mean) ** 2 for v in numbers) / (len(numbers) - 1))
 
 
 def is_rising(
@@ -136,40 +154,67 @@ def is_rising(
     eps: float,
     window: int = RISING_WINDOW,
 ) -> bool:
-    """Is the agent getting louder, judged against a window rather than one sample?
+    """Is the agent getting louder, judged as a trend between two windows?
 
-    Two changes from the single-step test this replaces, and both are forced by measurement
-    rather than taste:
+    **Both sides average, and `eps-1` is why.** The version this replaces compared the
+    single latest reading against a median of the preceding ``window`` — which halves the
+    noise on the baseline and leaves the current side carrying all of it. That run then
+    measured what the current side is up against: pooled over 20 episodes, one 0.25 m
+    forward step buys a rise of **0.61 to 0.86 of the local scatter** in every band inside
+    5 m, including the 2-3 m band where the detours die. The cue is real and it is smaller
+    than the variation a single pose-to-pose comparison is read through, so no threshold on
+    a single reading can recover it. Averaging both sides makes the signal grow with
+    ``window`` while the noise falls as its square root.
 
-    **The baseline is a median, not the previous reading.** One unlucky render on a rising
-    gradient used to answer "not rising" and send the agent into a turn. A median over the
-    preceding ``window`` readings needs most of them to be wrong before it moves, and the
-    renderer's disagreement is scatter about a level rather than a trend.
+    **The bar is the larger of two things, and that is the second `eps-1` finding.**
+    ``eps`` is the *renderer's* disagreement with itself, median 3.3e-3 over that run. The
+    scatter the agent actually walks through — the field's own pose-to-pose variation,
+    turns included — measured 7e-3 to 1.2e-2, two to three times larger. A rule that clears
+    only the render floor is under-thresholded in exactly the regime it operates in, so the
+    gap must also clear ``RISING_SIGMAS`` standard errors of the observed dispersion:
 
-    **``eps`` is the renderer's own scatter, passed in per episode** (`calibration.
-    render_scatter`), not a constant. The value it replaces was ``1e-6`` against a measured
-    residual of ~2.8e-3 — about three thousand times too small, which makes the comparison
-    a coin flip wherever the field is flat. A threshold at 1 sigma asks the rise to clear
-    the noise it is being read through.
+        gap = mean(recent) - mean(baseline)
+        rising = gap > max(eps, RISING_SIGMAS * s * sqrt(2 / window))
 
-    Short histories degrade to the old behaviour by construction: with one prior reading
-    the median IS that reading, so early steps behave as they always did.
+    ``s`` is the sample SD of the pooled readings, so the bar is measured on the agent's
+    own trace rather than assumed, and it rises by itself in a room whose field is noisy.
+    ``eps`` stays as a floor: a renderer that agreed with itself exactly would put ``s``
+    near zero, and a comparison with no floor at all would answer FORWARD to arithmetic
+    dust.
+
+    **Means, not medians, now that both sides are windows.** A median is the right summary
+    of a baseline whose failure mode is one bad render; it is the wrong one for a window
+    whose readings carry a *trend*, because it discards the ordering that makes the trend
+    visible and it is the less efficient estimator of the level the gap is measuring.
+
+    Short histories degrade toward the old comparison by construction: the windows shrink
+    to what is available, and below ``MIN_DISPERSION_SAMPLES`` readings the dispersion term
+    is not estimated at all and the rule clears ``eps`` alone.
 
     **Rotations are not filtered out, deliberately.** `turn_left`/`turn_right` change the
     measured RMS without changing distance (see below), so a forward-only baseline is the
     tempting fix — but which action produced a reading is decided *after* the controller
-    runs, and threading it back turns a pure predicate into a stateful one for a correction
-    the median already absorbs: a turn-driven reading is scatter about the pose's level,
-    which is exactly what a median is robust to. If the turn contamination turns out to be
-    biased rather than symmetric, that is the next thing to measure, and the per-step
-    record already carries the action to measure it with.
+    runs, and threading it back turns a pure predicate into a stateful one. Averaging
+    absorbs a symmetric contamination, and it now enters ``s`` as well, which raises the
+    bar in exactly the episodes where turning is adding variance. If the contamination
+    turns out to be biased rather than symmetric, that is the next thing to measure, and
+    the per-step record already carries the action to measure it with.
     """
     history = [float(e) for e in energy_history if e is not None]
     if len(history) < 2:
         return True  # nothing to compare against yet, so probe forward
-    current = history[-1]
-    baseline = history[-(int(window) + 1) : -1]
-    return current > _median(baseline) + float(eps)
+    # Split what is available into two adjacent blocks of at most `window`. With three
+    # readings that is two against one; with two it is the original single-step compare.
+    half = min(int(window), len(history) // 2)
+    recent = history[-half:]
+    baseline = history[-2 * half : -half]
+    gap = (sum(recent) / len(recent)) - (sum(baseline) / len(baseline))
+    bar = float(eps)
+    pooled = recent + baseline
+    if len(pooled) >= MIN_DISPERSION_SAMPLES:
+        dispersion = _sample_sd(pooled) * math.sqrt(2.0 / len(recent))
+        bar = max(bar, RISING_SIGMAS * dispersion)
+    return gap > bar
 
 
 def realizable_investigate_step(

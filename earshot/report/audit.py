@@ -126,11 +126,21 @@ class StepRecord:
     displacement_m: Optional[float] = None
     position: Optional[Xyz] = None
     realizable_action: Optional[str] = None
+    # The navmesh route length from this pose to the source, which `position` paired with
+    # `source_xyz` CANNOT give: that derivation is horizontal `xz` distance, and past a few
+    # metres in a house the two come apart — another room is a short hop in `xz` and a long
+    # walk around a wall, and the sound takes the walk. `eps-1` read its field profile on
+    # the `xz` axis and found the gradient inverting beyond 5 m, which is either a real
+    # inversion or the axis failing, and nothing on disk could separate them. It is filled
+    # by the runner because only `sim/` can query a navmesh (ADR-0013); `None` on a record
+    # written before this existed, which reads as *unknown* and never as zero.
+    geodesic_to_source: Optional[float] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "step": int(self.step),
             "measured_rms": float(self.measured_rms),
+            "geodesic_to_source": self.geodesic_to_source,
             "lateral_sign": self.lateral_sign,
             "source_playing": bool(self.source_playing),
             "source_is_visible": self.source_is_visible,
@@ -164,6 +174,7 @@ class StepRecord:
             # nothing" — the plateau replay must be able to tell an unvalidatable old
             # record from a step where the carried rule genuinely did not run.
             realizable_action=data.get("realizable_action"),
+            geodesic_to_source=data.get("geodesic_to_source"),
         )
 
 
@@ -328,6 +339,17 @@ class EpisodeAudit:
         construction, which is the pairing an analyst actually reads.
         """
         return tuple(row.source_is_visible for row in self.steps)
+
+    @property
+    def geodesic_to_source_history(self) -> Tuple[Optional[float], ...]:
+        """Navmesh route length from the agent to the source, per step. Recorded.
+
+        Stored rather than derived, unlike the horizontal series below, because it cannot
+        be derived here: a route needs the navmesh and the navmesh lives behind ADR-0013's
+        boundary. ``None`` throughout on any run before the field existed, which is what
+        makes a reader choose the horizontal axis explicitly rather than silently.
+        """
+        return tuple(row.geodesic_to_source for row in self.steps)
 
     @property
     def distance_to_source_history(self) -> Tuple[Optional[float], ...]:
