@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import textwrap
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -46,9 +47,14 @@ __all__ = ["HEADLINE_STAGE", "diff", "format_report", "main"]
 HEADLINE_STAGE = FunnelStage.SOURCE_REACHED
 
 # `detour-1` ran the same scene twice under the same configuration and 4 of 20 episodes
-# changed arm — the renderer is non-deterministic and there is no seed for it. A delta
-# smaller than this is inside the noise of running the same code twice, and it is printed
-# beside every total rather than left in a commit message.
+# changed arm — the renderer is non-deterministic and there is no seed for it.
+#
+# **This is the flip RATE, and the net delta is not compared against it.** The first
+# version of this file printed "a delta near this many episodes is not a result", which is
+# far too conservative and would have argued away a real one: flips go BOTH directions, so
+# under a null of no effect each episode contributes -1, 0 or +1 with variance `FLIP_RATE`,
+# and the net has mean zero and SD `sqrt(FLIP_RATE * built)`. At 365 episodes that is 8.5,
+# not 73. The count is still printed, as the scale of the churn underneath a net.
 FLIP_RATE = 0.20
 
 
@@ -66,6 +72,36 @@ def _by_scene(summaries: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any
             )
         out[scene] = dict(summary)
     return out
+
+
+def _sign_test(deltas: Sequence[int]) -> Dict[str, Any]:
+    """Scenes up, down, flat, and the exact two-sided sign-test p. Pure.
+
+    **The statistic this design can actually support.** Episodes inside one scene share a
+    room, a source and a renderer, so they are not independent draws and an aggregate rate
+    over them carries a noise model nobody has fitted. Which DIRECTION each scene moved is
+    a much weaker thing to assume about, and 15 of 16 scenes falling one way is decisive
+    where the same total concentrated in three scenes would not be.
+
+    Ties are dropped rather than split, which is the conservative convention: a scene that
+    did not move is no evidence either way, and counting it as half a success would
+    manufacture confidence out of scenes where nothing happened.
+    """
+    up = sum(1 for d in deltas if d > 0)
+    down = sum(1 for d in deltas if d < 0)
+    flat = sum(1 for d in deltas if d == 0)
+    n = up + down
+    if n == 0:
+        return {"up": up, "down": down, "flat": flat, "n": 0, "p_value": None}
+    extreme = max(up, down)
+    tail = sum(math.comb(n, k) for k in range(extreme, n + 1))
+    return {
+        "up": up,
+        "down": down,
+        "flat": flat,
+        "n": n,
+        "p_value": min(1.0, 2.0 * tail / (2 ** n)),
+    }
 
 
 def _stage_counts(summary: Mapping[str, Any]) -> Dict[str, int]:
@@ -147,9 +183,19 @@ def diff(
         "before_rate": (before_total / built) if built else None,
         "after_rate": (after_total / built) if built else None,
         "delta_rate": ((after_total - before_total) / built) if built else None,
-        # What running the same code twice would produce. Not a significance test — the
-        # per-episode pairing that would support one is not in these records.
+        # What running the same code twice would produce. The COUNT is the churn; the SD
+        # is what a net has to clear, and they differ by a square root — see FLIP_RATE.
         "flip_noise_episodes": FLIP_RATE * built,
+        "delta_sd": math.sqrt(FLIP_RATE * built) if built else None,
+        "delta_z": (
+            (after_total - before_total) / math.sqrt(FLIP_RATE * built) if built else None
+        ),
+        # The test that needs no noise model at all: how the per-scene deltas fall. Scene
+        # outcomes are independent draws in a way episodes within a scene are not, and a
+        # consistent SIGN across scenes is evidence an aggregate cannot give — 15 of 16
+        # scenes moving one way is decisive where the same total spread over 3 scenes
+        # would not be.
+        "sign_test": _sign_test([int(row["delta"]) for row in paired]),
         "stages": stages,
     }
 
@@ -201,13 +247,25 @@ def format_report(agg: Mapping[str, Any], *, labels: Tuple[str, str] = ("before"
         for row in agg["unpaired"]:
             lines.append("  {:<24} {}".format(str(row["scene"])[:24], row["reason"]))
 
+    sign = agg.get("sign_test") or {}
+    if sign.get("n"):
+        lines.append("")
+        lines.append("  scenes: {} down, {} up, {} unchanged — sign test p = {:.4f}".format(
+            sign["down"], sign["up"], sign["flat"], sign["p_value"]))
+        lines.extend(_wrap(
+            "The direction each scene moved, which assumes nothing about the renderer. "
+            "Episodes inside one scene share a room and a source and are not independent; "
+            "scenes are closer to it."))
+
     if agg["built"]:
         lines.append("")
         lines.extend(_wrap(
             "~{:.0f} episode(s) of this pairing would change arm between two runs of the "
             "SAME code — detour-1 measured a {:.0%} per-episode flip rate against a "
-            "renderer that has no seed. A delta near that size is not a result.".format(
-                agg["flip_noise_episodes"], FLIP_RATE)))
+            "renderer that has no seed. Flips go BOTH ways, so what a net delta has to "
+            "clear is their SD of {:.1f} episodes, not their count: this delta is "
+            "{:+.1f} of those.".format(
+                agg["flip_noise_episodes"], FLIP_RATE, agg["delta_sd"], agg["delta_z"])))
         lines.extend(_wrap(
             "These are scene-level counts, not paired episodes: summary.json records how "
             "many reached, never which. A per-episode test needs each run's audit.json."))
