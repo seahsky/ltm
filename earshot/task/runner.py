@@ -54,6 +54,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from earshot.agent.config import PlannerConfig
 from earshot.agent.controller import (
     ACT_STOP,
+    RISING_WINDOW,
     ControllerState,
     NavMode,
     climb_eps,
@@ -111,10 +112,13 @@ __all__ = [
 # distribution the threshold is then placed inside.
 CALIBRATION_DRAWS = 512
 
-# How many recent loudness readings the greedy climb keeps. `realizable_investigate_step`
-# reads the last two; the rest are kept because the per-step record already carries the
-# full series and a short window makes the controller's input inspectable at a glance.
-ENERGY_HISTORY = 8
+# How many recent loudness readings the greedy climb keeps. DERIVED from the rule rather
+# than chosen: `is_rising` compares two adjacent windows and therefore reads exactly
+# `2 * RISING_WINDOW` entries, so a hand-picked constant here is a silent way to feed the
+# agent a shorter baseline than its own predicate asks for — and than a replay of the
+# record would reconstruct. It was 8 against a rule that needed 6; the two-sided rule
+# needs 10, and nothing about the old number said so.
+ENERGY_HISTORY = 2 * RISING_WINDOW
 
 # The candidate id the oracle arm's investigate divert is injected with.
 # `FrontierProposer._emit` issues ids from 1, so 0 is never a proposed candidate and the
@@ -484,6 +488,20 @@ def run_episode(
     def geodesic(a: Xyz, b: Xyz) -> Optional[float]:
         return world.geodesic_distance(a, [b])
 
+    def route_to_source(position: Xyz) -> Optional[float]:
+        """How far the agent is from the source ALONG THE NAVMESH, or None if unrouted.
+
+        Recorded per step because the audit's derived series is horizontal `xz` distance,
+        and the two separate exactly where the climb dies: at 5-12 m the agent is usually
+        in another room, where `xz` shrinks while the walk (and the sound's path) does not.
+        Non-finite is None — an unrouted pose has no distance, and a zero there would put
+        a phantom sample at the source.
+        """
+        distance = geodesic(position, source)
+        if distance is None or not math.isfinite(float(distance)):
+            return None
+        return float(distance)
+
     # §2.5's one smoke exception: verify audibility at the episode's own start pose, once,
     # with a calibration render, so the smoke is deterministic. It is a measurement rather
     # than a screen — nothing is rejected on it, and it is recorded next to the threshold
@@ -678,6 +696,11 @@ def run_episode(
                 # `measured_rms` on this row was rendered here, and pairing the energy
                 # with the place it was measured is the whole point of recording it.
                 position=pose.position,
+                # The route, beside the position the route is FROM. One pathfinder query
+                # per step, no render: the field profile's axis has to be the distance the
+                # sound travels rather than the one a straight line measures, and only
+                # this layer can ask.
+                geodesic_to_source=route_to_source(pose.position),
                 # What the CUE said, beside what the agent DID. Since ticket 26 the two
                 # differ — the rule names a probe and the follower routes to it — and
                 # until now only the follower's half was written down, which left an
