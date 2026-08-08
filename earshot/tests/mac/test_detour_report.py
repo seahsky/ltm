@@ -35,6 +35,7 @@ from earshot.report.audit import (
 )
 from earshot.tools.detour_report import (
     ABANDONED,
+    ARRIVAL_RING_M,
     NO_DETOUR,
     REACHED,
     RISING_EPS,
@@ -429,6 +430,83 @@ class TestTheDistanceAxis(unittest.TestCase):
             trace_one(self._audit([None] * 4)),
         ]))
         self.assertIn("TWO AXES IN ONE REPORT", text)
+
+
+class TestTheArrivalsThatWereRefused(unittest.TestCase):
+    """An abandoned episode that stood inside the ring reached the source and was not
+    counted, and the record proves it without needing `visual_confirm` recorded.
+
+    The confirm is a pure function of distance — the oracle fires at `oracle_radius_m`
+    geodesic to the anomaly object's view points, and the source position IS one of them.
+    So an in-ring step HAD the confirm. The rule STOPs on confirm-and-not-rising and an
+    abandoned episode never STOPped, so `rising` was true at every in-ring step: the
+    climb's memory of the approach vetoing an arrival already made. `cast-1` put seven of
+    fifteen abandoned episodes in `DYehNKdT76V` in exactly that position.
+    """
+
+    def _audit(self, routes, *, stage, rms=None, index=0):
+        series = rms or [0.05] * len(routes)
+        steps = tuple(
+            StepRecord(step=ONSET_STEP + i, measured_rms=value,
+                       position=Xyz(float(d), 0.0, 0.0), displacement_m=0.25,
+                       geodesic_to_source=d)
+            for i, (d, value) in enumerate(zip(routes, series)))
+        return EpisodeAudit(
+            episode_index=index, source_xyz=SOURCE, funnel_stage=stage,
+            onset=OnsetRecord(onset_step=ONSET_STEP), steps=steps)
+
+    def test_an_abandoned_episode_inside_the_ring_is_a_refused_arrival(self):
+        row = trace_one(self._audit([4.0, 2.0, 0.9, 0.4],
+                                    stage=FunnelStage.INVESTIGATE_ENTERED))
+        self.assertTrue(row["arrival_refused"])
+        self.assertEqual(row["n_steps_in_ring"], 2)
+
+    def test_a_reached_episode_inside_the_ring_is_not_refused(self):
+        """The control arm. Standing in the ring is only a finding when it was not counted."""
+        row = trace_one(self._audit([4.0, 2.0, 0.9, 0.4],
+                                    stage=FunnelStage.PRIMARY_RESUMED))
+        self.assertFalse(row["arrival_refused"])
+        self.assertEqual(row["n_steps_in_ring"], 2)
+
+    def test_an_episode_that_never_entered_the_ring_is_not_refused(self):
+        row = trace_one(self._audit([6.0, 5.0, 4.0, 3.0],
+                                    stage=FunnelStage.INVESTIGATE_ENTERED))
+        self.assertFalse(row["arrival_refused"])
+        self.assertEqual(row["n_steps_in_ring"], 0)
+
+    def test_the_in_ring_steps_that_read_rising_are_counted(self):
+        """The mechanism, not just the count: a climbing series keeps `rising` true
+        through the ring, which is the only way an in-ring step can refuse to STOP."""
+        climbing = [0.010, 0.014, 0.018, 0.022, 0.026, 0.030]
+        row = trace_one(self._audit([5.0, 4.0, 3.0, 2.0, 0.8, 0.3],
+                                    stage=FunnelStage.INVESTIGATE_ENTERED,
+                                    rms=climbing))
+        self.assertEqual(row["n_steps_in_ring"], 2)
+        self.assertEqual(row["n_in_ring_rising"], 2)
+
+    def test_the_report_names_the_count_and_the_ring(self):
+        text = format_report(aggregate([
+            trace_one(self._audit([4.0, 0.9], stage=FunnelStage.INVESTIGATE_ENTERED)),
+            trace_one(self._audit([4.0, 3.0], stage=FunnelStage.INVESTIGATE_ENTERED,
+                                  index=1)),
+        ]))
+        self.assertIn("arrivals refused: 1 of 2", text)
+        self.assertIn("{:.1f} m ring".format(ARRIVAL_RING_M), text)
+        self.assertIn("LOWER BOUND", text)
+
+    def test_a_horizontal_axis_record_is_caveated_rather_than_quoted(self):
+        """The ring is geodesic. Counting against the derived horizontal distance measures
+        a different thing, and the report has to say so before the number is used."""
+        bare = EpisodeAudit(
+            episode_index=0, source_xyz=SOURCE,
+            funnel_stage=FunnelStage.INVESTIGATE_ENTERED,
+            onset=OnsetRecord(onset_step=ONSET_STEP),
+            steps=tuple(StepRecord(step=ONSET_STEP + i, measured_rms=0.05,
+                                   position=Xyz(float(d), 0.0, 0.0), displacement_m=0.25)
+                        for i, d in enumerate([4.0, 0.9])))
+        text = format_report(aggregate([trace_one(bare)]))
+        self.assertIn("arrivals refused: 1 of 1", text)
+        self.assertIn("WRONG AXIS", text)
 
 
 class TestTheFieldItself(unittest.TestCase):
