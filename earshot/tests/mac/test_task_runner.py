@@ -26,7 +26,7 @@ from _task_fakes import (
     make_goal,
 )
 
-from earshot.agent.config import ControllerConfig
+from earshot.agent.config import ControllerConfig, DetectorConfig
 from earshot.agent.proposers import SOURCE_INVESTIGATE
 from earshot.agent.reachability import EmptyPoolError
 from earshot.audio.bed import bed_signal
@@ -120,9 +120,16 @@ class TestTheFullLoop(unittest.TestCase):
         The controller was handed no coordinate (``source_xyz=None`` in this arm), so the
         only thing that could have brought it within a step of the source is the energy
         climb over the fake's distance-dependent IR.
+
+        **The bound is the ring, and it is inclusive now.** With the confirm sufficient
+        the agent stops the tick it enters the ring rather than pressing on until the
+        climb flattens, so a stop lands AT `oracle_radius_m` instead of inside it. That is
+        the trade `cast-1` bought: arrivals counted, final proximity given up. Read from
+        the config rather than written as `1.0`, so moving the ring moves this with it.
         """
+        ring = DetectorConfig().oracle_radius_m
         self.assertIsNotNone(self.result.audit.dist_at_stop)
-        self.assertLess(self.result.audit.dist_at_stop, 1.0)
+        self.assertLessEqual(self.result.audit.dist_at_stop, ring)
         self.assertIsNotNone(self.result.report.stopped_at_pose)
 
     def test_the_visual_confirm_named_the_object_at_the_source(self):
