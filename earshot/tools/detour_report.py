@@ -36,17 +36,21 @@ The plateau half — why the terminal approach stalls
 
 ``detour-1`` left one question open and named it the next lever: seven of twelve
 abandoned detours settle in a tight 2.06–2.76 m band, and nothing said why. Reading the
-carried rule (``agent/controller.realizable_investigate_step``) narrows it to one line::
+carried rule (``agent/controller.realizable_investigate_step``) narrowed it to one line::
 
     rising = current > previous + eps
     if visual_confirm and not rising:  STOP
     if rising:                         FORWARD
     else:                              TURN
 
-**No branch advances a plateaued agent.** Not rising and not confirmed is a turn, and
+**No branch advanced a plateaued agent.** Not rising and not confirmed was a turn, and
 ``visual_confirm`` is the ``OracleDetector`` at ``oracle_radius_m`` — 1.0 m, *geodesic*,
 carried over from Find-SR's primary ring. ``detour-1``'s empty gap, 0.78 m to 2.06 m,
 straddles exactly that radius.
+
+That defect is fixed and the fix is what this tool now replays: the un-cued branch scans,
+then casts (``controller.cast_action``), so the reconstruction below needs the agent's
+position in that cycle as well as its ``rising`` flag — see ``plateau_index``.
 
 So the stall has two candidate mechanisms and they imply opposite fixes:
 
@@ -108,9 +112,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from earshot.agent.controller import (
     ACT_FORWARD,
     ACT_STOP,
-    ACT_TURN_LEFT,
-    ACT_TURN_RIGHT,
     RISING_WINDOW,
+    cast_action,
     climb_eps,
     is_rising,
     realizable_investigate_step,
@@ -129,6 +132,7 @@ __all__ = [
     "band_rows",
     "rising_flags",
     "rule_action",
+    "plateau_index",
     "plateau_windows",
     "fit_slope",
     "trace_one",
@@ -252,7 +256,32 @@ def rising_flags(
     return flags
 
 
-def rule_action(rising: bool, lateral_sign: Optional[int]) -> str:
+def plateau_index(flags: Sequence[bool]) -> List[int]:
+    """How many dead-cue steps preceded each step, reset by any rise. Pure.
+
+    The replay's copy of ``ControllerState.plateau_steps``, and it agrees with the agent's
+    by construction: `next_plateau_steps` resets on a rise and adds one otherwise, which is
+    this loop. The agent keeps a counter because the runner hands the rule a TRIMMED
+    history and a cast leg outlives that window; a replay has the whole series and does not
+    need to.
+
+    **Counted over the detour, not the episode.** ``ControllerState`` is built fresh per
+    episode and the counter only advances inside INVESTIGATE, so a plateau that was running
+    during SEARCH did not exist as far as the cast cycle is concerned. Feeding this the
+    whole episode's flags would start the detour mid-leg and desynchronise every action
+    after it.
+    """
+    counts: List[int] = []
+    running = 0
+    for rising in flags:
+        counts.append(running)
+        running = 0 if rising else running + 1
+    return counts
+
+
+def rule_action(
+    rising: bool, lateral_sign: Optional[int], *, plateau_steps: int = 0
+) -> str:
     """What the carried rule answers, given ``rising`` and the lateral sign. Pure.
 
     The rule's third input, ``visual_confirm``, is **not recorded per step** — and for
@@ -266,9 +295,10 @@ def rule_action(rising: bool, lateral_sign: Optional[int]) -> str:
     """
     if rising:
         return ACT_FORWARD
-    if lateral_sign is not None and int(lateral_sign) > 0:
-        return ACT_TURN_RIGHT
-    return ACT_TURN_LEFT  # negative, zero, and absent all scan left (the rule's default)
+    # The un-cued branch is `cast_action`, imported rather than re-spelled: it scans, then
+    # commits forwards, then alternates, and a replay that still answered "turn" here
+    # would disagree with the agent on most of every plateau.
+    return cast_action(int(plateau_steps), 0 if lateral_sign is None else int(lateral_sign))
 
 
 def plateau_windows(flags: Sequence[bool]) -> List[Tuple[int, int]]:
@@ -605,13 +635,17 @@ def trace_one(
     # unvalidated rather than as agreement — an unchecked reconstruction that reads as a
     # checked one is the failure mode this field exists to close.
     stops = sum(1 for r in steps if r.realizable_action == ACT_STOP)
+    # The cast cycle's position at each step, over the DETOUR's flags — the counter the
+    # agent kept on its state, rebuilt from the series it kept it from.
+    indices = plateau_index(flags)
     checkable = [
-        (r, f) for r, f in zip(steps, flags)
+        (r, f, i) for r, f, i in zip(steps, flags, indices)
         if r.realizable_action is not None and r.realizable_action != ACT_STOP
     ]
     row["n_rule_checked"] = len(checkable)
     row["n_rule_agree"] = sum(
-        1 for r, f in checkable if rule_action(f, r.lateral_sign) == r.realizable_action)
+        1 for r, f, i in checkable
+        if rule_action(f, r.lateral_sign, plateau_steps=i) == r.realizable_action)
     # Never re-derivable from the two above: the rule's STOP needs `visual_confirm`,
     # which no record carries, so these steps are excluded from the check by name.
     row["n_rule_stop"] = stops

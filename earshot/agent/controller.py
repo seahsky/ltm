@@ -65,9 +65,13 @@ __all__ = [
     "RISING_WINDOW",
     "RISING_SIGMAS",
     "MIN_DISPERSION_SAMPLES",
+    "CAST_STEPS",
+    "SCAN_STEPS",
     "UNMEASURED_EPS",
     "climb_eps",
     "is_rising",
+    "cast_action",
+    "next_plateau_steps",
     "realizable_investigate_step",
     "realizable_investigate_probe",
     "is_diverting",
@@ -110,6 +114,26 @@ RISING_SIGMAS = 1.0
 # clears `eps` alone, which is the pre-`eps-1` behaviour and is why short histories still
 # degrade to the original comparison.
 MIN_DISPERSION_SAMPLES = 6
+
+# provenance: derived — how many forward steps a cast leg commits to before the heading is
+# re-derived. `ControllerConfig.investigate_probe_m` is 2.0 m and `sim.world`'s step is
+# 0.25 m, so this is ONE PROBE'S REACH: the rule names a place 2 m out and the agent now
+# walks to it instead of re-deriving a fresh 60-degree offset after every 0.25 m, which is
+# what turned the plateau branch into an orbit.
+CAST_STEPS = 8
+
+# provenance: derived — how many dead-cue steps are spent turning BEFORE any casting. A
+# `ControllerConfig.investigate_probe_turn_deg` of 60 makes six of them a full circle, so
+# this is one complete sweep.
+#
+# **It is here because a mis-oriented agent is not a lost one.** Facing away from a live
+# source also reads as a dead cue, and that case is fixed by consecutive turns — the
+# lateral sign homes onto the bearing in a turn or three and the climb resumes. A cast
+# that interrupts after the first turn walks the agent away from a source it was about to
+# find, which is measurable in the fake world (`TestTheStallTurnsTowardTheSource`) before
+# it is measurable on the box. Only once the cue has stayed dead through a whole sweep is
+# orientation ruled out and travel the remaining move.
+SCAN_STEPS = 6
 
 # provenance: fake — the threshold the climb falls back to when the renderer's scatter was
 # not measured. It is the pre-`detour-2` constant, kept only so an episode with no
@@ -224,8 +248,10 @@ def realizable_investigate_step(
     *,
     eps: float = UNMEASURED_EPS,
     window: int = RISING_WINDOW,
+    plateau_steps: int = 0,
+    cast_steps: int = CAST_STEPS,
 ) -> str:
-    """One greedy step of realizable anomaly-source localization (ADR-0011). Carried verbatim.
+    """One step of realizable anomaly-source localization (ADR-0011): SURGE, or CAST.
 
     Pure, and from **agent-estimable signals only** — it never reads a ground-truth source
     distance or coordinate:
@@ -235,10 +261,42 @@ def realizable_investigate_step(
     - ``lateral_sign`` — the interaural level sign, ``+1`` source to the right, ``-1``
       left, ``0`` ambiguous. Agent-frame, uncompensated (see the module docstring).
     - ``visual_confirm`` — the detector confirms the anomaly object is here.
+    - ``plateau_steps`` — how many consecutive steps the cue has already been dead for.
+      Not a reading; the count of them, carried on ``ControllerState`` because the runner
+      trims ``energy_history`` and a plateau outlives the readings it started in.
 
-    Rising loudness means forward; peak-or-plateau plus visual confirm means STOP, so the
-    agent stops *at* the source rather than at an arbitrary loud cell; a stall without a
-    confirm turns toward the louder half-plane.
+    Rising loudness means forward, and peak-or-plateau plus visual confirm means STOP, so
+    the agent stops *at* the source rather than at an arbitrary loud cell. Both carried
+    unchanged. What is new is the third branch.
+
+    **The un-cued branch now CASTS instead of turning, and `eps-1` is why.**
+
+    Every earlier version answered "turn" whenever the cue was dead, so no branch advanced
+    a plateaued agent. That defect was survivable only by accident: the pre-`detour-2` test
+    was ``current > previous + 1e-6`` against a renderer scattering 2.8e-3, a coin flip on
+    flat ground, and P(forward) of about a half is a random walk that covers distance.
+    Calibrating the threshold removed the coin flip and cost **13.2 points of
+    Anomaly-response SR** — 46.0% to 32.9% over 365 paired episodes, 15 of 16 scenes down,
+    sign test p = 0.0005. The noise was the exploration.
+
+    A threshold cannot give it back. `eps-1` measured one 0.25 m forward as worth 0.61 to
+    0.86 of the field's own local scatter in every band inside 5 m, so a correctly
+    calibrated single-step rule fires rarely BY CONSTRUCTION. The un-cued case needs a
+    policy, not a smaller epsilon.
+
+    So: **one turn, then ``cast_steps`` forwards, then a turn the other way.** The first
+    leg turns toward the louder half-plane, which is the lateral cue's last useful word.
+    Later legs ALTERNATE regardless of the sign, and that is deliberate — following a
+    stable sign every leg traces a closed polygon, which is an orbit, and an agent
+    circling a source at five metres reads exactly like the flat field and stable sign it
+    would be circling in. Alternating cannot close: the heading oscillates between two
+    values one turn apart, so the sweep drifts along their bisector and the agent always
+    goes somewhere.
+
+    The cast is interrupted by the cue rather than run to completion — ``rising`` is
+    evaluated every step, and a real rise surges immediately and resets the count. And
+    arrival still preempts everything: ``visual_confirm`` with a dead cue is a STOP even
+    mid-leg, because a cast is what the agent does when it has not arrived.
 
     **The rule does not read the collision flag, and ticket 26 measured why it should
     not.** The first box episode walked 110 forwards for 6.57 m of path and never reached
@@ -264,12 +322,81 @@ def realizable_investigate_step(
     if visual_confirm and not rising:
         return ACT_STOP
     if rising:
-        return ACT_FORWARD
-    if int(lateral_sign) > 0:
-        return ACT_TURN_RIGHT
-    if int(lateral_sign) < 0:
-        return ACT_TURN_LEFT
-    return ACT_TURN_LEFT  # ambiguous sign, default scan turn
+        return ACT_FORWARD  # surge
+    return cast_action(plateau_steps, lateral_sign, cast_steps=cast_steps)
+
+
+def _turn_toward(lateral_sign: int) -> str:
+    """The carried stall turn: toward the louder half-plane, left when the sign says
+    nothing. Ambiguous, zero and absent all scan left, which is the rule's own default."""
+    return ACT_TURN_RIGHT if int(lateral_sign) > 0 else ACT_TURN_LEFT
+
+
+def cast_action(
+    plateau_steps: int,
+    lateral_sign: int,
+    *,
+    cast_steps: int = CAST_STEPS,
+    scan_steps: int = SCAN_STEPS,
+) -> str:
+    """Where in the scan-then-cast cycle ``plateau_steps`` puts the agent. Pure.
+
+    Split out of the rule so the replay reconstructs the cycle by calling it rather than
+    by re-deriving it, and so the cycle reads as one expression. ``plateau_steps`` is the
+    count of consecutive dead-cue steps BEFORE this one, so zero is a plateau's first step.
+
+    Three phases, in order:
+
+    1. **Scan** — ``scan_steps`` turns toward the louder half-plane. A mis-oriented agent
+       recovers here and never reaches the rest.
+    2. **Cast** — one turn, then ``cast_steps`` forwards, repeatedly.
+    3. and the legs alternate direction, so the sweep cannot close into an orbit.
+
+    ``cast_steps = 0`` collapses phases 2 and 3 into a turn on every dead step, which is
+    the pre-`eps-1` behaviour and the control arm the next sweep needs. That is why both
+    lengths are arguments rather than constants read from module scope.
+    """
+    index = max(0, int(plateau_steps))
+    if index < int(scan_steps):
+        return _turn_toward(lateral_sign)
+    index -= int(scan_steps)
+    period = 1 + int(cast_steps)
+    if index % period:
+        return ACT_FORWARD  # running the leg
+    # Starting one. The lateral sign steers the first leg and the alternation steers the
+    # rest; see the rule's docstring for why a stable sign must not steer them all.
+    #
+    # **The alternation is conditional on there being legs at all.** It exists to stop a
+    # TRAVELLING sweep closing into a polygon, and with `cast_steps = 0` nothing travels:
+    # alternating there would oscillate the agent on the spot, which is worse than the
+    # rule being controlled against rather than equal to it.
+    turn_right = int(lateral_sign) > 0
+    if int(cast_steps) and (index // period) % 2:
+        turn_right = not turn_right
+    return ACT_TURN_RIGHT if turn_right else ACT_TURN_LEFT
+
+
+def next_plateau_steps(
+    energy_history: Sequence[float],
+    *,
+    eps: float = UNMEASURED_EPS,
+    window: int = RISING_WINDOW,
+    plateau_steps: int = 0,
+) -> int:
+    """The plateau count after this tick: zero if the cue is alive, one more if not. Pure.
+
+    The counter lives on ``ControllerState`` rather than being derived inside the rule
+    because the runner trims ``energy_history`` to what `is_rising` reads, and a cast leg
+    is longer than that window — a rule deriving its own plateau length from a truncated
+    history would silently restart the cycle every ``ENERGY_HISTORY`` steps.
+
+    A *replay* has the whole series and can derive it, which is what makes the reconstructed
+    action checkable against the recorded one (`tools/detour_report`).
+    """
+    history = [float(e) for e in energy_history if e is not None]
+    if not history or is_rising(history, eps=eps, window=window):
+        return 0
+    return max(0, int(plateau_steps)) + 1
 
 
 def realizable_investigate_probe(action: str, pose: Pose, cfg: ControllerConfig) -> Xyz:
@@ -378,6 +505,11 @@ class ControllerState:
     mode: NavMode = NavMode.SEARCH
     investigate_target_xyz: Optional[Xyz] = None
     investigate_steps: int = 0
+    # Consecutive INVESTIGATE steps whose cue was dead, which is where the agent sits in
+    # the cast cycle. Zero outside the detour and reset by any rise. It is state rather
+    # than a derivation because `energy_history` reaches the rule trimmed to what
+    # `is_rising` reads, and a cast leg outlives that window.
+    plateau_steps: int = 0
     investigated: bool = False  # reached CHECK, i.e. arrived at the source
     investigate_aborted: bool = False  # gave up the detour on the step budget
     resumed: bool = False  # re-entered SEARCH after the interrupt
@@ -497,10 +629,15 @@ def step_controller(
                     investigate_steps=0,
                 )
                 if realizable:
+                    # A fresh detour starts a fresh cast cycle: `nxt` carries
+                    # `plateau_steps=0` from the state above, so this first tick is either
+                    # a surge or the turn that opens a leg.
                     entry = realizable_investigate_step(
                         energy_history or [], lateral_sign, visual_confirm,
-                        eps=rising_eps,
+                        eps=rising_eps, plateau_steps=0,
                     )
+                    nxt = replace(nxt, plateau_steps=next_plateau_steps(
+                        energy_history or [], eps=rising_eps, plateau_steps=0))
                     return nxt, ControllerDecision(
                         mode=NavMode.INVESTIGATE,
                         active_goal=goal,
@@ -530,8 +667,15 @@ def step_controller(
         action = None
         if realizable:
             action = realizable_investigate_step(
-                energy_history or [], lateral_sign, visual_confirm, eps=rising_eps
+                energy_history or [], lateral_sign, visual_confirm, eps=rising_eps,
+                plateau_steps=state.plateau_steps,
             )
+            # Advanced whatever the action was, including a forward mid-leg: the count is
+            # of dead-cue STEPS, not of turns, and resetting it on the leg's own forwards
+            # would restart the cycle every other tick.
+            state = replace(state, plateau_steps=next_plateau_steps(
+                energy_history or [], eps=rising_eps,
+                plateau_steps=state.plateau_steps))
         arrived = (action == ACT_STOP) if realizable else bool(arrived_at_source)
 
         if arrived:

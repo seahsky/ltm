@@ -17,12 +17,18 @@ from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.agent.controller import (
     ACT_FORWARD,
+    ACT_STOP,
     ACT_TURN_LEFT,
+    ACT_TURN_RIGHT,
+    CAST_STEPS,
     MIN_DISPERSION_SAMPLES,
     RISING_WINDOW,
+    SCAN_STEPS,
     UNMEASURED_EPS,
+    cast_action,
     climb_eps,
     is_rising,
+    next_plateau_steps,
     realizable_investigate_step,
 )
 from earshot.audio.calibration import (
@@ -243,6 +249,110 @@ class TwoSidedWindowTest(unittest.TestCase):
         self.assertLess(len(short), MIN_DISPERSION_SAMPLES)
         self.assertTrue(is_rising(short, eps=MEASURED_SCATTER))
         self.assertFalse(is_rising([0.010, 0.010, 0.0105, 0.0105], eps=MEASURED_SCATTER))
+
+
+class SurgeAndCastTest(unittest.TestCase):
+    """The un-cued branch, which used to be a turn and nothing else.
+
+    `eps-1` measured what that cost: calibrating the threshold removed the coin flip that
+    was the agent's only exploration and took Anomaly-response SR from 46.0% to 32.9%.
+    The control arm here is `cast_steps=0`, which IS the old behaviour, so every assertion
+    below is paired with what the rule used to answer on the same input.
+    """
+
+    FLAT = [0.0100, 0.0102, 0.0098, 0.0101, 0.0099, 0.0103,
+            0.0100, 0.0101, 0.0099, 0.0102]
+
+    def _actions(self, n, *, lateral=1, **kwargs):
+        """The rule's answer at each position in a plateau of length ``n``."""
+        return [
+            realizable_investigate_step(
+                self.FLAT, lateral, False, eps=MEASURED_SCATTER, plateau_steps=i,
+                **kwargs)
+            for i in range(n)
+        ]
+
+    def test_the_old_rule_turns_forever_and_this_one_does_not(self):
+        """THE ARM THE REGRESSION WAS MEASURED IN. Same flat field, both policies."""
+        old = self._actions(40, cast_steps=0)
+        new = self._actions(40)
+        self.assertEqual(set(old), {ACT_TURN_RIGHT},
+                         "the carried rule answers a turn to every dead-cue step")
+        self.assertIn(ACT_FORWARD, new, "and the cast has to leave that trap")
+        self.assertGreater(new.count(ACT_FORWARD), new.count(ACT_TURN_RIGHT))
+
+    def test_a_full_sweep_of_turns_comes_first(self):
+        """A mis-oriented agent is not a lost one: it recovers inside the scan and never
+        reaches the cast. Casting before the sweep walks it away from a source it was
+        about to find, which `TestTheStallTurnsTowardTheSource` measures end to end."""
+        self.assertEqual(self._actions(SCAN_STEPS), [ACT_TURN_RIGHT] * SCAN_STEPS)
+        self.assertEqual(self._actions(SCAN_STEPS + 1)[-1], ACT_TURN_RIGHT,
+                         "the first cast leg opens with its own turn")
+
+    def test_a_leg_is_one_turn_then_cast_steps_forwards(self):
+        leg = self._actions(SCAN_STEPS + 1 + CAST_STEPS)[SCAN_STEPS:]
+        self.assertEqual(leg[0], ACT_TURN_RIGHT)
+        self.assertEqual(leg[1:], [ACT_FORWARD] * CAST_STEPS)
+
+    def test_the_legs_alternate_so_the_sweep_cannot_close_into_an_orbit(self):
+        """A stable lateral sign steering every leg traces a closed polygon — and an
+        agent orbiting a source at five metres produces exactly the flat field and stable
+        sign it would be orbiting in, so the shape is self-sustaining."""
+        turns = [a for a in self._actions(SCAN_STEPS + 4 * (1 + CAST_STEPS))[SCAN_STEPS:]
+                 if a != ACT_FORWARD]
+        self.assertEqual(turns, [ACT_TURN_RIGHT, ACT_TURN_LEFT] * 2)
+
+    def test_the_first_leg_still_follows_the_lateral_cue(self):
+        right = cast_action(SCAN_STEPS, 1)
+        left = cast_action(SCAN_STEPS, -1)
+        self.assertEqual((right, left), (ACT_TURN_RIGHT, ACT_TURN_LEFT))
+        self.assertEqual(cast_action(SCAN_STEPS, 0), ACT_TURN_LEFT, "ambiguous scans left")
+
+    def test_a_live_cue_surges_and_never_casts(self):
+        """The cast is what the agent does INSTEAD of standing still, not instead of
+        climbing: any rise preempts it wherever in the cycle the agent is."""
+        climbing = [0.010, 0.014, 0.018, 0.022, 0.026, 0.030]
+        for position in (0, SCAN_STEPS, SCAN_STEPS + 3):
+            self.assertEqual(
+                realizable_investigate_step(climbing, 1, False, eps=MEASURED_SCATTER,
+                                            plateau_steps=position),
+                ACT_FORWARD)
+
+    def test_arrival_preempts_the_cast_mid_leg(self):
+        """`visual_confirm` with a dead cue is a STOP wherever the cycle stands. A cast
+        that outranked arrival would walk the agent out of the source it had reached."""
+        for position in (0, SCAN_STEPS, SCAN_STEPS + 3):
+            self.assertEqual(
+                realizable_investigate_step(self.FLAT, 1, True, eps=MEASURED_SCATTER,
+                                            plateau_steps=position),
+                ACT_STOP)
+
+
+class PlateauCounterTest(unittest.TestCase):
+    """The counter the cast cycle indexes, and the reason it is state rather than derived.
+
+    The runner trims `energy_history` to `ENERGY_HISTORY`, which is what `is_rising` reads
+    and shorter than a cast leg. A rule deriving its own plateau length from that history
+    would silently restart the cycle every trim and never finish a leg.
+    """
+
+    FLAT = SurgeAndCastTest.FLAT
+
+    def test_a_dead_cue_advances_the_count_and_a_rise_resets_it(self):
+        self.assertEqual(
+            next_plateau_steps(self.FLAT, eps=MEASURED_SCATTER, plateau_steps=7), 8)
+        climbing = [0.010, 0.014, 0.018, 0.022, 0.026, 0.030]
+        self.assertEqual(
+            next_plateau_steps(climbing, eps=MEASURED_SCATTER, plateau_steps=7), 0)
+
+    def test_an_empty_history_is_not_a_plateau(self):
+        self.assertEqual(next_plateau_steps([], eps=MEASURED_SCATTER, plateau_steps=3), 0)
+
+    def test_the_count_outlives_the_history_the_rule_reads(self):
+        """The property that forces it onto the state: a leg is longer than the window."""
+        from earshot.task.runner import ENERGY_HISTORY
+
+        self.assertGreater(SCAN_STEPS + 1 + CAST_STEPS, ENERGY_HISTORY)
 
 
 class ClimbEpsTest(unittest.TestCase):
