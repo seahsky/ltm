@@ -53,6 +53,10 @@ nrun bash earshot/tools/yield_sweep.sh --tag <fresh-tag>
 # and what one forward step was worth against the threshold it had to clear
 python -m earshot.tools.detour_report runs/<tag>/<scene>
 
+# how many abandoned episodes stood inside the arrival ring — the whole sweep, by scene.
+# Counts only: scenes are different rooms, so bands and epsilons stay per-scene above
+python -m earshot.tools.detour_report runs/<tag> --across-scenes
+
 # did a change move the funnel — the arm WITHOUT it first. Refuses to subtract scenes
 # the two sweeps built differently, and prints how big a delta the renderer alone makes
 python -m earshot.tools.funnel_diff runs/<before-tag> runs/<after-tag>
