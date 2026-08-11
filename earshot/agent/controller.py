@@ -319,7 +319,29 @@ def realizable_investigate_step(
     if not history:
         return ACT_FORWARD  # no reading yet, probe forward
     rising = is_rising(history, eps=eps, window=window)
-    if visual_confirm and not rising:
+    # **ARM BRANCH: the confirm alone ends the detour, without a plateau beside it.**
+    #
+    # `cast-1` measured what the conjunct costs. Seven of fifteen abandoned episodes in
+    # `DYehNKdT76V` had a closest approach INSIDE the ring — 0.13 m in one case — and the
+    # confirm is a pure function of distance, so they had it. They never STOPped, so
+    # `rising` was true at every in-ring step, and the arrival they had already made was
+    # vetoed by the climb.
+    #
+    # The windowed rule is why. It compares the last k readings against the k before, so
+    # after a real approach the baseline LAGS: `rising` stays true for up to `window`
+    # steps past the point the local gradient flattens. At 0.25 m a step that is 1.25 m of
+    # hysteresis against a 1.0 m ring, so an agent that climbs in reads "rising" while
+    # inside it, surges through, and leaves. There is nothing to climb in there either —
+    # the 0-1 m band measured rise/eps at 0.54 and -0.04 with the largest residual of any
+    # band.
+    #
+    # What is given up is ADR-0011's reason for the conjunct: stop AT the source rather
+    # than at an arbitrary loud cell. Under `Detector.ORACLE` that reason is already
+    # carried by the ring itself — a confirm IS "within `oracle_radius_m` of the object" —
+    # so the plateau adds nothing and refuses arrivals. Under `Detector.CAPTION`, where a
+    # confirm is a noisy visual judgement rather than a distance, it would matter again,
+    # and this line is where that arm has to be reconsidered rather than inherited.
+    if visual_confirm:
         return ACT_STOP
     if rising:
         return ACT_FORWARD  # surge

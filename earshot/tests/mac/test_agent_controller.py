@@ -68,9 +68,24 @@ class TestTheGreedyRule(unittest.TestCase):
         """Otherwise the agent stops at an arbitrary loud cell rather than at the source."""
         self.assertNotEqual(realizable_investigate_step([0.3, 0.3], 0, False), ACT_STOP)
 
-    def test_rising_with_a_confirm_keeps_going(self):
-        """Still getting louder means the source is ahead, confirm or not."""
-        self.assertEqual(realizable_investigate_step([0.1, 0.4], 0, True), ACT_FORWARD)
+    def test_a_confirm_ends_the_detour_even_while_the_climb_still_rises(self):
+        """**Changed by `cast-1`, and this is the assertion that changed.**
+
+        This used to read "still getting louder means the source is ahead, confirm or
+        not" and expect FORWARD. That rule refused arrivals the agent had already made:
+        seven of fifteen abandoned episodes in `DYehNKdT76V` had a closest approach inside
+        the ring — 0.13 m in one — and since the confirm is a pure function of distance
+        they had it, so `rising` must have been true at every in-ring step. The windowed
+        test's baseline lags a real approach by up to `RISING_WINDOW` steps, which at
+        0.25 m a step is more hysteresis than the ring is wide.
+
+        What is given up is stopping AT the source rather than at the ring's edge. Under
+        an oracle confirm the ring already carries that; under a caption confirm it would
+        not, and this line is where that arm reconsiders it.
+        """
+        self.assertEqual(realizable_investigate_step([0.1, 0.4], 0, True), ACT_STOP)
+        # and the confirm is still REQUIRED — a rising climb with no confirm walks on
+        self.assertEqual(realizable_investigate_step([0.1, 0.4], 0, False), ACT_FORWARD)
 
     def test_a_stall_turns_toward_the_louder_half_plane_uncompensated(self):
         """``+1`` is a source to the RIGHT, so the agent turns right. No inversion.
@@ -88,7 +103,13 @@ class TestTheGreedyRule(unittest.TestCase):
         self.assertEqual(realizable_investigate_step([0.3, 0.3], 0, False), ACT_TURN_LEFT)
 
     def test_a_single_reading_counts_as_rising(self):
-        self.assertEqual(realizable_investigate_step([0.2], 0, True), ACT_FORWARD)
+        """No confirm, so this isolates its subject: what ONE reading does to `rising`.
+
+        It passed `True` before and was reading the confirm branch as much as the rising
+        one — which only went unnoticed while a confirm plus a rise happened to answer
+        FORWARD as well.
+        """
+        self.assertEqual(realizable_investigate_step([0.2], 0, False), ACT_FORWARD)
 
     def test_none_readings_are_skipped(self):
         self.assertEqual(realizable_investigate_step([None, 0.3, 0.3], 0, True), ACT_STOP)
