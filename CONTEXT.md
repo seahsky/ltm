@@ -118,5 +118,17 @@ Reconstructed from the readings the controller actually used, so it is the contr
 Its LENGTH is the unit that matters: a hail of one-step windows and a handful of long ones are different mechanisms with different fixes.
 _Avoid_: stall, plateau (unqualified — say the window, and say how long it was).
 
+**Refused arrival**:
+An abandoned episode that stood inside the detector's arrival ring (`DetectorConfig.oracle_radius_m`, 1.0 m geodesic) and was scored as never reaching the source.
+It was possible because the stop rule read `visual_confirm AND not rising`: confirmation is a pure function of distance, so an abandoned in-ring episode proves the rising test was true at every in-ring step — the agent believed it was still climbing and walked back out.
+The count decomposes a headline delta exactly, because a reach requires a confirm which requires being in the ring: **ring entries = reached + refused**, so a change either finds more entries (exploration) or converts more of them (arrival).
+_Avoid_: near miss, almost reached (neither says the agent was inside the ring the detector uses); reading a refusal count off records that carry only the horizontal axis, which is at most the geodesic and so reads more steps as in-ring than the ring holds.
+
+**Unrouted source**:
+An episode whose source the navmesh could never reach — `find_path` returned nothing at every step, which the audit records as `distance_axis == "horizontal"` on a run that wrote routes.
+It is unwinnable rather than failed: the detector asks the same pathfinder about the same target and reads a `None` distance as not-detected, so no confirm can fire whatever the controller does.
+The builder screens xz separation and `|Δy|` (ADR-0010, ADR-0015) but never asks whether the source is REACHABLE, so these sit in the headline's denominator as losses no policy could have avoided — 23 of the 365 built episodes, identical across arms.
+_Avoid_: unreachable (says nothing about which of the two pathfinder queries failed); dropping them from a denominator without printing the count you dropped.
+
 **Floor-constrained source**:
 The anomaly source sits on the primary goal's floor (`|Δy| < ~1.0 m`). Off-floor sources produce fabricated audio, because the RIR grid is rendered on one floor and `nearest` resolves by xz (ADR-0003).

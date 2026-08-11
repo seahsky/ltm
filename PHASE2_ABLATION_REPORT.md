@@ -3767,3 +3767,64 @@ The ADR also rejected stochastic exploration on principle — a random walk has 
 `RISING_SIGMAS = 0` with the cast held fixed — the bar becomes the renderer's scatter alone, dropping the field-dispersion term. One constant, one sweep, and it separates *how permissive the rising test is* from *where the agent goes when it fires nothing*, which is the only remaining confound between `cast-1` and the accident.
 
 **File index.** `funnel_diff` comparisons over `runs/{yield-2,eps-1,cast-1}` (RACE). Controller at `earshot/agent/controller.py`, ADR-0016.
+
+---
+
+# arrive-2 — confirm is enough: the arrival criterion is spent, and the residual deficit is exploration (RACE, 2026-08-11)
+
+**Run:** `bash earshot/tools/yield_sweep.sh --tag arrive-2`, exit 0, 2h47m, commit `90ffdea`, host riftvm.
+**The change:** one line in `realizable_investigate_step` — `if visual_confirm and not rising:` becomes `if visual_confirm:`.
+**Read with:** `python -m earshot.tools.funnel_diff runs/cast-1 runs/arrive-2` and `bash earshot/tools/arrival_audit.sh --tags "cast-1 arrive-2"`.
+
+## Why it was run: the arrival ring decomposes the headline exactly
+
+A reach requires a confirm, and a confirm requires standing inside the detector's 1.0 m geodesic ring. So **ring entries = reached + refused**, and any headline delta splits without residue into *how many episodes got to the door* and *how many were let through it*. `arrival_audit.sh` counted both over the three finished sweeps:
+
+| arm | ring entries | converted | refused | conversion |
+|---|---|---|---|---|
+| `yield-2` (the coin flip) | 168 | 168 | **0** | 100% |
+| `eps-1` (the estimator fix) | 126 | 120 | 6 | 95.2% |
+| `cast-1` (surge-and-cast) | 157 | 134 | **23** | 85.4% |
+
+That reads the two earlier deltas as different failures:
+
+- `yield-2` → `eps-1`, **−48 = −42 entries and −6 conversions**. Almost pure exploration damage, which is what the previous section concluded from the plateau windows.
+- `eps-1` → `cast-1`, **+14 = +31 entries and −17 conversions**. The cast recovered 74% of the lost entries and handed 17 back at the door.
+
+And it explains why the bug was never charged for arrival: a coin-flip `rising` yields a not-rising tick almost immediately, so under `yield-2` entering the ring *meant* stopping in it. `yield-2` predates `StepRecord.geodesic_to_source`, so its refusals are judged on the horizontal fallback, which is at most the geodesic and therefore reads MORE steps as in-ring — an over-counting axis returning zero of 365 is the strongest form of that reading. Every subsequent sharpening of the rising test made the climb more willing to keep believing while standing on top of the source.
+
+## The result
+
+| arm | what it is | SOURCE_REACHED | on the 342 routed episodes |
+|---|---|---|---|
+| `yield-2` | `current > previous + 1e-6` against a 2.8e-3 renderer | **168/365 = 46.0%** | 49.1% |
+| `eps-1` | median-of-5 baseline, `eps` = the renderer's measured scatter | 120/365 = 32.9% | 35.1% |
+| `cast-1` | two-sided window + dispersion bar, plus scan-then-cast (ADR-0016) | 134/365 = 36.7% | 39.2% |
+| **`arrive-2`** | **`cast-1` with the rising veto removed from the stop rule** | **147/365 = 40.3%** | **43.0%** |
+
+All four sweeps built the same 365 of 1016 episodes with identical per-scene counts and identical rejection tallies, so every comparison is paired at the scene. `ONSET_FIRED` and `INVESTIGATE_ENTERED` are 365/365 in `arrive-2` as in the others, and `PRIMARY_RESUMED` tracks `SOURCE_REACHED` exactly; the whole delta is at stage 5 again.
+
+**Against a prediction, though not a pre-registered one.** Before the run I put the landing zone at 157 — `cast-1`'s ring entries, on the argument that the rule only changes behaviour at steps where `visual_confirm` is already true, so the trajectory up to a first entry is identical and every entry should now convert. That reasoning was stated in conversation and is being written down after the fact, which is weaker than a registered prediction and is recorded as such. It read 147, ten short. The direction is the expected one (a ceiling is an upper bound), and ten episodes is 1.2σ of the render noise measured in `detour-1` (4 of 20 episodes flip between byte-identical runs, giving SD = √(0.20 × 365) = 8.5 on a net).
+
+## What it establishes
+
+1. **Arrival is spent as a lever.** Under `if visual_confirm:` a ring entry converts by construction, so 147 *is* `arrive-2`'s ring-entry count. There is no conversion loss left to recover; a further arrival change can only move the number by moving the ring, which is the detector's definition of success and not the controller's business.
+
+2. **The residual deficit is exploration, and its size is now named.** `yield-2` reached 168 entries, `arrive-2` reaches 147. The remaining **21 episodes — 5.8 points** — are doors the coin flip's accidental random walk found and the calibrated threshold does not. That is the plateau branch, which is where the `eps-1` post-mortem pointed and where the cast made a partial recovery.
+
+3. **The 23 unwinnable episodes are in every arm's denominator.** `distance_axis == "horizontal"` on a run that wrote routes means `find_path` to the source failed at every step; the detector asks the same pathfinder and reads `None` as not-detected, so no confirm can fire. Nfvxx8J5NCo 6, qyAac8rV8Zk 8, mv2HUxq3B53 5, p53SfW6mjZe 3, wcojb4TFT35 1, none of which reached in any arm. The corrected-base column above drops exactly those. The builder never asks whether the source is reachable, which is a dataset defect rather than a controller one.
+
+## What is NOT established, and is red until it is
+
+- **The paired test on +13 has not been run.** `funnel_diff runs/cast-1 runs/arrive-2` is the tool of record and its sign-across-scenes reading is the claim that does not depend on the renderer's noise model. +13 is +1.5σ on the net, which on its own is not a result.
+- **The mechanism arm has not been exercised.** `arrival_audit.sh --tags "cast-1 arrive-2"` must show `arrive-2` refusing **zero** arrivals net of unrouted episodes. A raw count above zero is expected and harmless — an unrouted episode's in-ring steps are judged on the horizontal fallback and it can never confirm — but a nonzero *net* refusal would mean a rule that stops on confirm somehow refused one, and the +13 would need another cause before it could be attributed to this diff.
+
+Both are read-only and take minutes. Until they are pasted in, this section is a measurement without its control.
+
+**Supplementary, computed from the run digests rather than from `funnel_diff`:** `eps-1` → `arrive-2` is **+27**, 12 scenes up / 6 down / 2 flat. Net is +3.2σ; the two-sided sign test over the 18 that moved is **p = 0.24**, so the gain is real in size but concentrated (ziup5kvtCCR +6, and +4 each in 6s7QHgap2fW, XB4GS9ShBRE, q3zU7Yy5E5s) rather than broad. This pair changes *two* things — the cast and the stop rule — so it does not isolate either; the one-thing-changed comparison is `cast-1` → `arrive-2`.
+
+## What is measured next
+
+The exploration gap, not the threshold and not the arrival rule. `earshot/loosen-the-bar` (`RISING_SIGMAS = 0`) is still queued and still confounded: it was cut against the old stop rule and needs rebasing onto `confirm-is-enough` before its sweep says anything about how permissive the rising test should be.
+
+**File index.** `realizable_investigate_step` in `earshot/agent/controller.py`; `arrival_refused`, `scene_rollup`, `format_rollup` and the unrouted count in `earshot/tools/detour_report.py`; `earshot/tools/arrival_audit.sh`; `tests/mac/test_agent_controller.py`, `tests/mac/test_task_runner.py`, `tests/mac/test_detour_report.py`. Data: `runs/arrive-2/<scene>` (RACE). See ADR-0016 for the cast this builds on.
