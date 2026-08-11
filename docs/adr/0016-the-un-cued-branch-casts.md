@@ -1,6 +1,6 @@
 # The un-cued branch casts, because the noise it replaced was the exploration
 
-**Status:** accepted (2026-08-08, on the `eps-1` regression).
+**Status:** accepted (2026-08-08, on the `eps-1` regression), **and its own falsification criterion has since fired** — see the amendment at the foot of this file. The decision stands; the claim made for it was too strong.
 **Amends ADR-0011's greedy climb**, whose surge and whose arrival rule carry unchanged. Only the third branch moves.
 
 When the cue is dead and the agent has not arrived, `realizable_investigate_step` no longer answers "turn".
@@ -40,3 +40,17 @@ The old rule had no branch that advanced a plateaued agent. It survived that on 
 **Two invented numbers**, both derived from existing constants rather than chosen, and both module-level. A sweep over leg length is a code edit, deliberately: there is no configuration surface for the controller and ADR-0008 removed the one there was.
 
 **The next result must be read as a three-way.** `yield-2` (46.0%, pre-fix) and `eps-1` (32.9%, post-fix, no cast) are both on disk, so one sweep with the cast completes the comparison. A cast arm that lands between them means the policy is worse than the accident it replaced.
+
+---
+
+## Amendment (2026-08-08, `cast-1`): the criterion above fired
+
+`cast-1` landed **between them**: 134/365 = 36.7%, against 32.9% for `eps-1` and 46.0% for `yield-2`. The sentence directly above is recorded as met rather than reinterpreted.
+
+**What survives.** The cast is a real effect and the exploration diagnosis was right. Isolated against `eps-1` — the only comparison that changes one thing — it recovered **+14 episodes** across 13 of the 16 scenes that moved (sign test p = 0.021), while paying for a *stricter* rising bar than `eps-1` ran. Forwards per episode rose ~45% with displacement to match.
+
+**What does not.** The combination is 34 episodes below the accident (−4.0σ). Since the cast's own contribution is positive, the estimator half carries the whole deficit, and the losses are concentrated in scenes that scored 13/20 under the coin flip. **46.0% remains the best number measured, and it is still produced by an arithmetic error.**
+
+**What this does to the rejections above.** "Restore the coin flip" and "randomise the un-cued action" were rejected on principle — exploration by accident is re-broken by the next honest fix, and a stochastic controller makes every future A/B need repeats against a renderer with no seed. Both objections stand on their own terms. They now have a price: **9.3 points**. That trade is explicit here rather than resolved by assertion, and if a later run cannot close the gap by loosening the rising test, the price is what the choice should be argued against.
+
+**The decision is not reversed**, because nothing measured says the cast is the problem and one thing measured says it is part of the answer. The next arm holds the cast fixed and moves the threshold (`RISING_SIGMAS = 0`), which is the only remaining confound between this controller and the bug it is losing to.
