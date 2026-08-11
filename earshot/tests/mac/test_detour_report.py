@@ -43,10 +43,13 @@ from earshot.tools.detour_report import (
     band_rows,
     fit_slope,
     format_report,
+    format_rollup,
+    main,
     plateau_index,
     plateau_windows,
     rising_flags,
     rule_action,
+    scene_rollup,
     trace_one,
 )
 from earshot.types import Xyz
@@ -698,6 +701,220 @@ class TestTheReconstructionCheck(unittest.TestCase):
         ]))
         self.assertIn("plateau windows", text)
         self.assertIn("sig/sc", text)
+
+
+class TestTheRefusalsAreCountedOverTheWholeSweep(unittest.TestCase):
+    """One scene's refused arrivals are an anecdote; the sweep's total is the lever.
+
+    `cast-1`'s `DYehNKdT76V` put seven of fifteen abandoned episodes inside the ring. That
+    is either a property of one room or the shape of the whole deficit, and only a count
+    over every scene separates them. This walks a tag directory the way the box does and
+    asserts the arithmetic, including the two things a total can get quietly wrong: a
+    scene that built nothing dropped rather than listed, and a ceiling quoted as if it
+    were a prediction.
+
+    On disk with the real writers, because that seam is where the count is read: an
+    aggregate that is correct over injected traces and never finds the files is a report
+    that prints zero and reads as good news.
+    """
+
+    def _scene(self, root, name, episodes):
+        """One scene directory. `episodes` is (routes, stage) per episode."""
+        import pathlib
+
+        from earshot.report.agent import AgentReport
+        from earshot.report.artifacts import write_episode
+
+        scene = pathlib.Path(root) / name
+        scene.mkdir(parents=True)
+        for index, (routes, stage) in enumerate(episodes):
+            # A CLIMBING series, because that is the case being counted: an agent whose
+            # readings still rise as it crosses the ring is the one the rule refuses.
+            steps_ = tuple(
+                StepRecord(step=ONSET_STEP + i, measured_rms=0.01 + 0.004 * i,
+                           position=Xyz(float(d), 0.0, 0.0), displacement_m=0.25,
+                           geodesic_to_source=d)
+                for i, d in enumerate(routes))
+            write_episode(str(scene), index, AgentReport(resumed=True), EpisodeAudit(
+                episode_index=index, source_xyz=SOURCE, funnel_stage=stage,
+                onset=OnsetRecord(onset_step=ONSET_STEP), steps=steps_))
+        return scene
+
+    def _sweep(self):
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        # in the ring and abandoned (refused), in the ring and reached (the control),
+        # and never in the ring at all.
+        self._scene(root, "AAAscene", [
+            ([4.0, 2.0, 0.9], FunnelStage.INVESTIGATE_ENTERED),
+            ([4.0, 2.0, 0.9], FunnelStage.PRIMARY_RESUMED),
+            ([6.0, 5.0, 4.0], FunnelStage.INVESTIGATE_ENTERED),
+        ])
+        self._scene(root, "BBBscene", [
+            ([3.0, 0.5], FunnelStage.INVESTIGATE_ENTERED),
+        ])
+        self._scene(root, "CCCempty", [])
+        return root
+
+    def test_the_refusals_total_across_scenes(self):
+        rollup = scene_rollup(self._sweep())
+        by_name = {s["scene"]: s for s in rollup["scenes"]}
+        self.assertEqual(by_name["AAAscene"]["n_refused"], 1)
+        self.assertEqual(by_name["BBBscene"]["n_refused"], 1)
+        self.assertEqual(rollup["totals"]["n_refused"], 2)
+        self.assertEqual(rollup["totals"]["n_episodes"], 4)
+        self.assertEqual(rollup["totals"]["n_reached"], 1)
+
+    def test_a_scene_that_built_nothing_is_listed_rather_than_dropped(self):
+        """`mL8ThkuaVTM` builds zero episodes. A roll-up that skipped it would report a
+        twenty-scene sweep as a nineteen-scene one and never say which was missing."""
+        rollup = scene_rollup(self._sweep())
+        self.assertEqual(rollup["n_scenes"], 3)
+        self.assertEqual(rollup["n_scenes_without_records"], 1)
+        self.assertIn("CCCempty", [s["scene"] for s in rollup["scenes"]])
+        self.assertIn("no records", format_rollup(rollup))
+
+    def test_the_ceiling_is_reached_plus_refused_and_is_labelled_one(self):
+        """The number this exists to produce, and the sentence that keeps it honest: a
+        rule that stops on entry stops EARLIER, so every step after is a different
+        trajectory and only a run measures the headline."""
+        rollup = scene_rollup(self._sweep())
+        self.assertEqual(rollup["totals"]["reached_with_refusals"], 3)
+        text = format_rollup(rollup)
+        self.assertIn("1 of 4", text)
+        self.assertIn("3 of 4", text)
+        self.assertIn("CEILING, NOT A PREDICTION", text)
+
+    def test_the_in_ring_steps_are_totalled_with_their_rising_flags(self):
+        rollup = scene_rollup(self._sweep())
+        self.assertEqual(rollup["totals"]["steps_in_ring"], 2)
+        self.assertEqual(rollup["totals"]["steps_in_ring_rising"], 2)
+        self.assertIn("2 of the 2 in-ring step(s)", format_rollup(rollup))
+
+    def test_a_scene_directory_is_refused_rather_than_counted_as_zero(self):
+        """The footgun: `--across-scenes runs/cast-1/DYehNKdT76V` finds no scene
+        subdirectories and would happily total nothing. Zero refused arrivals is a
+        finding, and a mistyped path must not be able to manufacture one."""
+        import pathlib
+
+        root = self._sweep()
+        with self.assertRaises(ValueError) as caught:
+            scene_rollup(str(pathlib.Path(root) / "AAAscene"))
+        self.assertIn("scene directory", str(caught.exception))
+
+    def test_a_sweep_that_routed_everything_says_so(self):
+        """The other arm of the finding below. Silence would read the same as absence."""
+        text = format_rollup(scene_rollup(self._sweep()))
+        self.assertIn("had a navmesh route to its source", text)
+        self.assertNotIn("UNROUTED SOURCES:", text)
+
+
+class TestTheSourcesTheNavmeshCouldNeverReach(unittest.TestCase):
+    """An episode whose source never routed is unwinnable, and it is in the denominator.
+
+    `distance_axis` falls back to horizontal only when the geodesic was None at EVERY
+    step. On a run that records routes that means `find_path` to the source failed
+    throughout — and `runner._make_detector` seeds the anomaly object's view-point list
+    with the source position, so the detector is asking the same pathfinder the same
+    question and getting the same None. `OracleDetector.detects` reads None as NOT
+    detected, so no confirm can fire and SOURCE_REACHED is unreachable whatever the
+    controller does.
+
+    `cast-1` flagged five scenes with mixed axes and nothing counted them.
+    """
+
+    def _write(self, scene, index, routes, *, stage, routed=True):
+        from earshot.report.agent import AgentReport
+        from earshot.report.artifacts import write_episode
+
+        steps_ = tuple(
+            StepRecord(step=ONSET_STEP + i, measured_rms=0.01 + 0.004 * i,
+                       position=Xyz(float(d), 0.0, 0.0), displacement_m=0.25,
+                       geodesic_to_source=d if routed else None)
+            for i, d in enumerate(routes))
+        write_episode(str(scene), index, AgentReport(resumed=True), EpisodeAudit(
+            episode_index=index, source_xyz=SOURCE, funnel_stage=stage,
+            onset=OnsetRecord(onset_step=ONSET_STEP), steps=steps_))
+
+    def _sweep(self, *, unrouted_stage=FunnelStage.INVESTIGATE_ENTERED):
+        import pathlib
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        scene = pathlib.Path(root) / "EEEmixed"
+        scene.mkdir(parents=True)
+        self._write(scene, 0, [4.0, 2.0, 0.9], stage=FunnelStage.INVESTIGATE_ENTERED)
+        self._write(scene, 1, [4.0, 2.0, 0.5], stage=FunnelStage.PRIMARY_RESUMED)
+        self._write(scene, 2, [4.0, 2.0, 0.9], stage=unrouted_stage, routed=False)
+        return root
+
+    def test_the_unrouted_episodes_are_counted_and_named(self):
+        rollup = scene_rollup(self._sweep())
+        self.assertEqual(rollup["totals"]["n_unrouted"], 1)
+        self.assertEqual(rollup["scenes"][0]["unrouted_episodes"], [2])
+        text = format_rollup(rollup)
+        self.assertIn("UNROUTED SOURCES: 1 of 3", text)
+
+    def test_a_refusal_inside_an_unrouted_episode_is_corrected_out(self):
+        """The double correction: no confirm could fire there, and the distance it was
+        judged on is the horizontal fallback, which is at most the geodesic one."""
+        rollup = scene_rollup(self._sweep())
+        self.assertEqual(rollup["totals"]["n_refused"], 2)
+        self.assertEqual(rollup["totals"]["n_refused_unrouted"], 1)
+        self.assertEqual(rollup["totals"]["n_refused_routed"], 1)
+        self.assertIn("Net of them the refusals are 1", format_rollup(rollup))
+
+    def test_the_headline_is_rebased_on_the_episodes_that_could_be_won(self):
+        rollup = scene_rollup(self._sweep())
+        text = format_rollup(rollup)
+        self.assertIn("1 of 3 (33.3%)", text)     # as scored
+        self.assertIn("1 of 2 (50.0%)", text)     # net of the unwinnable one
+
+    def test_an_unrouted_episode_that_reached_refutes_the_reading(self):
+        """The arm. `same_category` gives the detector the primary's view points too, so
+        an unrouted episode CAN reach — and a tool that only ever printed the argument
+        would never surface the case that breaks it."""
+        rollup = scene_rollup(self._sweep(unrouted_stage=FunnelStage.PRIMARY_RESUMED))
+        self.assertEqual(rollup["totals"]["n_unrouted_reached"], 1)
+        text = format_rollup(rollup)
+        self.assertIn("THE READING IS REFUTED", text)
+        self.assertIn("upper bound", text)
+
+    def test_a_run_written_before_routes_withholds_the_count(self):
+        """yield-2's shape: `geodesic_to_source` did not exist, so every episode reads
+        horizontal. Reporting 365-of-365 unrouted would be a spectacular false finding,
+        and NOT_RUN is red rather than green."""
+        import pathlib
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        scene = pathlib.Path(root) / "FFFold"
+        scene.mkdir(parents=True)
+        self._write(scene, 0, [4.0, 2.0, 0.9], stage=FunnelStage.INVESTIGATE_ENTERED,
+                    routed=False)
+        rollup = scene_rollup(root)
+        self.assertFalse(rollup["routes_recorded"])
+        text = format_rollup(rollup)
+        self.assertIn("UNROUTED SOURCES UNCOUNTABLE", text)
+        self.assertNotIn("UNROUTED SOURCES: 1", text)
+
+    def test_the_cli_reads_a_tag_directory_and_refuses_an_empty_one(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main([self._sweep(), "--across-scenes"])
+        self.assertEqual(code, 0)
+        self.assertIn("refused arrivals across", out.getvalue())
+
+        empty = io.StringIO()
+        with redirect_stdout(empty):
+            code = main([tempfile.mkdtemp(), "--across-scenes"])
+        self.assertEqual(code, 2, "a sweep with no records must not exit 0")
+        self.assertIn("NOTHING TO COUNT", empty.getvalue())
 
 
 if __name__ == "__main__":

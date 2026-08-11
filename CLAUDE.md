@@ -53,6 +53,14 @@ nrun bash earshot/tools/yield_sweep.sh --tag <fresh-tag>
 # and what one forward step was worth against the threshold it had to clear
 python -m earshot.tools.detour_report runs/<tag>/<scene>
 
+# how many abandoned episodes stood inside the arrival ring, and how many episodes had
+# no navmesh route to their source at all — the whole sweep, by scene. Counts only:
+# scenes are different rooms, so bands and epsilons stay per-scene above
+python -m earshot.tools.detour_report runs/<tag> --across-scenes
+
+# both counts over several finished runs, after a pull. Read-only, no GPU, minutes
+bash earshot/tools/arrival_audit.sh --tags "cast-1 eps-1 yield-2"
+
 # did a change move the funnel — the arm WITHOUT it first. Refuses to subtract scenes
 # the two sweeps built differently, and prints how big a delta the renderer alone makes
 python -m earshot.tools.funnel_diff runs/<before-tag> runs/<after-tag>

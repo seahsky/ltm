@@ -141,6 +141,8 @@ __all__ = [
     "aggregate",
     "format_report",
     "load_traces",
+    "scene_rollup",
+    "format_rollup",
     "main",
 ]
 
@@ -1115,10 +1117,290 @@ def load_traces(
     return traces
 
 
+def scene_rollup(
+    tag_dir: str, *, min_span_m: float = DEFAULT_MIN_SPAN_M
+) -> Dict[str, Any]:
+    """The refused-arrival count for every scene under one sweep's tag directory.
+
+    **Counts only.** A sweep's scenes are different rooms with different geometry, so
+    pooling their bands, their slopes or their epsilons would average incomparable
+    measurements; a count of episodes does pool, because an episode is an episode
+    wherever it ran. The per-scene report is still the place to read a gradient.
+
+    Every scene directory is listed even when it holds no records — ``mL8ThkuaVTM``
+    builds zero episodes and a roll-up that silently skipped it would report a sweep of
+    nineteen scenes as if that were the sweep.
+    """
+    root = pathlib.Path(tag_dir)
+    _, episodes = run_paths(root)
+    if episodes.is_dir():
+        raise ValueError(
+            "{} is a scene directory, not a sweep's tag directory — it holds episodes "
+            "itself. Pass the directory above it, or drop --across-scenes.".format(root))
+
+    scenes: List[Dict[str, Any]] = []
+    for child in sorted(p for p in root.iterdir() if p.is_dir()):
+        traces = load_traces(str(child), min_span_m=min_span_m)
+        if not traces:
+            scenes.append({"scene": child.name, "n_episodes": 0, "n_abandoned": 0,
+                           "n_reached": 0, "n_refused": 0, "steps_in_ring": 0,
+                           "steps_in_ring_rising": 0, "n_routed": 0, "n_unrouted": 0,
+                           "n_unrouted_reached": 0, "n_refused_unrouted": 0,
+                           "unrouted_episodes": [], "distance_axes": []})
+            continue
+        # Through `aggregate` rather than over `traces` directly: one definition of
+        # "refused" for the roll-up and the per-scene report, so the total can never
+        # disagree with the reports it totals.
+        agg = aggregate(traces)
+        arrival = agg["arrival"]
+        # **An episode whose route was NEVER available.** `distance_axis` falls back to
+        # horizontal only when the geodesic was None at every step of the detour, which
+        # on a run that records routes means `find_path` to the source failed throughout
+        # — the source sits on a navmesh island the agent cannot reach. See
+        # `_unrouted_lines` for why that is a feasibility finding and not a plotting one.
+        unrouted = [t for t in traces if t.get("distance_axis") == "horizontal"]
+        scenes.append({
+            "scene": child.name,
+            "n_episodes": agg["n_episodes"],
+            "n_abandoned": arrival["n_abandoned"],
+            "n_reached": agg["arms"][REACHED]["n"],
+            "n_refused": arrival["n_refused"],
+            "steps_in_ring": arrival["steps_in_ring"],
+            "steps_in_ring_rising": arrival["steps_in_ring_rising"],
+            "n_routed": sum(1 for t in traces if t.get("distance_axis") == "geodesic"),
+            "n_unrouted": len(unrouted),
+            # The falsification arm, carried per scene: an unrouted episode that REACHED
+            # the source contradicts the unwinnable reading, and the report says so
+            # rather than leaving the claim standing on an argument.
+            "n_unrouted_reached": sum(1 for t in unrouted if t.get("outcome") == REACHED),
+            # The intersection, because it is a DOUBLE correction. A refusal inside an
+            # unrouted episode is not an arrival the rule refused — no confirm could have
+            # fired there at all — and it is measured on the horizontal axis, which is at
+            # most the geodesic one and so reads more steps as in-ring than the ring holds.
+            "n_refused_unrouted": sum(1 for t in unrouted if t.get("arrival_refused")),
+            "unrouted_episodes": [t.get("episode") for t in unrouted],
+            "distance_axes": agg["distance_axes"],
+        })
+
+    def total(key: str) -> int:
+        return sum(int(s[key]) for s in scenes)
+
+    built = total("n_episodes")
+    reached = total("n_reached")
+    refused = total("n_refused")
+    return {
+        "tag": root.name,
+        "ring_m": ARRIVAL_RING_M,
+        "n_scenes": len(scenes),
+        "n_scenes_without_records": sum(1 for s in scenes if not s["n_episodes"]),
+        "scenes": scenes,
+        # Whether this run wrote routes AT ALL. A record from before
+        # `StepRecord.geodesic_to_source` landed carries None everywhere, which is
+        # indistinguishable per episode from a route that failed — so the unrouted count
+        # is reported only when some episode in the sweep did route, and is withheld
+        # rather than guessed when none did. A criterion that could not be evaluated is
+        # never green (CLAUDE.md), and 365-of-365 unrouted would be a spectacular
+        # false finding.
+        "routes_recorded": bool(total("n_routed")),
+        "totals": {
+            "n_episodes": built,
+            "n_abandoned": total("n_abandoned"),
+            "n_reached": reached,
+            "n_refused": refused,
+            "steps_in_ring": total("steps_in_ring"),
+            "steps_in_ring_rising": total("steps_in_ring_rising"),
+            # What the headline would read if every arrival the rule refused had been
+            # admitted. A CEILING and never a prediction — see `_rollup_lines`.
+            "reached_with_refusals": reached + refused,
+            "n_routed": total("n_routed"),
+            "n_unrouted": total("n_unrouted"),
+            "n_unrouted_reached": total("n_unrouted_reached"),
+            "n_refused_unrouted": total("n_refused_unrouted"),
+            # The refusals that survive the correction: an arrival the rule could have
+            # admitted and did not, in an episode where the detector could have answered.
+            "n_refused_routed": refused - total("n_refused_unrouted"),
+        },
+        "distance_axes": sorted({a for s in scenes for a in s["distance_axes"]}),
+    }
+
+
+def _rollup_lines(rollup: Mapping[str, Any]) -> List[str]:
+    totals = rollup["totals"]
+    built = int(totals["n_episodes"])
+    lines = ["refused arrivals across {}, by scene".format(
+        rollup.get("tag") or "the sweep")]
+    lines.extend(_wrap(
+        "An episode that stood inside the {:.1f} m ring and was scored as never "
+        "arriving.".format(rollup.get("ring_m", 0.0))))
+    lines.extend([
+        "",
+        "  {:<14} {:>5}  {:>9}  {:>7}  {:>7}  {:>7}  {:>6}".format(
+            "scene", "built", "abandoned", "reached", "refused", "in-ring", "rising"),
+        "  " + "-" * 66,
+    ])
+    for scene in rollup["scenes"]:
+        if not scene["n_episodes"]:
+            lines.append("  {:<14} {:>5}  {}".format(
+                scene["scene"], 0, "no records — this scene built nothing"))
+            continue
+        lines.append("  {:<14} {:>5}  {:>9}  {:>7}  {:>7}  {:>7}  {:>6}".format(
+            scene["scene"], scene["n_episodes"], scene["n_abandoned"],
+            scene["n_reached"], scene["n_refused"], scene["steps_in_ring"],
+            scene["steps_in_ring_rising"]))
+    lines.append("  " + "-" * 66)
+    lines.append("  {:<14} {:>5}  {:>9}  {:>7}  {:>7}  {:>7}  {:>6}".format(
+        "TOTAL", built, totals["n_abandoned"], totals["n_reached"],
+        totals["n_refused"], totals["steps_in_ring"], totals["steps_in_ring_rising"]))
+
+    if not built:
+        lines.append("")
+        lines.extend(_wrap(
+            "NOTHING TO COUNT: no scene under this directory holds an episode record."))
+        return lines
+
+    lines.append("")
+    ceiling = int(totals["reached_with_refusals"])
+    lines.extend(_wrap(
+        "SOURCE_REACHED is the headline stage, and it reads {} of {} ({:.1%}). A rule "
+        "that admitted the arrivals it already had would read at most {} of {} "
+        "({:.1%}).".format(
+            totals["n_reached"], built, float(totals["n_reached"]) / built,
+            ceiling, built, float(ceiling) / built)))
+    lines.append("")
+    lines.extend(_wrap(
+        "A CEILING, NOT A PREDICTION. These episodes stood in the ring under the rule "
+        "that walked them there; a rule that stops on entry stops EARLIER, and every "
+        "step after that point — the rest of the detour and the whole primary resume — "
+        "is a different trajectory. Only a run measures the number. What this bounds is "
+        "how much of the deficit is the arrival criterion rather than the climb."))
+    if totals["steps_in_ring"]:
+        lines.append("")
+        lines.extend(_wrap(
+            "`rising` was true at {} of the {} in-ring step(s) those episodes stood "
+            "for — the climb's own memory of the approach vetoing an arrival it had "
+            "already made.".format(
+                totals["steps_in_ring_rising"], totals["steps_in_ring"])))
+    lines.append("")
+    lines.extend(_wrap(
+        "A LOWER BOUND on the count: the detector minimises over every view point of "
+        "the anomaly object, so its distance is at most the one measured here."))
+    lines.extend(_unrouted_lines(rollup))
+    return lines
+
+
+def _unrouted_lines(rollup: Mapping[str, Any]) -> List[str]:
+    """Episodes whose source the navmesh could never reach — the denominator's own bug.
+
+    ``distance_axis`` falls back to horizontal only when the geodesic was ``None`` at
+    EVERY step of the detour. On a run that records routes that means ``find_path`` to
+    the source failed throughout: the source's view point sits on a navmesh island the
+    agent cannot walk to.
+
+    That is a feasibility finding rather than a plotting one, because the detector asks
+    the same question. ``runner._make_detector`` seeds ``view_points[anomaly_object]``
+    with the source position, and the builder prefers an anomaly object of a DIFFERENT
+    category from the primary, so for those episodes that list is exactly ``[source]``.
+    ``OracleDetector.detects`` returns False on a ``None`` distance. No confirm can fire,
+    so ``SOURCE_REACHED`` is unreachable under any controller and the episode is sitting
+    in the headline's denominator as a loss no policy could have avoided.
+
+    The exception is ``same_category``: when the anomaly object IS the primary category,
+    the list also holds the primary's view points and the detector may still answer. The
+    audit does not record which, so the count carries the caveat and the reached-count
+    beside it is the arm that would refute the reading.
+    """
+    totals = rollup["totals"]
+    lines = [""]
+    if not rollup.get("routes_recorded"):
+        return lines + _wrap(
+            "UNROUTED SOURCES UNCOUNTABLE: no episode in this sweep carries a navmesh "
+            "route, so a record written before `StepRecord.geodesic_to_source` and a "
+            "sweep where nothing routed are indistinguishable here. Withheld rather "
+            "than reported as all-unrouted.")
+
+    unrouted = int(totals["n_unrouted"])
+    built = int(totals["n_episodes"])
+    if not unrouted:
+        return lines + _wrap(
+            "Every one of the {} episode(s) had a navmesh route to its source at some "
+            "step, so none of them was unwinnable by construction.".format(built))
+
+    lines.extend(_wrap(
+        "UNROUTED SOURCES: {} of {} episode(s) never had a navmesh route to the source "
+        "at ANY step of their detour.".format(unrouted, built)))
+    for scene in rollup["scenes"]:
+        if not scene.get("n_unrouted"):
+            continue
+        lines.append("    {:<14} {:>2} of {:>2}   episodes {}".format(
+            scene["scene"], scene["n_unrouted"], scene["n_episodes"],
+            ", ".join(str(e) for e in scene.get("unrouted_episodes") or [])))
+    lines.append("")
+    lines.extend(_wrap(
+        "The detector asks the same question: the anomaly object's view-point list is "
+        "seeded with the source position, and the builder prefers an anomaly object of "
+        "a different category from the primary, so for those episodes the list is "
+        "exactly that one point. A None distance reads as NOT detected, so no confirm "
+        "can fire and SOURCE_REACHED is unreachable under any controller."))
+    lines.append("")
+    reached = int(totals["n_unrouted_reached"])
+    if reached:
+        lines.extend(_wrap(
+            "THE READING IS REFUTED FOR {} OF THEM: {} unrouted episode(s) reached the "
+            "source anyway, so the detector answered from somewhere else — the "
+            "`same_category` case, where the list also holds the primary's view "
+            "points. Treat the count above as an upper bound on the unwinnable "
+            "ones.".format(reached, reached)))
+    else:
+        lines.extend(_wrap(
+            "None of them reached, which is what the reading predicts. It is "
+            "consistent with the argument rather than proof of it: `same_category` "
+            "episodes would have a second way to answer and the audit does not record "
+            "which episodes those are."))
+    tainted = int(totals["n_refused_unrouted"])
+    if tainted:
+        lines.append("")
+        lines.extend(_wrap(
+            "AND {} OF THE REFUSALS ABOVE SIT IN THEM, which corrects the count twice "
+            "over: a refusal in an unrouted episode is not an arrival the rule refused, "
+            "because no confirm could fire there at all, and its distances are the "
+            "horizontal fallback, which is at most the geodesic one and so reads more "
+            "steps as in-ring than the ring holds. Net of them the refusals are "
+            "{}.".format(tainted, totals["n_refused_routed"])))
+
+    # The denominator drops ONLY the unrouted episodes. An episode that never entered
+    # INVESTIGATE carries no axis at all and stays in: it is not proven unwinnable, and a
+    # re-based rate that quietly also dropped the ones that never got a detour would be
+    # flattering itself twice.
+    rest = built - unrouted
+    if rest:
+        base = int(totals["n_reached"]) - reached
+        ceiling = base + int(totals["n_refused_routed"])
+        lines.append("")
+        lines.extend(_wrap(
+            "With those {} dropped, SOURCE_REACHED reads {} of {} ({:.1%}) rather than "
+            "{} of {} ({:.1%}), and the arrival ceiling over the same base is {} of {} "
+            "({:.1%}). That first difference is the denominator, not the "
+            "controller.".format(
+                unrouted, base, rest, float(base) / rest,
+                totals["n_reached"], built, float(totals["n_reached"]) / built,
+                ceiling, rest, float(ceiling) / rest)))
+    return lines
+
+
+def format_rollup(rollup: Mapping[str, Any]) -> str:
+    """The roll-up as text. Pure, so the totals are Mac-testable."""
+    return "\n".join(_rollup_lines(rollup))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", help="a directory `python -m earshot` wrote")
     parser.add_argument("--json", action="store_true", help="emit the aggregate as JSON")
+    parser.add_argument(
+        "--across-scenes", action="store_true",
+        help="read run_dir as a sweep's TAG directory and total the refused arrivals "
+             "over every scene under it. Counts only — bands and epsilons stay per-scene "
+             "because scenes are different rooms")
     parser.add_argument(
         "--min-span", type=float, default=DEFAULT_MIN_SPAN_M,
         help="metres a plateau window must span before its slope is fitted rather than "
@@ -1128,6 +1410,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not pathlib.Path(args.run_dir).is_dir():
         print("no such run directory: {}".format(args.run_dir))
         return 2
+    if args.across_scenes:
+        try:
+            rollup = scene_rollup(args.run_dir, min_span_m=args.min_span)
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        if not rollup["totals"]["n_episodes"]:
+            print(format_rollup(rollup))
+            return 2
+        print(json.dumps(rollup, indent=2) if args.json else format_rollup(rollup))
+        return 0
     traces = load_traces(args.run_dir, min_span_m=args.min_span)
     if not traces:
         print("no episode records under {} — nothing to trace".format(args.run_dir))
