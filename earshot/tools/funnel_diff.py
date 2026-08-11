@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from earshot.report.audit import FunnelStage
 from earshot.tools.yield_report import load_summaries
 
-__all__ = ["HEADLINE_STAGE", "diff", "format_report", "main"]
+__all__ = ["HEADLINE_STAGE", "diff", "format_report", "main", "two_sided_exact_binomial"]
 
 # The stage the headline delta is taken on. Stage 5 is arrival at the anomaly source —
 # what a controller change is trying to move, and the numerator of Anomaly-response SR.
@@ -74,6 +74,23 @@ def _by_scene(summaries: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any
     return out
 
 
+def two_sided_exact_binomial(extreme: int, n: int) -> Optional[float]:
+    """The exact two-sided p for `extreme` of `n` independent outcomes falling one way
+    under a fair coin. ``None`` when nothing moved, because no p exists for zero trials.
+
+    Shared with `episode_diff`'s McNemar rather than reimplemented there: the sign test
+    over scenes and the McNemar over episodes are the SAME arithmetic on different units,
+    and two copies of an exact-tail sum is a place for them to drift apart. It is exact
+    rather than normal-approximated because these `n` are small — 16 scenes moved in the
+    largest comparison this repo has run, where a normal approximation is not honest.
+    """
+    if n <= 0:
+        return None
+    extreme = max(int(extreme), n - int(extreme))
+    tail = sum(math.comb(n, k) for k in range(extreme, n + 1))
+    return min(1.0, 2.0 * tail / (2 ** n))
+
+
 def _sign_test(deltas: Sequence[int]) -> Dict[str, Any]:
     """Scenes up, down, flat, and the exact two-sided sign-test p. Pure.
 
@@ -91,16 +108,12 @@ def _sign_test(deltas: Sequence[int]) -> Dict[str, Any]:
     down = sum(1 for d in deltas if d < 0)
     flat = sum(1 for d in deltas if d == 0)
     n = up + down
-    if n == 0:
-        return {"up": up, "down": down, "flat": flat, "n": 0, "p_value": None}
-    extreme = max(up, down)
-    tail = sum(math.comb(n, k) for k in range(extreme, n + 1))
     return {
         "up": up,
         "down": down,
         "flat": flat,
         "n": n,
-        "p_value": min(1.0, 2.0 * tail / (2 ** n)),
+        "p_value": two_sided_exact_binomial(max(up, down), n),
     }
 
 

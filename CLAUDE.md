@@ -65,6 +65,11 @@ bash earshot/tools/arrival_audit.sh --tags "cast-1 eps-1 yield-2"
 # the two sweeps built differently, and prints how big a delta the renderer alone makes
 python -m earshot.tools.funnel_diff runs/<before-tag> runs/<after-tag>
 
+# the same two sweeps PAIRED BY EPISODE — 365 comparisons rather than 20, which is what
+# a delta of a dozen episodes needs. Verifies each pair is the same task before
+# subtracting it, and needs no flip-rate estimate: the flips ARE the discordant pairs
+python -m earshot.tools.episode_diff runs/<before-tag> runs/<after-tag>
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```
