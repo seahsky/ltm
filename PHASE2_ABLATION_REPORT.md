@@ -3582,8 +3582,10 @@ Two candidates imply opposite fixes.
 **The plateau is real** — the gradient genuinely flattens near 2 m, no forward would have raised it, and the lever is the arrival criterion.
 **The plateau is spurious** — the gradient is still climbing but `rising` is a SINGLE-STEP comparison, and `detour-1` measured the live render moving 24% between identical runs, so one unlucky reading sends the agent into a turn and the lever is the estimator.
 
-The planned separator was `rays-1`, a ray-count sweep. It never ran: `earshot/tools/ray_variance.sh` was never written and `nrun` exited 127 on it.
+The planned separator was `rays-1`, a ray-count sweep. It never ran and `nrun` exited 127 on it.
 The free gate answered the question instead — `signal_to_scatter` = |slope| × d_span / residual SD, computed from traces already on disk.
+
+**Corrected 2026-08-12.** This paragraph said `earshot/tools/ray_variance.sh` "was never written". **It was written**, on 2026-08-06, and never *merged* — which is why `nrun` could not find it. Commit `cd303c6` on `earshot/zero-yield-and-the-detour-finding` carries the 140-line driver, `earshot/tools/flip_report.py`, `AudioConfig.indirect_ray_count`, `--indirect-ray-count` and tests for all of it, green at 787 Mac tests. Recording a built tool as unbuilt is how it stayed invisible for six days while this report called the measurement it takes "the cheapest open question" it had.
 
 ## The measurement
 
@@ -3600,6 +3602,8 @@ The median window length is 1 while ~60% of detour steps sit inside a window —
 ## What it establishes
 
 1. **`rays-1` is CLOSED without running.** Every ratio is far above 1, which is this run's own branch for *the cue was recoverable from 500-ray traces all along*. The 2000/5000-ray probe is not a lever. (Cost, had it been built: 5000 rays ≈ 270 ms/step ≈ 135 s/episode against 13.6 s at 500.)
+
+   **Scoped 2026-08-12: this closure answers a question that is no longer the live one.** It asks *was the cue recoverable at 500 rays* — a statement about the estimator — and the answer is yes. It does not ask *does the ray count change the outcome flip rate*, which is a statement about reproducibility and is what the null arm made urgent. The two come apart: a cue can sit well above the noise at every step while 250 steps of trajectory still diverge between identical runs, which is exactly the 16.2% the null arm measured. The "What it did NOT establish" note below already flags that `signal_to_scatter` conflates render non-determinism with real non-linearity, so it was never the right instrument for the reproducibility question. **The closure stands for the estimator; the flip-rate question is open and `ray_variance.sh` is the thing that answers it.**
 
 2. **The estimator was the mechanism, and the arithmetic is embarrassing.** The test was `current > previous + 1e-6` against a renderer whose residual is ~2.8e-3 — a threshold about three thousand times smaller than the noise it was read through. On a flat field that is a coin flip, and every losing toss left FORWARD for one tick and turned. That is the one-step window, and there are hundreds of them.
 
@@ -3908,7 +3912,7 @@ That is a hard constraint on the whole ablation programme, not a comment on this
 - **`arrive-2`'s +13 (3.6 points) sits just under it**, which is why it reads 0.148 rather than anything cleaner. No re-analysis of these two runs will establish it; the tool has extracted everything the data contains.
 - **`cast-1`'s +14 sits under it too**, at 3.8 points. See the demotion below.
 - To resolve a 3.6-point effect at 80% power needs `0.0356 N = 2.8 sqrt(0.153 N)`, i.e. **N ≈ 950 episodes** — about 2.6 sweeps per arm, seven hours of box time. That is affordable, and it is the honest price of a result at this effect size.
-- The alternative is to cut the flip rate rather than raise N. The renderer has no seed, but its scatter falls with ray count, and `detour-2` measured `signal_to_scatter` at 6.12/7.41 with 500 direct rays — headroom to trade wall-clock for determinism. **Nobody has measured what the flip rate does as rays rise**, and one scene run twice at two ray counts prices that trade in an hour. It is the cheapest open question in this report.
+- The alternative is to cut the flip rate rather than raise N. **Nobody has measured what the flip rate does as rays rise** — `detour-2` closed `rays-1` on `signal_to_scatter`, which asks whether the *cue* was recoverable, not whether the *outcome* reproduces. It is the cheapest open question in this report, and **the experiment that answers it is already built**: commit `cd303c6` on `earshot/zero-yield-and-the-detour-finding` carries `ray_variance.sh` (one scene, several ray counts, N repeats each), `flip_report.py` (aggregate rate *and* the fraction of episodes not unanimous across repeats), the `indirect_ray_count` knob and tests, green at 787 Mac tests and never merged. Its own cost note puts 2500 rays near 0.3 s/step against criterion 7's 0.5 s ceiling — about 20 minutes per repeat against 7, so the default arms are **roughly 1.4 hours total**.
 
 ## The null arm, and the exhibit that should govern how this report is read
 

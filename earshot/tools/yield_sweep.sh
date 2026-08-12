@@ -56,6 +56,11 @@ OUT_DIR=""
 NO_PULL=0
 FORCE=0
 
+# Captured before the parse loop shifts them away, for `provenance.txt` below. After a
+# self-update re-exec these are the RECONSTRUCTED arguments, which is the honest thing to
+# record: they are what the body that actually ran was given.
+ORIGINAL_ARGS="$*"
+
 need_value() { [ "$1" -ge 2 ] || { echo "FATAL: $2 needs a value"; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -181,6 +186,42 @@ if [ "$LIMIT" -gt 0 ] && [ "$#" -gt "$LIMIT" ]; then
 fi
 echo "  $# scene(s): $*"
 mkdir -p "$OUT_DIR"
+
+# --- what code produced this sweep, recorded INSIDE the sweep -------------
+# `env_report.json` carries the resolved config, the interpreter and the conda prefix,
+# and NOT the commit. The commit went only to `notify-run.sh`'s log, which lives beside
+# `runs/` rather than inside the run and can be deleted on its own — so a finished sweep
+# could not say what built it. That cost a real reproduction: repeating `yield-2` meant
+# reconstructing its commit from mtimes and the shape of the controller.
+#
+# Written here rather than from Python ON PURPOSE. The null arm (`repeat-1`) rests on
+# `git diff` over `agent/ audio/ sim/ task/ config.py report/` being EMPTY between two
+# runs; a provenance write inside `task/runner.py` would put a diff there and turn a
+# demonstration into an argument that the diff is inert. A shell line cannot.
+#
+# It never fails the sweep. A tarball with no `.git` is a legitimate way to run this, and
+# an unrecorded commit must read as unknown rather than as absent — CLAUDE.md's rule that
+# a criterion which could not be evaluated is never green.
+{
+  echo "command: $0 $ORIGINAL_ARGS"
+  echo "started: $(date -Is)"
+  echo "host:    $(hostname)"
+  if COMMIT="$(git rev-parse HEAD 2>/dev/null)"; then
+    echo "commit:  $COMMIT"
+    if git diff --quiet HEAD 2>/dev/null && git diff --cached --quiet HEAD 2>/dev/null; then
+      echo "tree:    clean"
+    else
+      # A dirty tree means the commit does NOT identify the code that ran, so say it
+      # here rather than let the sha imply a reproducibility it does not have.
+      echo "tree:    DIRTY — the commit above does NOT identify what ran"
+      git status --porcelain 2>/dev/null | sed 's/^/         /'
+    fi
+  else
+    echo "commit:  UNKNOWN — no git repository answered here"
+    echo "tree:    UNKNOWN"
+  fi
+} > "$OUT_DIR/provenance.txt"
+echo "  provenance: $OUT_DIR/provenance.txt"
 
 # --- criterion 9's evidence, armed once around the whole sweep ------------
 # `reset_manifest --verify-absent` is a filesystem existence check over the delete set,
