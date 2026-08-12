@@ -3748,6 +3748,8 @@ Every delta is at stage 5 again: `ONSET_FIRED` and `INVESTIGATE_ENTERED` are 365
 
 1. **The exploration diagnosis was right, and the cast is a real effect.** Isolated against `eps-1` — the only comparison that changes one thing — the un-cued policy recovered **+14 of the 48 episodes** the calibrated threshold had lost, across 13 of the 16 scenes that moved. It did that while the rising bar got *stricter*: `cast-1` adds the dispersion term on top of `eps`, so the cast is paying for a harder test and still coming out ahead.
 
+   **Demoted 2026-08-12: "a real effect" overstates it.** The per-episode McNemar reads **p = 0.18** (54 gained / 40 lost over 94 discordant pairs) against this section's scene sign test at p = 0.021, and +14 is below the 15-episode resolution floor that the `arrive-2` section works out. Both tests are valid and disagree because they are sensitive to different shapes — the cast is broad and small, which the sign test sees and McNemar dilutes. What survives: **the cast moves 13 of 16 scenes the same way (p = 0.021) and its magnitude is unresolved at this sample size (p = 0.18).** The ~45% rise in forward steps is untouched and remains the strongest evidence the policy does what it was built to do.
+
    The corroboration is in the step counts. On `zt1RVoi7PcG`'s first five episodes, forwards went 46→51, 91→114, 50→59, 84→147, 82→104 against `eps-1`, with displacement rising to match. The agent moves substantially more, which is exactly what the policy was built to do.
 
 2. **The threshold is what costs the points, not the search.** The combination is still 34 episodes below the accident. Since the cast's own contribution is +14, the estimator half is carrying the whole deficit.
@@ -3872,28 +3874,60 @@ python -m earshot.tools.episode_diff runs/cast-1 runs/arrive-2
 
 That structure would also license a one-sided test, since the rule cannot remove an arrival by design. It gives **p = 0.074**. Still not significant, and recorded rather than leaned on.
 
-## The noise model was right, and now it is measured rather than assumed
+## The flip rate, measured properly — and a claim of mine corrected
 
-`funnel_diff` compares a net against `sqrt(FLIP_RATE × built)` with `FLIP_RATE = 0.20`, calibrated in `detour-1` by running **one scene, twenty episodes, twice**. That is a thin basis for a constant every comparison in this report leans on.
+An earlier version of this section read "`FLIP_RATE = 0.20` is confirmed, at 18.9%". That was wrong, and wrong in a way worth spelling out because it is the trap this whole tool exists to avoid.
 
-The paired data measures it over the whole sweep without assuming it. Under a null the discordant pairs are exactly the flips, and `SD(net) = sqrt(n_discordant)`:
+**Discordance is not a flip rate.** It is noise *plus* whatever the change itself did, so a raw discordant count can only ever bound the noise from above. The three comparisons make that plain — they do not imply one rate:
+
+| comparison | discordant | gained / lost | what the change does to a trajectory |
+|---|---|---|---|
+| `yield-2` → `eps-1` | 74 (20.3%) | 13 / 61 | freezes a random walk in place: from step 1 |
+| `cast-1` → `arrive-2` | 69 (18.9%) | 41 / 28 | nothing at all until the first confirm |
+| `eps-1` → `cast-1` | **94 (25.8%)** | 54 / 40 | walks the agent ~45% further: from step 1 |
+
+The cast perturbs trajectories most and has the most discordance; the arrival rule perturbs them least and has the least. Discordance is measuring *behavioural divergence*, and only one of these three rows can be decomposed.
+
+**That row is `cast-1` → `arrive-2`, and it gives the best flip-rate estimate this project has.** The controller is identical at every step before the first confirm, so the change cannot cause a divergence there — the 28 losses are pure renderer noise. Under a null the two directions have equal expectation, so noise contributes ≈ 28 the other way as well:
 
 | | flips | SD of a net |
 |---|---|---|
-| `detour-1`, assumed since | 20% of 365 = 73 | **8.5** |
-| observed discordance, `cast-1` vs `arrive-2` | 69 (18.9%) | **8.3** |
+| `detour-1`, assumed ever since | 20% of 365 = 73 | 8.5 |
+| **measured here** — 2 × 28 of 365 | **15.3%** = 56 | **7.5** |
 
-The two agree to within 3%, and the observed figure is if anything an over-estimate of the noise because a real effect adds discordance of its own. **`FLIP_RATE = 0.20` is confirmed, on 365 episodes across 20 scenes rather than 20 episodes in one room.** The exact McNemar and the σ reading also agree on this delta: +13 / 8.3 = 1.57σ, two-sided ≈ 0.12 against the exact 0.148. Nothing about the earlier readings needs revisiting for noise-model reasons.
+So the assumed rate is **too high, not confirmed** — and `detour-1`'s 4-of-20 has a 95% interval of roughly 6% to 44%, which 15.3% sits comfortably inside. `funnel_diff`'s σ is therefore mildly conservative, which is the safe direction: every delta in this report was tested against a larger SD than the data supports, so **no earlier conclusion changes.** The exact test and the σ reading still agree on this arm: +13 / 7.5 = 1.7σ against an exact 0.148.
+
+Applying the same subtraction to the other two rows would give 7.1% and 21.9%, which is the arithmetic telling you the decomposition is invalid where a change moves the agent from step 1. It is not attempted there.
 
 ## What this design can resolve at all, which is the number to plan against
 
-`SD(net) = sqrt(0.19 × N)`. At the current N = 365 that is 8.3 episodes, so **the minimum resolvable effect is 1.96 × 8.3 ≈ 17 episodes, or 4.7 points.** Everything smaller is invisible to a single sweep pair, however real.
+`SD(net) = sqrt(0.153 × N)`. At the current N = 365 that is 7.5 episodes, so **the minimum resolvable effect is 1.96 × 7.5 ≈ 15 episodes, or 4.0 points.** Everything smaller is invisible to a single sweep pair, however real.
 
 That is a hard constraint on the whole ablation programme, not a comment on this arm:
 
-- **`arrive-2`'s +13 (3.6 points) sits below it.** No amount of re-analysis of these two runs will establish it. The tool has now extracted everything the data contains.
-- To resolve a 3.6-point effect at 80% power needs `0.0356 N = 2.8 sqrt(0.19 N)`, i.e. **N ≈ 1180 episodes** — roughly 3.2 sweeps per arm, about 9 hours of box time each. That is affordable and is the honest price of a result at this effect size.
-- The alternative is to cut the flip rate rather than raise N. The renderer has no seed, but its scatter falls with ray count, and `detour-2` measured `signal_to_scatter` at 6.12/7.41 with 500 direct rays — headroom to trade wall-clock for determinism. Nobody has measured what the flip rate does as rays rise, and that measurement is cheaper than either.
+- **`arrive-2`'s +13 (3.6 points) sits just under it**, which is why it reads 0.148 rather than anything cleaner. No re-analysis of these two runs will establish it; the tool has extracted everything the data contains.
+- **`cast-1`'s +14 sits under it too**, at 3.8 points. See the demotion below.
+- To resolve a 3.6-point effect at 80% power needs `0.0356 N = 2.8 sqrt(0.153 N)`, i.e. **N ≈ 950 episodes** — about 2.6 sweeps per arm, seven hours of box time. That is affordable, and it is the honest price of a result at this effect size.
+- The alternative is to cut the flip rate rather than raise N. The renderer has no seed, but its scatter falls with ray count, and `detour-2` measured `signal_to_scatter` at 6.12/7.41 with 500 direct rays — headroom to trade wall-clock for determinism. **Nobody has measured what the flip rate does as rays rise**, and one scene run twice at two ray counts prices that trade in an hour. It is the cheapest open question in this report.
+
+## The tool's own control: `yield-2` → `eps-1`
+
+An effect three times the resolution floor must come back decisive, or the tool is wrong and everything read through it is worthless. It does: **13 gained / 61 lost, 74 discordant, exact McNemar p = 0.0000**, spread over 18 of 20 scenes. The −48 regression is confirmed at full power, and this is the arm that licenses reading the other two.
+
+## The cast is demoted: consistent in direction, magnitude unresolved
+
+`eps-1` → `cast-1` reads **54 gained / 40 lost over 94 discordant pairs, exact McNemar p = 0.18** — against the scene sign test's p = 0.021, on which the `cast-1` section above called the effect CONFIRMED.
+
+**Both tests are valid and they are answering different questions.** The sign test asks whether scenes moved consistently in one direction and is strongest against a broad, small effect; McNemar asks whether the episode-level imbalance beats a coin and is strongest against a concentrated one. The cast is exactly the first shape: 13 scenes up by +1 to +5, three down by −3 to −5. That consistency is real and the sign test is right to see it.
+
+Two things break the tie towards caution rather than towards the smaller p:
+
+- **McNemar's p is anti-conservative here**, because episodes inside a scene are correlated and it assumes they are not. 0.18 is a floor on the true value, not an estimate of it.
+- **+14 is below the 15-episode resolution floor**, so a single sweep pair was never going to settle it either way.
+
+**"CONFIRMED" was too strong for what one of two valid tests supports.** The claim that survives is narrower and still useful: *the cast moves 13 of 16 scenes in the same direction (p = 0.021), and its magnitude is not resolved at this sample size (p = 0.18).* The corroboration in the step counts — forwards up ~45%, displacement to match — is untouched and remains the strongest evidence that the policy does what it was built to do.
+
+**The general rule this establishes: report both tests for every comparison, always.** A claim resting on one of them must say which, and why the other disagrees.
 
 **The sign test is not superseded by any of this.** The two tests have different nulls and different power profiles: the scene sign test asks whether most scenes moved the same way and is strongest against a broad consistent effect, McNemar asks whether the episode-level imbalance beats a coin and is strongest against a concentrated one. `cast-1`'s +14 was broad (13 of 16 scenes up, p = 0.021) and `arrive-2`'s +13 is not (10 up, 6 down). Both readings belong in the record, and where they disagree the disagreement is information about the shape of the effect rather than a tie to break.
 
