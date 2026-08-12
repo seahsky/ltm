@@ -33,7 +33,16 @@
 # Flags: --tag T, --n-episodes N (default 20), --max-steps M (default 250),
 #        --scenes "a b c" (default: every scene with a mesh), --category C, --limit N,
 #        --out-dir DIR (default runs/<tag>), --no-pull, --force (reuse a non-empty
-#        out-dir; mixes runs, and says so in the report).
+#        out-dir; mixes runs, and says so in the report),
+#        --indirect-ray-count N (unset keeps `spec.ACOUSTICS_PRESET`'s 500).
+#
+# A SWEEP AT A DIFFERENT RAY COUNT IS A DIFFERENT EXPERIMENT, not a faster or slower
+# version of this one. `rays-2` measured the outcome flip rate on ONE scene at 20
+# episodes and could not separate 15% from 10% — 255 episodes an arm is what that needs.
+# The flag exists so the flip rate can be measured at the `n` the rest of this report
+# uses, against the 16.2% `arrive-2` and `repeat-1` measured pairwise at 500. Runs at
+# different ray counts DO NOT PAIR with each other for a controller comparison: the
+# renderer is part of the episode.
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then :; else
   echo "ERROR: execute this script, don't source it — its exit calls would kill your shell." >&2
@@ -55,6 +64,11 @@ LIMIT=0
 OUT_DIR=""
 NO_PULL=0
 FORCE=0
+# Empty means "say nothing to the CLI", which is what keeps a default sweep on exactly
+# the code path `arrive-2` and `repeat-1` ran. `test_audio_spec.py` pins that path to the
+# whole preset, not just the one key, so the knob's presence cannot silently move a
+# default run.
+INDIRECT_RAY_COUNT=""
 
 # Captured before the parse loop shifts them away, for `provenance.txt` below. After a
 # self-update re-exec these are the RECONSTRUCTED arguments, which is the honest thing to
@@ -71,9 +85,11 @@ while [ $# -gt 0 ]; do
     --category)    need_value $# "$1"; CATEGORY="$2";   shift 2 ;;
     --limit)       need_value $# "$1"; LIMIT="$2";      shift 2 ;;
     --out-dir)     need_value $# "$1"; OUT_DIR="$2";    shift 2 ;;
+    --indirect-ray-count)
+                   need_value $# "$1"; INDIRECT_RAY_COUNT="$2"; shift 2 ;;
     --no-pull)     NO_PULL=1;                           shift ;;
     --force)       FORCE=1;                             shift ;;
-    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -119,7 +135,8 @@ if [ "$NO_PULL" = 0 ]; then
     [ "$FORCE" = 1 ] && _force_flag="--force"
     exec bash "$0" --tag "$TAG" --n-episodes "$N_EPISODES" --max-steps "$MAX_STEPS" \
          ${SCENES:+--scenes "$SCENES"} ${CATEGORY:+--category "$CATEGORY"} \
-         --limit "$LIMIT" --out-dir "$OUT_DIR" ${_force_flag:+--force}
+         --limit "$LIMIT" --out-dir "$OUT_DIR" ${_force_flag:+--force} \
+         ${INDIRECT_RAY_COUNT:+--indirect-ray-count "$INDIRECT_RAY_COUNT"}
   fi
 else
   banner "[1/4] git pull SKIPPED (--no-pull)"
@@ -243,7 +260,8 @@ for scene in "$@"; do
   banner "[3/4] $scene"
   python -m earshot --run-dir "$OUT_DIR/$scene" --scene "$scene" \
       --n-episodes "$N_EPISODES" --max-steps "$MAX_STEPS" \
-      ${CATEGORY:+--category "$CATEGORY"}
+      ${CATEGORY:+--category "$CATEGORY"} \
+      ${INDIRECT_RAY_COUNT:+--indirect-ray-count "$INDIRECT_RAY_COUNT"}
   ec=$?
   if [ "$ec" -ne 0 ]; then
     # A scene that could place NO episode still writes its summary.json now
