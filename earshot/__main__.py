@@ -31,6 +31,7 @@ dataset. The smoke runs without it (§4.3: one sound, the anomaly by constructio
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 from typing import Optional, Sequence
 
@@ -116,6 +117,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="smoke criterion 7's per-step audio ceiling; recorded, asserted by the smoke",
     )
     parser.add_argument(
+        "--indirect-ray-count",
+        type=int,
+        default=defaults.audio.indirect_ray_count,
+        help="override the acoustics preset's indirectRayCount (default 500). The one "
+             "knob that trades RENDER ACCURACY for speed: two runs of the same scene at "
+             "500 disagreed on 4 of 20 episode outcomes. Roughly linear in cost",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="replace artefacts already in --run-dir (they are refused by default)",
@@ -150,6 +159,11 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         max_source_dy_m=float(args.max_source_dy_m),
         min_source_start_sep_m=float(args.min_source_start_sep_m),
         audio_step_ceiling_s=float(args.audio_step_ceiling_s),
+        audio=dataclasses.replace(
+            RunConfig(run_dir="").audio,
+            indirect_ray_count=(None if args.indirect_ray_count is None
+                                else int(args.indirect_ray_count)),
+        ),
         overwrite=bool(args.overwrite),
     )
 
