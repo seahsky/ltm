@@ -123,6 +123,20 @@ class TestTheEpisodesArePairedAndVerified(unittest.TestCase):
         self.assertIn("mL8ThkuaVTM", outcomes)
         self.assertEqual(outcomes["mL8ThkuaVTM"], {})
 
+    def test_a_non_directory_at_the_tag_level_is_ignored(self):
+        """`yield_sweep.sh` writes `provenance.txt` and `.hermeticity-before.json` beside
+        the scene directories. A loader that took either for a scene would report a
+        phantom one with no episodes, and a phantom scene is a silent hole in a
+        denominator."""
+        before = self.tag("before")
+        write_scene(before, "sceneA", [REACHED])
+        (pathlib.Path(before) / "provenance.txt").write_text("commit: abc123\n")
+        (pathlib.Path(before) / ".hermeticity-before.json").write_text("{}")
+
+        outcomes = load_outcomes(str(before))
+
+        self.assertEqual(sorted(outcomes), ["sceneA"])
+
     def test_a_scene_directory_passed_by_mistake_raises(self):
         """Zero paired episodes is a finding; a mistyped path must not manufacture one."""
         before = self.tag("before")
