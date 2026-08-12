@@ -62,8 +62,17 @@ class TestConfigMapping(unittest.TestCase):
                          "the override must not write through to the module constant")
 
     def test_none_leaves_the_preset_alone(self):
-        mapping = audio_config_mapping(AudioConfig(), fakes.BINAURAL)
-        self.assertEqual(mapping["acousticsConfig"]["indirectRayCount"], 500)
+        """The WHOLE preset, not just the one key. A 500-ray sweep run today has to be
+        the same experiment as `arrive-2` and `repeat-1`, which ran before this knob
+        existed — their pairwise discordance of 16.2% is the reference every ray-count
+        comparison is read against, and it stops being a reference the moment the
+        default path moves. One key passing would not have caught a preset entry
+        dropped on the way through the override."""
+        acoustics = audio_config_mapping(AudioConfig(), fakes.BINAURAL)["acousticsConfig"]
+        for key, value in ACOUSTICS_PRESET.items():
+            self.assertEqual(acoustics[key], value, key)
+        print("default acoustics == ACOUSTICS_PRESET on all {} key(s)".format(
+            len(ACOUSTICS_PRESET)))
 
     def test_it_overrides_one_key_and_leaves_the_rest_of_the_preset(self):
         acoustics = audio_config_mapping(
