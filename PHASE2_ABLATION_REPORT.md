@@ -3910,6 +3910,39 @@ That is a hard constraint on the whole ablation programme, not a comment on this
 - To resolve a 3.6-point effect at 80% power needs `0.0356 N = 2.8 sqrt(0.153 N)`, i.e. **N ≈ 950 episodes** — about 2.6 sweeps per arm, seven hours of box time. That is affordable, and it is the honest price of a result at this effect size.
 - The alternative is to cut the flip rate rather than raise N. The renderer has no seed, but its scatter falls with ray count, and `detour-2` measured `signal_to_scatter` at 6.12/7.41 with 500 direct rays — headroom to trade wall-clock for determinism. **Nobody has measured what the flip rate does as rays rise**, and one scene run twice at two ray counts prices that trade in an hour. It is the cheapest open question in this report.
 
+## The null arm, and the exhibit that should govern how this report is read
+
+`repeat-1` is `arrive-2` re-run with **no change at all** — `git diff 90ffdea e3f8ae5` over `agent/`, `audio/`, `sim/`, `task/`, `config.py` and `report/` is empty, so the run path is byte-identical and only tooling moved. It is the forced-failure arm ADR-0014 requires for `episode_diff`, which until now had only ever been pointed at pairs with a real change.
+
+**The tool passes.** 24 / 35 over 59 discordant, net +11, exact McNemar **p = 0.19**; scene sign test 8 up / 6 down, p = 0.79. No false positive.
+
+**And the flip rate is now measured rather than argued.** 59 of 365 = **16.2%**, against the 15.3% inferred above from `arrive-2`'s 28 structurally-impossible losses. The inference was sound and the direct measurement supersedes it. `SD(single run) = 5.4` episodes (1.5 points); `SD(a difference) = 7.7` (2.1 points); minimum resolvable effect **15 episodes = 4.1 points**.
+
+**The null arm's own net was +11.** Identical code, 147 against 158 — **3.0 points apart.** Set that beside the two effects this section spent its length on:
+
+| | net | p |
+|---|---|---|
+| **null arm** — identical bytes | **+11** | 0.19 |
+| `cast-1` → `arrive-2` | +13 | 0.148 |
+| `eps-1` → `cast-1` | +14 | 0.18 |
+
+Neither effect is larger than what the apparatus produces from nothing.
+
+**The exhibit.** The exploration gap — the one quantity still worth chasing — was then measured against both runs of the same honest controller:
+
+| comparison | discordant | gained / lost | net | p |
+|---|---|---|---|---|
+| `yield-2` → `arrive-2` | 79 (21.6%) | 29 / 50 | **−21** | **0.024** |
+| `yield-2` → `repeat-1` | 82 (22.5%) | 36 / 46 | **−10** | **0.32** |
+
+**Same question, same accident arm, control code identical to the byte — and the answer crosses the significance threshold depending on which run you subtract.** A reader who saw only the first row would take the exploration gap as established. One who saw only the second would take it as absent. Both rows are real and this report prints both.
+
+The rule that follows is stronger than the two-tests rule above and supersedes it in scope: **at this effect size a comparison resting on a single run of either arm is not reportable at all.** Everything in the `eps-1`, `cast-1` and `arrive-2` sections is a single-run comparison. Their point estimates stand; their p-values should be read as one draw from a distribution that straddles 0.05.
+
+**The stochastic arm is also the noisiest, which prices an ADR-0016 objection.** Discordance against `yield-2` reads 21.6% and 22.5% against the null arm's 16.2%. If two deterministic runs contribute about 8.1% each, `yield-2` is contributing about 14% — **roughly 1.7× a deterministic arm's run-to-run variance**. That is an inference from three numbers rather than a measurement, and `yield-2b` will settle it. ADR-0016 rejected stochastic control partly because "a stochastic controller makes every future A/B need repeats"; the surcharge is now approximately quantified, and it is being paid by every comparison that uses `yield-2` as a baseline.
+
+**`yield-2` has been measured once.** 46.0% is the best number this project has, it defines the gap every remaining plan targets, and its single run carries SD 5.4 episodes. Propagated against the arrival arm's two runs, the exploration gap is **15.5 ± 6.6 episodes** — a 95% interval of roughly [3, 28] that nearly touches zero. Repeating it is the highest-value sweep available and is what runs next.
+
 ## The tool's own control: `yield-2` → `eps-1`
 
 An effect three times the resolution floor must come back decisive, or the tool is wrong and everything read through it is worthless. It does: **13 gained / 61 lost, 74 discordant, exact McNemar p = 0.0000**, spread over 18 of 20 scenes. The −48 regression is confirmed at full power, and this is the arm that licenses reading the other two.
