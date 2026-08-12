@@ -3748,11 +3748,15 @@ Every delta is at stage 5 again: `ONSET_FIRED` and `INVESTIGATE_ENTERED` are 365
 
 1. **The exploration diagnosis was right, and the cast is a real effect.** Isolated against `eps-1` — the only comparison that changes one thing — the un-cued policy recovered **+14 of the 48 episodes** the calibrated threshold had lost, across 13 of the 16 scenes that moved. It did that while the rising bar got *stricter*: `cast-1` adds the dispersion term on top of `eps`, so the cast is paying for a harder test and still coming out ahead.
 
+   **Demoted 2026-08-12: "a real effect" overstates it.** The per-episode McNemar reads **p = 0.18** (54 gained / 40 lost over 94 discordant pairs) against this section's scene sign test at p = 0.021, and +14 is below the 15-episode resolution floor that the `arrive-2` section works out. Both tests are valid and disagree because they are sensitive to different shapes — the cast is broad and small, which the sign test sees and McNemar dilutes. What survives: **the cast moves 13 of 16 scenes the same way (p = 0.021) and its magnitude is unresolved at this sample size (p = 0.18).** The ~45% rise in forward steps is untouched and remains the strongest evidence the policy does what it was built to do.
+
    The corroboration is in the step counts. On `zt1RVoi7PcG`'s first five episodes, forwards went 46→51, 91→114, 50→59, 84→147, 82→104 against `eps-1`, with displacement rising to match. The agent moves substantially more, which is exactly what the policy was built to do.
 
 2. **The threshold is what costs the points, not the search.** The combination is still 34 episodes below the accident. Since the cast's own contribution is +14, the estimator half is carrying the whole deficit.
 
-3. **The two effects have different shapes, and the shape names the lever.** The cast's gain is broad and small — 13 scenes up, mostly +1 to +5, which is why its sign test (p = 0.021) is stronger than its net (+1.6σ). The estimator's loss is concentrated: `DYehNKdT76V` 13→5, `q3zU7Yy5E5s` 13→7, `Dd4bFSTQ8gi` 13→8, `QaLdnwvtxbs` 13→8. **Every one of those was a 13/20 scene under the coin flip.** The calibrated threshold hurts worst exactly where random forward motion was working best, which is a statement about how permissive the rising test should be rather than about where the agent should walk.
+3. **The two effects have different shapes.** The cast's gain is broad and small — 13 scenes up, mostly +1 to +5, which is why its sign test (p = 0.021) is stronger than its net (+1.6σ). The estimator's loss is **broad as well, and roughly proportional to what the scene was already scoring**: 15 of the 16 scenes that moved went down, and the largest drops are `q3zU7Yy5E5s` 13→7, `4ok3usBNeis` 10→5, `DYehNKdT76V` 13→8, `ziup5kvtCCR` 8→3 and `TEEsavR23oF` 6→1 — starting points of 13, 10, 13, 8 and 6, not one band.
+
+   **Corrected 2026-08-12, and the conclusion it carried is withdrawn.** This paragraph originally read that the estimator's loss *concentrated* in four scenes that scored 13/20 under the coin flip — `DYehNKdT76V` 13→5, `q3zU7Yy5E5s` 13→7, `Dd4bFSTQ8gi` 13→8, `QaLdnwvtxbs` 13→8 — and concluded from that shape that "the calibrated threshold hurts worst exactly where random forward motion was working best, which is a statement about how permissive the rising test should be". **Three of those four right-hand numbers were `cast-1`'s, not `eps-1`'s.** `funnel_diff runs/yield-2 runs/eps-1` reads 13→8, 13→7, 13→**12**, 13→**13**: two of the four barely moved under the estimator at all, and `QaLdnwvtxbs` did not move. The concentration was an artifact of reading the wrong column, and nothing survives it — a broad proportional loss says nothing in particular about how permissive the rising test should be. The `+14` and `−34` totals, their σ and their sign tests are unaffected; only this shape claim was wrong.
 
 ## ADR-0016's falsification criterion fired
 
@@ -3765,6 +3769,8 @@ The ADR also rejected stochastic exploration on principle — a random walk has 
 ## What is measured next
 
 `RISING_SIGMAS = 0` with the cast held fixed — the bar becomes the renderer's scatter alone, dropping the field-dispersion term. One constant, one sweep, and it separates *how permissive the rising test is* from *where the agent goes when it fires nothing*, which is the only remaining confound between `cast-1` and the accident.
+
+**Amended 2026-08-12.** That separation is still worth having, but the argument that made it look urgent — the concentration claim corrected above — is withdrawn, and the arm is now confounded a second way: it was cut against the old stop rule, which `arrive-2` replaced. It needs rebasing onto `confirm-is-enough` before its sweep isolates anything.
 
 **File index.** `funnel_diff` comparisons over `runs/{yield-2,eps-1,cast-1}` (RACE). Controller at `earshot/agent/controller.py`, ADR-0016.
 
@@ -3814,17 +3820,125 @@ All four sweeps built the same 365 of 1016 episodes with identical per-scene cou
 
 3. **The 23 unwinnable episodes are in every arm's denominator.** `distance_axis == "horizontal"` on a run that wrote routes means `find_path` to the source failed at every step; the detector asks the same pathfinder and reads `None` as not-detected, so no confirm can fire. Nfvxx8J5NCo 6, qyAac8rV8Zk 8, mv2HUxq3B53 5, p53SfW6mjZe 3, wcojb4TFT35 1, none of which reached in any arm. The corrected-base column above drops exactly those. The builder never asks whether the source is reachable, which is a dataset defect rather than a controller one.
 
-## What is NOT established, and is red until it is
+## The two readings, run 2026-08-12
 
-- **The paired test on +13 has not been run.** `funnel_diff runs/cast-1 runs/arrive-2` is the tool of record and its sign-across-scenes reading is the claim that does not depend on the renderer's noise model. +13 is +1.5σ on the net, which on its own is not a result.
-- **The mechanism arm has not been exercised.** `arrival_audit.sh --tags "cast-1 arrive-2"` must show `arrive-2` refusing **zero** arrivals net of unrouted episodes. A raw count above zero is expected and harmless — an unrouted episode's in-ring steps are judged on the horizontal fallback and it can never confirm — but a nonzero *net* refusal would mean a rule that stops on confirm somehow refused one, and the +13 would need another cause before it could be attributed to this diff.
+**The mechanism arm is green and exact.** `arrive-2` refuses **0 of 365** — zero refusals, zero in-ring steps among abandoned episodes, in every one of the 19 scenes that built anything. The tool's own ceiling sentence collapses onto the measurement: *"a rule that admitted the arrivals it already had would read at most 147 of 365"*, which is what it read. Entries equal reaches by construction, and now in the data.
 
-Both are read-only and take minutes. Until they are pasted in, this section is a measurement without its control.
+**The pre-registered paired test came back null.** `funnel_diff runs/cast-1 runs/arrive-2`: +13, **10 scenes up / 6 down / 4 unchanged, sign test p = 0.45**, net **+1.5σ**. Neither reading separates +13 from a renderer with no seed. On the test named before the run, this arm did not move the headline.
+
+**The mechanism says where the gain must live, and that is where it is.** The change can only act on a scene that refused an arrival, and `cast-1`'s refusals were counted before this run went out:
+
+| `cast-1` refusals | scenes | Σ delta | up / down / flat | sign test |
+|---|---|---|---|---|
+| ≥ 1 | 10 | **+19** | **8 / 1 / 1** | **p = 0.039** |
+| 0 | 9 | −6 | 2 / 5 / 2 | p = 0.45 |
+
+Nineteen episodes recovered against the twenty-three refusals that were available to recover, in the scenes that held them, eight scenes up against one down. The nine scenes where the rule cannot act at all drift −6 with two up and five down, which is what a null looks like — and it is exactly the −6 that put the total ten short of the 157 ceiling.
+
+**That split was chosen after seeing the result**, which makes it one degree weaker than the test that came back null. What it has going for it is that the splitting variable is a measurement taken before the run and the predicted direction is forced by the mechanism rather than fitted. It is a strong suggestion, not a substitute for the null.
+
+**The honest verdict.** The rule change does what it was built to do — that is measured, exactly, and not in dispute. Whether it is worth +13 episodes is **not established**: the test named before the run says no, the post-hoc split says yes, and the per-episode McNemar below — the most powerful test this data supports — says p = 0.148. The report claims the mechanism and leaves the magnitude open.
+
+The magnitude is also **below what this design can resolve at all**: at 365 episodes and a 19% flip rate the minimum resolvable effect is about 17 episodes, and this one is 13. That is worked out at the end of this section, and it is a constraint on the programme rather than on this arm.
+
+## What would settle it: pair the episodes
+
+The scene sign test discards 345 of the 365 comparisons available, which is why +13 cannot clear it. Per-episode pairing is possible and is not being done. Both arms write an `audit.json` per episode; the episode index is the *same task* in both, since the builder is deterministic — episode 0 of `zt1RVoi7PcG` is `toilet` with the source at `bed (2.90059, 0.11294, 9.75894)` in `eps-1` and in `arrive-2` alike — and `source_xyz` is recorded, so the pairing can be **verified rather than assumed**, the way `funnel_diff` already verifies that two sweeps built the same scenes.
+
+A McNemar test over those pairs reads only the discordant ones, which is where a 20%-flip renderer puts all of its information. `funnel_diff` named this gap in its own footer (*"a per-episode test needs each run's audit.json"*) and did not close it.
+
+**`earshot/tools/episode_diff.py` closes it**, and it costs no GPU because it re-reads runs already on disk — `yield-2`, `eps-1`, `cast-1` and `arrive-2` alike, so every delta in this report can be re-scored at full power without a single new sweep.
+
+```
+python -m earshot.tools.episode_diff runs/cast-1 runs/arrive-2
+```
+
+Two properties are worth stating because they are the reasons to trust it over the scene reading:
+
+- **It needs no noise model.** `funnel_diff` compares a net against `sqrt(FLIP_RATE × built)` with a flip rate measured once, on one scene, in `detour-1`. Here the flips *are* the discordant pairs: under a null the two arms have the same per-episode outcome distribution, so a disagreement is equally likely to fall either way and the discordant pairs are a fair coin by construction. Nothing about the renderer is estimated.
+- **Independence is the assumption it does make, and it prints what you need to check it.** Episodes inside a scene share a room, a source and a renderer, so clustered disagreements would make the p anti-conservative. The per-scene split of gained and lost is printed beside the total; if the whole imbalance comes from two rooms, the scene-level sign test is the honest reading and the tool says so.
+
+Every pair is verified before it is subtracted — same scene, same index, and `source_xyz` agreeing to 1e-6 — and anything that fails is counted, named and dropped in the report rather than quietly excluded.
+
+## It ran, and +13 is still not established
+
+```
+python -m earshot.tools.episode_diff runs/cast-1 runs/arrive-2
+```
+
+**365 of 365 paired**, every one verified on scene, index and source. 106 reached in both, 190 in neither, **41 in `arrive-2` only, 28 in `cast-1` only** — net +13 over **69 discordant pairs**, **exact McNemar p = 0.148**. Better resolved than the scene sign test's 0.45 and still short of any conventional threshold.
+
+**The disagreements are not clustered**, so the independence assumption is in reasonable shape: 18 of the 20 paired scenes contribute discordant pairs, and the largest single contribution is `DYehNKdT76V` at 7 gained / 2 lost. This p is not an artifact of two rooms.
+
+**The 28 losses are structurally impossible except through noise, which is the most useful number in the table.** The controller is identical at every step where `visual_confirm` is false, and where it is true the new rule stops while the old one might not. An episode that reached under `cast-1` therefore reaches under `arrive-2` **on the same trajectory** — so all 28 losses are the renderer taking a different path before the first confirm. If that noise is symmetric it also supplies about 28 of the 41 gains, leaving **≈13 of signal**, which is the net. The point estimate is credible even though the test does not reach significance.
+
+That structure would also license a one-sided test, since the rule cannot remove an arrival by design. It gives **p = 0.074**. Still not significant, and recorded rather than leaned on.
+
+## The flip rate, measured properly — and a claim of mine corrected
+
+An earlier version of this section read "`FLIP_RATE = 0.20` is confirmed, at 18.9%". That was wrong, and wrong in a way worth spelling out because it is the trap this whole tool exists to avoid.
+
+**Discordance is not a flip rate.** It is noise *plus* whatever the change itself did, so a raw discordant count can only ever bound the noise from above. The three comparisons make that plain — they do not imply one rate:
+
+| comparison | discordant | gained / lost | what the change does to a trajectory |
+|---|---|---|---|
+| `yield-2` → `eps-1` | 74 (20.3%) | 13 / 61 | freezes a random walk in place: from step 1 |
+| `cast-1` → `arrive-2` | 69 (18.9%) | 41 / 28 | nothing at all until the first confirm |
+| `eps-1` → `cast-1` | **94 (25.8%)** | 54 / 40 | walks the agent ~45% further: from step 1 |
+
+The cast perturbs trajectories most and has the most discordance; the arrival rule perturbs them least and has the least. Discordance is measuring *behavioural divergence*, and only one of these three rows can be decomposed.
+
+**That row is `cast-1` → `arrive-2`, and it gives the best flip-rate estimate this project has.** The controller is identical at every step before the first confirm, so the change cannot cause a divergence there — the 28 losses are pure renderer noise. Under a null the two directions have equal expectation, so noise contributes ≈ 28 the other way as well:
+
+| | flips | SD of a net |
+|---|---|---|
+| `detour-1`, assumed ever since | 20% of 365 = 73 | 8.5 |
+| **measured here** — 2 × 28 of 365 | **15.3%** = 56 | **7.5** |
+
+So the assumed rate is **too high, not confirmed** — and `detour-1`'s 4-of-20 has a 95% interval of roughly 6% to 44%, which 15.3% sits comfortably inside. `funnel_diff`'s σ is therefore mildly conservative, which is the safe direction: every delta in this report was tested against a larger SD than the data supports, so **no earlier conclusion changes.** The exact test and the σ reading still agree on this arm: +13 / 7.5 = 1.7σ against an exact 0.148.
+
+Applying the same subtraction to the other two rows would give 7.1% and 21.9%, which is the arithmetic telling you the decomposition is invalid where a change moves the agent from step 1. It is not attempted there.
+
+## What this design can resolve at all, which is the number to plan against
+
+`SD(net) = sqrt(0.153 × N)`. At the current N = 365 that is 7.5 episodes, so **the minimum resolvable effect is 1.96 × 7.5 ≈ 15 episodes, or 4.0 points.** Everything smaller is invisible to a single sweep pair, however real.
+
+That is a hard constraint on the whole ablation programme, not a comment on this arm:
+
+- **`arrive-2`'s +13 (3.6 points) sits just under it**, which is why it reads 0.148 rather than anything cleaner. No re-analysis of these two runs will establish it; the tool has extracted everything the data contains.
+- **`cast-1`'s +14 sits under it too**, at 3.8 points. See the demotion below.
+- To resolve a 3.6-point effect at 80% power needs `0.0356 N = 2.8 sqrt(0.153 N)`, i.e. **N ≈ 950 episodes** — about 2.6 sweeps per arm, seven hours of box time. That is affordable, and it is the honest price of a result at this effect size.
+- The alternative is to cut the flip rate rather than raise N. The renderer has no seed, but its scatter falls with ray count, and `detour-2` measured `signal_to_scatter` at 6.12/7.41 with 500 direct rays — headroom to trade wall-clock for determinism. **Nobody has measured what the flip rate does as rays rise**, and one scene run twice at two ray counts prices that trade in an hour. It is the cheapest open question in this report.
+
+## The tool's own control: `yield-2` → `eps-1`
+
+An effect three times the resolution floor must come back decisive, or the tool is wrong and everything read through it is worthless. It does: **13 gained / 61 lost, 74 discordant, exact McNemar p = 0.0000**, spread over 18 of 20 scenes. The −48 regression is confirmed at full power, and this is the arm that licenses reading the other two.
+
+## The cast is demoted: consistent in direction, magnitude unresolved
+
+`eps-1` → `cast-1` reads **54 gained / 40 lost over 94 discordant pairs, exact McNemar p = 0.18** — against the scene sign test's p = 0.021, on which the `cast-1` section above called the effect CONFIRMED.
+
+**Both tests are valid and they are answering different questions.** The sign test asks whether scenes moved consistently in one direction and is strongest against a broad, small effect; McNemar asks whether the episode-level imbalance beats a coin and is strongest against a concentrated one. The cast is exactly the first shape: 13 scenes up by +1 to +5, three down by −3 to −5. That consistency is real and the sign test is right to see it.
+
+Two things break the tie towards caution rather than towards the smaller p:
+
+- **McNemar's p is anti-conservative here**, because episodes inside a scene are correlated and it assumes they are not. 0.18 is a floor on the true value, not an estimate of it.
+- **+14 is below the 15-episode resolution floor**, so a single sweep pair was never going to settle it either way.
+
+**"CONFIRMED" was too strong for what one of two valid tests supports.** The claim that survives is narrower and still useful: *the cast moves 13 of 16 scenes in the same direction (p = 0.021), and its magnitude is not resolved at this sample size (p = 0.18).* The corroboration in the step counts — forwards up ~45%, displacement to match — is untouched and remains the strongest evidence that the policy does what it was built to do.
+
+**The general rule this establishes: report both tests for every comparison, always.** A claim resting on one of them must say which, and why the other disagrees.
+
+**The sign test is not superseded by any of this.** The two tests have different nulls and different power profiles: the scene sign test asks whether most scenes moved the same way and is strongest against a broad consistent effect, McNemar asks whether the episode-level imbalance beats a coin and is strongest against a concentrated one. `cast-1`'s +14 was broad (13 of 16 scenes up, p = 0.021) and `arrive-2`'s +13 is not (10 up, 6 down). Both readings belong in the record, and where they disagree the disagreement is information about the shape of the effect rather than a tie to break.
+
+**Both earlier deltas should now be re-scored per episode** — `eps-1` → `cast-1` and `yield-2` → `eps-1` — because it costs nothing and the second in particular should show what full power looks like on an effect four times this size.
 
 **Supplementary, computed from the run digests rather than from `funnel_diff`:** `eps-1` → `arrive-2` is **+27**, 12 scenes up / 6 down / 2 flat. Net is +3.2σ; the two-sided sign test over the 18 that moved is **p = 0.24**, so the gain is real in size but concentrated (ziup5kvtCCR +6, and +4 each in 6s7QHgap2fW, XB4GS9ShBRE, q3zU7Yy5E5s) rather than broad. This pair changes *two* things — the cast and the stop rule — so it does not isolate either; the one-thing-changed comparison is `cast-1` → `arrive-2`.
 
 ## What is measured next
 
-The exploration gap, not the threshold and not the arrival rule. `earshot/loosen-the-bar` (`RISING_SIGMAS = 0`) is still queued and still confounded: it was cut against the old stop rule and needs rebasing onto `confirm-is-enough` before its sweep says anything about how permissive the rising test should be.
+**Per-episode pairing first**, because it costs no box time and re-scores every delta already measured — including this one. Then the exploration gap, which is the only stage-5 loss left with a mechanism attached: 21 episodes that the coin flip's random walk found and no deliberate policy has yet.
+
+Not the threshold and not the arrival rule. `earshot/loosen-the-bar` (`RISING_SIGMAS = 0`) is still queued and now doubly confounded: it was cut against the old stop rule, and the argument that made it look urgent was withdrawn with the correction in the `cast-1` section above.
 
 **File index.** `realizable_investigate_step` in `earshot/agent/controller.py`; `arrival_refused`, `scene_rollup`, `format_rollup` and the unrouted count in `earshot/tools/detour_report.py`; `earshot/tools/arrival_audit.sh`; `tests/mac/test_agent_controller.py`, `tests/mac/test_task_runner.py`, `tests/mac/test_detour_report.py`. Data: `runs/arrive-2/<scene>` (RACE). See ADR-0016 for the cast this builds on.
