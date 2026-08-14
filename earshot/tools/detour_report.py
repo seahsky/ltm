@@ -629,9 +629,19 @@ def trace_one(
     # counted.** `visual_confirm` is a pure function of distance — the oracle fires at
     # `oracle_radius_m` geodesic to the anomaly object's view points, and the source
     # position IS one of those — so a recorded distance under the ring means the confirm
-    # fired. The rule STOPs on `visual_confirm and not rising`; an abandoned episode never
-    # STOPped; therefore `rising` was TRUE at every in-ring step, and the climb's own
-    # memory of the approach is what refused the arrival.
+    # fired.
+    #
+    # WHICH RULE THAT IMPLICATES DEPENDS ON WHEN THE RECORD WAS WRITTEN, and the count is
+    # the same either way. Before `a0f4625` the controller STOPped on `visual_confirm and
+    # not rising`, so an abandoned in-ring episode proves `rising` was TRUE at every
+    # in-ring step and the climb's own memory of the approach refused an arrival it had
+    # already made — that is what `n_in_ring_rising` is for, and it read 163 of 163 on
+    # `cast-1`. Since `a0f4625` the rule STOPs on the confirm alone, so a refusal is
+    # STRUCTURALLY IMPOSSIBLE on a routed episode and the count reads zero by
+    # construction: `arrive-2`, `repeat-1` and both `r2500` arms all do. A nonzero count
+    # on a post-`a0f4625` run therefore means something OTHER than the old conjunct —
+    # look at the unrouted list first, since a horizontal-axis episode can sit inside a
+    # ring it was never in.
     #
     # A LOWER BOUND in two ways, both conservative: the detector minimises over ALL that
     # object's view points so its distance is at most this one, and an episode whose

@@ -10,9 +10,13 @@
 # Two counts, both of which the funnel hides:
 #
 #   REFUSED ARRIVALS — an episode that stood inside the 1.0 m ring and was scored as
-#   never arriving. `visual_confirm` is a pure function of distance, the rule STOPs on
-#   confirm-and-not-rising, and an abandoned episode never STOPped, so `rising` was true
-#   at every in-ring step. cast-1's DYehNKdT76V held seven of them.
+#   never arriving. `visual_confirm` is a pure function of distance, so a recorded
+#   distance under the ring means the confirm fired. On a run written BEFORE `a0f4625`
+#   the rule STOPped on confirm-and-not-rising, so an abandoned in-ring episode proves
+#   `rising` was true at every in-ring step: cast-1's DYehNKdT76V held seven, and the
+#   sweep held 23. SINCE `a0f4625` the rule STOPs on the confirm alone, so this count is
+#   zero by construction on a routed episode — arrive-2, repeat-1 and both r2500 arms
+#   read 0 of 365, which is the mechanism check rather than an absence of evidence.
 #
 #   UNROUTED SOURCES — an episode whose geodesic to the source was None at EVERY step,
 #   meaning `find_path` failed throughout. `runner._make_detector` seeds the anomaly
