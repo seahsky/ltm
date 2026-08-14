@@ -3912,7 +3912,7 @@ That is a hard constraint on the whole ablation programme, not a comment on this
 - **`arrive-2`'s +13 (3.6 points) sits just under it**, which is why it reads 0.148 rather than anything cleaner. No re-analysis of these two runs will establish it; the tool has extracted everything the data contains.
 - **`cast-1`'s +14 sits under it too**, at 3.8 points. See the demotion below.
 - To resolve a 3.6-point effect at 80% power needs `0.0356 N = 2.8 sqrt(0.153 N)`, i.e. **N ≈ 950 episodes** — about 2.6 sweeps per arm, seven hours of box time. That is affordable, and it is the honest price of a result at this effect size.
-- The alternative is to cut the flip rate rather than raise N. **Nobody has measured what the flip rate does as rays rise** — `detour-2` closed `rays-1` on `signal_to_scatter`, which asks whether the *cue* was recoverable, not whether the *outcome* reproduces. It is the cheapest open question in this report, and **the experiment that answers it is already built**: commit `cd303c6` on `earshot/zero-yield-and-the-detour-finding` carries `ray_variance.sh` (one scene, several ray counts, N repeats each), `flip_report.py` (aggregate rate *and* the fraction of episodes not unanimous across repeats), the `indirect_ray_count` knob and tests, green at 787 Mac tests and never merged. Its own cost note puts 2500 rays near 0.3 s/step against criterion 7's 0.5 s ceiling — about 20 minutes per repeat against 7, so the default arms are **roughly 1.4 hours total**.
+- The alternative was to cut the flip rate rather than raise N. **It does not work — ANSWERED 2026-08-13, see the `r2500` section at the end of this report.** Two full sweeps at 2500 rays read **56 discordant of 365 against 500 rays' 59** (p = 0.76, and the 95% interval excludes a halving). The floor is a property of this design, the preset stays at 500, and nothing on disk re-baselines. `detour-2` had closed `rays-1` on `signal_to_scatter`, which asks whether the *cue* was recoverable rather than whether the *outcome* reproduces; both questions are now closed and they close the same way.
 
 ## The null arm, and the exhibit that should govern how this report is read
 
@@ -3979,3 +3979,64 @@ Two things break the tie towards caution rather than towards the smaller p:
 Not the threshold and not the arrival rule. `earshot/loosen-the-bar` (`RISING_SIGMAS = 0`) is still queued and now doubly confounded: it was cut against the old stop rule, and the argument that made it look urgent was withdrawn with the correction in the `cast-1` section above.
 
 **File index.** `realizable_investigate_step` in `earshot/agent/controller.py`; `arrival_refused`, `scene_rollup`, `format_rollup` and the unrouted count in `earshot/tools/detour_report.py`; `earshot/tools/arrival_audit.sh`; `tests/mac/test_agent_controller.py`, `tests/mac/test_task_runner.py`, `tests/mac/test_detour_report.py`. Data: `runs/arrive-2/<scene>` (RACE). See ADR-0016 for the cast this builds on.
+
+---
+
+# r2500 — ray count is not the lever, the preset stays at 500, and repeats are the route (RACE, 2026-08-13)
+
+**Runs:** `bash earshot/tools/yield_sweep.sh --tag r2500-{a,b} --indirect-ray-count 2500`, commit `a173bd5`, host riftvm, 3h35m each (1.29× the 500-ray baseline, against the 1.4× projected).
+**Read with:** `python -m earshot.tools.episode_diff runs/r2500-a runs/r2500-b`.
+
+## The question, and the two numbers written down before it ran
+
+The null arm put the outcome flip rate at **16.2%** (59 discordant of 365, `arrive-2` against `repeat-1`) and the minimum resolvable effect at **15 episodes / 4.1 points**. Both `arrive-2`'s +13 and `cast-1`'s +14 sit under that floor. Two ways out: **triple every arm**, or **buy the variance down** by undoing ticket 06's `indirectRayCount` 5000→500 cut, whose variance was the price and had never been measured.
+
+`rays-2` tried the second on one scene at 20 episodes and could not separate 15% from 10%. This is the powered version, and the branches were stated in the PR before it started:
+
+| pre-registered outcome | discordant of 365 | what it would mean |
+|---|---|---|
+| **halving** | ~29 | the preset moves; floor drops to ~10.7 episodes; every run on disk re-baselines |
+| **no effect** | ~58 | ray count is not the lever; repeats are mandatory |
+
+## It landed on 58
+
+**56 discordant of 365 at 2500 rays**, against 59 of 365 at 500.
+
+| arm | discordant | flip rate | reached |
+|---|---|---|---|
+| 500 rays (`arrive-2` vs `repeat-1`) | 59 | **16.2%** | 147, 158 |
+| **2500 rays (`r2500-a` vs `r2500-b`)** | **56** | **15.3%** | 154, 156 |
+
+The difference is 0.8 points, SE 2.7, **z = 0.30, p = 0.76**. The 95% interval on the reduction runs from −4.5 to +6.1 points, so **the halving branch is excluded by the data** rather than merely unsupported. Five times the rays buys nothing measurable in outcome reproducibility.
+
+The two 2500-ray runs also agree with each other in the ordinary way — net −2 over 56 discordant, exact McNemar **p = 0.89**, discordance spread over 19 of 20 scenes.
+
+## A free finding worth more than the one we were hunting
+
+**The headline does not move with ray count either.** Four runs of the same controller read **147, 158** at 500 rays and **154, 156** at 2500 — an 11-episode spread with no ordering by ray count, against a single-run SD of 5.4. Ticket 06 cut `indirectRayCount` 5000→500 for a 63× speedup and justified it on the energy gradient staying climbable (Spearman ρ −0.98/−0.99). **This is the first check that the cheap preset does not cost anomaly-response SR, and it does not.** The preset was a better decision than the evidence available at the time could show.
+
+## Criterion 7 went RED, on a single step, and the measurement stands
+
+`r2500-b` exited 1: `SMOKE RED ... q3zU7Yy5E5s`. The gate reads
+
+```
+7. FAIL  audio wall-clock inside its ceiling  19/20
+     ep 1: max 0.5335 s, mean 0.08645 s over 250 steps, ceiling 0.5 s
+```
+
+**One step, on one episode, whose own mean was 5.8× under the ceiling.** Typical max/mean in these runs is 2.5–2.7×; this episode's was 6.2×, so it is a hiccup rather than a slow episode. Criteria 1–4 — audio live and every-step, audio context sound, the IR is real, provenance did not raise — are 20/20 across the sweep, so nothing about the audio is in question and the flip-rate measurement is unaffected. RED is still RED and the sweep exited nonzero, which is the gate working.
+
+**It also prices the ceiling on the lever we were testing.** At 2500 rays the mean is ~0.10 s/step against criterion 7's 0.5 s, and the tail already touches it. At 5000 the mean would be ~0.20 and breaches would be routine rather than a one-off. So even in the world where rays had reduced the flips, there was about **one doubling of headroom left** before criterion 7 closed the door on the approach entirely.
+
+## What is decided
+
+1. **The preset stays at 500.** Nothing on disk re-baselines, and every existing comparison stays valid.
+2. **The ~15-episode / 4.1-point floor is a property of this design**, not a budget choice. It cannot be bought down with rays, and the only remaining route is `n`.
+3. **Repeats are mandatory.** A comparison resting on a single run of either arm is not reportable at this effect size — the exhibit is `yield-2`→`arrive-2` at p = 0.024 against `yield-2`→`repeat-1` at p = 0.32, same question, control code identical to the byte. Three runs per arm gives SD ÷ √3 and a floor near 8.7 episodes.
+4. **`arrive-2`'s +13 and `cast-1`'s +14 stay unresolved** until an arm is run in triplicate. Their point estimates stand; their p-values do not.
+
+## What this closes
+
+`rays-1` was closed on `signal_to_scatter` in `detour-2`, correctly, for the question *was the cue recoverable at 500 rays*. The reproducibility question it did not cover is now closed too, by measurement rather than by argument, and in the same direction: **the ray count is not a lever on anything this project has looked at.** `earshot/tools/ray_variance.sh`, `flip_report.py` and `AudioConfig.indirect_ray_count` stay in the tree — they answered the question they were built for, and the knob is how anyone re-opens it.
+
+**File index.** `AudioConfig.indirect_ray_count` in `earshot/audio/config.py`; `ACOUSTICS_PRESET`, `audio_config_mapping` in `earshot/audio/spec.py`; `--indirect-ray-count` in `earshot/__main__.py` and `earshot/tools/yield_sweep.sh`; `earshot/tools/episode_diff.py`, `earshot/tools/flip_report.py`, `earshot/tools/ray_variance.sh`. Data: `runs/r2500-{a,b}`, `runs/rays-2-r{500,2500}-{1,2,3}` (RACE).
