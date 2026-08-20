@@ -44,6 +44,8 @@ __all__ = [
     "prompt_of",
     "by_affinity",
     "anchor_object",
+    "ROOM_OF_ANCHOR",
+    "room_of",
 ]
 
 # provenance: source -- HM3D ObjectNav's goal set, the six the ObjectNav episode JSON
@@ -64,6 +66,40 @@ HM3D_GOAL_CATEGORIES: Tuple[str, ...] = (
 # How strongly the sound implies ONE of the six rather than any other. Not a confidence in
 # the recording and not a CLAP score: it is about what the signal predicts.
 AFFINITY_GRADES: Tuple[str, ...] = ("strong", "moderate", "weak")
+
+# The room each anchor object sits in. ANALYST-ONLY, same fence as `anchor_object`.
+#
+# It exists because the clapsmoke-3 gate refuted the object-level taxonomy this table was
+# built on. `plant` scored 0.383 with 187 of 480 rows landing on `toilet`: water sounds mean
+# BATHROOM, and "a houseplant is a thing you pour water near" was the author reasoning from
+# what could plausibly happen at an object rather than from what the sound predicts. Rooms
+# are the level the sounds actually encode, and an object is still the navigable target, so
+# grouping costs no new capability -- notably NOT a room labeller, which this tree does not
+# have (`NullRoomLabeler` is what runs).
+#
+# `chair` joins the living room rather than getting a study of its own: HM3D homes do not
+# reliably have offices, and a lone-class room cannot be split heard-from-not-heard.
+# `plant` keeps its own room deliberately, so the re-score can say whether grouping rescues
+# it or whether the class assignments under it were simply wrong.
+ROOM_OF_ANCHOR: Dict[str, str] = {
+    "toilet": "bathroom",
+    "bed": "bedroom",
+    "sofa": "living_room",
+    "tv_monitor": "living_room",
+    "chair": "living_room",
+    "plant": "greenery",
+}
+
+
+def room_of(name: str) -> str:
+    """ANALYST AND DATASET BUILDER ONLY -- the room a source of this class is placed in.
+
+    The composition of `anchor_object` with `ROOM_OF_ANCHOR`, and fenced for the same reason:
+    it is placement ground truth, and an agent that reads it measures this table instead of
+    its own semantic store.
+    """
+    return ROOM_OF_ANCHOR[anchor_object(name)]
+
 
 
 @dataclass(frozen=True)

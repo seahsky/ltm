@@ -30,7 +30,7 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence
 
 from earshot.audio.separation import GateRow, anchor_top1_of, prune, summarise
-from earshot.audio.vocabulary import CANDIDATE_VOCABULARY
+from earshot.audio.vocabulary import CANDIDATE_VOCABULARY, ROOM_OF_ANCHOR
 
 __all__ = ["load_rows", "main"]
 
@@ -156,7 +156,9 @@ def _format(report: Any, rows: Sequence[GateRow], anchors: Dict[str, str], min_r
         by_anchor.setdefault(anchors[name], []).append(name)
     lines.append("")
     lines.append("-- the surviving vocabulary by anchor: CAN IT BE SPLIT heard/not-heard? --")
-    for anchor in sorted({entry.anchor_object for entry in CANDIDATE_VOCABULARY}):
+    # From the MAP, not from the object table: in room mode the anchors are rooms, and
+    # reading the object table here would print six objects with no classes under them.
+    for anchor in sorted(set(anchors.values())):
         names = sorted(by_anchor.get(anchor, []))
         if not names:
             verdict = "NO CLASS SURVIVES — this anchor cannot appear in either column"
@@ -183,6 +185,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Re-score a gate run at the anchor level and apply both ADR-0018 cuts."
     )
     parser.add_argument("run_dir")
+    # `object` is the taxonomy ADR-0018 shipped. `room` is the one clapsmoke-3's confusion
+    # structure argues for: `plant` scored 0.383 with 187 of 480 rows going to `toilet`,
+    # because water sounds mean BATHROOM. Re-scoring costs nothing -- only the anchor map
+    # changes and no audio is re-rendered -- so the taxonomy is decided on data rather than
+    # on the author's second guess.
+    parser.add_argument("--anchors", choices=("object", "room", "both"), default="both")
     parser.add_argument("--min-recall", type=float, default=0.50)
     parser.add_argument("--n-bands", type=int, default=4)
     args = parser.parse_args(None if argv is None else list(argv))
@@ -194,15 +202,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     rows = load_rows(rows_path)
-    anchors = {entry.name: entry.anchor_object for entry in CANDIDATE_VOCABULARY}
     affinities = {entry.name: entry.affinity for entry in CANDIDATE_VOCABULARY}
-    report = summarise(rows, affinities=affinities, anchors=anchors, n_bands=args.n_bands)
-    print(_format(report, rows, anchors, args.min_recall))
+    by_object = {entry.name: entry.anchor_object for entry in CANDIDATE_VOCABULARY}
+    by_room = {
+        entry.name: ROOM_OF_ANCHOR[entry.anchor_object] for entry in CANDIDATE_VOCABULARY
+    }
 
-    out = run_dir / "anchor_report.json"
-    with out.open("w", encoding="utf-8") as sink:
-        json.dump(report.as_dict(), sink, indent=2, sort_keys=True)
-    print("  written: {}".format(out))
+    wanted = (
+        [("object", by_object), ("room", by_room)]
+        if args.anchors == "both"
+        else [(args.anchors, by_object if args.anchors == "object" else by_room)]
+    )
+
+    written = []
+    for label, anchors in wanted:
+        report = summarise(rows, affinities=affinities, anchors=anchors, n_bands=args.n_bands)
+        print("")
+        print("######################################################################")
+        print("### TAXONOMY: {} ".format(label.upper()))
+        print("######################################################################")
+        print(_format(report, rows, anchors, args.min_recall))
+        out = run_dir / "anchor_report_{}.json".format(label)
+        with out.open("w", encoding="utf-8") as sink:
+            json.dump(report.as_dict(), sink, indent=2, sort_keys=True)
+        written.append(str(out))
+
+    print("  written: {}".format(", ".join(written)))
+    print("")
+    print("  The two taxonomies score the SAME rows. Nothing was re-rendered, so any")
+    print("  difference between them is the grouping and only the grouping.")
     return 0
 
 
