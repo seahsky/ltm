@@ -29,13 +29,131 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-__all__ = ["ClapEncoder", "load_clap_encoder", "CLAP_MODEL_ID"]
+__all__ = [
+    "ClapEncoder",
+    "load_clap_encoder",
+    "CLAP_MODEL_ID",
+    "CLAP_LOCAL_DIR",
+    "resolve_clap_source",
+    "stage_clap_safetensors",
+]
 
 # provenance: box — ticket 13's known-good checkpoint, the one `env_check`'s
 # `probe_clap_instantiable` constructs and the one the Gate-0b calibration that produced
 # `ANOMALY_GATE_DELTA` / `ANOMALY_GATE_TAU` was measured against. Changing it invalidates
 # those two constants, which is why it is named in one place.
 CLAP_MODEL_ID = "laion/clap-htsat-unfused"
+
+# provenance: box -- where `stage_clap_safetensors` writes the converted checkpoint. Named
+# here and duplicated ONCE in `env_check.py`, which ADR-0013's layer graph forbids from
+# importing anything intra-package; the duplication is deliberate and both sites say so.
+CLAP_LOCAL_DIR = "models/clap-htsat-unfused"
+
+
+def resolve_clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOCAL_DIR) -> str:
+    """The staged local copy when it is complete, otherwise the Hub id.
+
+    Prefers local because `laion/clap-htsat-unfused` ships ONLY `pytorch_model.bin`, and
+    transformers >= 4.52 refuses to `torch.load` a `.bin` unless torch >= 2.6
+    (CVE-2025-32434). The box pins torch 2.2.2+cu118 because cu118 is the last CUDA line
+    where the V100's sm_70 is a first-class target, so upgrading torch to satisfy
+    transformers would cost the GPU. Converting the checkpoint once costs neither.
+
+    Completeness is checked, not assumed: a directory holding a half-written conversion
+    would otherwise be preferred over the Hub and fail later with a confusing error.
+    """
+    import os
+
+    needed = ("model.safetensors", "config.json", "preprocessor_config.json", "tokenizer.json")
+    if all(os.path.isfile(os.path.join(local_dir, name)) for name in needed):
+        return local_dir
+    return model_id
+
+
+def stage_clap_safetensors(model_id: str = CLAP_MODEL_ID, out_dir: str = CLAP_LOCAL_DIR) -> str:
+    """Convert the Hub checkpoint to safetensors under `out_dir`. Idempotent. Returns the dir.
+
+    A staging step, run once on the box like `python -m earshot.audio.clips`, never on the
+    live path. It calls `torch.load` DIRECTLY rather than through transformers: the CVE
+    guard is transformers' policy about untrusted checkpoints, and this checkpoint is the
+    one `CLAP_MODEL_ID` names and the bootstrap already fetched.
+
+    Every tensor is cloned before saving. `safetensors.save_file` refuses tensors that share
+    storage, which tied embeddings produce, and a clone is the documented fix rather than a
+    superstition.
+    """
+    import json
+    import os
+    import shutil
+
+    import torch
+    from huggingface_hub import snapshot_download
+    from safetensors.torch import save_file
+
+    if resolve_clap_source(model_id, out_dir) == out_dir:
+        print("  CLAP already staged at {} - nothing to do".format(out_dir))
+        return out_dir
+
+    source = snapshot_download(model_id)
+    checkpoint = os.path.join(source, "pytorch_model.bin")
+    if not os.path.isfile(checkpoint):
+        raise FileNotFoundError(
+            "{} has no pytorch_model.bin at {}. If the Hub repo gained a model.safetensors "
+            "this conversion is unnecessary and `resolve_clap_source` should point at the "
+            "Hub id again.".format(model_id, source)
+        )
+
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    tensors = {
+        key: value.contiguous().clone()
+        for key, value in state.items()
+        if isinstance(value, torch.Tensor)
+    }
+    dropped = sorted(set(state) - set(tensors))
+    if dropped:
+        # Printed, never swallowed: a dropped key is a weight the model would initialise
+        # randomly, which is the silent-fabrication class this repo keeps finding.
+        print("  WARNING: {} non-tensor key(s) not carried: {}".format(len(dropped), dropped))
+
+    os.makedirs(out_dir, exist_ok=True)
+    save_file(tensors, os.path.join(out_dir, "model.safetensors"), metadata={"format": "pt"})
+    for name in sorted(os.listdir(source)):
+        if name.endswith((".json", ".txt")):
+            shutil.copyfile(os.path.join(source, name), os.path.join(out_dir, name))
+
+    with open(os.path.join(out_dir, "PROVENANCE.json"), "w", encoding="utf-8") as sink:
+        json.dump(
+            {
+                "model_id": model_id,
+                "converted_from": checkpoint,
+                "n_tensors": len(tensors),
+                "dropped_non_tensor_keys": dropped,
+                "why": (
+                    "transformers >= 4.52 refuses torch.load on a .bin below torch 2.6 "
+                    "(CVE-2025-32434); the box pins torch 2.2.2+cu118 for the V100 sm_70"
+                ),
+            },
+            sink,
+            indent=2,
+            sort_keys=True,
+        )
+    print("  CLAP staged: {} tensor(s) -> {}/model.safetensors".format(len(tensors), out_dir))
+    return out_dir
+
+
+def _main(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Stage the CLAP checkpoint locally as safetensors (run once on the box)."
+    )
+    parser.add_argument("--model-id", default=CLAP_MODEL_ID)
+    parser.add_argument("--out-dir", default=CLAP_LOCAL_DIR)
+    args = parser.parse_args(None if argv is None else list(argv))
+    stage_clap_safetensors(args.model_id, args.out_dir)
+    print("  resolve_clap_source now returns: {}".format(resolve_clap_source(args.model_id, args.out_dir)))
+    return 0
+
 
 
 class ClapEncoder:
@@ -62,8 +180,11 @@ class ClapEncoder:
         # and 153.5 M params on the CPU would land inside the per-step budget criterion 7
         # audits. Ticket 15 measured CLAP at 0.713 GiB against 26.45 GiB of margin.
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self._processor = ClapProcessor.from_pretrained(self.model_id)
-        self._model = ClapModel.from_pretrained(self.model_id).to(self.device)
+        # The staged safetensors copy when present, else the Hub id. See
+        # `resolve_clap_source` for why the local copy has to exist on this box.
+        self.source = resolve_clap_source(self.model_id)
+        self._processor = ClapProcessor.from_pretrained(self.source)
+        self._model = ClapModel.from_pretrained(self.source).to(self.device)
         self._model.eval()
 
     def encode_audio(self, waveform: Any, sample_rate: int) -> Any:
@@ -121,3 +242,7 @@ def load_clap_encoder(model_id: str = CLAP_MODEL_ID) -> ClapEncoder:
             "installed (ticket 13). `python -m earshot.env_check --clap --strict` is the "
             "same probe.".format(model_id, exc)
         ) from exc
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

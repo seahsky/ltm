@@ -133,6 +133,17 @@ else
   echo "  --no-stage: reusing whatever is already under data/sound_corpus and data/absent_corpus"
 fi
 
+# The CLAP checkpoint itself, converted to safetensors ONCE. `laion/clap-htsat-unfused`
+# ships only pytorch_model.bin, and transformers >= 4.52 refuses torch.load on a .bin below
+# torch 2.6 (CVE-2025-32434) — while this box pins torch 2.2.2+cu118 because cu118 is the
+# last CUDA line where the V100's sm_70 is first-class. Upgrading torch would cost the GPU;
+# converting the checkpoint costs nothing and changes no pin. Idempotent, so it is safe to
+# leave in the path — the second run prints "already staged" and returns.
+echo
+echo "  CLAP checkpoint:"
+python -m earshot.task.models \
+  || { echo "FATAL: could not stage the CLAP checkpoint — the gate cannot classify"; exit 2; }
+
 # --- 3. the gate ----------------------------------------------------------
 banner "[3/4] rendering and classifying"
 python -m earshot.task.clap_gate \
