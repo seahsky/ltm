@@ -210,7 +210,7 @@ class TestPrune(unittest.TestCase):
             rows.append(row("clock_alarm", wrong, recording=recording))
         rows += [absent_row("chainsaw", normal=0.3)]
         report = summarise(rows)
-        kept, cut = prune(report, min_recall=0.5, min_n=4)
+        kept, cut = prune(report, min_recall=0.5, recall_level="class", min_n=4)
         self.assertIn("toilet_flush", kept)
         self.assertIn("clock_alarm", cut)
 
@@ -220,7 +220,7 @@ class TestPrune(unittest.TestCase):
         rows += [confident("clock_alarm", recording=index) for index in range(8)]
         rows += [absent_row("chainsaw", normal=0.3)]
         report = summarise(rows)
-        kept, cut = prune(report, min_recall=0.5, min_n=8)
+        kept, cut = prune(report, min_recall=0.5, recall_level="class", min_n=8)
         self.assertIn("toilet_flush", cut)
         self.assertIn("clock_alarm", kept)
 

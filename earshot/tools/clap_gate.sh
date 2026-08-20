@@ -29,10 +29,10 @@
 # that, and would be the same shape of number this repo has twice mistaken for a result.
 #
 # DO NOT HAND-PRUNE THE VOCABULARY. The candidate set is deliberately generous and carries
-# weak anchors on purpose. `separation.prune` cuts by measured recall, so the surviving
+# weak anchors on purpose. `separation.prune` cuts by measured ANCHOR recall, so the surviving
 # vocabulary is an artefact of this run rather than an author's guess. A class dropped for
-# want of DATA and a class dropped for want of SEPARATION are different findings and the
-# report prints both counts.
+# want of DATA, for want of SEPARATION and for want of AFFINITY are three different findings
+# and the report prints all three counts.
 #
 # ONE DIRECTORY IS ONE RUN, enforced before any work starts, for yield-1's reason: a reused
 # tag mixed two invocations into one pool with nothing on disk saying so.
@@ -168,79 +168,14 @@ if [ "$GATE_STATUS" -ne 0 ]; then
 fi
 
 # --- 4. the pruned vocabulary --------------------------------------------
+#
+# `earshot.tools.anchor_report` and not an inline prune. This stage used to reimplement the
+# cut in a heredoc, and the two implementations diverged exactly as you would expect: the
+# heredoc cut on CLASS recall and ignored the affinity rule, so `clapsmoke-3` kept three weak
+# classes and dropped `pouring_water` at 0.354 despite an anchor recall of 1.000. One
+# implementation, called both by the live run and by a re-score of it.
 banner "[4/4] pruning"
-python - "$OUT_DIR/separation.json" "$MIN_RECALL" <<'PY'
-import json
-import sys
-
-path, min_recall = sys.argv[1], float(sys.argv[2])
-with open(path, encoding="utf-8") as handle:
-    payload = json.load(handle)
-
-rows = payload["per_class"]
-kept, cut_recall, cut_n = [], [], []
-for item in rows:
-    if item["n"] < 8:
-        cut_n.append(item)
-    elif item["recall"] < min_recall:
-        cut_recall.append(item)
-    else:
-        kept.append(item)
-
-print("")
-print("PRUNED VOCABULARY at min_recall={:.2f}".format(min_recall))
-print("  kept {} of {} candidate class(es)".format(len(kept), len(rows)))
-print("")
-for item in sorted(kept, key=lambda entry: -entry["recall"]):
-    print("  KEEP  {:18s} {:8s} n={:4d} recall={:.3f}".format(
-        item["name"], item["affinity"], item["n"], item["recall"]))
-for item in sorted(cut_recall, key=lambda entry: -entry["recall"]):
-    print("  cut   {:18s} {:8s} n={:4d} recall={:.3f}  (separation)".format(
-        item["name"], item["affinity"], item["n"], item["recall"]))
-for item in cut_n:
-    print("  cut   {:18s} {:8s} n={:4d} recall={:.3f}  (TOO FEW ROWS — not a separation "
-          "finding)".format(item["name"], item["affinity"], item["n"], item["recall"]))
-
-# The strong-versus-weak read. The affinity grades are declared judgements (ADR-0018), so
-# this says whether the gate agreed with them — which is a check on the vocabulary's design
-# rather than on CLAP.
-print("")
-print("BY DECLARED AFFINITY (does the gate agree with the table?)")
-for grade in ("strong", "moderate", "weak", "unknown"):
-    at_grade = [item for item in rows if item["affinity"] == grade]
-    if not at_grade:
-        continue
-    mean = sum(item["recall"] for item in at_grade) / len(at_grade)
-    survived = len([item for item in at_grade if item in kept])
-    print("  {:8s} n_classes={:2d}  mean recall={:.3f}  survived={}/{}".format(
-        grade, len(at_grade), mean, survived, len(at_grade)))
-
-reject = payload["rejection"]
-print("")
-print("FORCED-FAILURE ARM: EER {:.3f}  (0.500 = the two arms are on top of each other)".format(
-    reject["eer"]))
-
-failed = payload.get("scenes_failed") or []
-if failed:
-    print("")
-    print("SCENES THAT FAILED TO LOAD ({}): {}".format(len(failed), " ".join(failed)))
-    print("  Continuing is not passing — this run is INCOMPLETE.")
-
-with open(path.replace("separation.json", "pruned_vocabulary.json"), "w", encoding="utf-8") as sink:
-    json.dump(
-        {
-            "min_recall": min_recall,
-            "kept": [item["name"] for item in kept],
-            "cut_for_separation": [item["name"] for item in cut_recall],
-            "cut_for_too_few_rows": [item["name"] for item in cut_n],
-        },
-        sink,
-        indent=2,
-        sort_keys=True,
-    )
-
-sys.exit(1 if failed else 0)
-PY
+python -m earshot.tools.anchor_report "$OUT_DIR" --min-recall "$MIN_RECALL"
 PRUNE_STATUS=$?
 
 banner "done"

@@ -130,7 +130,11 @@ class TestAffinityCut(unittest.TestCase):
     def test_a_perfect_weak_class_is_still_cut(self):
         """`coughing` scored 1.000 in clapsmoke-3 and is disqualified anyway."""
         kept, cut = prune(
-            self._report(), min_recall=0.5, min_n=8, allowed_affinities=("strong", "moderate")
+            self._report(),
+            min_recall=0.5,
+            recall_level="anchor",
+            min_n=8,
+            allowed_affinities=("strong", "moderate"),
         )
         self.assertIn("breathing", cut)
         self.assertIn("snoring", kept)
@@ -138,8 +142,61 @@ class TestAffinityCut(unittest.TestCase):
 
     def test_omitting_the_affinity_cut_keeps_the_weak_class(self):
         """The old behaviour, preserved so a caller must ASK for the cut and say so."""
-        kept, _cut = prune(self._report(), min_recall=0.5, min_n=8)
+        kept, _cut = prune(
+            self._report(), min_recall=0.5, recall_level="anchor", min_n=8
+        )
         self.assertIn("breathing", kept)
+
+
+class TestTheCutIsMadeAtTheAnchor(unittest.TestCase):
+    """ADR-0018 Q9: the separation cut reads ANCHOR recall, because that is what the task pays.
+
+    `clapgate-1` measured `pouring_water` at 0.354 class recall and 1.000 anchor recall: every
+    one of its misses landed on another bathroom class, so the agent walked to the right room
+    every time. Cutting it on class recall priced a cost the task never pays and took a quarter
+    of the bathroom vocabulary with it.
+    """
+
+    def _report(self):
+        """`snoring` is the pouring_water case: 0.4 class recall, 1.0 anchor recall."""
+        rows = []
+        for index in range(10):
+            rows.append(row("snoring", "snoring" if index < 4 else "breathing", recording=index))
+            rows.append(row("breathing", "breathing", recording=index))
+            rows.append(row("toilet_flush", "toilet_flush", recording=index))
+        rows.append(absent("chainsaw"))
+        return summarise(rows, affinities=AFFINITIES, anchors=ANCHORS)
+
+    def test_a_sibling_confused_class_survives_the_anchor_bar(self):
+        kept, cut = prune(self._report(), min_recall=0.5, recall_level="anchor", min_n=8)
+        self.assertIn("snoring", kept)
+        self.assertNotIn("snoring", cut)
+
+    def test_the_same_class_is_cut_by_the_class_bar(self):
+        """Both bars stay scoreable so the looser one can be checked against the stricter."""
+        kept, cut = prune(self._report(), min_recall=0.5, recall_level="class", min_n=8)
+        self.assertIn("snoring", cut)
+        self.assertNotIn("snoring", kept)
+
+    def test_the_anchor_bar_on_a_report_with_no_anchor_map_raises(self):
+        """NOT_RUN is red: a recall the report never measured must not read as a pass."""
+        report = summarise(
+            [row("snoring", "snoring", recording=index) for index in range(10)]
+            + [absent("chainsaw")],
+            affinities=AFFINITIES,
+        )
+        self.assertIsNone(report.per_class[0].anchor_recall)
+        with self.assertRaises(ValueError):
+            prune(report, min_recall=0.5, recall_level="anchor")
+
+    def test_an_unknown_recall_level_raises_rather_than_defaulting(self):
+        with self.assertRaises(ValueError):
+            prune(self._report(), min_recall=0.5, recall_level="ANCHOR")
+
+    def test_anchor_recall_matches_the_per_anchor_arithmetic(self):
+        by_class = {item.name: item for item in self._report().per_class}
+        self.assertAlmostEqual(by_class["snoring"].recall, 0.4, places=6)
+        self.assertAlmostEqual(by_class["snoring"].anchor_recall, 1.0, places=6)
 
 
 class TestTheVocabularyCanStillBeSplit(unittest.TestCase):

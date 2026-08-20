@@ -97,7 +97,17 @@ class GateRow:
 
 @dataclass(frozen=True)
 class ClassResult:
-    """One candidate class's closed-set behaviour over every row that rendered it."""
+    """One candidate class's closed-set behaviour over every row that rendered it.
+
+    `recall` is class-level: did CLAP name the class. `anchor_recall` is the same rows scored
+    at the level the task pays at: did the winning class point at the right ANCHOR. The two
+    diverge wherever a class's misses land on its own siblings, and the divergence is large.
+    `clapgate-1` measured `pouring_water` at 0.354 class and 1.000 anchor, every miss inside
+    its own bathroom.
+
+    `anchor_recall` is None when `summarise` was given no anchor map. NOT 0.0: an unsupplied
+    map and a class that never once found its anchor are different facts.
+    """
 
     name: str
     affinity: str
@@ -105,6 +115,7 @@ class ClassResult:
     recall: float
     mean_true_margin: float
     top_confusion: Optional[Tuple[str, int]]
+    anchor_recall: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +199,7 @@ class SeparationReport:
                     "recall": item.recall,
                     "mean_true_margin": item.mean_true_margin,
                     "top_confusion": list(item.top_confusion) if item.top_confusion else None,
+                    "anchor_recall": item.anchor_recall,
                 }
                 for item in self.per_class
             ],
@@ -386,6 +398,15 @@ def summarise(
 
     grades = dict(affinities or {})
     class_names = sorted({row.true_class for row in known})
+    # Folded once, up front, so the per-class loop reads it rather than every caller
+    # recomputing an anchor recall of its own and the two drifting apart. `anchor_report`
+    # did exactly that before this field existed.
+    anchor_hits: Dict[str, int] = {}
+    if anchors is not None:
+        for row in known:
+            true_anchor, predicted_anchor = anchor_top1_of(row, anchors)
+            if true_anchor == predicted_anchor:
+                anchor_hits[row.true_class] = anchor_hits.get(row.true_class, 0) + 1
     confusion: Dict[Tuple[str, str], int] = {}
     for row in known:
         key = (row.true_class, top1_of(row))
@@ -412,6 +433,9 @@ def summarise(
                 recall=hits / len(subset),
                 mean_true_margin=sum(margins) / len(margins),
                 top_confusion=top_confusion,
+                anchor_recall=(
+                    None if anchors is None else anchor_hits.get(name, 0) / len(subset)
+                ),
             )
         )
 
@@ -500,10 +524,11 @@ def prune(
     report: SeparationReport,
     *,
     min_recall: float,
+    recall_level: str,
     min_n: int = 8,
     allowed_affinities: Optional[Sequence[str]] = None,
 ) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
-    """`(kept, cut)` class names. TWO cuts, and they are independent.
+    """`(kept, cut)` class names. THREE cuts, and they are independent.
 
     A class with fewer than `min_n` rows is CUT rather than kept on a small-sample recall, and
     the caller is expected to print the count: a class dropped for want of data and a class
@@ -513,18 +538,47 @@ def prune(
     `allowed_affinities` applies ADR-0018's OTHER requirement, which the first gate run
     ignored: a weak-affinity class is disqualified whatever its recall, because the semantic
     store cannot learn an association that is not there. `coughing` scored a perfect 1.000 in
-    clapsmoke-3 and is still disqualified -- people cough on every one of the six objects.
-    Leave it `None` to skip the affinity cut, and say so when you report the result.
+    clapsmoke-3 and is still disqualified -- people cough in every room. Leave it `None` to
+    skip the affinity cut, and say so when you report the result.
 
-    There is no default `min_recall` on purpose. The bar is a decision, it belongs in the run
-    that states it, and a default here would quietly become the bar everywhere.
+    `recall_level` says WHICH recall the separation cut reads, and it has no default because
+    the two bars disagree and choosing between them is a decision:
+
+    - `"anchor"` is what ADR-0018 takes, on `clapgate-1`. The agent navigates to a ROOM, so a
+      class confused for a sibling of the same room costs it nothing. Cutting on class recall
+      discarded `pouring_water` at 0.354 despite an anchor recall of 1.000, which prices a
+      cost the task never pays and took a quarter of the bathroom vocabulary with it.
+    - `"class"` is the stricter bar, kept scoreable so the looser one can be checked against
+      it. Take it if the claim being defended includes the agent NAMING the sound.
+
+    Asking for `"anchor"` on a report summarised without an anchor map raises. A recall the
+    report could not measure must not read as a pass: CLAUDE.md makes NOT_RUN red.
+
+    There is no default `min_recall` either. The bar is a decision, it belongs in the run that
+    states it, and a default here would quietly become the bar everywhere.
     """
+    if recall_level not in ("class", "anchor"):
+        raise ValueError(
+            "recall_level must be 'class' or 'anchor', got {!r}. There is no default: the two "
+            "bars disagree by design, so a run has to say which one it cut on.".format(
+                recall_level
+            )
+        )
     allowed = None if allowed_affinities is None else set(allowed_affinities)
     kept: List[str] = []
     cut: List[str] = []
     for item in report.per_class:
+        if recall_level == "class":
+            measured = item.recall
+        elif item.anchor_recall is None:
+            raise ValueError(
+                "class {!r} carries no anchor recall, so this report was summarised without "
+                "an anchor map and cannot be pruned at the anchor level".format(item.name)
+            )
+        else:
+            measured = item.anchor_recall
         too_few = item.n < int(min_n)
-        too_confused = item.recall < float(min_recall)
+        too_confused = measured < float(min_recall)
         wrong_affinity = allowed is not None and item.affinity not in allowed
         if too_few or too_confused or wrong_affinity:
             cut.append(item.name)

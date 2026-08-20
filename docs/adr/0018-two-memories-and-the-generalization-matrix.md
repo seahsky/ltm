@@ -140,3 +140,35 @@ Merging also helped where it should: `chair` 0.683 and `sofa` 0.792 became 0.830
 **`clapsmoke-3`'s numbers do not carry forward.** The prompt bank drops from 20 classes to 17, so chance moves 0.050 to 0.059 and the task is easier by construction. The gate must be re-run before any number here is quoted.
 
 **Read per-anchor accuracy with a caveat**: it is inflated for an anchor whose classes confuse each other and deflated for one whose classes scatter. `tv_monitor`'s 0.963 was two mutually-confusable classes landing on their only shared anchor. It is not a clean per-anchor quality score.
+
+---
+
+## Amendment, 2026-08-21: the separation cut is made at the anchor, not at the class
+
+**Status:** accepted, on `clapgate-1` (a partial run: 48 rows per class over roughly half the scenes, see the caveat below). Nothing about the two stores, the class-level heard axis or the inferred goal class moves. Only the prune criterion.
+
+The amendment above made the anchor the level the semantic store learns at, and said plainly that anchor accuracy "is the number the task rests on". The prune did not follow. It kept cutting on class recall, so the two disagreed, and `clapgate-1` made the disagreement expensive.
+
+### What forced it
+
+`pouring_water` measured **0.354 class recall and 1.000 anchor recall**. Every one of its misses landed on another bathroom class, so the agent walked to the right room on every row and the class bar discarded it anyway. That is a quarter of the bathroom vocabulary, cut for a cost the task never pays.
+
+It is not an isolated case. Under the anchor bar `laughing` gains +0.250, `clock_tick` +0.250, `snoring` +0.250 and `brushing_teeth` +0.167.
+
+### The rule
+
+The separation cut reads **anchor recall**. `separation.prune` now takes a required `recall_level` with no default, because the two bars disagree by design and a run has to say which one it read. Asking for the anchor bar on a report summarised without an anchor map raises rather than passing: NOT_RUN is red.
+
+Both bars stay scoreable and both are printed, so the looser one can always be checked against the stricter. Take the class bar if the claim being defended includes the agent NAMING the sound; this design's claim is that it goes to the right room.
+
+**The affinity cut is unchanged and still independent.** `coughing` scored 1.000 at both levels and is still disqualified: people cough in every room, so there is no association for the semantic store to learn. Anchor recall is a looser separation bar, not a looser gate.
+
+### What this does not license
+
+Anchor recall is **inflated for a room whose classes confuse each other**, which the amendment above already records. `pouring_water` is exactly that case. The defence is that the inflation describes a real property of the task rather than an artefact: the agent's action space is rooms, so a confusion the action space cannot express is not an error the agent makes. Any claim about the agent identifying the sound must quote class recall, and both numbers are in `anchor_report_room.json` for that reason.
+
+### Consequences
+
+**Stage 4 of `tools/clap_gate.sh` no longer implements its own prune.** It calls `earshot.tools.anchor_report`, so the live run and a re-score of it apply the same cut by construction. The duplicate had already diverged: the heredoc cut on class recall and skipped the affinity rule entirely, which is how `clapsmoke-3` kept three weak classes.
+
+**`clapgate-1` is a partial run and none of its numbers are the gate's result.** It was killed four minutes in when an SSH session dropped, with the class loop complete and roughly half the scenes covered. It is quoted here for the confusion STRUCTURE it exposed, which is a property of the vocabulary rather than of the scene sample. The bar of record needs the full run.

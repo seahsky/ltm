@@ -106,9 +106,11 @@ A class that CLAP separates perfectly is still disqualified if its affinity is f
 _Avoid_: sound-object affinity (superseded); audibility or CLAP separability as the membership test (both are about the signal, affinity is about what the signal predicts); re-grading a class because the gate scored it badly.
 
 **Pruned vocabulary**:
-The sounding class vocabulary AFTER the separation gate has cut the classes CLAP cannot tell apart through reverb at the distances episodes pose.
+The sounding class vocabulary AFTER the separation gate has cut the classes CLAP cannot resolve to a ROOM through reverb at the distances episodes pose.
 The candidate set going in is deliberately generous, including the weak anchors, so the surviving set is a measured artefact rather than an author's judgement.
-_Avoid_: fixing the vocabulary before the gate has run; reporting the pruned set without the candidate set it was cut from.
+Three independent cuts, each reported with its own count: too few rows, too little separation, wrong affinity.
+The separation cut reads **anchor recall, not class recall** (ADR-0018, from `clapgate-1`): a class confused for a sibling of the same room still sends the agent to the right room, so cutting on class recall prices a cost the task never pays.
+_Avoid_: fixing the vocabulary before the gate has run; reporting the pruned set without the candidate set it was cut from; quoting a survivor count without saying which recall the cut read.
 
 **Success when silent (SWS)**:
 The published fraction of episodes the agent completes by reaching the goal AFTER the sounding window closed (Chen et al., CVPR 2021, §5).
