@@ -413,7 +413,12 @@ def run_gate(cfg: GateConfig, progress: Optional[Callable[[str], None]] = None) 
         )
 
     affinities = {entry.name: entry.affinity for entry in CANDIDATE_VOCABULARY}
-    report = summarise(rows, affinities=affinities, n_bands=cfg.n_bands)
+    # The anchor map goes in because ANCHOR accuracy is the number the task rests on: the
+    # agent navigates to an object, so a class confused for a sibling of the same anchor
+    # costs it nothing. Reporting only class top-1 understates the system, sometimes by a
+    # lot -- every one of `snoring`'s misses in clapsmoke-3 landed on `breathing`.
+    anchors = {entry.name: entry.anchor_object for entry in CANDIDATE_VOCABULARY}
+    report = summarise(rows, affinities=affinities, anchors=anchors, n_bands=cfg.n_bands)
     payload: Dict[str, Any] = dict(report.as_dict())
     payload["config"] = cfg.as_dict()
     payload["scenes_run"] = [label for label in wanted if label not in failed]
@@ -435,7 +440,28 @@ def _format_report(report: Any, failed: Sequence[str]) -> str:
             report.top1_accuracy, report.n_rows, report.n_classes, report.chance_accuracy
         )
     )
+    if report.anchor_top1_accuracy is not None:
+        lines.append(
+            "ANCHOR top-1:     {:.3f}  <- THE TASK NUMBER: the agent navigates to an object, "
+            "so a sibling confusion at the same anchor costs it nothing".format(
+                report.anchor_top1_accuracy
+            )
+        )
     lines.append("mean true-class margin: {:+.4f}".format(report.mean_true_margin))
+    if report.per_anchor:
+        lines.append("")
+        lines.append("-- per anchor object --")
+        for item in sorted(report.per_anchor, key=lambda entry: -entry.accuracy):
+            confusion = (
+                "{} x{}".format(item.top_confusion[0], item.top_confusion[1])
+                if item.top_confusion
+                else "-"
+            )
+            lines.append(
+                "  {:12s} n={:5d}  classes={:2d}  accuracy={:.3f}  top-confusion={}".format(
+                    item.anchor, item.n, item.n_classes, item.accuracy, confusion
+                )
+            )
     lines.append("")
     lines.append("-- top-1 by distance band (THE curve; a scalar cannot say this) --")
     for band in report.per_band:

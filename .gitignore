@@ -139,3 +139,14 @@ tmp/
 # Real ESC-50 anomaly + benign clips (CC BY-NC) — staged via fetch_anomaly_clips.py, not committed
 data/anomaly_audio/
 data/benign_audio/
+
+# The sounding class vocabulary corpus and the gate's forced-failure arm (CC BY-NC),
+# staged via `python -m earshot.audio.clips --vocabulary`. Several recordings per class,
+# so it is a directory per class rather than a file per class.
+#
+# These two were MISSING and it cost a real thing: every clap_gate run after the first
+# stamped `dirty=1` into its own provenance.txt, which is the field that says whether a
+# number can be attributed to a commit. `data/` is ignored subdirectory-by-subdirectory
+# here, so a new data directory is a new line, not an inherited rule.
+data/sound_corpus/
+data/absent_corpus/

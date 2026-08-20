@@ -36,6 +36,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 __all__ = [
     "GateRow",
     "ClassResult",
+    "AnchorResult",
     "BandResult",
     "RejectionResult",
     "SeparationReport",
@@ -44,6 +45,7 @@ __all__ = [
     "decision_score_of",
     "equal_error_rate",
     "summarise",
+    "anchor_top1_of",
     "prune",
 ]
 
@@ -106,6 +108,25 @@ class ClassResult:
 
 
 @dataclass(frozen=True)
+class AnchorResult:
+    """One anchor OBJECT's accuracy: did the inferred class point at the right thing.
+
+    This is the number the task cares about and `ClassResult.recall` is not. The agent
+    navigates to an object, so a class confused for a SIBLING of the same anchor costs it
+    nothing: `snoring` heard as `breathing` still sends it to the bed. The clapsmoke-3 gate
+    made that concrete -- all 60 of `snoring`'s misses landed on `breathing`, and all 53 of
+    `clock_tick`'s landed on `clock_alarm`, so a class recall of 0.500 and 0.558 understated
+    what the agent would actually have done by a wide margin.
+    """
+
+    anchor: str
+    n: int
+    accuracy: float
+    n_classes: int
+    top_confusion: Optional[Tuple[str, int]]
+
+
+@dataclass(frozen=True)
 class BandResult:
     """Closed-set accuracy inside one distance band. The curve, not the scalar."""
 
@@ -146,6 +167,10 @@ class SeparationReport:
     per_band: Tuple[BandResult, ...]
     confusion: Mapping[Tuple[str, str], int]
     rejection: RejectionResult
+    # Empty when no anchor map was supplied. NOT zero: an unsupplied anchor map and an
+    # anchor accuracy of 0.0 are different facts and must not read the same.
+    anchor_top1_accuracy: Optional[float] = None
+    per_anchor: Tuple[AnchorResult, ...] = ()
 
     def as_dict(self) -> Dict[str, object]:
         """The artefact form. Confusion keys are joined because JSON has no tuple key."""
@@ -180,6 +205,17 @@ class SeparationReport:
                 "{}->{}".format(true, predicted): count
                 for (true, predicted), count in sorted(self.confusion.items())
             },
+            "anchor_top1_accuracy": self.anchor_top1_accuracy,
+            "per_anchor": [
+                {
+                    "anchor": item.anchor,
+                    "n": item.n,
+                    "accuracy": item.accuracy,
+                    "n_classes": item.n_classes,
+                    "top_confusion": list(item.top_confusion) if item.top_confusion else None,
+                }
+                for item in self.per_anchor
+            ],
             "rejection": {
                 "n_in_vocabulary": self.rejection.n_in_vocabulary,
                 "n_absent": self.rejection.n_absent,
@@ -265,6 +301,28 @@ def equal_error_rate(
     return best[1], best[2]
 
 
+def anchor_top1_of(row: GateRow, anchors: Mapping[str, str]) -> Tuple[str, str]:
+    """`(true_anchor, predicted_anchor)` for one in-vocabulary row.
+
+    Raises on a class the map does not carry rather than defaulting it to its own name: a
+    silently self-anchored class scores a free hit and inflates the one number the design
+    decisions rest on.
+    """
+    if not row.in_vocabulary:
+        raise ValueError(
+            "{!r} is an absent class and has no true anchor".format(row.true_class)
+        )
+    predicted = top1_of(row)
+    for name in (row.true_class, predicted):
+        if name not in anchors:
+            raise KeyError(
+                "no anchor for class {!r}; the anchor map must cover every class in the "
+                "prompt bank or the accuracy is computed over a subset that nothing "
+                "declares".format(name)
+            )
+    return anchors[row.true_class], anchors[predicted]
+
+
 def _band_edges(rows: Sequence[GateRow], n_bands: int) -> List[Tuple[float, float]]:
     """Log-spaced edges spanning the observed distances, matching `calibration.band_poses`.
 
@@ -298,12 +356,18 @@ def summarise(
     rows: Iterable[GateRow],
     *,
     affinities: Optional[Mapping[str, str]] = None,
+    anchors: Optional[Mapping[str, str]] = None,
     n_bands: int = 4,
 ) -> SeparationReport:
     """Fold gate rows into the report. Raises rather than reporting an unmeasurable arm.
 
     `affinities` maps class name to its declared grade, so the per-class table can be read
     strong-versus-weak without this module importing the vocabulary and inheriting its table.
+
+    `anchors` maps class name to its anchor OBJECT and is optional only because a caller may
+    genuinely not have one. Supply it whenever you can: anchor accuracy is the number the task
+    rests on, and class recall systematically understates it wherever sibling classes share an
+    anchor.
     """
     materialised = list(rows)
     if not materialised:
@@ -389,6 +453,31 @@ def summarise(
         false_rejection_rate=sum(1 for value in positives if value < threshold) / len(positives),
     )
 
+    per_anchor: List[AnchorResult] = []
+    anchor_accuracy: Optional[float] = None
+    if anchors is not None:
+        pairs = [anchor_top1_of(row, anchors) for row in known]
+        anchor_accuracy = sum(1 for true, predicted in pairs if true == predicted) / len(pairs)
+        for anchor in sorted({true for true, _predicted in pairs}):
+            subset = [pair for pair in pairs if pair[0] == anchor]
+            wrong: Dict[str, int] = {}
+            for _true, predicted in subset:
+                if predicted != anchor:
+                    wrong[predicted] = wrong.get(predicted, 0) + 1
+            per_anchor.append(
+                AnchorResult(
+                    anchor=anchor,
+                    n=len(subset),
+                    accuracy=sum(1 for _t, p in subset if p == anchor) / len(subset),
+                    n_classes=len(
+                        {row.true_class for row in known if anchors[row.true_class] == anchor}
+                    ),
+                    top_confusion=(
+                        max(sorted(wrong.items()), key=lambda item: item[1]) if wrong else None
+                    ),
+                )
+            )
+
     total_hits = sum(1 for row in known if top1_of(row) == row.true_class)
     all_margins = [true_margin_of(row) for row in known]
     n_classes = len(next(iter(known)).scores)
@@ -402,26 +491,42 @@ def summarise(
         per_band=tuple(per_band),
         confusion=confusion,
         rejection=rejection,
+        anchor_top1_accuracy=anchor_accuracy,
+        per_anchor=tuple(per_anchor),
     )
 
 
 def prune(
-    report: SeparationReport, *, min_recall: float, min_n: int = 8
+    report: SeparationReport,
+    *,
+    min_recall: float,
+    min_n: int = 8,
+    allowed_affinities: Optional[Sequence[str]] = None,
 ) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
-    """`(kept, cut)` class names, by measured recall. This is what makes the vocabulary pruned.
+    """`(kept, cut)` class names. TWO cuts, and they are independent.
 
     A class with fewer than `min_n` rows is CUT rather than kept on a small-sample recall, and
     the caller is expected to print the count: a class dropped for want of data and a class
     dropped for want of separation are different findings, and merging them is how a sweep
     reports coverage it did not have.
 
+    `allowed_affinities` applies ADR-0018's OTHER requirement, which the first gate run
+    ignored: a weak-affinity class is disqualified whatever its recall, because the semantic
+    store cannot learn an association that is not there. `coughing` scored a perfect 1.000 in
+    clapsmoke-3 and is still disqualified -- people cough on every one of the six objects.
+    Leave it `None` to skip the affinity cut, and say so when you report the result.
+
     There is no default `min_recall` on purpose. The bar is a decision, it belongs in the run
     that states it, and a default here would quietly become the bar everywhere.
     """
+    allowed = None if allowed_affinities is None else set(allowed_affinities)
     kept: List[str] = []
     cut: List[str] = []
     for item in report.per_class:
-        if item.n < int(min_n) or item.recall < float(min_recall):
+        too_few = item.n < int(min_n)
+        too_confused = item.recall < float(min_recall)
+        wrong_affinity = allowed is not None and item.affinity not in allowed
+        if too_few or too_confused or wrong_affinity:
             cut.append(item.name)
         else:
             kept.append(item.name)
