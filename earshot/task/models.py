@@ -34,6 +34,8 @@ __all__ = [
     "load_clap_encoder",
     "CLAP_MODEL_ID",
     "CLAP_LOCAL_DIR",
+    "CLAP_SAMPLE_RATE",
+    "resample_ratio",
     "resolve_clap_source",
     "stage_clap_safetensors",
 ]
@@ -48,6 +50,32 @@ CLAP_MODEL_ID = "laion/clap-htsat-unfused"
 # here and duplicated ONCE in `env_check.py`, which ADR-0013's layer graph forbids from
 # importing anything intra-package; the duplication is deliberate and both sites say so.
 CLAP_LOCAL_DIR = "models/clap-htsat-unfused"
+
+# provenance: box -- `ClapFeatureExtractor.sampling_rate` on this checkpoint. The extractor
+# REFUSES any other rate; it does not resample. See `resample_ratio`.
+CLAP_SAMPLE_RATE = 48000
+
+
+def resample_ratio(from_rate: int, to_rate: int = CLAP_SAMPLE_RATE):
+    """The `(up, down)` integer pair for a polyphase resample, in lowest terms.
+
+    Split out from the resample itself so the arithmetic is Mac-testable: scipy lives in the
+    box's `ss2` env and nowhere near `mac-requirements.txt`, but getting 44100 -> 48000 wrong
+    would silently change every duration CLAP sees, and that is worth a test.
+
+    44100 -> 48000 is 160/147. `(1, 1)` when the rates already agree, so a caller can skip
+    the resample without a second comparison.
+    """
+    import math
+
+    source, target = int(from_rate), int(to_rate)
+    if source <= 0 or target <= 0:
+        raise ValueError(
+            "sample rates must be positive, got from_rate={} to_rate={}".format(source, target)
+        )
+    divisor = math.gcd(source, target)
+    return target // divisor, source // divisor
+
 
 
 def resolve_clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOCAL_DIR) -> str:
@@ -185,18 +213,48 @@ class ClapEncoder:
         self.source = resolve_clap_source(self.model_id)
         self._processor = ClapProcessor.from_pretrained(self.source)
         self._model = ClapModel.from_pretrained(self.source).to(self.device)
+        # `audios=` is deprecated for removal in transformers 4.59 in favour of `audio=`.
+        # Resolved ONCE from the signature rather than guessed: transformers wraps
+        # `__call__` with a decorator that uses functools.wraps, so `inspect.signature`
+        # follows `__wrapped__` and reports the real parameter names. `audios` is the
+        # fallback because it is what every version in the declared >=4.40,<5 range
+        # accepts, warning included.
+        import inspect
+
+        try:
+            names = inspect.signature(type(self._processor).__call__).parameters
+        except (TypeError, ValueError):
+            names = {}
+        self._audio_kwarg = "audio" if "audio" in names else "audios"
         self._model.eval()
 
     def encode_audio(self, waveform: Any, sample_rate: int) -> Any:
-        """The audio embedding for one mono waveform.
+        """The audio embedding for one mono waveform, resampled to CLAP's own rate.
 
-        ``ClapProcessor`` resamples to the checkpoint's own 48 kHz when it has to, so the
-        branch's 44100 Hz signal (ticket 22: ``sampleRate`` reads 44100.0 and ESC-50 is
-        44.1 kHz, so nothing else in the tree resamples) is handed over with its rate
-        rather than silently reinterpreted.
+        **``ClapProcessor`` does NOT resample.** The previous version of this docstring said
+        it did, and that claim was wrong from the day it was written: `ClapFeatureExtractor`
+        raises ``ValueError`` on any rate other than its 48 kHz. Nothing caught it because
+        the weights had never been loaded on the box -- `bootstrap_ss2.sh` reported
+        ``clap_weights_loaded False`` and ``--clap`` defaults off -- so the first caller to
+        reach this line was the separation gate.
+
+        The renderer stays at 44100. `AudioConfig.sample_rate` is the branch's own
+        ``sampleRate`` and ESC-50 is 44.1 kHz, so the heard signal's domain is the TASK's;
+        CLAP is one consumer of it and converts at its own boundary. Moving the renderer to
+        48 kHz to suit a text-audio encoder would change every IR in the tree.
         """
+        samples = self._as_1d(waveform)
+        rate = int(sample_rate)
+        if rate != CLAP_SAMPLE_RATE:
+            from scipy.signal import resample_poly
+
+            up, down = resample_ratio(rate, CLAP_SAMPLE_RATE)
+            samples = resample_poly(samples, up, down)
+            rate = CLAP_SAMPLE_RATE
         inputs = self._processor(
-            audios=self._as_1d(waveform), sampling_rate=int(sample_rate), return_tensors="pt"
+            **{self._audio_kwarg: samples},
+            sampling_rate=rate,
+            return_tensors="pt",
         )
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
         with self._torch.no_grad():
