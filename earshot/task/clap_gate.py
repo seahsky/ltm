@@ -49,7 +49,12 @@ from earshot.audio.clap import NORMAL_PROMPTS, heard_clip_for_clap
 from earshot.audio.clips import as_binaural, corpus_clip_paths, load_anomaly_clip
 from earshot.audio.config import AudioConfig
 from earshot.audio.separation import GateRow, summarise
-from earshot.audio.vocabulary import ABSENT_CLASSES, CANDIDATE_VOCABULARY, prompts
+from earshot.audio.vocabulary import (
+    ABSENT_CLASSES,
+    CANDIDATE_VOCABULARY,
+    ROOM_OF_ANCHOR,
+    prompts,
+)
 
 __all__ = [
     "GateConfig",
@@ -412,12 +417,19 @@ def run_gate(cfg: GateConfig, progress: Optional[Callable[[str], None]] = None) 
             "failure rather than an empty result".format(len(wanted))
         )
 
-    affinities = {entry.name: entry.affinity for entry in CANDIDATE_VOCABULARY}
+    affinities = {entry.name: entry.room_affinity for entry in CANDIDATE_VOCABULARY}
     # The anchor map goes in because ANCHOR accuracy is the number the task rests on: the
     # agent navigates to an object, so a class confused for a sibling of the same anchor
     # costs it nothing. Reporting only class top-1 understates the system, sometimes by a
     # lot -- every one of `snoring`'s misses in clapsmoke-3 landed on `breathing`.
-    anchors = {entry.name: entry.anchor_object for entry in CANDIDATE_VOCABULARY}
+    # ROOMS, not objects. The 2026-08-20 amendment to ADR-0018 made the room the anchor
+    # taxonomy: `clapsmoke-3` scored the object grouping at 0.764 and the room grouping at
+    # 0.779, which is not the reason -- the reason is that only the room level leaves the
+    # living room with enough classes to split heard from not-heard. The object is still
+    # where the source is PLACED; it is just not what the semantic store learns.
+    anchors = {
+        entry.name: ROOM_OF_ANCHOR[entry.anchor_object] for entry in CANDIDATE_VOCABULARY
+    }
     report = summarise(rows, affinities=affinities, anchors=anchors, n_bands=cfg.n_bands)
     payload: Dict[str, Any] = dict(report.as_dict())
     payload["config"] = cfg.as_dict()
@@ -450,7 +462,7 @@ def _format_report(report: Any, failed: Sequence[str]) -> str:
     lines.append("mean true-class margin: {:+.4f}".format(report.mean_true_margin))
     if report.per_anchor:
         lines.append("")
-        lines.append("-- per anchor object --")
+        lines.append("-- per anchor room --")
         for item in sorted(report.per_anchor, key=lambda entry: -entry.accuracy):
             confusion = (
                 "{} x{}".format(item.top_confusion[0], item.top_confusion[1])

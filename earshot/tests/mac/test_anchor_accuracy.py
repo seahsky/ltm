@@ -19,7 +19,7 @@ import unittest
 from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.audio.separation import GateRow, anchor_top1_of, prune, summarise
-from earshot.audio.vocabulary import CANDIDATE_VOCABULARY
+from earshot.audio.vocabulary import CANDIDATE_VOCABULARY, ROOM_OF_ANCHOR
 
 # Two bed classes and one toilet class: a sibling confusion and a cross-anchor one.
 ANCHORS = {"snoring": "bed", "breathing": "bed", "toilet_flush": "toilet"}
@@ -151,16 +151,22 @@ class TestTheVocabularyCanStillBeSplit(unittest.TestCase):
         lands in one column only, confounding the columns with object difficulty.
         """
         eligible = [
-            entry for entry in CANDIDATE_VOCABULARY if entry.affinity in ("strong", "moderate")
+            entry
+            for entry in CANDIDATE_VOCABULARY
+            if entry.room_affinity in ("strong", "moderate")
         ]
         counts = {}
         for entry in eligible:
-            counts[entry.anchor_object] = counts.get(entry.anchor_object, 0) + 1
+            room = ROOM_OF_ANCHOR[entry.anchor_object]
+            counts[room] = counts.get(room, 0) + 1
         splittable = [anchor for anchor, count in counts.items() if count >= 2]
         self.assertGreaterEqual(
             len(splittable),
-            2,
-            "only {} anchor(s) carry 2+ non-weak classes: {}".format(len(splittable), counts),
+            3,
+            "only {} room(s) carry 2+ non-weak classes: {}. The room taxonomy was adopted "
+            "for exactly this -- under the object taxonomy only bed and toilet were "
+            "splittable, and a 2-way semantic space is too thin to build the matrix "
+            "on.".format(len(splittable), counts),
         )
 
 

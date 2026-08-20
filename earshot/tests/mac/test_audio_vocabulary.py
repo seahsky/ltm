@@ -23,12 +23,15 @@ from earshot.audio.vocabulary import (
     AFFINITY_GRADES,
     CANDIDATE_VOCABULARY,
     HM3D_GOAL_CATEGORIES,
+    ROOM_OF_ANCHOR,
+    ROOMS,
     SoundClass,
     anchor_object,
     by_affinity,
     class_names,
     prompt_of,
     prompts,
+    room_of,
 )
 
 # Who may read the placement mapping. The dataset builder places sources with it, the gate
@@ -56,9 +59,20 @@ class TestVocabularyTable(unittest.TestCase):
                 ),
             )
 
+    def test_every_anchor_resolves_to_a_room(self):
+        """An object with no room cannot carry a class: there is nothing to learn at it.
+
+        This is what retired `plant`. A houseplant has no characteristic sound, and grouping
+        did not rescue it -- `greenery` scored the identical 0.383 the object taxonomy gave
+        `plant`, because the map was one-to-one. The classes were misassigned, not mis-grouped.
+        """
+        for entry in CANDIDATE_VOCABULARY:
+            self.assertIn(entry.anchor_object, ROOM_OF_ANCHOR, entry.name)
+            self.assertIn(room_of(entry.name), ROOMS, entry.name)
+
     def test_every_affinity_is_a_declared_grade(self):
         for entry in CANDIDATE_VOCABULARY:
-            self.assertIn(entry.affinity, AFFINITY_GRADES, entry.name)
+            self.assertIn(entry.room_affinity, AFFINITY_GRADES, entry.name)
 
     def test_class_names_are_unique(self):
         names = list(class_names())
@@ -120,6 +134,9 @@ class TestVocabularyTable(unittest.TestCase):
             SoundClass("x", "x", "a sound", "microwave", "strong")
         with self.assertRaises(ValueError):
             SoundClass("x", "x", "a sound", "toilet", "very strong")
+        # An HM3D category that resolves to no room. `plant` is the real case.
+        with self.assertRaises(ValueError):
+            SoundClass("x", "x", "a sound", "plant", "strong")
 
     def test_the_vocabulary_is_generous_enough_to_prune(self):
         """The candidate set exists to be CUT. Too small and the gate has nothing to say."""

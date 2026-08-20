@@ -85,22 +85,25 @@ Its job is the silent phase: carry the energy history and the lateral-sign trace
 It is the counterpart to the cross-visit stores, and the axis it serves is time-within-episode rather than either generalization axis.
 _Avoid_: memory (unqualified — STM crosses no episode boundary and settles no cell of the matrix).
 
-**Sound-object mapping**:
-The dataset's table from a sound class to the HM3D ObjectNav category its source is placed at — flush at a toilet, TV audio at a tv_monitor, an alarm at a bed.
+**Sound-room mapping**:
+The dataset's table from a sound class to the ROOM its source is placed in — a flush in the bathroom, an alarm in the bedroom, a TV audience in the living room.
+The room resolves to an HM3D ObjectNav category for PLACEMENT (bathroom is the toilet, bedroom the bed, living room a sofa, tv_monitor or chair), so the object is where the source physically sits and the room is what the semantic store learns.
 It is PLACEMENT GROUND TRUTH and analyst-only, fenced off in the same way `sourceIsVisible()` is: handing it to the agent turns the unseen-and-heard cell into a measurement of the author's table rather than the agent's memory.
-The agent is meant to acquire the same association by hearing the class near the object on prior visits.
-_Avoid_: sound prior, class prior (both read as something the agent holds); using it anywhere in the controller.
+**It was OBJECT-level until 2026-08-20 and the `clapsmoke-3` gate refuted that**: the `plant` anchor scored 0.383 with 187 of 480 rows landing on `toilet`, because water sounds predict a room with plumbing and a houseplant is not one. Rooms are the level the sounds encode.
+_Avoid_: sound-object mapping (superseded — the anchor is a room); sound prior, class prior (both read as something the agent holds); using it anywhere in the controller.
 
 **Sounding class vocabulary**:
-The set of ESC-50 classes an episode can draw its source clip from, each mapped to one of HM3D ObjectNav's six goal categories.
-Six categories is too thin to split heard from not-heard, and four of the six are silent objects, so the vocabulary is built at the CLASS level and anchored to the six rather than being the six.
-_Avoid_: goal category as a synonym for sound class (the mapping is many-to-one); assuming a class exists because ESC-50 has it — it must have a plausible placement anchor.
+The set of ESC-50 classes an episode can draw its source clip from, each anchored to one of three rooms and placed at that room's HM3D object.
+The vocabulary is built at the CLASS level rather than being the anchors themselves: three rooms cannot be split heard-from-not-heard, but thirteen classes over three rooms can.
+A class needs a room to belong to. Outdoor sounds have none, so `chirping_birds`, `crickets` and `rain` moved to `ABSENT_CLASSES` rather than being deleted — a sound whose source is not in the house is the hardest honest negative the forced-failure arm can have.
+_Avoid_: goal category as a synonym for sound class (the mapping is many-to-one); assuming a class exists because ESC-50 has it — it must have a room.
 
-**Sound-object affinity**:
-How strongly a sound class implies one object category rather than any other.
-It is the membership test for the sounding class vocabulary, and it binds harder than CLAP accuracy does: a flush implies a toilet and an alarm implies a bed, but coughing, laughing and footsteps happen on every one of the six, so a vocabulary carrying them asks the semantic store to learn noise and it will correctly fail to.
-A class that CLAP separates perfectly is still disqualified if its affinity is flat.
-_Avoid_: audibility or CLAP separability as the membership test (both are about the signal, affinity is about what the signal predicts).
+**Sound-room affinity**:
+How strongly a sound class implies one ROOM rather than any other.
+It is the membership test for the sounding class vocabulary, and it binds harder than CLAP accuracy does: a flush implies a bathroom and an alarm a bedroom, but coughing and vacuuming happen in every room, so a vocabulary carrying them asks the semantic store to learn noise and it will correctly fail to.
+A class that CLAP separates perfectly is still disqualified if its affinity is flat — `coughing` scored 1.000 in `clapsmoke-3` and is out.
+**Grades are never derived from measured recall.** Fitting the ground truth to the classifier would make the matrix circular: the semantic store would be scored against a table built from the very model it depends on. `mouse_click` keeps its grade at 0.017 recall, and the separation gate is what cuts it.
+_Avoid_: sound-object affinity (superseded); audibility or CLAP separability as the membership test (both are about the signal, affinity is about what the signal predicts); re-grading a class because the gate scored it badly.
 
 **Pruned vocabulary**:
 The sounding class vocabulary AFTER the separation gate has cut the classes CLAP cannot tell apart through reverb at the distances episodes pose.

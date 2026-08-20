@@ -96,3 +96,47 @@ A seen scene is the only place episodic memory can pay, so the row is the contri
 The measured per-episode flip rate on byte-identical reruns is 16.2%, the MDE is 15 episodes or 4.1 points at n=365, and single-run-per-arm comparisons are already recorded as not reportable.
 Four cells carved out of one sweep gives ~90 per cell.
 No matrix run should be launched before this has its own decision.
+
+---
+
+## Amendment, 2026-08-20: the anchor is a ROOM, not an object
+
+**Status:** accepted, on the `clapsmoke-3` separation gate. The two-store design, the class-level heard axis and the inferred goal class all carry unchanged. Only the anchor taxonomy moves.
+
+Sources still sit at an HM3D ObjectNav object, because that is the only thing the episode builder can place against and the only thing the agent can navigate to. What changes is the level the **semantic LTM learns at**: a room, not an object.
+
+### What forced it
+
+The gate scored the object taxonomy at **0.764** anchor top-1 and `plant` at **0.383**, with 187 of its 480 rows landing on `toilet`. Water sounds predict a room with plumbing, and a houseplant is not one. The `plant` assignments were the author reasoning from what could plausibly happen near an object rather than from what a sound predicts, which is the same error as the affinity grades and the third time the gate corrected that table.
+
+Grouping was then scored against the identical rows, nothing re-rendered:
+
+| taxonomy | anchor top-1 | chance | ratio |
+|---|---|---|---|
+| object (6) | 0.764 | 0.167 | 4.6x |
+| room (4) | 0.779 | 0.250 | 3.1x |
+
+**Rooms are not better at classification and this ADR does not claim they are.** +0.015 absolute, and worse against chance. `greenery` scored the identical 0.383 `plant` did, because the map is one-to-one — which is the useful part of the result: the classes were misassigned, not mis-grouped.
+
+### The actual reason
+
+**Splittability.** A heard/not-heard split needs two or more classes at an anchor, or that anchor appears in one column only and the columns end up confounded with object difficulty rather than memory.
+
+- Under objects: `bed` (5) and `toilet` (3) split. `chair` and `plant` hold one each, `sofa` and `tv_monitor` none. **A 2-way semantic space over 8 classes.**
+- Under rooms, with affinity re-graded at the room level: **bathroom 4, bedroom 5, living_room 4. Three splittable rooms over 13 classes.**
+
+Merging also helped where it should: `chair` 0.683 and `sofa` 0.792 became 0.830 together, a weighted +0.036, at the cost of pulling `tv_monitor` down from 0.963.
+
+### Consequences
+
+**The 6-way ceiling this ADR declared was never real.** It was 2-way under the taxonomy as shipped. It is now 3-way. That is still a small semantic space and the paper must name the three rooms rather than let a reader assume more.
+
+**`plant` carries no class.** An object with no room cannot host one, and `SoundClass.__post_init__` now raises on it.
+
+**Three classes changed side rather than being deleted.** `chirping_birds`, `crickets` and `rain` moved to `ABSENT_CLASSES`: an outdoor sound heard indoors is precisely a sound with no room, so they are the forced-failure arm's best negatives. The arm goes from five classes to eight.
+
+**Grades were re-derived at the room level and NOT from the gate's recall.** Fitting ground truth to the classifier would make the whole matrix circular. `mouse_click` keeps a moderate grade at 0.017 recall; the separation gate is what cuts it, and the two cuts stay separate counts.
+
+**`clapsmoke-3`'s numbers do not carry forward.** The prompt bank drops from 20 classes to 17, so chance moves 0.050 to 0.059 and the task is easier by construction. The gate must be re-run before any number here is quoted.
+
+**Read per-anchor accuracy with a caveat**: it is inflated for an anchor whose classes confuse each other and deflated for one whose classes scatter. `tv_monitor`'s 0.963 was two mutually-confusable classes landing on their only shared anchor. It is not a clean per-anchor quality score.

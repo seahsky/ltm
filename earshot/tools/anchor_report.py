@@ -185,12 +185,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Re-score a gate run at the anchor level and apply both ADR-0018 cuts."
     )
     parser.add_argument("run_dir")
-    # `object` is the taxonomy ADR-0018 shipped. `room` is the one clapsmoke-3's confusion
-    # structure argues for: `plant` scored 0.383 with 187 of 480 rows going to `toilet`,
-    # because water sounds mean BATHROOM. Re-scoring costs nothing -- only the anchor map
-    # changes and no audio is re-rendered -- so the taxonomy is decided on data rather than
-    # on the author's second guess.
-    parser.add_argument("--anchors", choices=("object", "room", "both"), default="both")
+    # `room` is the taxonomy as of the 2026-08-20 amendment and the default. `object` is
+    # kept so the superseded grouping stays scoreable: clapsmoke-3 measured 0.764 for objects
+    # against 0.779 for rooms, and the near-tie is itself the finding -- the room grouping was
+    # adopted for SPLITTABILITY, not for accuracy, and a reader who assumes otherwise should
+    # be able to check. Re-scoring costs nothing; no audio is re-rendered.
+    parser.add_argument("--anchors", choices=("object", "room", "both"), default="room")
     parser.add_argument("--min-recall", type=float, default=0.50)
     parser.add_argument("--n-bands", type=int, default=4)
     args = parser.parse_args(None if argv is None else list(argv))
@@ -202,7 +202,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     rows = load_rows(rows_path)
-    affinities = {entry.name: entry.affinity for entry in CANDIDATE_VOCABULARY}
+    affinities = {entry.name: entry.room_affinity for entry in CANDIDATE_VOCABULARY}
     by_object = {entry.name: entry.anchor_object for entry in CANDIDATE_VOCABULARY}
     by_room = {
         entry.name: ROOM_OF_ANCHOR[entry.anchor_object] for entry in CANDIDATE_VOCABULARY
