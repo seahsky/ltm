@@ -26,6 +26,92 @@ _Avoid_: resume, abort (both name the transition, neither says the source was ne
 **Mission**:
 One episode = the primary find-task PLUS the anomaly response. "Mission complete" is not a single number — see Find-SR and Anomaly-response SR.
 
+### The sounding window (sound-source finding)
+
+Terms resolved in the 2026-08-20 grilling session, when the task pivoted from anomaly response to sound-source finding.
+The section is OPEN: only the decisions listed here are settled, and the anomaly-response language above is not yet retired.
+
+**Sounding window**:
+The contiguous run of steps over which the positioned source emits.
+It opens at `t_anom` and closes after a chosen duration, so the source is silent for the rest of the episode.
+This is the pivot's load-bearing change: a source that sounds forever is reachable by gradient climb alone, which leaves memory nothing to do and makes all four generalization cells score alike.
+The convention is the field's — SAVi (Chen et al., CVPR 2021) and SAVN-CE (CVPR 2026) both draw an onset and a duration per episode rather than sounding continuously.
+_Avoid_: onset (it already means something else here — see below); playback, clip length (the recording's own duration is not the window).
+
+**Offset step**:
+The first step at which the source no longer emits, i.e. the step the sounding window closes.
+_Avoid_: onset for either end of the window; "the sound ends" without saying which step.
+
+**Onset step** (unchanged, and the collision is the point):
+In this tree `onset_step` is the step the AGENT's own measured RMS crossed threshold — when it HEARD the source, not when the source STARTED.
+`t_anom` is when the source starts.
+The field's vocabulary uses "onset" for the source's start, so a paper sentence and a log line can use the same word for different steps.
+Carry the tree's meaning and say "sounding window opens" for the other.
+_Avoid_: importing SAVi's "onset"/"offset" pair wholesale onto `onset_step`; reading a cross-quoted onset time as a threshold crossing.
+
+**Silent phase**:
+The steps after the offset step, during which the only live signal is the background bed.
+It is where both memories are supposed to pay, because there is no cue left to climb.
+_Avoid_: silence (the bed still sounds); "after the sound" (say the offset step).
+
+**Inferred goal class**:
+The agent is told NOTHING at step 0.
+The goal category is what CLAP returns for the clip the agent heard, so audio-to-class is inside the agent's own loop rather than handed to it.
+This is what makes the not-heard column non-vacuous: told the category outright, the sound's identity never matters and heard and not-heard score alike by construction.
+It is also the claim against MAGNet, whose 21-way head is welded into its tensor shapes and cannot take a 22nd class without retraining, while an open-set text encoder takes one more prompt and no training at all.
+_Avoid_: goal category (unqualified — say whether it was inferred or given); treating a given category as a weaker version of the same task.
+
+**CLAP separation gate**:
+The measurement that must clear before anything reads the inferred class: CLAP's discrimination on clips rendered through a real reverberant IR at the distances episodes actually pose, not on dry recordings.
+It exists because the capability is unproven here rather than merely untested — the one arc that ran it had the gate reject 0 of 8, which is what a gate that discriminates nothing also looks like.
+Its number is a separation, in the pattern of the EER and CapRL gates, and a failure is fixed at the audio path, never by lowering the bar.
+_Avoid_: reading a CLAP call that returns a finite logit as evidence the gate passed; depending on the inferred class before the gate has a number.
+
+**Episodic LTM**:
+The scene-keyed store: what was seen where, on a prior visit to THIS scene.
+It is what the seen axis tests, and it pays in both heard and not-heard columns of the seen row.
+It cannot pay in an unseen scene, and that is a property of the design rather than a shortfall — the archived stack made the same commitment structurally by hard-filtering its fine layer to the current scene.
+_Avoid_: LTM (unqualified — say episodic or semantic; they are different stores answering different cells).
+
+**Semantic LTM**:
+The scene-AGNOSTIC store: sound class to object category to a spatial prior, accumulated across prior visits to OTHER scenes.
+It is the only thing that can fill the unseen-and-heard cell, so it is what makes the matrix a factorial rather than three arms and a duplicate.
+Its associations must be LEARNED from the prior passes, never handed over as a table: the dataset's own sound-to-object mapping is placement ground truth and giving it to the agent would test the author's prior instead of the agent's memory.
+_Avoid_: prior, world knowledge (neither says the agent acquired it); reading a hand-authored placement table as if the agent had learned it.
+
+**STM**:
+Within-episode state, rebuilt every episode and never persisted.
+Its job is the silent phase: carry the energy history and the lateral-sign trace from the sounding window so a bearing survives the offset step.
+It is the counterpart to the cross-visit stores, and the axis it serves is time-within-episode rather than either generalization axis.
+_Avoid_: memory (unqualified — STM crosses no episode boundary and settles no cell of the matrix).
+
+**Sound-object mapping**:
+The dataset's table from a sound class to the HM3D ObjectNav category its source is placed at — flush at a toilet, TV audio at a tv_monitor, an alarm at a bed.
+It is PLACEMENT GROUND TRUTH and analyst-only, fenced off in the same way `sourceIsVisible()` is: handing it to the agent turns the unseen-and-heard cell into a measurement of the author's table rather than the agent's memory.
+The agent is meant to acquire the same association by hearing the class near the object on prior visits.
+_Avoid_: sound prior, class prior (both read as something the agent holds); using it anywhere in the controller.
+
+**Sounding class vocabulary**:
+The set of ESC-50 classes an episode can draw its source clip from, each mapped to one of HM3D ObjectNav's six goal categories.
+Six categories is too thin to split heard from not-heard, and four of the six are silent objects, so the vocabulary is built at the CLASS level and anchored to the six rather than being the six.
+_Avoid_: goal category as a synonym for sound class (the mapping is many-to-one); assuming a class exists because ESC-50 has it — it must have a plausible placement anchor.
+
+**Sound-object affinity**:
+How strongly a sound class implies one object category rather than any other.
+It is the membership test for the sounding class vocabulary, and it binds harder than CLAP accuracy does: a flush implies a toilet and an alarm implies a bed, but coughing, laughing and footsteps happen on every one of the six, so a vocabulary carrying them asks the semantic store to learn noise and it will correctly fail to.
+A class that CLAP separates perfectly is still disqualified if its affinity is flat.
+_Avoid_: audibility or CLAP separability as the membership test (both are about the signal, affinity is about what the signal predicts).
+
+**Pruned vocabulary**:
+The sounding class vocabulary AFTER the separation gate has cut the classes CLAP cannot tell apart through reverb at the distances episodes pose.
+The candidate set going in is deliberately generous, including the weak anchors, so the surviving set is a measured artefact rather than an author's judgement.
+_Avoid_: fixing the vocabulary before the gate has run; reporting the pruned set without the candidate set it was cut from.
+
+**Success when silent (SWS)**:
+The published fraction of episodes the agent completes by reaching the goal AFTER the sounding window closed (Chen et al., CVPR 2021, §5).
+Adopted verbatim so it is cross-quotable against SAVi and SAVN-CE, and because it is the one standard metric that isolates what the silent phase tests.
+_Avoid_: re-deriving it under a local name; reporting it without SR beside it.
+
 ### The four headline metrics (per setting S1/S2/S3)
 
 **Find-SR**:
@@ -73,7 +159,12 @@ _Avoid_: DOA (the near-zero time-difference cue is not what drives this).
 Warm = the agent mapped this scene on a prior silent pass (visual LTM has it). Cold = first visit.
 
 **Heard vs not-heard (audio axis)**:
-Whether the anomaly sound was heard/stored on a prior visit. Currently a CLOSED negative (audio-memory value redundant with vision) — not a live experimental axis.
+Whether the sound CLASS has an LTM entry from a prior visit. Class-level, not recording-level: heard means an entry exists, not-heard means CLAP must place the class open-set from its name alone.
+**REOPENED 2026-08-20**, having been a closed negative (audio-memory value redundant with vision) since the `write_audio_event` A/B.
+The old null was measured on a single-goal harness where the agent could SEE the goal, so a stored audio event never carried anything vision was not already supplying.
+Under the sounding window the source is silent for most of the episode, so in the silent phase there is nothing left for a stored audio-place association to be redundant WITH. That is the mechanical reason the null does not transfer, and it is the only thing licensing the reopening.
+Reopening costs a prior visit per episode, which couples this axis to the seen axis: both need the same prior pass.
+_Avoid_: recording-level "unheard" (that is a CLAP robustness question, not a memory one, and is the SECONDARY axis); citing the old redundant-with-vision null against the silent phase without saying the harness differed.
 
 ### Anomaly detection
 
