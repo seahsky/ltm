@@ -20,6 +20,7 @@ from earshot.task.episode_plan import (
     plan_episodes,
     supply,
 )
+from earshot.tools.build_plan import load_bank
 
 # provenance: `room_yield --split val`, 2026-08-21. bathroom 40 / bedroom 68 / living 296.
 VAL_ROOMS = {
@@ -189,6 +190,41 @@ class TestTheFourConditionsCrossTheSamePlan(unittest.TestCase):
         reference = per_condition[MEMORY_CONDITIONS[0]]
         for name in MEMORY_CONDITIONS[1:]:
             self.assertEqual(per_condition[name], reference, name)
+
+
+class TestLoadBankRefusesTheCandidateSet(unittest.TestCase):
+    """The plan must come from the BANK OF RECORD, never from the candidate vocabulary.
+
+    The candidate set carries weak-affinity and unresolvable classes on purpose so the gate can
+    prune rather than the author. Building a plan from it would put `mouse_click` (0.308 anchor
+    recall) and `coughing` (a sound people make in every room) into a dataset that is supposed
+    to measure room memory. So a malformed bank raises instead of falling back.
+    """
+
+    def _write(self, payload):
+        import json, os, tempfile
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "bank.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return path
+
+    def test_a_real_bank_loads_as_room_to_classes(self):
+        path = self._write({"by_anchor": {room: list(names) for room, names in BANK.items()}})
+        self.assertEqual(load_bank(path), {room: sorted(names) for room, names in BANK.items()})
+
+    def test_a_file_without_by_anchor_raises(self):
+        with self.assertRaises(ValueError):
+            load_bank(self._write({"kept": ["toilet_flush"]}))
+
+    def test_a_bank_listing_no_class_raises(self):
+        with self.assertRaises(ValueError):
+            load_bank(self._write({"by_anchor": {"bathroom": [], "bedroom": []}}))
+
+    def test_a_room_with_no_classes_is_dropped_not_planned_empty(self):
+        """An empty room would otherwise raise deep inside the planner with a worse message."""
+        path = self._write({"by_anchor": {"bathroom": ["toilet_flush"], "bedroom": []}})
+        self.assertEqual(load_bank(path), {"bathroom": ["toilet_flush"]})
 
 
 class TestBalanceReport(unittest.TestCase):

@@ -363,3 +363,41 @@ Episodes inside a scene share a room, a source and a renderer, so they are not i
 | 5 | **impossible at any outcome** |
 
 At ten scenes a side the scene test needs a near-sweep. **No episode count repairs this**, and if `room_yield --split train` shows HM3D train episodes on the box the scene pool should be widened before the matrix runs. If it does not, the seen/unseen axis is bounded at ten scenes each and the paper states that rather than burying it.
+
+---
+
+## Amendment, 2026-08-21: 500 distinct episodes, 2000 runs, and the cells are PAIRED
+
+**Status:** accepted, superseding the 200-per-cell amendment above. **Amended before any matrix episode existed**, which is the only condition under which a pre-registered parameter may move. Nothing was seen and then fitted to.
+
+### The cells are conditions on the prior phase, not properties of the episode
+
+An episode is `(scene, class, anchor instance, recording)`. Whether it lands in seen-heard or unseen-not-heard depends entirely on what the **prior pass toured and sounded**, so the identical episode can be run under all four conditions.
+
+That changes the statistics, not the compute. Four independent cells become four paired measurements on the same episodes, and the comparison gets the same lift `episode_diff` already exploits:
+
+| design | episodes | runs | MDE @80% |
+|---|---|---|---|
+| 4 independent cells of 200 | 800 | 800 | 14.0 pt |
+| 200 x 4 conditions, paired | 200 | 800 | 8.0 pt |
+| **500 x 4 conditions, paired** | **500** | **2000** | **5.0 pt** |
+
+### The size
+
+**500 distinct episodes, 2000 runs, about 15 hours** at the 27 s/episode measured on the old task. The new sounding-window episode has never been timed, so that is an order of magnitude and not a booking.
+
+At 5.0 points the design detects far less than the +17.1 the M3 revisit measured, which matters because there is no reason to expect the room-memory effect to be that large.
+
+### Balance, which is the actual difficulty
+
+Supply was never the constraint: the crossing admits **26,960** distinct episodes. The constraint is that HM3D val publishes **40 bathroom anchors, 68 bedroom and 296 living-room**, so uniform expansion builds a dataset that is 73% living room, and one scene holds 37 anchors against another's 8.
+
+`task/episode_plan.py` imposes balance top-down instead of sampling: equal room shares, equal class shares inside a room, and a scene-major anchor draw with rotating instances. Measured at 500 episodes: rooms 167/167/166, scenes 25-26 across the 19 that host every room, complete ratio 1.04.
+
+**Two balancing bugs were found by measuring rather than by reasoning**, and both are recorded because the reasoning had looked sound. Cycling the anchor enumeration is proportional to supply, so a five-bathroom house took five times a one-bathroom house's episodes. Then the remainder always landed on the alphabetically-first scenes, and three rooms stacked their extras onto the same houses.
+
+The second fix made the headline ratio **worse** (1.71 to 1.83) while the real spread improved from 9-12 to 10-11, because the metric was dominated by `QaLdnwvtxbs`, which publishes no toilet and can never host a bathroom episode. `balance_report` now returns `scene_ratio_complete` beside `scene_ratio` and names the incomplete scenes. A metric that moves the wrong way when the thing improves is how a good fix gets reverted.
+
+### Unchanged
+
+The analysis plan, the both-tests rule, the assumed base rate and the primary contrast all carry from the amendment above. The scene-level sign test is still bounded by scene count and still needs 9 of 10 to agree; 2000 runs do not buy a single scene.
