@@ -317,3 +317,49 @@ The episodic store is scene-keyed, so **one prior pass serves every test episode
 **Nothing here writes to a memory store.** The scene-agnostic semantic store is new code this ADR commits to and it does not exist. `walk_tour` takes an `observe` callback and returns a `TourRecord`; that is the seam a store will attach to. Building the tour first means it can be exercised and measured before anything depends on it.
 
 **The tour is an upper bound on episodic memory quality.** A complete route through every anchor room is the best prior map the design can give. That is the right first arm: if memory does not pay with a complete map, it will not pay with a partial one. An agent-driven pass becomes a realism ablation on top of a result rather than the thing the result rests on, and the paper must say so.
+
+---
+
+## Amendment, 2026-08-21: 200 episodes a cell, and this is a PRE-REGISTRATION
+
+**Status:** accepted. Closes the second of the three parts this ADR named as open. `earshot/tools/power.py` computes every number below; none of it is hand arithmetic.
+
+**Written before any matrix episode has run.** This project's history is one of post-hoc reinterpretation, so the analysis is fixed here and dated.
+
+### The size
+
+**200 episodes per cell, 800 total, about six hours at the measured 27 s/episode.**
+
+| n/cell | total | wall | SD(diff) | 2 sigma | MDE @80% |
+|---|---|---|---|---|---|
+| 90 | 360 | 2.7 h | 7.5 pt | 14.9 pt | **20.9 pt** |
+| **200** | **800** | **6.0 h** | **5.0 pt** | 10.0 pt | **14.0 pt** |
+| 400 | 1600 | 12.0 h | 3.5 pt | 7.1 pt | 9.9 pt |
+
+The M3 revisit headline this project measured was **+17.1 points**, which clears the 14.0 bar at 200/cell. 135/cell would clear it exactly; 200 buys margin. The 90/cell figure this ADR had been arguing from would have **missed** it.
+
+### Two corrections that changed the arithmetic
+
+**"2 sigma" is not an MDE.** The first table put in front of this decision used a 2.0 multiplier. An effect sitting exactly at 2 sigma is detected half the time. At 80% power the multiplier is 2.80, so that table understated every requirement by about 40%. Both columns are printed side by side now so the gap cannot be silently reintroduced.
+
+**The paired formula does not apply here.** "MDE = 15 episodes = 4.1 points at n=365" comes from `SD = sqrt(flip_rate * n)`, valid because `episode_diff` compares the SAME episode in two arms. Cells of the 2x2 share no episodes. At equal total rendering cost the paired design is **1.76x** more sensitive: 5.9 points against 10.4. That ratio was itself asserted as "roughly three times" before anything computed it, which is the same error one level down, and both are now pinned by tests.
+
+### The pre-registered analysis
+
+**Primary contrast:** seen-heard against unseen-not-heard. Both memories against neither.
+**Secondary:** the two main effects, seen-vs-unseen and heard-vs-not-heard.
+**Both tests are reported, always** (the `funnel_diff` rule): the episode-level comparison AND the scene-level sign test. Neither alone is the result.
+**Base rate assumed 0.5**, the worst case. An MDE computed there cannot be flattered by a lucky base rate.
+
+### The limitation episodes cannot buy
+
+Episodes inside a scene share a room, a source and a renderer, so they are not independent. The scene-level sign test needs:
+
+| scenes | must agree |
+|---|---|
+| 10 | 9 of 10 |
+| 20 | 15 of 20 |
+| 40 | 27 of 40 |
+| 5 | **impossible at any outcome** |
+
+At ten scenes a side the scene test needs a near-sweep. **No episode count repairs this**, and if `room_yield --split train` shows HM3D train episodes on the box the scene pool should be widened before the matrix runs. If it does not, the seen/unseen axis is bounded at ten scenes each and the paper states that rather than burying it.
