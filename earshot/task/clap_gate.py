@@ -419,9 +419,10 @@ def run_gate(cfg: GateConfig, progress: Optional[Callable[[str], None]] = None) 
 
     affinities = {entry.name: entry.room_affinity for entry in CANDIDATE_VOCABULARY}
     # The anchor map goes in because ANCHOR accuracy is the number the task rests on: the
-    # agent navigates to an object, so a class confused for a sibling of the same anchor
-    # costs it nothing. Reporting only class top-1 understates the system, sometimes by a
-    # lot -- every one of `snoring`'s misses in clapsmoke-3 landed on `breathing`.
+    # agent navigates to a ROOM, so a class confused for a sibling of that room costs it
+    # nothing. Reporting only class top-1 understates the system, sometimes by a lot --
+    # 465 of `pouring_water`'s 470 misses in clapgate-2 landed on `toilet_flush`, which is
+    # the same bathroom, so a class recall of 0.510 is not what the agent would have done.
     # ROOMS, not objects. The 2026-08-20 amendment to ADR-0018 made the room the anchor
     # taxonomy: `clapsmoke-3` scored the object grouping at 0.764 and the room grouping at
     # 0.779, which is not the reason -- the reason is that only the room level leaves the
@@ -454,8 +455,8 @@ def _format_report(report: Any, failed: Sequence[str]) -> str:
     )
     if report.anchor_top1_accuracy is not None:
         lines.append(
-            "ANCHOR top-1:     {:.3f}  <- THE TASK NUMBER: the agent navigates to an object, "
-            "so a sibling confusion at the same anchor costs it nothing".format(
+            "ANCHOR top-1:     {:.3f}  <- THE TASK NUMBER: the agent navigates to a ROOM, "
+            "so a sibling confusion inside that room costs it nothing".format(
                 report.anchor_top1_accuracy
             )
         )
@@ -511,9 +512,18 @@ def _format_report(report: Any, failed: Sequence[str]) -> str:
         )
     )
     lines.append("")
+    for item in sorted(report.rejection.per_absent, key=lambda entry: entry.rejection_rate):
+        lines.append(
+            "  {:18s} n={:5d}  rejected={:.3f}  mean decision score={:+.4f}".format(
+                item.name, item.n, item.rejection_rate, item.mean_decision_score
+            )
+        )
+    lines.append("")
     lines.append(
         "  EER near 0.500 means the two arms are on top of each other, which is what a "
-        "gate that discriminates nothing looks like."
+        "gate that discriminates nothing looks like. Read the per-class rejection above "
+        "before blaming the rule: a negative rejected far below the others is a HARD "
+        "NEGATIVE, and the aggregate then describes the negatives rather than the gate."
     )
     if failed:
         lines.append("")

@@ -225,6 +225,41 @@ class TestPrune(unittest.TestCase):
         self.assertIn("clock_alarm", kept)
 
 
+class TestPerAbsentBreakdown(unittest.TestCase):
+    """An aggregate EER cannot say WHICH negative the rule cannot reject.
+
+    `clapgate-2` needs that split: the EER moved 0.232 to 0.318 in the same commit that
+    promoted `rain`, `crickets` and `chirping_birds` into the absent set, and rain against
+    `water_drops` is a harder negative than a chainsaw by any reading. Without a per-class
+    rejection rate the two readings are indistinguishable, and one of them condemns the gate.
+    """
+
+    def _report(self):
+        rows = [confident(name, recording=index)
+                for index in range(4) for name in CLASSES]
+        # `chainsaw` looks nothing like a candidate, so its decision score sits far below the
+        # positives. `rain` scores ABOVE them, which is what a water sound does against a
+        # bathroom vocabulary and is why the aggregate cannot be read on its own.
+        rows += [absent_row("chainsaw", normal=0.9) for _ in range(6)]
+        rows += [absent_row("rain", normal=-0.4) for _ in range(6)]
+        return summarise(rows)
+
+    def test_an_easy_negative_is_rejected_more_often_than_a_hard_one(self):
+        by_name = {item.name: item for item in self._report().rejection.per_absent}
+        self.assertGreater(by_name["chainsaw"].rejection_rate, by_name["rain"].rejection_rate)
+
+    def test_every_absent_class_is_counted_exactly_once(self):
+        rejection = self._report().rejection
+        self.assertEqual(
+            sum(item.n for item in rejection.per_absent), rejection.n_absent
+        )
+
+    def test_the_breakdown_survives_the_json_round_trip(self):
+        payload = self._report().as_dict()
+        names = {item["name"] for item in payload["rejection"]["per_absent"]}
+        self.assertEqual(names, {"chainsaw", "rain"})
+
+
 class TestBatchedRender(unittest.TestCase):
     """The gate's fast path must be the slow path, exactly."""
 

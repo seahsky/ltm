@@ -259,9 +259,36 @@ def _format(
 
     lines.append("")
     lines.append(
-        "FORCED-FAILURE ARM: EER {:.3f}  (0.500 = the two arms are on top of each other)".format(
-            report.rejection.eer
+        "FORCED-FAILURE ARM: EER {:.3f} at threshold {:+.4f}  (0.500 = the two arms are on "
+        "top of each other)".format(
+            report.rejection.eer, report.rejection.threshold_at_eer
         )
+    )
+    lines.append(
+        "  in-vocab n={}  absent n={}  absent rejected {:.3f}  in-vocab falsely rejected "
+        "{:.3f}".format(
+            report.rejection.n_in_vocabulary,
+            report.rejection.n_absent,
+            report.rejection.rejection_rate,
+            report.rejection.false_rejection_rate,
+        )
+    )
+    # An aggregate EER cannot separate "the rule discriminates nothing" from "a few of the
+    # negatives are near-duplicates of an in-vocabulary class". clapgate-2 needs that split:
+    # the EER moved 0.232 to 0.318 in the same commit that promoted rain, crickets and
+    # chirping_birds into the absent set, and rain against water_drops is a harder negative
+    # than a chainsaw by any reading.
+    lines.append("")
+    lines.append("-- per absent class: WHICH negatives the rule cannot reject --")
+    for item in sorted(report.rejection.per_absent, key=lambda entry: entry.rejection_rate):
+        lines.append(
+            "  {:18s} n={:5d}  rejected={:.3f}  mean decision score={:+.4f}".format(
+                item.name, item.n, item.rejection_rate, item.mean_decision_score
+            )
+        )
+    lines.append("")
+    lines.append(
+        "  A negative rejected far below the others is a hard negative, not a broken gate."
     )
     lines.append("")
     return "\n".join(lines)

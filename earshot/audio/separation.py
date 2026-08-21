@@ -37,6 +37,7 @@ __all__ = [
     "GateRow",
     "ClassResult",
     "AnchorResult",
+    "AbsentResult",
     "BandResult",
     "RejectionResult",
     "SeparationReport",
@@ -149,12 +150,35 @@ class BandResult:
 
 
 @dataclass(frozen=True)
+class AbsentResult:
+    """One absent class's own rejection rate, so a bad EER can be attributed.
+
+    An aggregate EER cannot tell "the open-set rule discriminates nothing" from "three of the
+    eight negatives are near-duplicates of an in-vocabulary class". `clapgate-2` needs exactly
+    that distinction: the EER moved 0.232 to 0.318 in the same commit that promoted `rain`,
+    `crickets` and `chirping_birds` into the absent set, and rain against `water_drops` is a
+    harder negative than a chainsaw by any reading.
+
+    `mean_decision_score` is on the same scale as the threshold, so the two are comparable
+    by eye.
+    """
+
+    name: str
+    n: int
+    rejection_rate: float
+    mean_decision_score: float
+
+
+@dataclass(frozen=True)
 class RejectionResult:
     """The forced-failure arm: in-vocabulary accepted, absent rejected, and the EER between.
 
     `eer` is threshold-free and is the number to quote. `rejection_rate` and
     `false_rejection_rate` are that same separation read at one chosen threshold, and they are
     here because a rate is what a reader checks against "0 of 8".
+
+    `per_absent` breaks the rejection rate down by negative, because an aggregate that a few
+    hard negatives dominate is a statement about the negatives and not about the gate.
     """
 
     n_in_vocabulary: int
@@ -163,6 +187,7 @@ class RejectionResult:
     threshold_at_eer: float
     rejection_rate: float
     false_rejection_rate: float
+    per_absent: Tuple[AbsentResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -235,6 +260,15 @@ class SeparationReport:
                 "threshold_at_eer": self.rejection.threshold_at_eer,
                 "rejection_rate": self.rejection.rejection_rate,
                 "false_rejection_rate": self.rejection.false_rejection_rate,
+                "per_absent": [
+                    {
+                        "name": item.name,
+                        "n": item.n,
+                        "rejection_rate": item.rejection_rate,
+                        "mean_decision_score": item.mean_decision_score,
+                    }
+                    for item in self.rejection.per_absent
+                ],
             },
         }
 
@@ -468,6 +502,17 @@ def summarise(
     positives = [decision_score_of(row) for row in known]
     negatives = [decision_score_of(row) for row in absent]
     eer, threshold = equal_error_rate(positives, negatives)
+    per_absent: List[AbsentResult] = []
+    for name in sorted({row.true_class for row in absent}):
+        scores = [decision_score_of(row) for row in absent if row.true_class == name]
+        per_absent.append(
+            AbsentResult(
+                name=name,
+                n=len(scores),
+                rejection_rate=sum(1 for value in scores if value < threshold) / len(scores),
+                mean_decision_score=sum(scores) / len(scores),
+            )
+        )
     rejection = RejectionResult(
         n_in_vocabulary=len(known),
         n_absent=len(absent),
@@ -475,6 +520,7 @@ def summarise(
         threshold_at_eer=threshold,
         rejection_rate=sum(1 for value in negatives if value < threshold) / len(negatives),
         false_rejection_rate=sum(1 for value in positives if value < threshold) / len(positives),
+        per_absent=tuple(per_absent),
     )
 
     per_anchor: List[AnchorResult] = []
