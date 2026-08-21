@@ -51,6 +51,13 @@ CLAP_MODEL_ID = "laion/clap-htsat-unfused"
 # importing anything intra-package; the duplication is deliberate and both sites say so.
 CLAP_LOCAL_DIR = "models/clap-htsat-unfused"
 
+# What the staged directory says about ITSELF. `stage_clap_safetensors` already wrote this
+# file; `resolve_clap_source` did not read it, and that was the bug: any model_id resolved to
+# whatever was staged, so `env_check`'s forced-failure arm asked for a model that does not
+# exist, got the real checkpoint, and reported PASS. A directory that cannot name the model it
+# holds is not a checkpoint for that model.
+STAGED_MARKER = "PROVENANCE.json"
+
 # provenance: box -- `ClapFeatureExtractor.sampling_rate` on this checkpoint. The extractor
 # REFUSES any other rate; it does not resample. See `resample_ratio`.
 CLAP_SAMPLE_RATE = 48000
@@ -89,13 +96,36 @@ def resolve_clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOC
 
     Completeness is checked, not assumed: a directory holding a half-written conversion
     would otherwise be preferred over the Hub and fail later with a confusing error.
+
+    **IDENTITY is checked too, and the first version did not check it.** Returning the staged
+    directory for ANY `model_id` made `env_check`'s forced-failure arm vacuous: a probe asked
+    for `earshot/definitely-not-a-model` got the real local checkpoint and reported a finite
+    feature vector, so the arm that exists to prove the probe can fail reported PASS. The box
+    gate caught it, which is ADR-0014's rule working exactly as intended.
+
+    `STAGED_MARKER` records which model the directory was converted from. A directory without
+    it is a directory that cannot say what it holds, so it is not used. `stage_clap_safetensors`
+    writes it, and the marker is part of the completeness check, so an older staged copy is
+    simply re-staged on the next run rather than trusted on faith.
     """
+    import json
     import os
 
-    needed = ("model.safetensors", "config.json", "preprocessor_config.json", "tokenizer.json")
-    if all(os.path.isfile(os.path.join(local_dir, name)) for name in needed):
-        return local_dir
-    return model_id
+    needed = (
+        "model.safetensors",
+        "config.json",
+        "preprocessor_config.json",
+        "tokenizer.json",
+        STAGED_MARKER,
+    )
+    if not all(os.path.isfile(os.path.join(local_dir, name)) for name in needed):
+        return model_id
+    try:
+        with open(os.path.join(local_dir, STAGED_MARKER), encoding="utf-8") as handle:
+            staged = str(json.load(handle).get("model_id", ""))
+    except (ValueError, OSError):
+        return model_id
+    return local_dir if staged == model_id else model_id
 
 
 def stage_clap_safetensors(model_id: str = CLAP_MODEL_ID, out_dir: str = CLAP_LOCAL_DIR) -> str:
