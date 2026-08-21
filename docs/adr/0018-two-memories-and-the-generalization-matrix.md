@@ -256,7 +256,15 @@ Two disjoint recording sets, 0.013 apart on the headline and identical on the EE
 
 ### The bank of record
 
-**The intersection: 11 classes, bathroom 3 / bedroom 5 / living_room 3.** All three rooms splittable.
+**The intersection: 11 classes, bathroom 3 / bedroom 5 / living_room 3.** All three rooms splittable. Written out here rather than only in `runs/bank_of_record.json`, because `runs/` is gitignored and this is a decision:
+
+| room | classes |
+|---|---|
+| bathroom | `brushing_teeth`, `pouring_water`, `toilet_flush` |
+| bedroom | `breathing`, `clock_alarm`, `clock_tick`, `crying_baby`, `snoring` |
+| living_room | `clapping`, `keyboard_typing`, `laughing` |
+
+The weakest cell of the whole table is `brushing_teeth` at 0.747 on clips 8-15. Everything else clears 0.75 in both columns and most clear 0.95.
 
 Each class in it cleared the bar on two recording sets that share no audio, so every class carries a held-out validation rather than the aggregate carrying one. `water_drops` and `mouse_click` are **disputed** and are cut. A disputed class is not a marginal call to settle by judgement: its recall depends on which recordings it drew, which is the one confound the heard/not-heard column cannot survive.
 
