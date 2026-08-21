@@ -233,3 +233,41 @@ The twin hypothesis is **measured, both arms**, which is what ADR-0014 asks of a
 **The remaining sink is `toilet_flush`.** `chirping_birds` 0.506 and `sea_waves` 0.577 both name it, and `church_bells` names `clock_alarm` on 927 of 960. Those are the negatives to watch if the arm is ever tightened. They are not, on this evidence, a reason to change the vocabulary: all three are absent classes by construction and the task never asks the agent to hear them.
 
 **None of the pruned-bank numbers are unbiased.** The bank was chosen using those rows. `anchor_report --bank <other run>/pruned_vocabulary.json` scores a run against a bank it had no part in picking, and `--clip-start 8` gives ESC-50 recordings 8 to 15 against a default run's 0 to 7. Both are needed; either alone leaves the circularity in place one step along.
+
+---
+
+## Amendment, 2026-08-21: one run's prune is not the vocabulary, and the held-out run proves it
+
+**Status:** accepted, on `clapgate-2` (ESC-50 clips 0-7) and `clapheld-1` (clips 8-15). The bank of record is the INTERSECTION, and `earshot/tools/bank_intersect.py` computes it.
+
+### The aggregate is stable and the per-class numbers are not
+
+| | `clapgate-2` | `clapheld-1` |
+|---|---|---|
+| anchor top-1, candidate bank | 0.880 | 0.867 |
+| open-set EER, candidate bank | 0.318 | 0.318 |
+| distance curve | flat | flat |
+
+Two disjoint recording sets, 0.013 apart on the headline and identical on the EER to three decimals. The flat curve reproduced. `chainsaw` named `vacuum_cleaner` on 960 of 960 rows this time, against 568 before, so the twin is not a tendency.
+
+**Per class it falls apart.** `water_drops` measured 0.998 anchor recall on clips 0-7 and **0.449** on clips 8-15. `mouse_click` went 0.308 to 0.789. Bathroom's room accuracy moved 0.984 to 0.799 on the back of one class. The two runs' prunes agree on 11 of 12 classes and disagree on the twelfth in both directions.
+
+**Eight recordings do not pin a class.** That is a fact about ESC-50 rather than about CLAP, and it was invisible until there were two disjoint sets to compare.
+
+### The bank of record
+
+**The intersection: 11 classes, bathroom 3 / bedroom 5 / living_room 3.** All three rooms splittable.
+
+Each class in it cleared the bar on two recording sets that share no audio, so every class carries a held-out validation rather than the aggregate carrying one. `water_drops` and `mouse_click` are **disputed** and are cut. A disputed class is not a marginal call to settle by judgement: its recall depends on which recordings it drew, which is the one confound the heard/not-heard column cannot survive.
+
+`bank_intersect.py` reads `clip_start` and `n_per_class` from each run's `provenance.txt` and **raises on overlapping ranges**. A class clearing the bar on shared audio is one observation counted twice, and the whole argument for the intersection is that it is not.
+
+### What is still not measured
+
+**No unbiased number exists for the bank of record.** Both input runs helped derive it, so scoring either against it is selection on the outcome, one step removed. The evidence for the bank is the per-class side-by-side table, not a headline. A fresh headline needs `--clip-start 16`.
+
+**The recording-level axis is promoted.** This ADR filed "a different recording of a known class" as a cheap secondary axis on the grounds that it is a CLAP robustness question rather than a memory question. It is still that, but a 0.55 swing on `water_drops` means recording difficulty is large enough to confound the heard column if the two columns draw different clips. The heard/not-heard split must control it: the same recordings on both sides, differing only in whether a prior visit stored them.
+
+### Consequences
+
+**The three open parts of this ADR are unchanged and are now the whole remaining risk.** The prior pass is undesigned, power at roughly 90 episodes per cell against a measured 16.2% flip rate is unresolved, and the seen-scene row still has to be argued against SAVi's always-unseen protocol. CLAP is no longer on that list.

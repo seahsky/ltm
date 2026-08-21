@@ -112,6 +112,13 @@ Three independent cuts, each reported with its own count: too few rows, too litt
 The separation cut reads **anchor recall, not class recall** (ADR-0018, from `clapgate-1`): a class confused for a sibling of the same room still sends the agent to the right room, so cutting on class recall prices a cost the task never pays.
 _Avoid_: fixing the vocabulary before the gate has run; reporting the pruned set without the candidate set it was cut from; quoting a survivor count without saying which recall the cut read.
 
+**Bank of record**:
+The INTERSECTION of the pruned vocabularies of two or more gate runs staged on disjoint ESC-50 recordings (`earshot/tools/bank_intersect.py`).
+One run's prune is not stable: `water_drops` scored 0.998 anchor recall on clips 0-7 and 0.449 on clips 8-15, so `clapgate-2` and `clapheld-1` picked a different twelfth class each.
+A class in the intersection cleared the bar on audio the other run never saw, which is a held-out validation per class rather than per aggregate.
+A **disputed** class, kept by one run and cut by another, is cut: its recall depends on which recordings it drew, which is exactly what the heard/not-heard column must not be confounded by.
+_Avoid_: shipping a single run's prune; scoring an input run against the bank it helped derive and calling it unbiased; asserting disjointness instead of reading `clip_start` from both `provenance.txt` files.
+
 **Success when silent (SWS)**:
 The published fraction of episodes the agent completes by reaching the goal AFTER the sounding window closed (Chen et al., CVPR 2021, §5).
 Adopted verbatim so it is cross-quotable against SAVi and SAVN-CE, and because it is the one standard metric that isolates what the silent phase tests.
