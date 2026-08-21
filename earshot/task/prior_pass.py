@@ -265,11 +265,14 @@ def walk_tour(
     did work; hiding the abandonment would let a partial tour read as a seen scene. Neither
     is acceptable, so it is recorded and `TourRecord.complete` goes False.
     """
-    next_action = world.follower(goal_radius)  # type: ignore[attr-defined]
     legs: List[LegOutcome] = []
     observations: List[Mapping[str, object]] = []
 
     for stop in plan.stops:
+        # A FRESH follower per leg. habitat-sim's greedy follower caches a plan across
+        # calls, and handing it a new goal mid-plan is the kind of stale-state bug that
+        # reads as a navmesh failure. One per leg costs nothing at three legs a tour.
+        next_action = world.follower(goal_radius)  # type: ignore[attr-defined]
         steps = 0
         reached = False
         reason = "budget of {} steps exhausted".format(leg_budget)
