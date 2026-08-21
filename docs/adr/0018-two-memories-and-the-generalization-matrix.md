@@ -279,3 +279,41 @@ Each class in it cleared the bar on two recording sets that share no audio, so e
 ### Consequences
 
 **The three open parts of this ADR are unchanged and are now the whole remaining risk.** The prior pass is undesigned, power at roughly 90 episodes per cell against a measured 16.2% flip rate is unresolved, and the seen-scene row still has to be argued against SAVi's always-unseen protocol. CLAP is no longer on that list.
+
+---
+
+## Amendment, 2026-08-21: the prior pass is a scripted tour, and it does not double the cost
+
+**Status:** accepted. `earshot/task/prior_pass.py`, with the pure planner tested on a Mac. This closes the first of the three parts this ADR named as open.
+
+### The decision
+
+**A scripted navmesh tour of the scene's anchor rooms, source sounding, one stop per room.** Not an agent-driven prior episode, and not an oracle write.
+
+**Against agent-driven.** The matrix carries a measured 16.2% per-episode flip rate and roughly 90 episodes a cell. It cannot afford another variance source. An agent-driven pass gives each seen cell whatever coverage that episode happened to achieve, so a null becomes unreadable: memory failed, or the prior pass never entered the room. A fixed route makes coverage identical across scenes by construction.
+
+**Against an oracle write.** It would cost no episodes and be perfectly controlled, and CLAUDE.md forbids it: a capability is exercised, never proxied. The tour runs the real audio sensor and the real encoder, so what a store receives is what the agent could have perceived.
+
+**One stop per room, not per object.** The semantic store learns at the room level, so a second sofa adds nothing it can learn and does make route length a property of the house rather than of the design.
+
+### The cost claim above was wrong
+
+This ADR said the matrix "is a two-visit design and episode cost roughly doubles". It over-counts, and the correction matters for the power question that is still open.
+
+The episodic store is scene-keyed, so **one prior pass serves every test episode in that scene**. The semantic store is scene-agnostic and class-keyed, so **one pass hearing a class serves every test episode of that class anywhere**. Ten seen scenes and six heard classes is tens of prior episodes against a test set in the hundreds: single-digit percent overhead, not 100%.
+
+### What is guarded
+
+**An incomplete tour is not a seen scene.** `TourRecord.complete` is False unless every planned leg arrived, and an abandoned leg is recorded with its step count, its final geodesic gap and a reason. Silently accepting a partial tour would reintroduce exactly the coverage variance scripting exists to remove.
+
+**A leg has a step budget.** A follower oscillating between two navmesh polygons would otherwise hang a sweep, and the run would report nothing rather than reporting a bad tour. Over budget, the leg is abandoned and the tour continues, because throwing away the rooms that did work helps nobody.
+
+**An unroutable stop is a field, not a warning.** 23 of 365 episodes in the anomaly-response sweep had no navmesh route to their source and nothing counted them until a tool did. `TourPlan.unreachable` carries every dropped candidate with its reason.
+
+**An observation is only taken at a stop the agent REACHED.** An observation from a stop it never arrived at is fabricated audio, which is the failure that invalidated the whole `anommxv` arc.
+
+### What this does not do
+
+**Nothing here writes to a memory store.** The scene-agnostic semantic store is new code this ADR commits to and it does not exist. `walk_tour` takes an `observe` callback and returns a `TourRecord`; that is the seam a store will attach to. Building the tour first means it can be exercised and measured before anything depends on it.
+
+**The tour is an upper bound on episodic memory quality.** A complete route through every anchor room is the best prior map the design can give. That is the right first arm: if memory does not pay with a complete map, it will not pay with a partial one. An agent-driven pass becomes a realism ablation on top of a result rather than the thing the result rests on, and the paper must say so.
