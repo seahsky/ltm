@@ -18,8 +18,10 @@
 # live had it reject 0 of 8 — which is also what a gate that discriminates nothing does.
 #
 # BOTH ARMS, OR IT IS RED. The healthy arm is the candidate vocabulary. The forced-failure
-# arm is `vocabulary.ABSENT_CLASSES` — chainsaw, helicopter, airplane, church bells, sea
-# waves — staged as audio and never placed in the prompt bank. A run missing either arm
+# arm is `vocabulary.ABSENT_CLASSES` — eight sounds with no room in a home, staged as audio
+# and never placed in the prompt bank. clapgate-2 showed the arm is not uniform: `airplane`
+# rejects at 1.000 and `chainsaw` at 0.351, because a chainsaw sounds like the `vacuum_cleaner`
+# in the bank. Read the per-class rejection, not just the EER. A run missing either arm
 # raises in `separation.summarise` rather than reporting the half that ran, on CLAUDE.md's
 # rule that a criterion which could not be evaluated is never green.
 #
@@ -40,6 +42,9 @@
 # Flags: --tag T (required), --scenes "a b c" (default: every scene with a mesh),
 #        --n-sources N (default 2), --n-poses N (default 6), --n-recordings N (default 4),
 #        --n-bands N (default 4), --n-per-class N (default 8, staging only),
+#        --clip-start N (default 0; ESC-50 ships 40 per class, so --clip-start 8
+#          against the default 8 gives HELD-OUT recordings and the only prune-
+#          unbiased accuracy this design can produce without new audio),
 #        --min-recall R (default 0.50, the prune bar), --seed N, --split S,
 #        --indirect-ray-count N (unset keeps ACOUSTICS_PRESET's 500), --no-pull, --no-stage.
 
@@ -58,6 +63,7 @@ N_POSES=6
 N_RECORDINGS=4
 N_BANDS=4
 N_PER_CLASS=8
+CLIP_START=0
 MIN_RECALL=0.50
 SEED=20260820
 RAYS=""
@@ -76,6 +82,7 @@ while [ "$#" -gt 0 ]; do
     --n-recordings)       need_value $# "$1"; N_RECORDINGS="$2"; shift 2 ;;
     --n-bands)            need_value $# "$1"; N_BANDS="$2";      shift 2 ;;
     --n-per-class)        need_value $# "$1"; N_PER_CLASS="$2";  shift 2 ;;
+    --clip-start)         need_value $# "$1"; CLIP_START="$2";   shift 2 ;;
     --min-recall)         need_value $# "$1"; MIN_RECALL="$2";   shift 2 ;;
     --seed)               need_value $# "$1"; SEED="$2";         shift 2 ;;
     --indirect-ray-count) need_value $# "$1"; RAYS="$2";         shift 2 ;;
@@ -115,7 +122,7 @@ fi
   echo "split=$SPLIT"
   echo "scenes=${SCENES:-<every scene with a mesh>}"
   echo "n_sources=$N_SOURCES n_poses=$N_POSES n_recordings=$N_RECORDINGS n_bands=$N_BANDS"
-  echo "n_per_class=$N_PER_CLASS min_recall=$MIN_RECALL seed=$SEED"
+  echo "n_per_class=$N_PER_CLASS clip_start=$CLIP_START min_recall=$MIN_RECALL seed=$SEED"
   echo "indirect_ray_count=${RAYS:-<ACOUSTICS_PRESET default 500>}"
   echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$OUT_DIR/provenance.txt"
@@ -128,6 +135,7 @@ if [ "$STAGE" -eq 1 ]; then
   # on purpose: a gate run needs both arms, and staging them in separate steps is how one
   # of them ends up missing on the night it matters.
   python -m earshot.audio.clips --vocabulary --n-per-class "$N_PER_CLASS" \
+    --clip-start "$CLIP_START" \
     || { echo "FATAL: staging failed — the gate cannot run on a partial corpus"; exit 2; }
 else
   echo "  --no-stage: reusing whatever is already under data/sound_corpus and data/absent_corpus"

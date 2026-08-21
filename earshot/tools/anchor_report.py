@@ -32,7 +32,13 @@ import pathlib
 import sys
 from typing import Dict, List, Mapping, Optional, Sequence
 
-from earshot.audio.separation import GateRow, SeparationReport, prune, summarise
+from earshot.audio.separation import (
+    GateRow,
+    SeparationReport,
+    prune,
+    restrict_to,
+    summarise,
+)
 from earshot.audio.vocabulary import CANDIDATE_VOCABULARY, ROOM_OF_ANCHOR
 
 __all__ = ["load_rows", "main"]
@@ -279,17 +285,101 @@ def _format(
     # chirping_birds into the absent set, and rain against water_drops is a harder negative
     # than a chainsaw by any reading.
     lines.append("")
-    lines.append("-- per absent class: WHICH negatives the rule cannot reject --")
+    lines.append("-- per absent class: WHICH negatives the rule cannot reject, and WHY --")
     for item in sorted(report.rejection.per_absent, key=lambda entry: entry.rejection_rate):
+        match = (
+            "{} x{}".format(item.top_match[0], item.top_match[1]) if item.top_match else "-"
+        )
         lines.append(
-            "  {:18s} n={:5d}  rejected={:.3f}  mean decision score={:+.4f}".format(
-                item.name, item.n, item.rejection_rate, item.mean_decision_score
+            "  {:18s} n={:5d}  rejected={:.3f}  mean score={:+.4f}  looks like={}".format(
+                item.name, item.n, item.rejection_rate, item.mean_decision_score, match
             )
         )
     lines.append("")
     lines.append(
-        "  A negative rejected far below the others is a hard negative, not a broken gate."
+        "  A negative rejected far below the others is a hard negative, not a broken gate,"
     )
+    lines.append(
+        "  and `looks like` names the twin. A twin the prune REMOVES takes its negative's"
+    )
+    lines.append("  difficulty with it, which the pruned-bank pass below measures.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _format_pruned_bank(
+    rows: Sequence[GateRow],
+    kept: Sequence[str],
+    anchors: Mapping[str, str],
+    affinities: Mapping[str, str],
+    args: argparse.Namespace,
+) -> str:
+    """The same rows against the bank the system will actually ship.
+
+    Everything above scores against the 17-class CANDIDATE bank, which nothing will run. This
+    re-scores against the pruned bank, which is the configuration an episode would use. Two
+    things move for two different reasons: the closed-set task gets easier because the
+    confusable classes are gone, and the open-set arm may get easier because a negative's twin
+    left with them.
+    """
+    lines: List[str] = []
+    lines.append("")
+    lines.append("######################################################################")
+    lines.append("### THE PRUNED BANK: the {} classes the system would ship".format(len(kept)))
+    lines.append("######################################################################")
+
+    restricted = restrict_to(rows, kept)
+    report = summarise(
+        restricted,
+        affinities={name: affinities[name] for name in kept},
+        anchors={name: anchors[name] for name in kept},
+        n_bands=args.n_bands,
+    )
+    lines.append("")
+    lines.append(
+        "  class  top-1: {:.3f}   over {} rows, {} classes (chance {:.3f})".format(
+            report.top1_accuracy, report.n_rows, report.n_classes, report.chance_accuracy
+        )
+    )
+    lines.append(
+        "  ANCHOR top-1: {:.3f}   over {} rows, {} anchors (chance {:.3f})".format(
+            report.anchor_top1_accuracy,
+            report.n_rows,
+            len(report.per_anchor),
+            1.0 / max(1, len(report.per_anchor)),
+        )
+    )
+    lines.append("")
+    for item in sorted(report.per_anchor, key=lambda entry: -entry.accuracy):
+        lines.append(
+            "  {:12s} n={:5d}  classes={:2d}  accuracy={:.3f}".format(
+                item.anchor, item.n, item.n_classes, item.accuracy
+            )
+        )
+    lines.append("")
+    lines.append(
+        "  FORCED-FAILURE ARM: EER {:.3f} at threshold {:+.4f}  (absent rejected {:.3f})".format(
+            report.rejection.eer,
+            report.rejection.threshold_at_eer,
+            report.rejection.rejection_rate,
+        )
+    )
+    for item in sorted(report.rejection.per_absent, key=lambda entry: entry.rejection_rate):
+        match = (
+            "{} x{}".format(item.top_match[0], item.top_match[1]) if item.top_match else "-"
+        )
+        lines.append(
+            "  {:18s} rejected={:.3f}  mean score={:+.4f}  looks like={}".format(
+                item.name, item.rejection_rate, item.mean_decision_score, match
+            )
+        )
+
+    lines.append("")
+    lines.append("  READ THIS AS A DIRECTION, NOT AS THE GATE'S RESULT. The bank was chosen")
+    lines.append("  using these same rows, so a recall measured on them afterwards is")
+    lines.append("  selection on the outcome and is optimistically biased. The unbiased")
+    lines.append("  number needs held-out recordings: ESC-50 ships 40 per class and a run")
+    lines.append("  stages 8, so `--clip-start 8` on a second gate run is the honest measurement.")
     lines.append("")
     return "\n".join(lines)
 
@@ -353,6 +443,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if label == TAXONOMY_OF_RECORD:
             cuts = _cuts(report, args.min_recall)
+            print(_format_pruned_bank(rows, cuts["adr"], anchors, affinities, args))
             out = run_dir / "pruned_vocabulary.json"
             with out.open("w", encoding="utf-8") as sink:
                 json.dump(

@@ -172,3 +172,41 @@ Anchor recall is **inflated for a room whose classes confuse each other**, which
 **Stage 4 of `tools/clap_gate.sh` no longer implements its own prune.** It calls `earshot.tools.anchor_report`, so the live run and a re-score of it apply the same cut by construction. The duplicate had already diverged: the heredoc cut on class recall and skipped the affinity rule entirely, which is how `clapsmoke-3` kept three weak classes.
 
 **`clapgate-1` is a partial run and none of its numbers are the gate's result.** It was killed four minutes in when an SSH session dropped, with the class loop complete and roughly half the scenes covered. It is quoted here for the confusion STRUCTURE it exposed, which is a property of the vocabulary rather than of the scene sample. The bar of record needs the full run.
+
+---
+
+## Amendment, 2026-08-21: the vocabulary is twelve classes, and the open-set arm fails in a shape
+
+**Status:** accepted, on `clapgate-2`. The full gate: 20 val scenes, 16320 in-vocabulary rows, 7680 absent, 26m39s.
+
+### The numbers of record
+
+**Anchor top-1 0.880** over three rooms against 0.333 chance. Class top-1 0.751 against 0.059. Bathroom 0.984, bedroom 0.869, living_room 0.835, with essentially all of the error mass between bedroom and living_room.
+
+**The distance curve is flat.** 0.751 / 0.753 / 0.746 / 0.753 across 0.8 to 8.1 m, with only the margin decaying (+0.1028 to +0.0954). Class inference does not degrade with range on this renderer. `AudioConfig.audible_band_m` is therefore not a constraint on the sounding window, and the design does not need the agent close to the source to know what it is hearing. This was visible on the `clapsmoke-3` half-run and now holds on 16320 rows.
+
+### The vocabulary
+
+**Twelve classes: bathroom 4, bedroom 5, living_room 3.** All three rooms splittable. The anchor bar rescued exactly what the amendment above predicted it would: `pouring_water` 0.510 class against 1.000 anchor, `snoring` 0.573 against 0.840, `clock_tick` 0.711 against 0.964, `laughing` 0.787 against 1.000.
+
+Two classes were cut for separation. `mouse_click` sent 662 of 960 to `clock_tick`, which is a bedroom class, so the anchor bar could not rescue it (0.308). `drinking_sipping` reached 0.442 at the anchor and fails on affinity anyway.
+
+Three were cut for affinity despite passing recall: `coughing` at 1.000, `vacuum_cleaner` at 1.000, `door_wood_creaks` at 1.000 anchor. That is the affinity rule earning its place. All three are sounds a person makes in any room, and a semantic store cannot learn an association that is not there.
+
+**The gate agreed with the affinity table on the strong end and not on the weak end.** Mean anchor recall was 0.913 strong, 0.870 moderate, 0.860 weak. The weak classes are not harder to recognise; they are unusable for a different reason, which is exactly why the two cuts are counted separately.
+
+### The open-set arm, and a hypothesis this ADR got wrong
+
+EER 0.318, up from `clapsmoke-3`'s 0.232. The obvious suspect was the amendment above, which promoted `rain`, `crickets` and `chirping_birds` into `ABSENT_CLASSES`. **That is refuted.** Those three reject at 0.786, 0.815 and 0.480. The hardest negative is `chainsaw` at 0.351, which had been in the absent set from the start.
+
+`AbsentResult.top_match` was added to say why, and the failure has a shape: **each hard negative has a twin in the prompt bank.** A chainsaw is continuous motor noise and so is a `vacuum_cleaner`. That is a different problem from a rule that discriminates nothing, and it has a different fix.
+
+**It may already be fixed.** `vacuum_cleaner` is cut for affinity, so the shipped bank does not contain `chainsaw`'s twin. `separation.restrict_to` re-scores an existing run against the pruned bank without re-rendering, and `anchor_report` now prints that pass.
+
+**The restricted pass is a direction and not a result.** The bank was chosen using those same rows, so any recall re-measured on them is selection on the outcome. `--clip-start 8` stages ESC-50 recordings 8 to 15 against the 0 to 7 a default run uses, which is the only unbiased measurement available without new audio.
+
+### Consequences
+
+**ADR-0018's assumption that the open-set gate could hard-reject is withdrawn.** At EER 0.318 it cannot, and 0.232 was never good enough either. The inferred class must be usable without a reject decision, or the reject needs a lever this gate has not tested.
+
+**The `n_classes` in every number above is 17, the candidate bank.** The system ships 12. Numbers from the two banks are not comparable and must be labelled.

@@ -48,6 +48,7 @@ __all__ = [
     "summarise",
     "anchor_top1_of",
     "prune",
+    "restrict_to",
 ]
 
 
@@ -153,11 +154,18 @@ class BandResult:
 class AbsentResult:
     """One absent class's own rejection rate, so a bad EER can be attributed.
 
-    An aggregate EER cannot tell "the open-set rule discriminates nothing" from "three of the
-    eight negatives are near-duplicates of an in-vocabulary class". `clapgate-2` needs exactly
-    that distinction: the EER moved 0.232 to 0.318 in the same commit that promoted `rain`,
-    `crickets` and `chirping_birds` into the absent set, and rain against `water_drops` is a
-    harder negative than a chainsaw by any reading.
+    An aggregate EER cannot tell "the open-set rule discriminates nothing" from "some of the
+    negatives are near-duplicates of an in-vocabulary class". `clapgate-2` settled that
+    question and REFUTED the guess that came with it: the EER moved 0.232 to 0.318 in the same
+    commit that promoted `rain`, `crickets` and `chirping_birds` into the absent set, so those
+    three looked like the cause. They are not. `rain` rejects at 0.786 and `crickets` at
+    0.815, both near the top. The hardest negative is `chainsaw` at 0.351, which had been in
+    the absent set from the start.
+
+    `top_match` is why. It names the candidate class an absent clip most often looks like, and
+    a chainsaw looks like a `vacuum_cleaner`: continuous motor noise against continuous motor
+    noise. The open-set failures are TWINNED rather than diffuse, which is a different problem
+    with a different fix.
 
     `mean_decision_score` is on the same scale as the threshold, so the two are comparable
     by eye.
@@ -167,6 +175,7 @@ class AbsentResult:
     n: int
     rejection_rate: float
     mean_decision_score: float
+    top_match: Optional[Tuple[str, int]] = None
 
 
 @dataclass(frozen=True)
@@ -266,6 +275,7 @@ class SeparationReport:
                         "n": item.n,
                         "rejection_rate": item.rejection_rate,
                         "mean_decision_score": item.mean_decision_score,
+                        "top_match": list(item.top_match) if item.top_match else None,
                     }
                     for item in self.rejection.per_absent
                 ],
@@ -504,13 +514,19 @@ def summarise(
     eer, threshold = equal_error_rate(positives, negatives)
     per_absent: List[AbsentResult] = []
     for name in sorted({row.true_class for row in absent}):
-        scores = [decision_score_of(row) for row in absent if row.true_class == name]
+        subset = [row for row in absent if row.true_class == name]
+        scores = [decision_score_of(row) for row in subset]
+        matches: Dict[str, int] = {}
+        for row in subset:
+            winner = top1_of(row)
+            matches[winner] = matches.get(winner, 0) + 1
         per_absent.append(
             AbsentResult(
                 name=name,
                 n=len(scores),
                 rejection_rate=sum(1 for value in scores if value < threshold) / len(scores),
                 mean_decision_score=sum(scores) / len(scores),
+                top_match=max(sorted(matches.items()), key=lambda item: item[1]),
             )
         )
     rejection = RejectionResult(
@@ -564,6 +580,52 @@ def summarise(
         anchor_top1_accuracy=anchor_accuracy,
         per_anchor=tuple(per_anchor),
     )
+
+
+def restrict_to(rows: Iterable[GateRow], names: Sequence[str]) -> List[GateRow]:
+    """The same rows re-scored against a SMALLER prompt bank. Pure; nothing is re-rendered.
+
+    The gate scores every clip against the whole candidate bank, but the system ships the
+    PRUNED bank. Those are different measurements and the difference is not a detail: on
+    `clapgate-2` the cut removes `vacuum_cleaner`, which is what `chainsaw` was being mistaken
+    for, so the hardest negative loses its twin. An accuracy quoted from the candidate bank
+    describes a configuration nothing will run.
+
+    In-vocabulary rows whose class was cut are DROPPED, because a bank that does not carry a
+    class cannot be asked about it. Absent rows are all kept: the forced-failure arm is the
+    same question against a smaller bank.
+
+    **This is selection on the outcome.** The bank was chosen using these rows, so a recall
+    measured on them afterwards is optimistically biased. The unbiased number needs held-out
+    recordings, which ESC-50 has 40 of per class against the 8 a run stages. Report the
+    restricted numbers as a direction, never as the gate's result.
+    """
+    keep = list(dict.fromkeys(names))
+    if not keep:
+        raise ValueError("cannot restrict to an empty bank; there would be nothing to score")
+    kept_set = set(keep)
+    out: List[GateRow] = []
+    for row in rows:
+        missing = kept_set - set(row.scores)
+        if missing:
+            raise KeyError(
+                "row for {!r} was never scored against {}; a bank cannot be restricted to a "
+                "class the run did not measure".format(row.true_class, ", ".join(sorted(missing)))
+            )
+        if row.in_vocabulary and row.true_class not in kept_set:
+            continue
+        out.append(
+            GateRow(
+                true_class=row.true_class,
+                in_vocabulary=row.in_vocabulary,
+                distance_m=row.distance_m,
+                scene=row.scene,
+                recording_index=row.recording_index,
+                scores={name: float(row.scores[name]) for name in keep},
+                normal_cosine=row.normal_cosine,
+            )
+        )
+    return out
 
 
 def prune(

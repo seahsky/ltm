@@ -23,6 +23,7 @@ from earshot.audio.separation import (
     decision_score_of,
     equal_error_rate,
     prune,
+    restrict_to,
     summarise,
     top1_of,
     true_margin_of,
@@ -258,6 +259,49 @@ class TestPerAbsentBreakdown(unittest.TestCase):
         payload = self._report().as_dict()
         names = {item["name"] for item in payload["rejection"]["per_absent"]}
         self.assertEqual(names, {"chainsaw", "rain"})
+
+
+class TestRestrictToBank(unittest.TestCase):
+    """The gate scores the CANDIDATE bank; the system ships the PRUNED one.
+
+    On `clapgate-2` the cut removes `vacuum_cleaner`, which is exactly what `chainsaw` was
+    being mistaken for, so the hardest negative loses its twin. A number quoted from the
+    candidate bank describes a configuration nothing will run.
+    """
+
+    def _rows(self):
+        rows = [confident(name, recording=index)
+                for index in range(4) for name in CLASSES]
+        rows += [absent_row("chainsaw", normal=0.9)]
+        return rows
+
+    def test_a_dropped_class_takes_its_rows_with_it(self):
+        kept = restrict_to(self._rows(), ["toilet_flush", "clock_alarm"])
+        self.assertEqual({row.true_class for row in kept if row.in_vocabulary},
+                         {"toilet_flush", "clock_alarm"})
+
+    def test_absent_rows_all_survive_the_restriction(self):
+        """The forced-failure arm is the same question against a smaller bank, not a smaller arm."""
+        kept = restrict_to(self._rows(), ["toilet_flush"])
+        self.assertEqual(len([row for row in kept if not row.in_vocabulary]), 1)
+
+    def test_every_surviving_row_is_scored_against_exactly_the_new_bank(self):
+        kept = restrict_to(self._rows(), ["toilet_flush", "clock_alarm"])
+        for row in kept:
+            self.assertEqual(set(row.scores), {"toilet_flush", "clock_alarm"})
+
+    def test_restricting_to_a_class_the_run_never_scored_raises(self):
+        """Better than silently scoring a bank one class short of the one asked for."""
+        with self.assertRaises(KeyError):
+            restrict_to(self._rows(), ["toilet_flush", "never_measured"])
+
+    def test_an_empty_bank_raises(self):
+        with self.assertRaises(ValueError):
+            restrict_to(self._rows(), [])
+
+    def test_chance_rises_because_the_bank_is_smaller(self):
+        kept = restrict_to(self._rows(), ["toilet_flush", "clock_alarm"])
+        self.assertAlmostEqual(summarise(kept).chance_accuracy, 0.5, places=6)
 
 
 class TestBatchedRender(unittest.TestCase):

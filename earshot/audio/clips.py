@@ -438,17 +438,33 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--corpus-dir", default="data/sound_corpus")
     parser.add_argument("--absent-dir", default="data/absent_corpus")
     parser.add_argument("--n-per-class", type=int, default=8)
+    # HELD-OUT RECORDINGS. The prune picks its vocabulary using the staged clips, so any
+    # accuracy re-measured on those same clips is selection on the outcome. ESC-50 ships 40
+    # recordings per class and a run stages 8, so `--clip-start 8` gives a disjoint set and
+    # the only unbiased number this design can produce without new audio.
+    parser.add_argument("--clip-start", type=int, default=0)
     args = parser.parse_args(None if argv is None else list(argv))
 
     if args.vocabulary:
         from earshot.audio.vocabulary import ABSENT_CLASSES, CANDIDATE_VOCABULARY
 
         candidates = {entry.name: entry.esc50_category for entry in CANDIDATE_VOCABULARY}
-        print("candidate vocabulary ({} classes) -> {}".format(len(candidates), args.corpus_dir))
-        fetch_esc50_corpus(args.corpus_dir, candidates, None, args.n_per_class)
+        print(
+            "candidate vocabulary ({} classes, recordings {}..{}) -> {}".format(
+                len(candidates),
+                args.clip_start,
+                args.clip_start + args.n_per_class - 1,
+                args.corpus_dir,
+            )
+        )
+        fetch_esc50_corpus(
+            args.corpus_dir, candidates, None, args.n_per_class, start=args.clip_start
+        )
         absent = {name: name for name in ABSENT_CLASSES}
         print("absent classes ({}) -> {}".format(len(absent), args.absent_dir))
-        fetch_esc50_corpus(args.absent_dir, absent, None, args.n_per_class)
+        fetch_esc50_corpus(
+            args.absent_dir, absent, None, args.n_per_class, start=args.clip_start
+        )
         return 0
 
     fetch_esc50_clips(args.out_dir, CLASS_TO_ESC50, list(CLASS_TO_ESC50), args.index)
