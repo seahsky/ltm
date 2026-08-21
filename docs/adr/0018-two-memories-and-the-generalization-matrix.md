@@ -210,3 +210,26 @@ EER 0.318, up from `clapsmoke-3`'s 0.232. The obvious suspect was the amendment 
 **ADR-0018's assumption that the open-set gate could hard-reject is withdrawn.** At EER 0.318 it cannot, and 0.232 was never good enough either. The inferred class must be usable without a reject decision, or the reject needs a lever this gate has not tested.
 
 **The `n_classes` in every number above is 17, the candidate bank.** The system ships 12. Numbers from the two banks are not comparable and must be labelled.
+
+### Confirmed, same day, on the pruned-bank pass
+
+The twin hypothesis is **measured, both arms**, which is what ADR-0014 asks of a detector.
+
+| | candidate bank (17) | pruned bank (12) |
+|---|---|---|
+| class top-1 | 0.751 | 0.863 |
+| anchor top-1 | 0.880 | **0.959** |
+| open-set EER | 0.318 | **0.234** |
+| `chainsaw` rejected | 0.351 | 0.759 |
+
+`chainsaw` named `vacuum_cleaner` on 568 of its 960 rows. `vacuum_cleaner` is cut for AFFINITY, having no room of its own, and removing it took chainsaw from the worst negative to a middling one. `rain` went 0.786 to 0.926 and `helicopter`, `airplane` and `rain` had all been pointing at the same sink.
+
+**The affinity cut paid twice.** It was justified purely on the semantic store having nothing to learn from a sound that happens in every room. It also removed the class that was absorbing every broadband negative. The two cuts are independent by design, and this is the first evidence that the independence is doing real work rather than being a bookkeeping nicety.
+
+**The EER never regressed.** 0.234 on the shipped bank against `clapsmoke-3`'s 0.232. The 0.318 was an artefact of scoring a bank nothing will run, and the paragraph above that treated it as a degradation was reasoning from the wrong configuration.
+
+**The withdrawal of the hard-reject assumption stands anyway.** 0.234 is roughly one error in four at the balanced point. The inferred class must be usable without a reject decision. What survives is a *soft* signal: `airplane` and `helicopter` sit at mean decision scores of -0.042 and -0.041 against positives well above the +0.172 threshold, so the far tail is separable even though the middle is not.
+
+**The remaining sink is `toilet_flush`.** `chirping_birds` 0.506 and `sea_waves` 0.577 both name it, and `church_bells` names `clock_alarm` on 927 of 960. Those are the negatives to watch if the arm is ever tightened. They are not, on this evidence, a reason to change the vocabulary: all three are absent classes by construction and the task never asks the agent to hear them.
+
+**None of the pruned-bank numbers are unbiased.** The bank was chosen using those rows. `anchor_report --bank <other run>/pruned_vocabulary.json` scores a run against a bank it had no part in picking, and `--clip-start 8` gives ESC-50 recordings 8 to 15 against a default run's 0 to 7. Both are needed; either alone leaves the circularity in place one step along.

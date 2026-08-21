@@ -280,10 +280,11 @@ def _format(
         )
     )
     # An aggregate EER cannot separate "the rule discriminates nothing" from "a few of the
-    # negatives are near-duplicates of an in-vocabulary class". clapgate-2 needs that split:
-    # the EER moved 0.232 to 0.318 in the same commit that promoted rain, crickets and
-    # chirping_birds into the absent set, and rain against water_drops is a harder negative
-    # than a chainsaw by any reading.
+    # negatives are near-duplicates of an in-vocabulary class". clapgate-2 settled it, and
+    # against the guess: rain and crickets reject near the top, the worst negative is chainsaw
+    # at 0.351, and `looks like` names its twin as `vacuum_cleaner` on 568 of 960 rows.
+    # Removing that twin took chainsaw to 0.759 and the EER from 0.318 to 0.234 -- the
+    # before-and-after ADR-0014 asks a detector to ship.
     lines.append("")
     lines.append("-- per absent class: WHICH negatives the rule cannot reject, and WHY --")
     for item in sorted(report.rejection.per_absent, key=lambda entry: entry.rejection_rate):
@@ -313,19 +314,28 @@ def _format_pruned_bank(
     anchors: Mapping[str, str],
     affinities: Mapping[str, str],
     args: argparse.Namespace,
+    external: bool = False,
 ) -> str:
     """The same rows against the bank the system will actually ship.
 
     Everything above scores against the 17-class CANDIDATE bank, which nothing will run. This
     re-scores against the pruned bank, which is the configuration an episode would use. Two
-    things move for two different reasons: the closed-set task gets easier because the
-    confusable classes are gone, and the open-set arm may get easier because a negative's twin
-    left with them.
+    things move for two different reasons, and `clapgate-2` measured both: the closed-set task
+    got easier because the confusable classes are gone (anchor 0.880 to 0.959), and the
+    open-set arm got easier because a negative's twin left with them (EER 0.318 to 0.234,
+    `chainsaw` 0.351 to 0.759 once `vacuum_cleaner` was cut).
+
+    `external` says the bank came from ANOTHER run via `--bank`, which is the only
+    configuration in which these numbers are unbiased. Same-run means selection on the outcome.
     """
     lines: List[str] = []
     lines.append("")
     lines.append("######################################################################")
-    lines.append("### THE PRUNED BANK: the {} classes the system would ship".format(len(kept)))
+    lines.append(
+        "### {} BANK: the {} classes the system would ship".format(
+            "THE HELD-OUT" if external else "THE PRUNED", len(kept)
+        )
+    )
     lines.append("######################################################################")
 
     restricted = restrict_to(rows, kept)
@@ -375,13 +385,38 @@ def _format_pruned_bank(
         )
 
     lines.append("")
-    lines.append("  READ THIS AS A DIRECTION, NOT AS THE GATE'S RESULT. The bank was chosen")
-    lines.append("  using these same rows, so a recall measured on them afterwards is")
-    lines.append("  selection on the outcome and is optimistically biased. The unbiased")
-    lines.append("  number needs held-out recordings: ESC-50 ships 40 per class and a run")
-    lines.append("  stages 8, so `--clip-start 8` on a second gate run is the honest measurement.")
+    if external:
+        lines.append("  THIS IS THE UNBIASED NUMBER. The bank was fixed by another run and")
+        lines.append("  these rows had no say in choosing it, so nothing was selected on the")
+        lines.append("  outcome. Check the recordings really are disjoint: `clip_start` in the")
+        lines.append("  two provenance.txt files must not overlap by n_per_class.")
+    else:
+        lines.append("  READ THIS AS A DIRECTION, NOT AS THE GATE'S RESULT. The bank was chosen")
+        lines.append("  using these same rows, so a recall measured on them afterwards is")
+        lines.append("  selection on the outcome and is optimistically biased. The unbiased")
+        lines.append("  number needs held-out recordings AND a bank this run did not pick:")
+        lines.append("  `--clip-start 8` on a second gate run, then `--bank <this run's")
+        lines.append("  pruned_vocabulary.json>` when scoring it.")
     lines.append("")
     return "\n".join(lines)
+
+
+def load_bank(path: pathlib.Path) -> Sequence[str]:
+    """The `kept` list from another run's `pruned_vocabulary.json`.
+
+    This is what makes a held-out run unbiased. Re-pruning a fresh run re-selects on the fresh
+    data, which is the same circularity moved one step along. Fixing the bank from the run that
+    chose it, and scoring a DISJOINT set of recordings against it, is the only order in which
+    the number means what it says.
+    """
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    kept = payload.get("kept")
+    if not kept:
+        raise ValueError(
+            "{} carries no non-empty 'kept' list; it is not a pruned vocabulary".format(path)
+        )
+    return tuple(str(name) for name in kept)
 
 
 def _scenes_failed(run_dir: pathlib.Path) -> Sequence[str]:
@@ -407,6 +442,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--anchors", choices=("object", "room", "both"), default="room")
     parser.add_argument("--min-recall", type=float, default=0.50)
     parser.add_argument("--n-bands", type=int, default=4)
+    # A pruned_vocabulary.json from ANOTHER run. Without it the pruned-bank pass re-selects on
+    # the rows it is about to score, which is the circularity moved one step along rather than
+    # removed. With it, plus disjoint recordings via `--clip-start`, the number is unbiased.
+    parser.add_argument("--bank", default=None)
     args = parser.parse_args(None if argv is None else list(argv))
 
     run_dir = pathlib.Path(args.run_dir)
@@ -443,7 +482,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if label == TAXONOMY_OF_RECORD:
             cuts = _cuts(report, args.min_recall)
-            print(_format_pruned_bank(rows, cuts["adr"], anchors, affinities, args))
+            bank = cuts["adr"] if args.bank is None else load_bank(pathlib.Path(args.bank))
+            print(
+                _format_pruned_bank(
+                    rows, bank, anchors, affinities, args, external=args.bank is not None
+                )
+            )
+            if args.bank is not None:
+                # An externally-supplied bank is not this run's finding, so writing it here
+                # would put another run's decision under this run's tag.
+                written.append("(no pruned_vocabulary.json: --bank came from elsewhere)")
+                continue
             out = run_dir / "pruned_vocabulary.json"
             with out.open("w", encoding="utf-8") as sink:
                 json.dump(
