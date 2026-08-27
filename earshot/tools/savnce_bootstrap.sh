@@ -113,12 +113,51 @@ SITE_PACKAGES="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purel
 # ----------------------------------------------------------------------
 banner "2  system deps"
 # ----------------------------------------------------------------------
-APT_LINE="sudo apt-get install -y --no-install-recommends libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxft-dev libxext-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxcb-xinerama0 libx11-xcb-dev"
+# THE UNION OF TWO LISTS, AND THE UNION IS THE POINT.
+#
+# The first half is SAVN-CE's INSTALLATION.md verbatim. The second half is
+# `bootstrap_ss2.sh`'s line, which is MEASURED on this box against this exact
+# habitat-sim SHA. Shipping only SAVN-CE's list cost a full failed compile on
+# 2026-08-27: their list has no EGL development headers, and `--headless` builds
+# magnum's `platform/egl.cpp`, which dies on `EGL/egl.h: No such file or directory`.
+#
+# Their list is not wrong; it is written for a machine that already had them. Ours is
+# the one with evidence attached, so both go in.
+APT_SAVNCE="libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxft-dev libxext-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxcb-xinerama0 libx11-xcb-dev"
+APT_EARSHOT="libjpeg-dev libglm-dev libgl1 libglx-mesa0 libegl1-mesa-dev mesa-utils xorg-dev freeglut3-dev libglvnd-dev"
+APT_LINE="sudo apt-get install -y --no-install-recommends $APT_SAVNCE $APT_EARSHOT"
 if sudo -n true 2>/dev/null; then
-  eval "$APT_LINE" >/dev/null 2>&1 && ok "apt deps installed" || echo "  WARN  apt install returned nonzero; continuing, stage 8 is the real check"
+  eval "$APT_LINE" >/dev/null 2>&1 && ok "apt deps installed" || echo "  WARN  apt install returned nonzero; the header check below is the real verdict"
 else
-  echo "  NOTE  passwordless sudo unavailable. If stage 8 fails on a missing X library, run:"
+  echo "  NOTE  passwordless sudo unavailable. Run this yourself:"
   echo "        $APT_LINE"
+fi
+
+# CHECK THE HEADERS, DO NOT TRUST THE INSTALL. apt reported success on the run that
+# then failed to compile, because the package that mattered was not in the list at all.
+# A header check costs milliseconds; discovering the same fact through cmake costs the
+# whole build. Fail here, before stage 3.
+MISSING_HEADERS=()
+for header in EGL/egl.h GL/gl.h X11/Xlib.h; do
+  compgen -G "/usr/include/$header" >/dev/null 2>&1 || compgen -G "/usr/include/*/$header" >/dev/null 2>&1 || MISSING_HEADERS+=("$header")
+done
+if [ ${#MISSING_HEADERS[@]} -gt 0 ]; then
+  blocker "missing development headers: ${MISSING_HEADERS[*]} — a --headless habitat-sim build needs them. Run: $APT_LINE"
+  banner "STOPPED BEFORE THE BUILD"
+  echo "  Not starting a compile that is already known to fail."
+  printf '    - %s\n' "${BLOCKERS[@]}"
+  exit 1
+fi
+ok "development headers present (EGL, GL, X11)"
+
+# CMAKE CACHES NOTFOUND. A build that failed for a missing header records
+# `EGL_INCLUDE_DIR-NOTFOUND` and will keep failing after the header is installed,
+# because the cache is consulted before the filesystem. So a poisoned cache is wiped
+# rather than reused. Object files survive; only the configure step repeats.
+CMAKE_CACHE="$SIM_DIR/build/CMakeCache.txt"
+if [ -f "$CMAKE_CACHE" ] && grep -q "NOTFOUND" "$CMAKE_CACHE"; then
+  rm -f "$CMAKE_CACHE"
+  ok "wiped a poisoned CMake cache (it held NOTFOUND entries from a failed configure)"
 fi
 
 # ----------------------------------------------------------------------
@@ -217,7 +256,7 @@ else
   python -m habitat_sim.utils.datasets_download --uids mp3d_example_scene \
     --data-path "$SAVNCE_DATA_ROOT" >/dev/null 2>&1 \
     && ok "downloaded mp3d_example_scene" \
-    || echo "  WARN  example-scene download failed; stage 8 will say so"
+    || echo "  WARN  example-scene download failed (it runs through habitat_sim.utils, so an earlier RED explains it); stage 8 will say so"
 fi
 
 # ----------------------------------------------------------------------
