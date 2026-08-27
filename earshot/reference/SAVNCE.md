@@ -43,6 +43,23 @@ python -m earshot.tools.savnce_gate --run-dir runs/savnce-smoke1
 The licence step for MP3D is `earshot/tools/savnce_licence_wizard.sh`, and it is the one
 part of this no agent can do for you.
 
+## The build tree, and why it is not shared
+
+`savnce_bootstrap.sh` builds in `~/savnce-build/habitat-sim`, seeded by a local copy of
+ss2's checkout (no network; the submodules are already there).
+The first version shared ss2's tree to save a compile, and two box runs on 2026-08-27
+showed why that was wrong: a shared `build/` carries the CMake cache, and the CMake
+cache carries the **compiler**.
+Wiping it to pick up a newly installed EGL header silently swapped the pinned conda
+gcc-10 for Ubuntu 24.04's gcc-13, which cannot compile this 2022 tree at all
+(`'std::uint32_t' has not been declared`, the GCC-13 signature).
+
+`earshot/tools/habitat_sim_toolchain.sh` now holds the four things that make the build
+work: conda gcc-10, the CPATH include shim, the cmake path hints for GLVND, and
+**bounded parallelism** (unbounded `-j` has taken this box down before).
+`bootstrap_ss2.sh` still has its own inline copy and is deliberately unchanged until the
+savnce build proves the shared file green.
+
 ## Two footguns already found, before the first box trip
 
 1. **Their docs and their config disagree about the dataset directory.**

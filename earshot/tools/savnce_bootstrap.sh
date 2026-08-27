@@ -13,15 +13,21 @@
 #
 # --- what this deliberately does NOT do -----------------------------------------
 #
-#  1. IT DOES NOT BUILD habitat-sim FROM SCRATCH. SAVN-CE's INSTALLATION.md asks for
-#     branch `RLRAudioPropagationUpdate`, which is the branch `bootstrap_ss2.sh` already
-#     builds at 4f61e321. We install from that existing checkout into a second env
-#     instead of spending a second multi-hour compile on a 4-core box.
+#  1. IT BUILDS IN ITS OWN TREE, and the first version of this script did not.
+#     SAVN-CE's INSTALLATION.md asks for branch `RLRAudioPropagationUpdate`, which is
+#     the branch `bootstrap_ss2.sh` already builds at 4f61e321, so the original plan was
+#     to install from that existing checkout and skip a second compile.
 #
-#     THE COST OF THAT CHOICE, STATED: habitat-sim's setup.py builds into `build/`
-#     inside the source tree, and reconfiguring it for a second interpreter invalidates
-#     that cache. A later `bootstrap_ss2.sh` run will recompile. That is recoverable;
-#     hours of compile are not free.
+#     THAT WAS WRONG, and two failed box runs on 2026-08-27 are why. A shared `build/`
+#     carries the CMake cache, and the CMake cache carries THE COMPILER. Wiping it to
+#     pick up a newly installed header silently swapped the pinned conda gcc-10 for
+#     Ubuntu 24.04's system gcc-13, which fails on this tree. The saving was one
+#     compile; the cost was a build directory neither environment could use, in the
+#     tree every earshot result depends on.
+#
+#     So: `$SAVNCE_BUILD_ROOT` holds a SEEDED COPY of ss2's checkout (a local file copy,
+#     no network, submodules already in place), and `ss2`'s tree is read exactly twice —
+#     once for the SHA pin, once to assert we never wrote to it.
 #
 #  2. IT DOES NOT PATCH EARSHOT'S SOURCE TREE. SAVN-CE needs a one-line change to
 #     `simulator.py` for multiple audio sensors. Their INSTALLATION.md sanctions applying
@@ -45,7 +51,9 @@ ENV_NAME="${SAVNCE_ENV_NAME:-savnce}"
 PY_VER="3.9"
 CMAKE_VER="3.14.0"
 SS2_BUILD_ROOT="${SS2_BUILD_ROOT:-${HOME}/ss2-build}"
-SIM_DIR="${SS2_BUILD_ROOT}/habitat-sim"
+SS2_SIM_DIR="${SS2_BUILD_ROOT}/habitat-sim"     # read-only here: the SHA pin and the seed
+SAVNCE_BUILD_ROOT="${SAVNCE_BUILD_ROOT:-${HOME}/savnce-build}"
+SIM_DIR="${SAVNCE_BUILD_ROOT}/habitat-sim"      # ours, and the only one we compile in
 SIM_SHA="${SS2_SIM_SHA:-4f61e321}"
 SAVNCE_DIR="$REPO_ROOT/earshot/reference/savnce"
 SAVNCE_DATA_ROOT="${SAVNCE_DATA_ROOT:-${HOME}/savnce-data}"
@@ -80,14 +88,14 @@ fi
 [ -f "$CONSTRAINTS" ] || blocker "$CONSTRAINTS missing — the pin IS the recipe"
 [ -f "$SAVNCE_DIR/setup.py" ] || blocker "submodule empty — run: git submodule update --init earshot/reference/savnce"
 
-if [ -d "$SIM_DIR/.git" ]; then
-  have_sha="$(git -C "$SIM_DIR" rev-parse --short HEAD 2>/dev/null)"
+if [ -d "$SS2_SIM_DIR/.git" ]; then
+  have_sha="$(git -C "$SS2_SIM_DIR" rev-parse --short HEAD 2>/dev/null)"
   case "$SIM_SHA" in
-    "$have_sha"*) ok "habitat-sim source at $have_sha (pinned $SIM_SHA)" ;;
-    *) blocker "habitat-sim source at $have_sha, pinned $SIM_SHA — this env must not diverge from ss2's tree" ;;
+    "$have_sha"*) ok "seed tree at $have_sha (pinned $SIM_SHA)" ;;
+    *) blocker "ss2's habitat-sim is at $have_sha, pinned $SIM_SHA — this env must not diverge from it" ;;
   esac
 else
-  blocker "no habitat-sim checkout at $SIM_DIR — run 'nrun bash earshot/tools/bootstrap_ss2.sh' first"
+  blocker "no habitat-sim checkout at $SS2_SIM_DIR — run 'nrun bash earshot/tools/bootstrap_ss2.sh' first"
 fi
 
 if [ ${#BLOCKERS[@]} -gt 0 ]; then
@@ -154,14 +162,18 @@ ok "development headers present (EGL, GL, X11)"
 # `EGL_INCLUDE_DIR-NOTFOUND` and will keep failing after the header is installed,
 # because the cache is consulted before the filesystem. So a poisoned cache is wiped
 # rather than reused. Object files survive; only the configure step repeats.
-CMAKE_CACHE="$SIM_DIR/build/CMakeCache.txt"
-if [ -f "$CMAKE_CACHE" ] && grep -q "NOTFOUND" "$CMAKE_CACHE"; then
-  rm -f "$CMAKE_CACHE"
-  ok "wiped a poisoned CMake cache (it held NOTFOUND entries from a failed configure)"
+# NOTE: this deliberately does NOT reach into ss2's build directory. Wiping a CMake
+# cache also discards the compiler it recorded, which is exactly how the 2026-08-27 run
+# swapped conda gcc-10 for system gcc-13. Our own tree is handled in stage 3, where the
+# compiler is known.
+if [ -f "$SS2_SIM_DIR/build/CMakeCache.txt" ] && grep -q "NOTFOUND" "$SS2_SIM_DIR/build/CMakeCache.txt" 2>/dev/null; then
+  echo "  NOTE  ss2's build cache holds NOTFOUND entries from an earlier failed configure."
+  echo "        Not touched by this script. If ss2 ever needs rebuilding, wipe it first:"
+  echo "            rm -rf $SS2_SIM_DIR/build"
 fi
 
 # ----------------------------------------------------------------------
-banner "3  habitat-sim into this env (from ss2's checkout, no second clone)"
+banner "3  habitat-sim into this env (our own tree, ss2's is read-only)"
 # ----------------------------------------------------------------------
 audio_probe() {
   python - <<'PY' 2>&1
@@ -179,8 +191,48 @@ PY
 if audio_probe | grep -q AUDIO_OK; then
   ok "audio-capable habitat_sim already importable in '$ENV_NAME'"
 else
-  echo "  building/installing habitat-sim from $SIM_DIR (reuses its cmake cache)"
-  ( cd "$SIM_DIR" && python setup.py install --headless --audio ) || blocker "habitat-sim install failed"
+  # Seed our tree from ss2's. A local copy rather than a clone: habitat-sim's submodules
+  # are already checked out there, and `git clone` would re-fetch gigabytes of them.
+  if [ ! -d "$SIM_DIR/.git" ]; then
+    mkdir -p "$SAVNCE_BUILD_ROOT"
+    echo "  seeding $SIM_DIR from $SS2_SIM_DIR (local copy, no network)"
+    cp -a "$SS2_SIM_DIR" "$SIM_DIR" || blocker "could not seed the build tree"
+    # The copied build/ was configured for ss2's env and its compiler. Ours is a
+    # different interpreter and, after the toolchain setup below, possibly a different
+    # gcc. Configuring on top of that cache is the mistake this whole rewrite is about.
+    rm -rf "$SIM_DIR/build"
+    ok "seeded, and the inherited build/ was removed rather than reused"
+  fi
+
+  # shellcheck source=earshot/tools/habitat_sim_toolchain.sh
+  source "$REPO_ROOT/earshot/tools/habitat_sim_toolchain.sh"
+  habitat_sim_toolchain_setup "$SAVNCE_BUILD_ROOT" "$REPO_ROOT"
+
+  # A failed configure leaves CMakeCache.txt WITHOUT compile_commands.json; setup.py's
+  # arg-cache then SKIPS re-running cmake and dies on the missing file. Carried from
+  # bootstrap_ss2.sh, where it cost a box trip to find.
+  if [ -d "$SIM_DIR/build" ] && [ ! -f "$SIM_DIR/build/compile_commands.json" ]; then
+    echo "  stale half-configured build dir — wiping $SIM_DIR/build"
+    rm -rf "$SIM_DIR/build"
+  fi
+  # And if the cache was configured with a different compiler than the one we are about
+  # to use, cmake will either error or silently keep the old one. Neither is acceptable.
+  if [ -f "$SIM_DIR/build/CMakeCache.txt" ] && [ -n "${CXX:-}" ]; then
+    if ! grep -qF "CMAKE_CXX_COMPILER:.*=$CXX" "$SIM_DIR/build/CMakeCache.txt" 2>/dev/null; then
+      echo "  build dir was configured with a different compiler — wiping $SIM_DIR/build"
+      rm -rf "$SIM_DIR/build"
+    fi
+  fi
+
+  echo "  building habitat-sim in $SIM_DIR — this is the long one"
+  mkdir -p "$REPO_ROOT/runs/savnce-bootstrap"
+  ( cd "$SIM_DIR" && python setup.py install --headless --audio ) 2>&1 \
+    | tee "$REPO_ROOT/runs/savnce-bootstrap/sim-build.log" | tail -25
+  if [ "${PIPESTATUS[0]}" != "0" ]; then
+    blocker "habitat-sim install failed — error excerpt below, full log in runs/savnce-bootstrap/sim-build.log"
+    grep -n -iE "cmake error|error:|Could NOT|No such file|undefined reference" \
+      -B2 -A8 "$REPO_ROOT/runs/savnce-bootstrap/sim-build.log" | head -60 || true
+  fi
   audio_probe | grep -q AUDIO_OK || blocker "habitat_sim still not audio-capable after install"
 fi
 
@@ -188,7 +240,7 @@ fi
 banner "4  the multi-audio-sensor patch — installed copy only"
 # ----------------------------------------------------------------------
 INSTALLED_SIM="$SITE_PACKAGES/habitat_sim/simulator.py"
-SOURCE_SIM="$SIM_DIR/src_python/habitat_sim/simulator.py"
+SOURCE_SIM="$SS2_SIM_DIR/src_python/habitat_sim/simulator.py"
 if [ -f "$INSTALLED_SIM" ]; then
   if grep -qF "$PATCH_TO" "$INSTALLED_SIM"; then
     ok "patch already present in $INSTALLED_SIM"
@@ -209,9 +261,9 @@ fi
 # The other half of the assertion. ss2 must not inherit this.
 if [ -f "$SOURCE_SIM" ]; then
   if grep -qF "$PATCH_TO" "$SOURCE_SIM"; then
-    blocker "SHARED SOURCE TREE IS PATCHED at $SOURCE_SIM — ss2 would silently inherit it; revert with: git -C $SIM_DIR checkout -- src_python/habitat_sim/simulator.py"
+    blocker "SS2'S SOURCE TREE IS PATCHED at $SOURCE_SIM — ss2 would silently inherit it; revert with: git -C $SS2_SIM_DIR checkout -- src_python/habitat_sim/simulator.py"
   else
-    ok "shared source tree is unpatched (ss2 unaffected)"
+    ok "ss2's source tree is unpatched and unbuilt-in (ss2 unaffected)"
   fi
 fi
 
