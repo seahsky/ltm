@@ -2,6 +2,11 @@
 
 **Status:** accepted (2026-08-01, grilling session over ticket 08 of the `ss2-clean-room` map, with ticket 03's material research in hand).
 
+**Narrowed 2026-08-27 by [ADR-0015](0015-mp3d-on-the-box-for-a-reproduced-reference.md).**
+MP3D now exists on the box, staged for one purpose: re-measuring SAVN-CE's published result on SAVN-CE's own benchmark.
+Everything below is unchanged for every earshot number.
+The clean room's scene dataset is still HM3D, and no earshot metric is computed on MP3D.
+
 The clean-room rebuild keeps **HM3D** as its scene dataset, runs the audio simulation with **acoustic materials off**, and rules **MP3D out of scope** for this effort — no fallback, no split, no audio-realism demonstration figure.
 The single property MP3D would buy is material-dependent room character, and nothing in the experiment consumes it.
 
