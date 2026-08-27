@@ -45,7 +45,11 @@ NON_AGENT_ROOTS: Dict[str, str] = {
     # `LTM_*` from the environment throughout so the env-flag rule fires on it, and its
     # modules import faiss, sentence-transformers and each other so the layering rule
     # fails on it. Excluded from import, test and lint by three separate mechanisms.
-    "reference": "vendored, inert, deliberately broken — see reference/memory/README.md",
+    "reference": (
+        "vendored and unreachable from the package. Two tenants now: memory/ is inert and "
+        "deliberately broken (reference/memory/README.md), and savnce/ is a pinned "
+        "submodule that only its own conda env runs (reference/SAVNCE.md, ADR-0015)."
+    ),
     # Operator-facing and not part of the agent (ADR-0013). `notify_email.py` reads
     # RESEND_API_KEY and friends: credentials, not agent configuration, and the flag
     # surface ADR-0008 removed was about behaviour.

@@ -337,6 +337,82 @@ EOF
 
 # --- main ------------------------------------------------------------------
 
+_earshot_savnce_menu() {
+  # The SAVN-CE reproduced reference (ADR-0015). Everything here runs as PLAIN BASH:
+  # each script activates the `savnce` env itself, and that env is deliberately NOT ss2
+  # — different torch, different numpy, its own habitat-sim install. Activating ss2
+  # around these would be the wrong python for every one of them.
+  local choice
+  while true; do
+    cat <<'EOF'
+
+  SAVN-CE reproduced reference — an EXTERNAL method on ITS OWN benchmark.
+  Never paired with an earshot number. See CONTEXT.md, "reproduced reference".
+  ---------------------------------------------------------------
+  1) licence + data wizard    MP3D Terms of Use, sounds, Drive, checksums
+  2) savnce_bootstrap.sh      build the savnce env — FOREGROUND, long
+  3) smoke eval               20 episodes; measures throughput, then decide
+  4) forced-failure arms      prove the gate goes red when it should
+  5) full arm                 1000 episodes on split=test — HOURS, use nrun
+  b) back
+EOF
+    read -r -p "  > " choice
+    case "$choice" in
+      1)
+        (cd "$EARSHOT_ROOT" && bash earshot/tools/savnce_licence_wizard.sh)
+        _earshot_pause
+        ;;
+      2)
+        echo "  foreground and long. For an unattended build:"
+        echo "      source earshot/tools/notify/notify-run.sh && nrun bash earshot/tools/savnce_bootstrap.sh"
+        read -r -p "  start it here? [y/N] " choice
+        case "$choice" in
+          y|Y)
+            (cd "$EARSHOT_ROOT" && bash earshot/tools/savnce_bootstrap.sh)
+            echo "  [earshot] savnce_bootstrap exit $?"
+            ;;
+          *) echo "  not started." ;;
+        esac
+        _earshot_pause
+        ;;
+      3)
+        read -r -p "  fresh tag: " choice
+        if [ -n "$choice" ]; then
+          (cd "$EARSHOT_ROOT" && bash earshot/tools/savnce_eval.sh --tag "$choice" --episodes 20)
+          echo "  [earshot] savnce_eval exit $?"
+        else
+          echo "  no tag, nothing run."
+        fi
+        _earshot_pause
+        ;;
+      4)
+        # BOTH arms, because one of them passing proves nothing (ADR-0014). Red is the
+        # pass here, and the driver inverts the exit code to say so.
+        read -r -p "  fresh tag prefix: " choice
+        if [ -n "$choice" ]; then
+          (cd "$EARSHOT_ROOT" && bash earshot/tools/savnce_eval.sh --tag "${choice}-wrongckpt" --episodes 2 --forced-failure wrong-ckpt)
+          echo "  [earshot] wrong-ckpt arm exit $?"
+          (cd "$EARSHOT_ROOT" && bash earshot/tools/savnce_eval.sh --tag "${choice}-noeps" --episodes 2 --forced-failure empty-episodes)
+          echo "  [earshot] empty-episodes arm exit $?"
+        else
+          echo "  no tag, nothing run."
+        fi
+        _earshot_pause
+        ;;
+      5)
+        echo "  This is the reported arm: split=test, 1000 episodes, pre-registered band"
+        echo "  37.7 +/- 2.0 SR points (ADR-0015). Run it under nrun, twice, different seeds:"
+        echo "      nrun bash earshot/tools/savnce_eval.sh --tag test1 --episodes 1000 --seed 0"
+        echo "      nrun bash earshot/tools/savnce_eval.sh --tag test2 --episodes 1000 --seed 1"
+        echo "  A single run of either arm is not reportable at this effect size."
+        _earshot_pause
+        ;;
+      b|B) return 0 ;;
+      *) echo "  ? $choice" ;;
+    esac
+  done
+}
+
 _earshot_main() {
   local choice
   _earshot_refuse || return $?
@@ -353,12 +429,14 @@ _earshot_main() {
   ===========================
   1) env setup
   2) nrun tasks — check / tail / kill
+  3) SAVN-CE baseline — the reproduced reference (ADR-0015)
   q) quit
 EOF
     read -r -p "  > " choice
     case "$choice" in
       1) _earshot_env_menu ;;
       2) _earshot_tasks_menu ;;
+      3) _earshot_savnce_menu ;;
       q|Q) return 0 ;;
       *) echo "  ? $choice" ;;
     esac

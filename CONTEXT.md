@@ -100,3 +100,24 @@ _Avoid_: reading `n_audio_onset_fired` as evidence the anomaly was heard (it cou
 
 **Floor-constrained source**:
 The anomaly source sits on the primary goal's floor (`|Δy| < ~1.0 m`). Off-floor sources produce fabricated audio, because the RIR grid is rendered on one floor and `nearest` resolves by xz (ADR-0003).
+
+### External comparisons
+
+Three things in this project have all been called "baseline" at some point, and they are not interchangeable.
+The distinction is *who ran it and against what*.
+
+**Baseline arm**:
+An internal setting of *this* agent, paired with another internal setting episode by episode so a difference means something: S1 / S1+ / S2 / S3 / S3+.
+The only kind of baseline a delta may be computed against.
+_Avoid_: "baseline" unqualified — say which of the three terms in this section you mean.
+
+**Cross-quoted number**:
+A figure published by another paper, cited and never run by us.
+VLFM's 0.304 and VLingNav's 0.429 on HM3D ObjectNav are the only ones, and they are quotable only where the measurement ring matches (ADR-0005).
+_Avoid_: calling it a baseline (that word says nothing about who ran it); quoting it against a relaxed ring.
+
+**Reproduced reference**:
+An external method's published result, re-measured *by us* on **that method's own benchmark, data, sensors and metrics**.
+SAVN-CE / MAGNet is the first (ADR-0015): SR 37.7 / SPL 32.9 in clean environments, MP3D, from their released checkpoint, re-run on our box.
+It measures the field, not this repo.
+_Avoid_: treating it as a baseline arm; subtracting it from anything; above all, putting it in a table beside Find-SR or Anomaly-response SR as though the two were paired — different dataset, different task, different episode definition, no shared episodes.

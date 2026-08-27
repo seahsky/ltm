@@ -1,0 +1,4 @@
+[submodule "earshot/reference/savnce"]
+	path = earshot/reference/savnce
+	url = https://github.com/yichenzeng24/SAVN-CE.git
+	branch = main

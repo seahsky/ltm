@@ -1,0 +1,39 @@
+# The `savnce` environment's PyPI pin (ADR-0015). Passed as `-c` to every pip install in
+# savnce_bootstrap.sh.
+#
+# THIS FILE DELIBERATELY DISAGREES WITH ss2-constraints.txt, and the disagreement is the
+# reason it exists as a separate file rather than a widening of that one:
+#
+#     ss2      numpy==1.23.5   torch==2.2.2+cu118
+#     savnce   numpy==1.26.0   torch==2.7.1+cu126
+#
+# Both are resolved against the SAME habitat-sim source tree (RLRAudioPropagationUpdate
+# @ 4f61e321). Both cannot be right about that tree's numpy floor. `bootstrap_ss2.sh`
+# records the tree as depending on `numpy<1.24`; SAVN-CE's requirements.txt pins 1.26.0
+# and their published results were produced against it.
+#
+# We take THEIRS on their side of the fence, unchanged, because a reproduced reference
+# that silently re-pins the original project's dependencies is not a reproduction. If
+# 1.26.0 turns out to break the 2022-era tree, stage 8's scene render is where it dies,
+# loudly, and that measurement is worth more than the guess it replaces.
+#
+# The rest of the pin is `earshot/reference/savnce/requirements.txt` verbatim: it is
+# already fully `==`-pinned, so it needs no help. Only the versions their INSTALLATION.md
+# states in prose rather than in a file are restated here, because prose is not a pin.
+
+# --- from INSTALLATION.md's torch line; sm_70 verified present in the cu126 build ---
+# pytorch v2.7.1 .ci/manywheel/build_cuda.sh sets a base arch list of
+# "5.0;6.0;7.0;7.5;8.0;8.6" and the 12.6 case only appends 9.0. Only the 12.8 case drops
+# sm_50-sm_70. So the V100 is a first-class target here, which was not obvious and was
+# checked rather than assumed.
+torch==2.7.1
+torchvision==0.22.1
+torchaudio==2.7.1
+
+# --- restated from their requirements.txt because the install ORDER matters ---
+# Their documented order installs habitat-sim first and numpy 1.26.0 afterwards, so the
+# extension is compiled against whatever numpy the build pulls and then run against
+# 1.26.0. That direction is the safe one (numpy 1.x is forward-compatible at the C ABI:
+# build old, run new). Reversing the order is not equivalent.
+numpy==1.26.0
+numpy-quaternion==2022.4.3
