@@ -222,17 +222,27 @@ class TestSwsComesFromTheTallyAndIsNeverRederived(unittest.TestCase):
         self.assertIn("SWS REFUSED", "\n".join(format_arm(reading)))
 
     def test_the_continuous_arm_has_no_offset_step_and_reports_not_run(self):
-        """Not a zero. A continuous episode has no silent phase to succeed in."""
+        """Not a zero. A continuous episode has no silent phase to succeed in.
+
+        `heard_within_window` is written by the runner only under an offset step, so on
+        this arm it is absent rather than false. `pilot-1`'s first readable output put
+        "heard while still sounding: 0 of 40" for `cont-alarm` beside "40 of 40" for the
+        windowed arms, which reads as a stark difference between the arms and is a
+        metric that does not exist on one of them."""
         arm = pathlib.Path(self.root) / "cont-alarm"
         write_scene(arm, "sceneA", [
             episode(n_steps=20, reached_step=15, win=window(None)),
         ])
 
         reading = read_arm(str(arm), arm="cont-alarm")
+        lines = "\n".join(format_arm(reading))
 
         self.assertIsNone(reading.sws)
         self.assertIsNone(reading.sws_refused)
-        self.assertIn("SWS NOT_RUN", "\n".join(format_arm(reading)))
+        self.assertIn("SWS NOT_RUN", lines)
+        self.assertEqual(reading.n_windowed, 0)
+        self.assertIn("heard while still sounding: n/a", lines)
+        self.assertNotIn("0 of 1", lines, "absent is not zero")
 
 
 class TestTheThreeNumbersThePilotRunsFor(unittest.TestCase):
@@ -274,11 +284,13 @@ class TestTheThreeNumbersThePilotRunsFor(unittest.TestCase):
     def test_the_onset_delay_and_the_cue_tail_are_read_off_the_metrics(self):
         arm = pathlib.Path(self.root) / "win-alarm"
         write_scene(arm, "sceneA", [
-            episode(metrics={"onset_delay_steps": 2.0, "sounding_cue_tail_steps": 1.0,
+            episode(win=window(10),
+                    metrics={"onset_delay_steps": 2.0, "sounding_cue_tail_steps": 1.0,
                              "sounding_phase_folds": 5.0, "heard_within_window": 1.0}),
-            episode(metrics={"onset_delay_steps": 6.0, "sounding_cue_tail_steps": 3.0,
+            episode(win=window(10),
+                    metrics={"onset_delay_steps": 6.0, "sounding_cue_tail_steps": 3.0,
                              "sounding_phase_folds": 5.0, "heard_within_window": 1.0}),
-            episode(metrics={"onset_delay_censored": 1.0}),
+            episode(win=window(10), metrics={"onset_delay_censored": 1.0}),
         ])
 
         reading = read_arm(str(arm), arm="win-alarm")
@@ -286,6 +298,7 @@ class TestTheThreeNumbersThePilotRunsFor(unittest.TestCase):
         self.assertEqual(reading.onset_delays, (2.0, 6.0))
         self.assertEqual(reading.n_onset_censored, 1)
         self.assertEqual(reading.n_heard_within_window, 2)
+        self.assertEqual(reading.n_windowed, 3, "the denominator is windowed episodes")
         self.assertEqual(sorted(reading.cue_tail_steps), [1, 3])
         lines = "\n".join(format_arm(reading))
         self.assertIn("cue_tail_steps 1x1 1x3", lines)
