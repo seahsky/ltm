@@ -77,6 +77,17 @@ python -m earshot.tools.episode_diff runs/<before-tag> runs/<after-tag>
 nrun bash earshot/tools/ray_variance.sh --tag <fresh-tag>
 python -m earshot.tools.flip_report runs/<tag>-r500-* runs/<tag>-r2500-*
 
+# the first run of ADR-0017's windowed task. THREE arms, because CONTINUOUS is the
+# control: a windowed run differenced against the historic sweeps crosses both the offset
+# step and the ADR-0019 renderer. Not the ADR-0018 matrix and it says so in its header
+nrun bash earshot/tools/window_pilot.sh --tag <fresh-tag>
+
+# the pilot's readout, over any sweep laid out as <tag>/<arm>/<scene>/. Read-only, no
+# GPU, seconds — so a finished sweep can be re-read without re-running it, which is what
+# `pilot-1` needed after its readout looked for the wrong filename and reported three
+# dead arms over 120 episodes that were on disk the whole time
+python -m earshot.tools.window_report runs/<tag>
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```

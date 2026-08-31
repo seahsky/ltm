@@ -54,6 +54,22 @@
 # CONTINUE-ON-FAILURE: one scene that cannot load must not cost the others. Continuing is
 # not passing — the exit code is NONZERO if any arm lost a scene or any smoke gate failed.
 #
+# WHAT `pilot-1` COST, because the fix is in three places below and the reason is one.
+# It ran all 120 episodes, wrote all of them, and reported NONE of the three numbers.
+#   * the readout was a heredoc that walked for `audit.json`; the writer names them
+#     `ep0000.audit.json`, so all three arms printed "NO EPISODES ON DISK". It is now
+#     `tools/window_report.py`, held by `tests/mac/test_window_report.py` over
+#     directories the real writer wrote. A reader inside a bash string is untestable and
+#     this repo does not get to ship one.
+#   * `episode_diff` was handed SCENE directories, which it refuses by design. It now
+#     gets the ARM directories, which pairs 40 episodes rather than 10 four times.
+#   * criterion 9 was never armed, so all twelve gates went red on a structural NOT_RUN
+#     and the run exited 1 with its other eight criteria green. Armed here exactly as
+#     `yield_sweep.sh` arms it.
+# Everything the run itself measured was sound. What failed was the join, and only the
+# `window_report` half of it could ever have been caught by a test — which is the half
+# that now has one.
+#
 # Flags: --tag T (required in practice; one directory is one run), --n-episodes N
 #        (default 10, PER SCENE PER ARM), --max-steps M (default 250), --scenes "a b c"
 #        (default: the first --limit scenes with a mesh), --limit N (default 4),
@@ -96,7 +112,7 @@ while [ $# -gt 0 ]; do
     --out-dir)         need_value $# "$1"; OUT_DIR="$2";         shift 2 ;;
     --no-pull)         NO_PULL=1;                                shift ;;
     --force)           FORCE=1;                                  shift ;;
-    -h|--help) sed -n '2,62p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,77p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -213,6 +229,19 @@ ARM_WHY=(
   "the RISK: a 0.6 s transient on a 5 s loop, audible one fold in five"
 )
 
+# --- criterion 9's evidence, armed once around the whole sweep ------------
+# Copied in behaviour from `yield_sweep.sh`, and `pilot-1` is why it is not optional:
+# criterion 9 was structurally NOT_RUN on all twelve gates, NOT_RUN is red, and the
+# driver exited 1 over twelve smoke gates whose other eight criteria were green. A
+# criterion that is red on every ordinary run is one the reader learns to skip — which
+# is how a never-armed canary read as a pass in the first place. `--verify-absent` is a
+# filesystem existence check over the delete set and costs milliseconds.
+HERM_BEFORE="$OUT_DIR/.hermeticity-before.json"
+if ! python -m earshot.tools.reset_manifest --verify-absent --when before > "$HERM_BEFORE"; then
+  echo "WARN: could not record the pre-run hermeticity check — criterion 9 will be NOT_RUN"
+  rm -f "$HERM_BEFORE"
+fi
+
 FAILED_RUNS=0
 banner "[4/5] the three arms"
 for i in "${!ARM_NAMES[@]}"; do
@@ -243,6 +272,19 @@ for i in "${!ARM_NAMES[@]}"; do
       echo "      FAILED (exit $status) — tail:"
       tail -n 12 "$OUT_DIR/$arm-$scene.log" | sed 's/^/        /'
       FAILED_RUNS=$((FAILED_RUNS + 1))
+      continue
+    fi
+    # stderr is NOT suppressed: `--verify-absent` prints "STILL PRESENT: <paths>" there
+    # and that list is the entire diagnostic. A criterion 9 that went red with its
+    # reason discarded is the shape of failure this repo keeps paying for.
+    if [ -f "$HERM_BEFORE" ]; then
+      python -m earshot.tools.reset_manifest --verify-absent --when after \
+          > "$run_dir/.hermeticity-after.json" \
+        && python -m earshot.tools.reset_manifest --write-record \
+             --run-dir "$run_dir" --before "$HERM_BEFORE" \
+             --after "$run_dir/.hermeticity-after.json" --commit "$COMMIT" \
+             >/dev/null \
+        || echo "      WARN: hermeticity incomplete — criterion 9 will not be green"
     fi
   done
 done
@@ -250,6 +292,7 @@ done
 # --- 5. read it back ------------------------------------------------------
 banner "[5/5] what the pilot measured"
 GATE_FAILED=0
+READ_FAILED=0
 for arm in "${ARM_NAMES[@]}"; do
   for scene in "${SCENE_LIST[@]}"; do
     [ -d "$OUT_DIR/$arm/$scene" ] || continue
@@ -261,71 +304,27 @@ done
 
 echo ""
 echo "  --- the three numbers this pilot exists for ---"
-python - "$OUT_DIR" <<'PY'
-# Stdlib only, and it reads the audit records rather than re-deriving anything: every
-# number below is written by the runner, so a disagreement here is a bug in this reader
-# and not a second opinion about the run.
-import json, os, statistics, sys
-
-root = sys.argv[1]
-for arm in ("cont-alarm", "win-alarm", "win-burst"):
-    arm_dir = os.path.join(root, arm)
-    if not os.path.isdir(arm_dir):
-        continue
-    steps, secs, reached, n, sws_num, sws_den, audible, delays = [], [], 0, 0, 0, 0, 0, []
-    for scene in sorted(os.listdir(arm_dir)):
-        for dirpath, _dirs, files in os.walk(os.path.join(arm_dir, scene)):
-            for name in files:
-                if name != "audit.json":
-                    continue
-                with open(os.path.join(dirpath, name)) as handle:
-                    audit = json.load(handle)
-                n += 1
-                rows = audit.get("steps") or []
-                steps.append(len(rows))
-                secs.append(sum(float(r.get("audio_render_s") or 0.0) for r in rows))
-                metrics = audit.get("metrics") or {}
-                if audit.get("source_reached_step") is not None:
-                    reached += 1
-                window = audit.get("sounding_window") or {}
-                offset = window.get("offset_step")
-                if offset is not None and len(rows) > int(offset):
-                    sws_den += 1
-                    srs = audit.get("source_reached_step")
-                    if srs is not None and int(srs) >= int(offset):
-                        sws_num += 1
-                if (window.get("post_offset_audible_steps") or 0) > 0:
-                    audible += 1
-                if metrics.get("onset_delay_steps") is not None:
-                    delays.append(float(metrics["onset_delay_steps"]))
-    if not n:
-        print("  {:11s}  NO EPISODES ON DISK -- this arm did not run".format(arm))
-        continue
-    print("  {:11s} n={:3d}  reached {:3d} ({:5.1%})  steps/ep {:5.1f}  audio s/ep {:6.2f}"
-          .format(arm, n, reached, reached / n, statistics.mean(steps), statistics.mean(secs)))
-    if sws_den:
-        print("  {:11s}   SWS {}/{} = {:.3f}   tail audible in {} of {} eligible"
-              .format("", sws_num, sws_den, sws_num / sws_den, audible, sws_den))
-    else:
-        print("  {:11s}   SWS NOT_RUN: no episode ran past its own offset step"
-              .format(""))
-    if delays:
-        print("  {:11s}   onset delay steps: n={} median {:.1f} max {:.1f}  "
-              "(CENSORED: {} episode(s) never heard it)"
-              .format("", len(delays), statistics.median(delays), max(delays), n - len(delays)))
-    else:
-        print("  {:11s}   onset NEVER FIRED in any episode of this arm".format(""))
-PY
+# The readout is `earshot/tools/window_report.py` and NOT a heredoc, because the heredoc
+# is what cost `pilot-1`. It walked for a file named `audit.json`; the writer names them
+# `ep0000.audit.json`; three arms and 120 episodes on disk printed "NO EPISODES ON DISK",
+# and no test in the tree could have caught it, because the reader was a bash string.
+# `tests/mac/test_window_report.py` now holds that seam over directories the REAL writer
+# wrote, and asserts this line still calls it.
+python -m earshot.tools.window_report "$OUT_DIR" || READ_FAILED=1
 
 echo ""
 echo "  --- the offset step, isolated: win-alarm against its own control ---"
 echo "  Paired by episode. At this n the sign is a direction and not a result:"
 echo "  repeat-1 measured a 16.2% flip rate on byte-identical reruns."
-for scene in "${SCENE_LIST[@]}"; do
-  [ -d "$OUT_DIR/cont-alarm/$scene" ] && [ -d "$OUT_DIR/win-alarm/$scene" ] || continue
+# ARM directories, not scene directories. `load_outcomes` wants the tag directory that
+# holds one subdirectory per scene, and for this sweep that IS the arm directory — a
+# scene directory it refuses by design, with the message `pilot-1` printed four times
+# where its only between-arm comparison should have been. Pairing across all four scenes
+# at once is also the correct unit: 40 pairs answer a question 10 cannot.
+if [ -d "$OUT_DIR/cont-alarm" ] && [ -d "$OUT_DIR/win-alarm" ]; then
   python -m earshot.tools.episode_diff \
-    "$OUT_DIR/cont-alarm/$scene" "$OUT_DIR/win-alarm/$scene" 2>&1 | tail -n 20
-done
+    "$OUT_DIR/cont-alarm" "$OUT_DIR/win-alarm" 2>&1 | tail -n 30
+fi
 
 echo ""
 echo "  logs:       $OUT_DIR/<arm>-<scene>.log"
@@ -336,6 +335,13 @@ if [ "$FAILED_RUNS" -ne 0 ]; then
   echo ""
   echo "RED: $FAILED_RUNS run(s) failed. A sweep missing runs is NOT_RUN for those cells,"
   echo "     and NOT_RUN is red. The aggregates above are over what survived."
+  exit 1
+fi
+if [ "$READ_FAILED" -ne 0 ]; then
+  echo ""
+  echo "RED: the readout found no episode under any arm. Runs that produced nothing and a"
+  echo "     reader that cannot find what they produced look identical from here, and"
+  echo "     pilot-1 was the second: check $OUT_DIR/<arm>/<scene>/episodes/ by hand."
   exit 1
 fi
 if [ "$GATE_FAILED" -ne 0 ]; then
