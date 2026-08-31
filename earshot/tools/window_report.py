@@ -78,6 +78,7 @@ class ArmReading:
     sws_refused: Optional[str]
     onset_delays: Tuple[float, ...]
     n_onset_censored: int
+    n_windowed: int
     n_heard_within_window: int
     cue_tail_steps: Tuple[int, ...]
     phase_folds: Tuple[int, ...]
@@ -152,6 +153,7 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
             sws_refused=None,
             onset_delays=(),
             n_onset_censored=0,
+            n_windowed=0,
             n_heard_within_window=0,
             cue_tail_steps=(),
             phase_folds=(),
@@ -207,6 +209,18 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
         onset_delays=delays,
         n_onset_censored=sum(
             1 for audit in audits if _metric(audit, "onset_delay_censored")
+        ),
+        # `heard_within_window` is written by the runner ONLY under `offset_step is not
+        # None`, so on the continuous arm it is absent on every episode. Its denominator
+        # is therefore the windowed episodes and not all of them: `pilot-1`'s first
+        # readable output said "heard while still sounding: 0 of 40" for `cont-alarm`
+        # beside "40 of 40" for the windowed arms, which reads as a difference between
+        # the arms and is a metric that does not exist on one of them.
+        n_windowed=sum(
+            1
+            for audit in audits
+            if audit.sounding_window is not None
+            and audit.sounding_window.offset_step is not None
         ),
         n_heard_within_window=sum(
             1 for audit in audits if _metric(audit, "heard_within_window")
@@ -302,11 +316,17 @@ def format_arm(reading: ArmReading) -> List[str]:
             "  {:11s}   ONSET NEVER FIRED in any episode of this arm — the climb had "
             "nothing to climb ({} censored)".format("", reading.n_onset_censored)
         )
-    lines.append(
-        "  {:11s}   heard while still sounding: {} of {}".format(
-            "", reading.n_heard_within_window, reading.n_episodes
+    if reading.n_windowed == 0:
+        lines.append(
+            "  {:11s}   heard while still sounding: n/a — no offset step on this arm, "
+            "so the runner writes no such metric".format("")
         )
-    )
+    else:
+        lines.append(
+            "  {:11s}   heard while still sounding: {} of {} windowed".format(
+                "", reading.n_heard_within_window, reading.n_windowed
+            )
+        )
     if reading.cue_tail_steps:
         lines.append(
             "  {:11s}   cue_tail_steps {}   phase folds {}".format(
