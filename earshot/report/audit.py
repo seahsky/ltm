@@ -36,6 +36,7 @@ __all__ = [
     "StepRecord",
     "OnsetRecord",
     "CalibrationRecord",
+    "SoundingWindowRecord",
     "EpisodeAudit",
 ]
 
@@ -235,6 +236,40 @@ class CalibrationRecord:
     ``passed`` is always ``True`` on a real result, because ``calibrate_onset`` raises
     otherwise. It is carried so the serialised record says so explicitly rather than by
     absence, which is the same reason ``provenance_asserted`` exists above.
+
+    **THREE NAMED SCATTER ARMS, because ``climb_eps``' input changed domain TWICE while
+    the field name stood still.** They are three estimates of one sentence -- "the spread
+    of the reading the climb compares" -- and that sentence stayed true across both
+    changes, which is exactly what would have let the domain move under a stable name.
+
+    - ``cue_render_scatter`` is what ``climb_eps`` reads since ADR-0019: the spread of
+      successive CUE readouts, ``hop`` samples wide, which is the reading ``is_rising``
+      actually compares.
+    - ``clip_render_scatter`` is the ADR-0017 arm -- the same folds, read at the clip
+      window's width -- and it costs nothing, because both readouts come off one loop.
+    - ``single_render_scatter`` is the pre-ADR-0017 arm: independent whole-clip renders
+      at the same pose. Measured 1.91x above the clip arm (3.490e-04 against 1.830e-04
+      over 400 repeats at a held pose; 3.55x under a second noise model), because
+      consecutive readouts share 80% of their samples.
+
+    ``render_scatter`` was RENAMED to ``cue_render_scatter`` rather than redefined, and
+    ``as_dict`` no longer emits the legacy key: every number on disk under it is a
+    clip-loop estimate (post-ADR-0017) or a whole-clip estimate (before it), and a reader
+    differencing across the change under one label would be subtracting two domains. A
+    record carrying both the legacy key and a new one would let a reader pick the wrong
+    one, so it carries only the new ones. ``from_dict`` maps the legacy key onto whichever
+    arm it actually was -- see its own docstring for the disambiguator.
+
+    ``None`` on any arm means it was not run, never that the arms agreed.
+
+    **The phase block is the loop, summarised**, and it is what makes a bursty clip
+    identifiable on disk. ``cue_phase_folds`` is how many distinct readings one held pose
+    cycles through; ``cue_phase_crest`` and ``cue_phase_min_ratio`` are the median over
+    the swept poses of ``max/level`` and ``min/level``; ``cue_phase_aggregation`` names
+    the aggregation that produced ``onset_rms``, so the record states it rather than
+    leaving it to be inferred. A crest of 2.24 with a min ratio of 0.0 is a source
+    audible on one fold in five -- measured for a 0.6 s transient on a 5 s loop -- and
+    nothing here is gated on it.
     """
 
     onset_rms: float
@@ -243,8 +278,16 @@ class CalibrationRecord:
     n_poses: int
     global_volume: float
     passed: bool = True
-    render_scatter: Optional[float] = None
-    scatter_repeats: int = 0
+    cue_render_scatter: Optional[float] = None
+    cue_scatter_repeats: int = 0
+    clip_render_scatter: Optional[float] = None
+    clip_scatter_repeats: int = 0
+    single_render_scatter: Optional[float] = None
+    single_render_repeats: int = 0
+    cue_phase_folds: int = 0
+    cue_phase_crest: Optional[float] = None
+    cue_phase_min_ratio: Optional[float] = None
+    cue_phase_aggregation: Optional[str] = None
     profile: Tuple[Tuple[float, float], ...] = ()
 
     def as_dict(self) -> Dict[str, Any]:
@@ -260,18 +303,82 @@ class CalibrationRecord:
             "n_poses": int(self.n_poses),
             "global_volume": float(self.global_volume),
             "passed": bool(self.passed),
-            # The climb's threshold, per episode. `None` means it was not measured, and
-            # the run then used the pre-`detour-2` `1e-6` — a distinction the record has
-            # to keep, because "the windowed rule ran" and "the windowed rule ran against
-            # a real noise floor" are different claims about the same run.
-            "render_scatter": (
-                None if self.render_scatter is None else float(self.render_scatter)
+            # The climb's threshold, per episode, in the domain the climb reads. `None`
+            # means it was not measured, and the run then used the pre-`detour-2` `1e-6`
+            # — a distinction the record has to keep, because "the windowed rule ran" and
+            # "the windowed rule ran against a real noise floor" are different claims
+            # about the same run.
+            "cue_render_scatter": (
+                None
+                if self.cue_render_scatter is None
+                else float(self.cue_render_scatter)
             ),
-            "scatter_repeats": int(self.scatter_repeats),
+            "cue_scatter_repeats": int(self.cue_scatter_repeats),
+            # The same folds read at the clip window's width: the ADR-0017 arm, free.
+            "clip_render_scatter": (
+                None
+                if self.clip_render_scatter is None
+                else float(self.clip_render_scatter)
+            ),
+            "clip_scatter_repeats": int(self.clip_scatter_repeats),
+            # The same pose, the pre-ADR-0017 estimator. Never read by `climb_eps`; the
+            # ratio between the three is what a reader needs to compare this run's `eps`
+            # with the ones `detour-2` and `eps-1` were tuned at.
+            "single_render_scatter": (
+                None
+                if self.single_render_scatter is None
+                else float(self.single_render_scatter)
+            ),
+            "single_render_repeats": int(self.single_render_repeats),
+            # The loop, so a reading that is audible on one fold in five is identifiable
+            # rather than merely suffered.
+            "cue_phase_folds": int(self.cue_phase_folds),
+            "cue_phase_crest": (
+                None if self.cue_phase_crest is None else float(self.cue_phase_crest)
+            ),
+            "cue_phase_min_ratio": (
+                None
+                if self.cue_phase_min_ratio is None
+                else float(self.cue_phase_min_ratio)
+            ),
+            "cue_phase_aggregation": self.cue_phase_aggregation,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "CalibrationRecord":
+        """Rebuild, mapping the legacy ``render_scatter`` key onto the arm it really was.
+
+        **The legacy key means two different things in two eras and the disambiguator is
+        ``single_render_scatter``'s presence.** That field was added by the same commit
+        that made ``render_scatter`` the clip-loop estimate (ADR-0017), so:
+
+        - ``render_scatter`` WITH ``single_render_scatter`` -- the record is post-ADR-0017
+          and its ``render_scatter`` IS the clip-loop number, so it lands on
+          ``clip_render_scatter``;
+        - ``render_scatter`` WITHOUT it -- the record is pre-ADR-0017 (``detour-2``,
+          ``eps-1``) and its ``render_scatter`` is the whole-clip number, so it lands on
+          ``single_render_scatter``.
+
+        Repeats follow their scatter. Guessing was rejected in favour of writing the rule
+        down here, because the two eras' numbers differ by a measured 1.91x and the wrong
+        mapping is a silently mispriced epsilon rather than an error.
+
+        **The consequence, stated:** ``cue_render_scatter`` is ``None`` on every record
+        written before ADR-0019, so ``climb_eps`` falls back to ``UNMEASURED_EPS`` on a
+        replay of an old run. That is correct -- the agent never ran at a cue-domain
+        epsilon -- and it is better than silently replaying at a foreign domain's number.
+        """
+        legacy = data.get("render_scatter")
+        legacy_repeats = int(data.get("scatter_repeats", 0))
+        single = data.get("single_render_scatter")
+        single_repeats = int(data.get("single_render_repeats", 0))
+        clip = data.get("clip_render_scatter")
+        clip_repeats = int(data.get("clip_scatter_repeats", 0))
+        if clip is None and legacy is not None:
+            if single is None:
+                single, single_repeats = legacy, legacy_repeats
+            else:
+                clip, clip_repeats = legacy, legacy_repeats
         return cls(
             onset_rms=float(data["onset_rms"]),
             bed_rms=float(data["bed_rms"]),
@@ -279,15 +386,180 @@ class CalibrationRecord:
             n_poses=int(data["n_poses"]),
             global_volume=float(data["global_volume"]),
             passed=bool(data.get("passed", True)),
-            render_scatter=(
-                None if data.get("render_scatter") is None
-                else float(data["render_scatter"])
+            cue_render_scatter=(
+                None if data.get("cue_render_scatter") is None
+                else float(data["cue_render_scatter"])
             ),
-            scatter_repeats=int(data.get("scatter_repeats", 0)),
+            cue_scatter_repeats=int(data.get("cue_scatter_repeats", 0)),
+            clip_render_scatter=None if clip is None else float(clip),
+            clip_scatter_repeats=clip_repeats,
+            single_render_scatter=None if single is None else float(single),
+            single_render_repeats=single_repeats,
+            cue_phase_folds=int(data.get("cue_phase_folds", 0)),
+            cue_phase_crest=(
+                None if data.get("cue_phase_crest") is None
+                else float(data["cue_phase_crest"])
+            ),
+            cue_phase_min_ratio=(
+                None if data.get("cue_phase_min_ratio") is None
+                else float(data["cue_phase_min_ratio"])
+            ),
+            cue_phase_aggregation=data.get("cue_phase_aggregation"),
             profile=tuple(
                 (float(pair[0]), float(pair[1]))
                 for pair in (data.get("profile") or ())
             ),
+        )
+
+
+@dataclass(frozen=True)
+class SoundingWindowRecord:
+    """ADR-0017's window and the accumulator that rendered it, as primitives.
+
+    A projection with primitive fields, exactly as ``CalibrationRecord`` projects
+    ``CalibrationResult``: ADR-0013 gives ``report`` only ``report``, ``audio.guard``
+    and ``types``, so this module may not name ``audio.window.SoundingWindow`` or
+    ``audio.tail.TailState``. ``tests/mac/test_report_audit.py`` imports both sides and
+    pins the projection, which is where a rename in ``audio/`` fails.
+
+    **Why each number is on the answer key rather than left to be inferred.**
+
+    ``offset_step`` exists nowhere else on disk. The per-step ``source_playing`` trace
+    shows WHEN the source stopped, not what the task ASKED for, and those are different
+    claims -- a source that failed to stop leaves a trace that agrees with itself. That
+    is the argument ``t_anom`` won above: a record carrying a number derived from a
+    bound it does not state cannot be read a year later.
+
+    ``max_ir_samples`` and ``n_buffer_grows`` are the accumulator's own measurement of
+    the thing ``audio/spec.py`` deliberately does not cap. There is no ``maxIRLength``
+    anywhere in this tree, so a buffer that truncated a wide IR would produce a quiet,
+    plausible, wrong tail; recorded, a truncation is visible in the artefact instead of
+    inferred from a level that looks a little low.
+
+    ``analysis_window_samples`` KEEPS its meaning across ADR-0019: the buffer's read
+    window, ``len(clip)``, the CLIP readout's width. It is **not what the controller
+    reads** -- the cue readout is ``hop_samples`` wide, which is already a field above,
+    which is why the split added no field for it.
+
+    ``tail_steps`` KEEPS its name and its arithmetic and CHANGED ITS ROLE at ADR-0019. It
+    is how long the CLIP readout takes to empty after the last sounding step --
+    ``ceil((N + L - 1) / hop)``, so ``tail_steps - 1`` steps past the offset step -- and
+    it is **not evidence that the room did any work**: ``audio/tail.py`` measures an
+    anechoic 1-sample IR reproducing the same decay to within 1.1 points, because the read
+    window (``N``) is always wider than the IR (``L``) in this tree. Read it as the
+    analysis window emptying, which is what it mostly is; ``cue_tail_steps`` below is the
+    number that IS evidence. Since the split it bounds what CLAP reads rather than what
+    the agent reads, smoke criterion 4 no longer measures its fence post from it, and it
+    remains ``runner.tail_is_active``'s clause. The name is kept because every audit.json
+    on disk uses it and renaming a serialised field reinterprets every record ever
+    written -- the argument ``onset_step`` already won in this file against the
+    literature's meaning of "onset".
+
+    ``cue_tail_steps`` is NEW at ADR-0019 and is the first number on this record that IS
+    evidence the geometric acoustics did any work. ``ceil((hop + L - 1) / hop)``: how long
+    the CUE readout -- the ``hop`` samples that arrived during one step, which is what the
+    agent reads -- takes to reach exactly zero after the last sounding step. **1 means the
+    IR fits inside a step** and the silent phase is an honest hard cut; greater than 1
+    means the room outlives a step. Measured 3 at the box's numbers against a
+    ``tail_steps`` of 7, and 1 for an anechoic 1-sample IR that leaves ``tail_steps``
+    almost unchanged. Smoke criterion 4's fence post is measured from this. ``None`` on
+    every record written before the split, which reads as unknown and never as 1.
+
+    **There is no ``cue_ramp_steps`` field, deliberately.** The cue window is written
+    whole by one sounding fold, so the cue ramp is the literal 1 (``tail.CUE_RAMP_STEPS``)
+    -- and a record field a literal could replace is exactly the hole
+    ``TestTheWindowRecordIsTheAccumulatorsOwnMeasurement`` exists to close.
+
+    ``ramp_steps`` KEEPS its name and its arithmetic and ALSO changed role. It is
+    ``tail_steps``' mirror at the other end -- ``ceil(N / hop)``, the folds the CLIP read
+    window takes to fill. It used to be the correction ``onset_delay_steps`` could not be
+    read without; since the split its consumer is the CLAP deferral, which it bounds at
+    ``ramp_steps - 1`` steps. Measured CLIP readout over settled level at a fixed pose
+    across the first five sounding steps: **0.441 0.629 0.772 0.891 0.997**. Under the old
+    readout an agent already inside earshot when the window opens, whose settled level sits
+    exactly at ``onset_rms``, crossed **4 steps late**; at 1.3x the threshold, 2 steps
+    late; at 5x, on the first step. That bias is gone from the cue readout, and the curve
+    is kept here labelled as the clip readout's so a reader of a pre-split run can still
+    read that run.
+
+    ``post_offset_audible_steps`` is the MEASURED half and the one a reader should
+    believe: how many silent-phase steps the agent's own reading stayed outside
+    ``pre_onset_rms_tol`` of the bed. Since ADR-0019 it is measured on the CUE trace, so
+    it counts steps at which the ROOM was still audible and its values FALL -- that is the
+    correction, not a regression. It can be far below ``cue_tail_steps`` -- zero, for a
+    transient clip whose loop rang last four steps before the window closed -- and zero
+    means the silent phase arrived as a hard cut. ``None`` is not measured, never 0.
+
+    ``hop_samples`` and ``step_seconds`` are the invented unit (``AudioConfig.
+    step_seconds``, ``provenance: fake``) that a window duration in STEPS has to be read
+    through before it can be cross-quoted against SAVN-CE's 15 s mean.
+    """
+
+    opens_at: int
+    offset_step: Optional[int] = None
+    policy: Optional[str] = None
+    step_seconds: Optional[float] = None
+    hop_samples: Optional[int] = None
+    analysis_window_samples: Optional[int] = None
+    max_ir_samples: Optional[int] = None
+    n_buffer_grows: int = 0
+    tail_steps: Optional[int] = None
+    ramp_steps: Optional[int] = None
+    post_offset_audible_steps: Optional[int] = None
+    cue_tail_steps: Optional[int] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "opens_at": int(self.opens_at),
+            "offset_step": None if self.offset_step is None else int(self.offset_step),
+            "policy": self.policy,
+            "post_offset_audible_steps": (
+                None
+                if self.post_offset_audible_steps is None
+                else int(self.post_offset_audible_steps)
+            ),
+            "step_seconds": (
+                None if self.step_seconds is None else float(self.step_seconds)
+            ),
+            "hop_samples": None if self.hop_samples is None else int(self.hop_samples),
+            "analysis_window_samples": (
+                None
+                if self.analysis_window_samples is None
+                else int(self.analysis_window_samples)
+            ),
+            "max_ir_samples": (
+                None if self.max_ir_samples is None else int(self.max_ir_samples)
+            ),
+            "n_buffer_grows": int(self.n_buffer_grows),
+            "tail_steps": None if self.tail_steps is None else int(self.tail_steps),
+            "cue_tail_steps": (
+                None if self.cue_tail_steps is None else int(self.cue_tail_steps)
+            ),
+            "ramp_steps": None if self.ramp_steps is None else int(self.ramp_steps),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "SoundingWindowRecord":
+        def _int(key: str) -> Optional[int]:
+            value = data.get(key)
+            return None if value is None else int(value)
+
+        return cls(
+            opens_at=int(data.get("opens_at", 0)),
+            offset_step=_int("offset_step"),
+            policy=data.get("policy"),
+            step_seconds=(
+                None if data.get("step_seconds") is None
+                else float(data["step_seconds"])
+            ),
+            hop_samples=_int("hop_samples"),
+            analysis_window_samples=_int("analysis_window_samples"),
+            max_ir_samples=_int("max_ir_samples"),
+            n_buffer_grows=int(data.get("n_buffer_grows", 0)),
+            tail_steps=_int("tail_steps"),
+            cue_tail_steps=_int("cue_tail_steps"),
+            ramp_steps=_int("ramp_steps"),
+            post_offset_audible_steps=_int("post_offset_audible_steps"),
         )
 
 
@@ -316,6 +588,15 @@ class EpisodeAudit:
     detector_arm: Optional[str] = None
     source_xyz: Optional[Xyz] = None
     t_anom: Optional[int] = None
+    # ADR-0017's window, beside the step it opens at. `None` on every record written
+    # before the window existed, which reads as "unknown" rather than as "continuous".
+    sounding_window: Optional["SoundingWindowRecord"] = None
+    # The step the agent reached the SOUND SOURCE, which was recoverable from nothing.
+    # The primary STOP is `len(steps) - 1`; the source reach was not written down at all
+    # -- `InvestigationEvent.investigate_steps` is a RELATIVE count of INVESTIGATE ticks
+    # and the ORACLE arm leaves no `realizable_action` trail to read it off. So SWS
+    # could not have been computed from any artefact this tree wrote before this field.
+    source_reached_step: Optional[int] = None
     dist_at_stop: Optional[float] = None
     funnel_stage: FunnelStage = FunnelStage.RUN
     onset: Optional[OnsetRecord] = None
@@ -432,6 +713,14 @@ class EpisodeAudit:
             "detector_arm": self.detector_arm,
             "source_xyz": list(self.source_xyz.as_tuple()) if self.source_xyz else None,
             "t_anom": None if self.t_anom is None else int(self.t_anom),
+            "sounding_window": (
+                self.sounding_window.as_dict()
+                if self.sounding_window is not None
+                else None
+            ),
+            "source_reached_step": (
+                None if self.source_reached_step is None else int(self.source_reached_step)
+            ),
             "dist_at_stop": self.dist_at_stop,
             "funnel_stage": int(self.funnel_stage),
             "funnel_stage_name": self.funnel_stage.name,
@@ -458,6 +747,8 @@ class EpisodeAudit:
         """
         source = data.get("source_xyz")
         t_anom = data.get("t_anom")
+        window = data.get("sounding_window")
+        reached = data.get("source_reached_step")
         return cls(
             episode_index=int(data.get("episode_index", 0)),
             scene_id=data.get("scene_id"),
@@ -465,6 +756,10 @@ class EpisodeAudit:
             detector_arm=data.get("detector_arm"),
             source_xyz=Xyz.from_sequence(source) if source is not None else None,
             t_anom=None if t_anom is None else int(t_anom),
+            sounding_window=(
+                SoundingWindowRecord.from_dict(window) if window is not None else None
+            ),
+            source_reached_step=None if reached is None else int(reached),
             dist_at_stop=data.get("dist_at_stop"),
             funnel_stage=FunnelStage(int(data.get("funnel_stage", FunnelStage.RUN))),
             onset=(

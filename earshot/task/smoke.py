@@ -393,7 +393,13 @@ def _ir_real(audit: EpisodeAudit) -> Criterion:
                      "shape {}, peak {:.4g}".format(shape, peak))
 
 
-def _provenance(audit: EpisodeAudit, *, t_anom: Optional[int]) -> Criterion:
+def _provenance(
+    audit: EpisodeAudit,
+    *,
+    t_anom: Optional[int],
+    policy: Optional[str] = None,
+    pre_onset_rms_tol: Optional[float] = None,
+) -> Criterion:
     """Criterion 4 (§3.1), and it is read off the record rather than off a clean exit.
 
     ``assert_provenance`` raises, so an audit that exists at all *looks* like proof it
@@ -407,6 +413,34 @@ def _provenance(audit: EpisodeAudit, *, t_anom: Optional[int]) -> Criterion:
     pinned one, the two must agree: an episode whose source started at a different step
     from the one the run asked for is a build that did not do what its configuration
     says, which is the failure this gate exists to catch.
+
+    **ADR-0017's window is checked here rather than as a tenth criterion.** A tenth would
+    be NOT_RUN -- and therefore red -- on every audit written before the window existed,
+    and this criterion's subject already is *the measured signal is what the task built*.
+    The window half runs after every check above and never changes their verdict on a
+    record that has no window.
+
+    What it asserts is the PER-STEP TRACE, never the config echo: ``source_playing`` must
+    be true on exactly ``[opens_at, offset_step)`` and false from the offset step on.
+    That check is entirely missing today -- a source that failed to stop, or one whose
+    window closed before it opened, produces a green criterion 4, which is the "the check
+    was a log line" shape ADR-0009 and the ``anommxv`` invalidation exist to close.
+
+    **The LEVEL half is measured from ``cue_tail_steps`` since ADR-0019, and a record
+    without one PASSES rather than being judged.** The trace half is unaffected and still
+    binds on every record. What moved is the fence post: ``tail_steps`` is the 5 s clip
+    readout emptying and asserting the level against it waited four steps too long, so the
+    criterion now reads the cue tail -- the room, one step wide.
+
+    A record that carries a window and no ``cue_tail_steps`` predates the split, and its
+    RMS trace is in the CLIP domain. Judging a clip-domain trace at a cue-domain fence
+    post can only go wrongly red, so that case returns PASS with a detail saying the level
+    is not asserted -- the same branch shape this file already owns for "ended inside its
+    own tail". Two things it deliberately is NOT: it is not added to the ``missing`` guard
+    (that would turn every audit written on this branch before today red, and that guard
+    must keep failing for its own reason), and it is not re-derived here from
+    ``hop_samples`` and ``max_ir_samples`` (a second copy of a definition this tree has
+    been bitten by twice, which would also assert a cue bound against a clip trace).
     """
     onset = audit.onset
     if onset is None:
@@ -428,9 +462,139 @@ def _provenance(audit: EpisodeAudit, *, t_anom: Optional[int]) -> Criterion:
         return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
                          "t_anom is {} but there were no pre-onset readings, so §3.1's "
                          "first invariant is unverified".format(int(effective)))
+    detail = "onset step {}, {} pre-onset readings, t_anom {}".format(
+        onset.onset_step, onset.n_pre_onset_readings, int(effective))
+
+    window = audit.sounding_window
+    if window is None:
+        # Every audit written before ADR-0017. Its verdict must not move: a criterion
+        # that changed its answer on an unchanged record is a criterion nobody can
+        # compare across runs.
+        return Criterion(4, "provenance did not raise", CriterionStatus.PASS, detail)
+    if policy is not None and window.policy is not None and str(policy) != str(window.policy):
+        return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
+                         "the run asked for the {!r} sounding policy but the episode "
+                         "recorded {!r}".format(str(policy), str(window.policy)))
+    if window.offset_step is None:
+        # The CONTINUOUS control arm. There is nothing to check, and saying so is not
+        # the same as passing vacuously.
+        return Criterion(4, "provenance did not raise", CriterionStatus.PASS,
+                         detail + " — continuous arm, no offset step")
+
+    opens_at = int(window.opens_at)
+    offset_step = int(window.offset_step)
+    for row in audit.steps:
+        index = int(row.step)
+        if opens_at <= index < offset_step and not row.source_playing:
+            return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
+                             "the sounding window is [{}, {}) but step {} recorded the "
+                             "source silent inside it".format(
+                                 opens_at, offset_step, index))
+        if index >= offset_step and row.source_playing:
+            return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
+                             "the source was asked to stop at step {} but step {} "
+                             "recorded it still sounding".format(offset_step, index))
+    detail += ", window [{}, {})".format(opens_at, offset_step)
+
+    # The signal half, and it deliberately WAITS. The naive symmetric mirror of
+    # `onset.py`'s pre-t_anom invariant — "after the offset step the RMS is the bed" —
+    # is FALSE for exactly the steps the reverb tail exists for: the room is still ringing
+    # on the first silent step and the agent's reading reaches the bed only at the end of
+    # `cue_tail_steps`. Waiting that long is what makes the assertion true, and the number
+    # comes off the record rather than off a constant because the IR's width is scene- and
+    # pose-dependent and this tree caps it nowhere.
+    #
+    # NOT skipping this is not a NOT_RUN: the criterion IS evaluated — the trace check
+    # above always runs — and this is an additional assertion whose premise (the episode
+    # outlived its own tail) an episode may simply not meet.
+    #
+    # `tail_steps` is still what the `missing` guard below demands, because that guard is
+    # about the record being whole and every record `run_episode` ever wrote carries it.
+    tail_steps = window.tail_steps
+    bed_rms = audit.calibration.bed_rms if audit.calibration is not None else None
+    last = audit.steps[-1] if audit.steps else None
+    # THE RECORD'S OWN CONSISTENCY, and it is RED rather than skipped. `run_episode`
+    # writes `tail_steps`, a `CalibrationRecord` and at least one `StepRecord` on every
+    # episode that carries a window at all -- one constructor, one call -- so a window
+    # WITHOUT them is a record no build of this tree can produce: hand-edited, truncated
+    # mid-write, or spliced from two runs. This returned PASS, which is the gate reporting
+    # green on an artefact it could not read; and being unreachable from any fixture, it
+    # was also the only thing standing between a missing `bed_rms` and the `float(None)`
+    # TypeError seven lines down, which turns a gate run into a traceback rather than a
+    # verdict.
+    missing = [
+        name
+        for name, value in (
+            ("tail_steps", tail_steps),
+            ("a calibration record", bed_rms),
+            ("any step records", last),
+        )
+        if value is None
+    ]
+    if missing:
+        return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
+                         detail + ", but the record carries a sounding window and no {} "
+                                  "-- run_episode writes those together, so this audit "
+                                  "did not come from one run".format(" or ".join(missing)))
+    # NOT the same case and NOT red. `pre_onset_rms_tol` is the run's CONFIGURATION and
+    # arrives beside the records rather than inside them (`judge`'s own rule: a gate that
+    # took its bound from the thing it is bounding passes by construction), so a `judge`
+    # called with no `run_config` -- `judge_run_dir` on a directory whose
+    # `env_report.json` is missing -- has no bound to measure against. A missing input to
+    # the gate is not evidence about the run.
+    if pre_onset_rms_tol is None:
+        return Criterion(4, "provenance did not raise", CriterionStatus.PASS,
+                         detail + ", no pre_onset_rms_tol configured to check the "
+                                  "silent phase's level against")
+    # THE FENCE POST IS THE CUE'S SINCE ADR-0019, and the record's own `cue_tail_steps`
+    # is where it comes from. `tail_steps` is the CLIP readout emptying -- the analysis
+    # window, which an anechoic 1-sample IR reproduces to 1.1 points -- so asserting the
+    # level against it waited four steps too long on every episode and called a
+    # five-second moving average a reverb tail.
+    cue_tail_steps = window.cue_tail_steps
+    if cue_tail_steps is None:
+        # The same shape as "ended inside its own tail" below: the criterion IS evaluated
+        # -- the trace check above always ran -- and this is an additional assertion whose
+        # premise the RECORD does not meet.
+        return Criterion(4, "provenance did not raise", CriterionStatus.PASS,
+                         detail + ", the record carries no cue tail, so the silent "
+                                  "phase's level is not asserted -- this audit predates "
+                                  "the split readout and its RMS trace is the 5 s clip "
+                                  "readout, which the cue tail's fence post would judge "
+                                  "at the wrong step")
+    # The cue tail counts from the LAST SOUNDING step, and the offset step is the first
+    # SILENT one -- so the reading is exactly the bed at `offset_step + cue_tail_steps - 1`.
+    # Reading it from the offset step over-stated the room's post-offset lifetime by a
+    # step and threw away a step of assertable evidence on every episode.
+    silent_to_bed = offset_step + int(cue_tail_steps) - 1
+    if int(last.step) < silent_to_bed:
+        return Criterion(4, "provenance did not raise", CriterionStatus.PASS,
+                         detail + ", ended at step {} before the {}-step cue tail ran out "
+                                  "at step {}, so the silent phase's level is not "
+                                  "asserted".format(
+                                      int(last.step), int(cue_tail_steps), silent_to_bed))
+    tolerance = abs(float(bed_rms)) * float(pre_onset_rms_tol)
+    if tolerance <= 0.0:
+        tolerance = abs(float(pre_onset_rms_tol))
+    if abs(float(last.measured_rms) - float(bed_rms)) > tolerance:
+        return Criterion(4, "provenance did not raise", CriterionStatus.FAIL,
+                         "the cue tail ran out at step {} ({} steps after the LAST "
+                         "SOUNDING step, {} after the offset step) but the final reading "
+                         "is {:.6g} against a bed of {:.6g}".format(
+                             silent_to_bed, int(cue_tail_steps), int(cue_tail_steps) - 1,
+                             float(last.measured_rms), float(bed_rms)))
+    # Printed, not gated. `cue_tail_steps` is arithmetic off the IR's width; this is the
+    # number of silent-phase steps the agent could actually still tell from the bed, and
+    # a zero means the silence arrived as a hard cut -- which is a fact about the clip and
+    # the loop rather than a broken run, so it belongs in the detail an operator reads
+    # rather than in a red verdict this gate cannot justify.
+    audible = window.post_offset_audible_steps
     return Criterion(4, "provenance did not raise", CriterionStatus.PASS,
-                     "onset step {}, {} pre-onset readings, t_anom {}".format(
-                         onset.onset_step, onset.n_pre_onset_readings, int(effective)))
+                     detail + ", silent phase decayed to the bed at step {} ({} steps "
+                              "after the last sounding step), {} audible".format(
+                                  silent_to_bed, int(cue_tail_steps),
+                                  "audible-step count not recorded"
+                                  if audible is None else "{} steps".format(int(audible))))
 
 
 def _full_loop(audit: EpisodeAudit) -> Criterion:
@@ -623,7 +787,12 @@ def judge(
         _live_every_step(audit),
         _context_sound(audit),
         _ir_real(audit),
-        _provenance(audit, t_anom=cfg.get("t_anom")),
+        _provenance(
+            audit,
+            t_anom=cfg.get("t_anom"),
+            policy=cfg.get("sounding_policy"),
+            pre_onset_rms_tol=(cfg.get("audio") or {}).get("pre_onset_rms_tol"),
+        ),
         _full_loop(audit),
         _report_populated(report),
         _within_ceiling(audit, ceiling_s=cfg.get("audio_step_ceiling_s")),

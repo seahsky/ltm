@@ -48,7 +48,10 @@ __all__ = [
     "load_anomaly_clip",
     "synthetic_burst",
     "select_esc50_clip",
+    "select_esc50_clips",
+    "corpus_clip_paths",
     "fetch_esc50_clips",
+    "fetch_esc50_corpus",
 ]
 
 # The three FSD50K/ESC-50-backed emergency classes, locked. Carried verbatim; the
@@ -265,6 +268,106 @@ def select_esc50_clip(
     return files[index % len(files)]
 
 
+def select_esc50_clips(
+    rows: Sequence[Dict[str, Any]], esc_category: str, n: int, start: int = 0
+) -> List[str]:
+    """The first ``n`` distinct filenames for a category from ``start``, sorted, wrapping.
+
+    The plural of ``select_esc50_clip`` and pure for the same reason. It exists because the
+    separation gate and the recording-level robustness axis both need SEVERAL recordings of
+    one class: ESC-50 ships 40 per category, and a gate measured on one recording per class
+    cannot tell a class CLAP understands from a recording CLAP happens to like.
+
+    Distinct rather than merely ``n`` draws: asking for more than the category holds returns
+    everything it holds, once each, instead of silently repeating a file and inflating ``n``
+    with duplicates that would read as independent samples.
+    """
+    files = sorted(str(r.get("filename")) for r in rows if r.get("category") == esc_category)
+    if not files:
+        return []
+    count = min(int(n), len(files))
+    return [files[(int(start) + offset) % len(files)] for offset in range(count)]
+
+
+def corpus_clip_paths(class_name: str, corpus_dir: str) -> List[str]:
+    """Every staged recording for a class, as ``<corpus_dir>/<class>/<index>.wav``, sorted.
+
+    Returns an empty list when nothing is staged. The caller decides what that means, on the
+    same rule as ``resolve_anomaly_clip``: this module does not guess, and
+    ``load_anomaly_clip`` refuses to substitute.
+    """
+    directory = os.path.join(corpus_dir, str(class_name))
+    if not os.path.isdir(directory):
+        return []
+    return sorted(
+        os.path.join(directory, name)
+        for name in os.listdir(directory)
+        if name.endswith(".wav")
+    )
+
+
+def fetch_esc50_corpus(
+    out_dir: str,
+    class_map: Dict[str, str],
+    classes: Optional[Sequence[str]] = None,
+    n_per_class: int = 8,
+    start: int = 0,
+    timeout: int = 120,
+) -> Dict[str, List[str]]:
+    """Stage ``n_per_class`` recordings per class into ``<out_dir>/<class>/<index>.wav``.
+
+    The multi-recording sibling of ``fetch_esc50_clips``, laid out one directory per class so
+    a class's recordings can be split heard-from-unheard later by index without re-staging.
+
+    Raises on an unknown class or a category ESC-50 has no rows for, and raises when a class
+    yields fewer recordings than asked, rather than staging a short class and letting the
+    per-class ``n`` differ silently across the vocabulary -- an uneven ``n`` is exactly what
+    makes a per-class recall table unreadable.
+    """
+    import csv
+    import io
+    import urllib.request
+
+    wanted = list(class_map) if classes is None else list(classes)
+
+    def fetch(url: str) -> bytes:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+            return response.read()
+
+    rows = list(
+        csv.DictReader(io.StringIO(fetch("{}/meta/esc50.csv".format(ESC50_BASE)).decode()))
+    )
+    staged: Dict[str, List[str]] = {}
+    for name in wanted:
+        category = class_map.get(name)
+        if category is None:
+            raise KeyError("unknown class {!r}; known: {}".format(name, sorted(class_map)))
+        filenames = select_esc50_clips(rows, category, n_per_class, start)
+        if not filenames:
+            raise LookupError(
+                "ESC-50 has no rows for category {!r} (class {!r})".format(category, name)
+            )
+        if len(filenames) < int(n_per_class):
+            raise LookupError(
+                "ESC-50 category {!r} (class {!r}) holds only {} recordings, {} were asked "
+                "for; a class staged short would enter the per-class table with a different "
+                "n from its neighbours".format(
+                    category, name, len(filenames), n_per_class
+                )
+            )
+        directory = os.path.join(out_dir, name)
+        os.makedirs(directory, exist_ok=True)
+        written: List[str] = []
+        for index, filename in enumerate(filenames):
+            destination = os.path.join(directory, "{:02d}.wav".format(index))
+            with open(destination, "wb") as handle:
+                handle.write(fetch("{}/audio/{}".format(ESC50_BASE, filename)))
+            written.append(destination)
+        staged[name] = written
+        print("  {} <- ESC-50 {} x{} -> {}/".format(name, category, len(written), directory))
+    return staged
+
+
 def fetch_esc50_clips(
     out_dir: str,
     class_map: Optional[Dict[str, str]] = None,
@@ -322,7 +425,47 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--benign-out-dir", default="data/benign_audio")
     parser.add_argument("--index", type=int, default=0, help="which clip per class (0..39)")
     parser.add_argument("--include-benign", action="store_true")
+    # The sounding class vocabulary is staged as a CORPUS -- several recordings per class in
+    # its own directory -- because the separation gate has to be able to tell a class CLAP
+    # understands from one recording CLAP happens to like. `--vocabulary` stages the
+    # candidate set AND `ABSENT_CLASSES`, which are the gate's forced-failure arm and are
+    # useless staged separately: a gate run needs both or it has one arm.
+    parser.add_argument(
+        "--vocabulary",
+        action="store_true",
+        help="stage the candidate sounding vocabulary + the absent classes as a corpus",
+    )
+    parser.add_argument("--corpus-dir", default="data/sound_corpus")
+    parser.add_argument("--absent-dir", default="data/absent_corpus")
+    parser.add_argument("--n-per-class", type=int, default=8)
+    # HELD-OUT RECORDINGS. The prune picks its vocabulary using the staged clips, so any
+    # accuracy re-measured on those same clips is selection on the outcome. ESC-50 ships 40
+    # recordings per class and a run stages 8, so `--clip-start 8` gives a disjoint set and
+    # the only unbiased number this design can produce without new audio.
+    parser.add_argument("--clip-start", type=int, default=0)
     args = parser.parse_args(None if argv is None else list(argv))
+
+    if args.vocabulary:
+        from earshot.audio.vocabulary import ABSENT_CLASSES, CANDIDATE_VOCABULARY
+
+        candidates = {entry.name: entry.esc50_category for entry in CANDIDATE_VOCABULARY}
+        print(
+            "candidate vocabulary ({} classes, recordings {}..{}) -> {}".format(
+                len(candidates),
+                args.clip_start,
+                args.clip_start + args.n_per_class - 1,
+                args.corpus_dir,
+            )
+        )
+        fetch_esc50_corpus(
+            args.corpus_dir, candidates, None, args.n_per_class, start=args.clip_start
+        )
+        absent = {name: name for name in ABSENT_CLASSES}
+        print("absent classes ({}) -> {}".format(len(absent), args.absent_dir))
+        fetch_esc50_corpus(
+            args.absent_dir, absent, None, args.n_per_class, start=args.clip_start
+        )
+        return 0
 
     fetch_esc50_clips(args.out_dir, CLASS_TO_ESC50, list(CLASS_TO_ESC50), args.index)
     if args.include_benign:

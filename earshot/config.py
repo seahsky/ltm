@@ -10,6 +10,14 @@ ADR-0013: each layer defines its own frozen config beside itself (``AudioConfig`
 explosion — which is the shape the old tree's ``LTM_REALIZABLE_LOCALIZATION`` did not
 have.
 
+**ADR-0017's ``sounding_policy`` is the third arm, and its DEFAULT IS PROVISIONAL.** How
+long the source sounds before the offset step is an open question the mechanism does not
+answer: a fixed step count, a fraction of the step budget, and a per-episode draw are all
+reachable, and ``CONTINUOUS`` is the fourth value and the pre-ADR-0017 control arm. The
+default is ``FIXED_STEPS`` at 60 steps, tagged ``provenance: fake``, with no sweep behind
+it. ``audio/window.py``'s module docstring names the evidence the first sweep at that
+default produces to settle it.
+
 **``onset_rms`` is deliberately absent**, as it is from ``AudioConfig``: task spec §2.3
 derives it at run start from the calibration sweep, and a config field would let an
 operator hand-set the one number the spec insists is measured. What lives here is the
@@ -29,10 +37,10 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from earshot.agent.config import ControllerConfig, DetectorConfig, PlannerConfig
-from earshot.audio.config import AudioConfig
+from earshot.audio.config import AudioConfig, WindowPolicy
 
 __all__ = ["Localization", "Detector", "RunConfig"]
 
@@ -102,6 +110,52 @@ class RunConfig:
     # step 30, the same step the source started sounding, and the loop under test never
     # ran. An integer here pins the old behaviour on every episode.
     t_anom: Optional[int] = None
+
+    # -- the sounding window (ADR-0017) ---------------------------------
+    # All four are TOP-LEVEL rather than on a sub-config, and the reason is threefold.
+    # (1) It is an experimental ARM, and ADR-0008 says arms are enums on the config:
+    # `Localization` and `Detector`, this tree's only two, are both top level. (2) A
+    # sub-config CANNOT hold it — `as_dict` passes sub-configs through
+    # `dataclasses.asdict`, which leaves an Enum member as an Enum object and makes
+    # `json.dumps` raise; the top-level enums below are hand-mapped to `.value` instead.
+    # (3) A fifth sub-config would widen a set `tests/mac/test_config.py` pins to exactly
+    # the four module configs, and that is a diff nobody should make to dodge writing
+    # four flags.
+    #
+    # provenance: fake — HOW THE SOUNDING WINDOW'S DURATION IS CHOSEN, and this default
+    # is PROVISIONAL. ADR-0017 leaves the choice open between a fixed step count, a
+    # fraction of the step budget, and a per-episode draw (which is what SAVi and SAVN-CE
+    # do). All three are reachable here; `CONTINUOUS` is the fourth and is the
+    # pre-ADR-0017 control arm.
+    #
+    # FIXED_STEPS by default because it is the only policy whose value can be read off a
+    # single run without a distribution, and the first sweep's job is to answer the
+    # question rather than to average over it. What answers it: `onset_delay_steps` and
+    # `heard_within_window` on the episode's metrics bag.
+    sounding_policy: WindowPolicy = WindowPolicy.FIXED_STEPS
+
+    # provenance: fake — no sweep behind this number. 60 steps is 60 s at
+    # `AudioConfig.step_seconds`, four times SAVN-CE's 15 s mean, and it is GENEROUS on
+    # purpose (ADR-0014: an unmeasured constant is set generously). The failure mode of a
+    # short window is not a harder task — it is that the agent never gets within earshot
+    # before the source stops, `onset.fired` stays False forever (the level after the
+    # tail is the bed, and `calibrate_onset` separates those by >= 6 dB by construction),
+    # the funnel caps at T_ANOM_REACHED, CLAP is never handed a clip, and NOTHING RAISES.
+    # That reads as ordinary attrition. It also clears the accumulator's own 5-step ramp
+    # with 55 steps to spare, and against `max_steps = 500` it leaves hundreds of steps
+    # of silent phase, which is the phase the whole ADR is for.
+    sounding_steps: int = 60
+
+    # provenance: fake — 0.12 * 500 = 60, the same duration FIXED_STEPS gives, so
+    # switching policy at the defaults changes the VARIANCE of the duration and not its
+    # level.
+    sounding_budget_fraction: float = 0.12
+
+    # provenance: fake — (30, 90), mean 60, the same reason. Drawn per episode as a pure
+    # function of (`seed`, episode index), never from a global RNG: `tools/episode_diff.py`
+    # pairs the same episode index across two sweeps, so a duration that depended on
+    # anything else would put a different task on each side of the pair.
+    sounding_draw_steps: Tuple[int, int] = (30, 90)
 
     # provenance: fake — seeds the navmesh's random point draws, which are the
     # calibration sweep's poses. A red run that cannot be reproduced is not evidence.
@@ -183,6 +237,13 @@ class RunConfig:
             "n_episodes": int(self.n_episodes),
             "max_steps": int(self.max_steps),
             "t_anom": None if self.t_anom is None else int(self.t_anom),
+            "sounding_policy": self.sounding_policy.value,
+            "sounding_steps": int(self.sounding_steps),
+            "sounding_budget_fraction": float(self.sounding_budget_fraction),
+            "sounding_draw_steps": [
+                int(self.sounding_draw_steps[0]),
+                int(self.sounding_draw_steps[1]),
+            ],
             "seed": int(self.seed),
             "localization": self.localization.value,
             "detector": self.detector.value,

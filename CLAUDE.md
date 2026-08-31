@@ -21,7 +21,7 @@ machine with no simulator.
 | directory | what it is |
 |---|---|
 | `sim/` | the only `habitat_sim` importer: `World`, the audio sensor, the navmesh follower |
-| `audio/` | spec, guard, IR handling, the bed, onset, CLAP, the lateral cue |
+| `audio/` | spec, guard, IR handling, the bed, onset, CLAP, the lateral cue, the sounding window, the accumulation buffer |
 | `agent/` | proposers → scorer → waypoint → follower; the anomaly controller; the detector seam |
 | `task/` | the runner, the episode/dataset builders, the smoke gate, the CLI |
 | `report/` | the agent's testimony and the audit record, written atomically, never overwritten |

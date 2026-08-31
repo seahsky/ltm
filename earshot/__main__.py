@@ -36,6 +36,7 @@ import sys
 from typing import Optional, Sequence
 
 from earshot.audio.clips import ANOMALY_CLASSES
+from earshot.audio.config import WindowPolicy
 from earshot.config import Detector, Localization, RunConfig
 
 __all__ = ["build_parser", "config_from_args", "main"]
@@ -79,6 +80,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="pin the step the anomaly source starts PLAYING (§2.5: not when it is "
         "heard). Omit to derive one per episode from its own start-to-goal distance, "
         "which is what keeps the onset inside the find it interrupts",
+    )
+    parser.add_argument(
+        "--sounding-policy",
+        choices=[policy.value for policy in WindowPolicy],
+        default=defaults.sounding_policy.value,
+        help="how long the source sounds before the offset step (ADR-0017). "
+        "`continuous` is the CONTROL ARM: the source never stops, which is the "
+        "pre-ADR-0017 behaviour, so a windowed run's funnel delta has an arm to be "
+        "measured against. `fixed_steps` / `budget_fraction` / `drawn` all close it",
+    )
+    parser.add_argument(
+        "--sounding-steps",
+        type=int,
+        default=defaults.sounding_steps,
+        help="the FIXED_STEPS duration. The default is PROVISIONAL and has no sweep "
+        "behind it; it is set generously because a window that closes before the agent "
+        "is in earshot is silent attrition rather than a harder task",
+    )
+    parser.add_argument(
+        "--sounding-budget-fraction",
+        type=float,
+        default=defaults.sounding_budget_fraction,
+        help="the BUDGET_FRACTION duration, as a fraction of --max-steps",
+    )
+    parser.add_argument(
+        "--sounding-draw-steps",
+        type=int,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=list(defaults.sounding_draw_steps),
+        help="the DRAWN duration's inclusive range, drawn per episode as a pure "
+        "function of (--seed, episode index)",
     )
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument(
@@ -149,6 +182,13 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         n_episodes=int(args.n_episodes),
         max_steps=int(args.max_steps),
         t_anom=None if args.t_anom is None else int(args.t_anom),
+        sounding_policy=WindowPolicy(args.sounding_policy),
+        sounding_steps=int(args.sounding_steps),
+        sounding_budget_fraction=float(args.sounding_budget_fraction),
+        # `nargs=2` yields a LIST, and `RunConfig` is compared by equality against its
+        # own defaults in `tests/mac/test_config.py` — a list here fails that for a
+        # reason that has nothing to do with the value.
+        sounding_draw_steps=tuple(int(value) for value in args.sounding_draw_steps),
         seed=int(args.seed),
         localization=Localization(args.localization),
         detector=Detector(args.detector),

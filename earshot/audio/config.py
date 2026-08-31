@@ -21,9 +21,52 @@ generously rather than tightly. The first box calibration is what turns ``bed_rm
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, Tuple
 
-__all__ = ["AudioConfig"]
+__all__ = ["AudioConfig", "WindowPolicy"]
+
+
+# **Why the policy enum lives in a config module and not beside ``window.plan_window``.**
+# ADR-0013 gives `earshot/config.py` exactly ("audio.config", "agent.config", "types")
+# as its import edge (`tests/mac/_tree.py:133`). `RunConfig` carries the policy as a
+# TOP-LEVEL field -- it has to, because `dataclasses.asdict` leaves an Enum on a
+# sub-config as an Enum object and `RunConfig.as_dict` would stop being JSON -- so
+# `earshot/config.py` must be able to name this type, and `audio.window` is not on that
+# edge. `window.py` imports it from here and re-exports it, so callers still have one
+# import site.
+class WindowPolicy(Enum):
+    """How long the source sounds before the offset step (ADR-0017).
+
+    ``CONTINUOUS`` is the source that never stops: ``playing = step >= t_anom`` and
+    nothing closes it, which is the pre-ADR-0017 behaviour. It is kept as the **named
+    control arm** rather than as a fallback. Every funnel delta a windowed run reports
+    crosses two changes at once -- the offset step and the accumulating renderer -- and
+    this repo's own rule is that a claim that X broke because of a change needs the arm
+    where the change is absent. The hermeticity gate already called a pre-existing
+    failure a leak for want of exactly that control run.
+
+    ``FIXED_STEPS`` is one duration on every episode, read off ``RunConfig.
+    sounding_steps``. The only policy whose value can be read off a single run without
+    first estimating a distribution.
+
+    ``BUDGET_FRACTION`` is ``floor(fraction * max_steps)`` -- a run-level constant,
+    while ``t_anom`` is per episode, so the window's *length* stops varying with the
+    episode's geometry even though its opening does not.
+
+    ``DRAWN`` is uniform on ``[lo, hi]`` steps, drawn per episode as a pure function of
+    ``(seed, episode_index)``. What SAVi and SAVN-CE do (SAVN-CE: onset uniform on
+    [0, 5] s, duration Gaussian, mean 15 s).
+
+    **Which one is right is an open question this build does not answer.** See
+    ``audio/window.py``'s module docstring: the mechanism keeps all four reachable and
+    the default is provisional.
+    """
+
+    CONTINUOUS = "continuous"
+    FIXED_STEPS = "fixed_steps"
+    BUDGET_FRACTION = "budget_fraction"
+    DRAWN = "drawn"
 
 
 @dataclass(frozen=True)
@@ -53,7 +96,9 @@ class AudioConfig:
     sweep_poses: int = 16
 
     # provenance: fake — §3.1's tolerance, RELATIVE to the bed level. The bed is
-    # generated per step at exactly the render's length and RMS-normalised, so a healthy
+    # generated once per EPISODE at exactly the render's length and RMS-normalised
+    # (`runner.py:481`; this comment said "per step" and `bed.py` said "per run", and a
+    # future reader would have sized a buffer against one of them), so a healthy
     # pre-onset reading is the bed level to float precision and this could be far
     # tighter. Kept generous on ADR-0014's rule: it has never been measured against a
     # live render, and the assertion RAISES, so a tight bound would stop a run for a
@@ -65,6 +110,27 @@ class AudioConfig:
     # so the clip needs no resample and `clips.load_anomaly_clip`'s resample path stays
     # unexercised on the standard route.
     sample_rate: int = 44100
+
+    # provenance: fake — HOW MUCH AUDIO TIME ONE SIMULATOR STEP IS, and the tree had no
+    # such number before ADR-0017. `AgentSpec` is 0.25 m and 30 deg per step
+    # (`sim/world.py:141-142`); nothing anywhere mapped a step to a span of seconds, and
+    # the accumulation buffer cannot exist without one — each step's convolution has to
+    # be written at an offset, and that offset IS this number.
+    #
+    # 1.0 s, chosen and not derived. Deriving it (0.25 m at a walking pace) would imply a
+    # measurement of a speed nobody took and would read as `source`. Round because it is
+    # also the cross-quote: 500 steps is 500 s, so SAVN-CE's 15 s mean duration reads as
+    # 15 steps without arithmetic. The other reading — 0.25 m at ~1 m/s, so 0.25 s — is
+    # rejected here because it makes the ramp below four times as long, and a ramp that
+    # wide eats any candidate window.
+    #
+    # What it costs, measured on this Mac (numpy, a 5 s white-noise clip at 44100 and a
+    # synthetic 72300-sample IR, hop 44100): the received level RAMPS over
+    # ceil(N/hop) = 5 steps to within a few percent of its settled value and is fully
+    # settled after ceil((N + L - 1)/hop) = 7, then DECAYS to exactly the bed over the
+    # same 7 steps after the offset step. Halving it doubles both. The ramp is why it is
+    # not smaller.
+    step_seconds: float = 1.0
 
     # provenance: box — measured 1.0 on our branch (ticket 04), NOT the 0.25 ticket 01
     # quoted from `main`. This is the ONLY correction the calibration gate may apply

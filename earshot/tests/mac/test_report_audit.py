@@ -19,13 +19,16 @@ import unittest
 from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.audio.calibration import CalibrationResult
+from earshot.audio.config import WindowPolicy
 from earshot.audio.guard import AudioContextReport
 from earshot.audio.onset import OnsetState
+from earshot.audio.window import SoundingWindow
 from earshot.report.audit import (
     CalibrationRecord,
     EpisodeAudit,
     FunnelStage,
     OnsetRecord,
+    SoundingWindowRecord,
     StepRecord,
 )
 from earshot.types import Xyz
@@ -57,6 +60,44 @@ class TestTheProjectionsCannotDriftFromTheAudioTypes(unittest.TestCase):
         projected = set(OnsetRecord.__dataclass_fields__) - {"provenance_asserted"}
         missing = projected - set(OnsetState.__dataclass_fields__)
         self.assertEqual(missing, set(), "OnsetRecord names {} that OnsetState lacks".format(missing))
+
+    def test_the_sounding_window_record_projects_the_window_it_names(self):
+        """ADR-0013 forbids ``report`` naming ``audio.window``, so this test does it.
+
+        ``SoundingWindowRecord`` is a primitive-typed mirror of
+        ``audio.window.SoundingWindow`` plus the accumulator's own measurements, and the
+        same drift the ``CalibrationRecord`` check above catches applies: a rename in
+        ``audio/window.py`` leaves the audit carrying a field that no longer means what
+        its name says. The extra fields are the tail's, and they are named so the
+        exception is a list rather than a hole.
+        """
+        accumulator_fields = {
+            "step_seconds",
+            "hop_samples",
+            "analysis_window_samples",
+            "max_ir_samples",
+            "n_buffer_grows",
+            "tail_steps",
+            # The CLIP tail's sibling, `ceil((hop + L - 1)/hop)` -- what the agent's own
+            # one-step-wide reading takes to empty. Same reason it is not on
+            # `SoundingWindow`: it needs the hop and the IR's width, and the window's
+            # boundaries depend on neither.
+            "cue_tail_steps",
+            # `ceil(N / hop)`, so it needs the hop and the clip length -- neither of
+            # which `plan_window` is given. Putting it on `SoundingWindow` instead was
+            # rejected for that reason: it would change that function's signature to
+            # carry two numbers the window's boundaries do not depend on.
+            "ramp_steps",
+            "post_offset_audible_steps",
+        }
+        projected = set(SoundingWindowRecord.__dataclass_fields__) - accumulator_fields
+        missing = projected - set(SoundingWindow.__dataclass_fields__)
+        self.assertEqual(
+            missing,
+            set(),
+            "SoundingWindowRecord names {} which SoundingWindow does not have — either "
+            "audio/window.py renamed a field or the audit invented one".format(missing),
+        )
 
     def test_the_projections_carry_what_section_5_2_names(self):
         """§5.2: "the calibration separation margin and the threshold in force"."""
@@ -267,6 +308,183 @@ class TestTheAuditRoundTrips(unittest.TestCase):
         self.assertEqual(restored.audio_context.n_vertices, 392364)
         self.assertEqual(tuple(restored.audio_context.ir_shape), (2, 72300))
         self.assertTrue(restored.audio_context.log_canary_seen)
+
+
+class TestTheSoundingWindowOnTheRecord(unittest.TestCase):
+    """ADR-0017's two new fields, and why each is on the answer key at all.
+
+    The offset step is nowhere else on disk — the per-step ``source_playing`` trace shows
+    WHEN the source stopped, never what the task asked for, and a source that failed to
+    stop leaves a trace that agrees with itself. The source-reach step was recoverable
+    from NOTHING: the primary STOP is ``len(steps) - 1``, but
+    ``InvestigationEvent.investigate_steps`` is a relative count and the ORACLE arm
+    leaves no ``realizable_action`` trail, so SWS could not have been computed from any
+    artefact this tree wrote before these two fields existed.
+    """
+
+    WINDOW = SoundingWindowRecord(
+        opens_at=30,
+        offset_step=90,
+        policy=WindowPolicy.FIXED_STEPS.value,
+        step_seconds=1.0,
+        hop_samples=44100,
+        analysis_window_samples=220500,
+        max_ir_samples=72300,
+        n_buffer_grows=1,
+        tail_steps=7,
+        # THE TWO TAILS, and they are different numbers at the box's own configuration:
+        # `ceil((220500 + 72299)/44100)` is 7 and `ceil((44100 + 72299)/44100)` is 3. The
+        # clip tail is the analysis window emptying; the cue tail is the room.
+        cue_tail_steps=3,
+    )
+
+    def test_the_window_and_the_reach_step_round_trip_through_the_audit(self):
+        original = EpisodeAudit(
+            t_anom=30,
+            sounding_window=self.WINDOW,
+            source_reached_step=141,
+            steps=_steps(),
+        )
+        restored = EpisodeAudit.from_dict(original.as_dict())
+        self.assertEqual(restored, original)
+        self.assertEqual(restored.sounding_window.offset_step, 90)
+        self.assertEqual(restored.sounding_window.tail_steps, 7)
+        self.assertEqual(restored.sounding_window.cue_tail_steps, 3)
+        self.assertEqual(restored.source_reached_step, 141)
+
+    def test_the_record_alone_round_trips(self):
+        self.assertEqual(
+            SoundingWindowRecord.from_dict(self.WINDOW.as_dict()), self.WINDOW
+        )
+
+    def test_a_record_written_before_the_split_readout_carries_no_cue_tail(self):
+        """``None``, and it must never resolve to 1 -- which is a claim about the ROOM.
+
+        ``cue_tail_steps`` of 1 says the IR fits inside one simulator step, i.e. the
+        silent phase is an honest hard cut. A default that produced 1 for a record that
+        never measured it would state exactly the thing this field exists to make
+        checkable, on an artefact that says nothing about it. Smoke criterion 4 reads the
+        None and declines to assert the level rather than judging a clip-domain trace at a
+        cue-domain fence post.
+        """
+        payload = self.WINDOW.as_dict()
+        del payload["cue_tail_steps"]
+        restored = SoundingWindowRecord.from_dict(payload)
+        self.assertIsNone(restored.cue_tail_steps)
+        # ...and the clip tail beside it is untouched, which is what makes the two
+        # separable on disk rather than one field wearing two meanings.
+        self.assertEqual(restored.tail_steps, 7)
+
+    def test_a_continuous_arm_window_keeps_its_null_offset_step(self):
+        """``None`` is the CONTINUOUS arm and it must never become a step index."""
+        window = SoundingWindowRecord(opens_at=30, offset_step=None, policy="continuous")
+        restored = SoundingWindowRecord.from_dict(window.as_dict())
+        self.assertIsNone(restored.offset_step)
+        self.assertEqual(restored.opens_at, 30)
+
+    def test_an_audit_written_before_the_window_existed_still_loads(self):
+        """Absent means UNKNOWN, never step 0 and never "the source never stopped".
+
+        Every audit on disk predates ADR-0017. A default that resolved to a number would
+        make ``tail_is_active`` answer True for a run that had no accumulator, which is
+        the one question that gates whether an SWS may be computed at all.
+        """
+        payload = EpisodeAudit(t_anom=30, steps=_steps()).as_dict()
+        del payload["sounding_window"]
+        del payload["source_reached_step"]
+        restored = EpisodeAudit.from_dict(payload)
+        self.assertIsNone(restored.sounding_window)
+        self.assertIsNone(restored.source_reached_step)
+
+
+class TestTheThreeScatterArmsOnTheCalibrationRecord(unittest.TestCase):
+    """ADR-0019's rename, and the legacy key that means two different things.
+
+    ``climb_eps``' input changed measurement domain twice under one field name. Before
+    ADR-0017 ``render_scatter`` was independent whole-clip renders at a held pose; after
+    it, successive CLIP readouts of the accumulator, measured 1.91x apart; after ADR-0019
+    the climb reads the CUE readout, which is a third domain again. The field's WRITTEN
+    definition -- "the spread of the reading the climb compares" -- stayed true through
+    all three, which is exactly what would have let the domain move silently.
+
+    So there are three named arms and the legacy key is not emitted at all. A record
+    carrying both ``render_scatter`` and ``cue_render_scatter`` would let a reader pick
+    the wrong one, and picking wrong is a mispriced epsilon rather than an error.
+    """
+
+    FULL = CalibrationRecord(
+        onset_rms=3e-3,
+        bed_rms=1e-3,
+        separation_db=18.0,
+        n_poses=16,
+        global_volume=1.0,
+        cue_render_scatter=2.7e-4,
+        cue_scatter_repeats=12,
+        clip_render_scatter=1.83e-4,
+        clip_scatter_repeats=12,
+        single_render_scatter=3.49e-4,
+        single_render_repeats=12,
+        cue_phase_folds=5,
+        cue_phase_crest=2.2361,
+        cue_phase_min_ratio=0.0,
+        cue_phase_aggregation="quadratic_mean_over_loop_phases",
+    )
+
+    def test_the_three_arms_and_the_phase_block_round_trip(self):
+        self.assertEqual(CalibrationRecord.from_dict(self.FULL.as_dict()), self.FULL)
+
+    def test_the_legacy_key_is_never_emitted(self):
+        """Both halves of the rename: the new keys are written and the old one is not."""
+        payload = self.FULL.as_dict()
+        self.assertNotIn("render_scatter", payload)
+        self.assertNotIn("scatter_repeats", payload)
+        self.assertEqual(payload["cue_render_scatter"], 2.7e-4)
+        self.assertEqual(payload["clip_render_scatter"], 1.83e-4)
+        self.assertEqual(payload["single_render_scatter"], 3.49e-4)
+
+    def test_a_post_adr_0017_record_maps_its_legacy_key_onto_the_CLIP_arm(self):
+        """The disambiguator is ``single_render_scatter``'s presence, and this is the era
+        where it is there: ADR-0017 added that field in the same commit that made
+        ``render_scatter`` the clip-loop estimate, so a record carrying both is a
+        clip-loop number under the old name."""
+        restored = CalibrationRecord.from_dict({
+            "onset_rms": 3e-3, "bed_rms": 1e-3, "separation_db": 18.0,
+            "n_poses": 16, "global_volume": 1.0,
+            "render_scatter": 1.83e-4, "scatter_repeats": 12,
+            "single_render_scatter": 3.49e-4, "single_render_repeats": 12,
+        })
+        self.assertEqual(restored.clip_render_scatter, 1.83e-4)
+        self.assertEqual(restored.clip_scatter_repeats, 12)
+        self.assertEqual(restored.single_render_scatter, 3.49e-4)
+        self.assertIsNone(
+            restored.cue_render_scatter,
+            "an ADR-0017 record has no cue-domain number, and inventing one would replay "
+            "the climb at a threshold no controller ever ran",
+        )
+
+    def test_a_pre_adr_0017_record_maps_its_legacy_key_onto_the_SINGLE_arm(self):
+        """The other era, and the same key: ``detour-2`` and ``eps-1`` wrote whole-clip
+        renders under ``render_scatter`` and had no ``single_render_scatter`` beside it."""
+        restored = CalibrationRecord.from_dict({
+            "onset_rms": 3e-3, "bed_rms": 1e-3, "separation_db": 18.0,
+            "n_poses": 16, "global_volume": 1.0,
+            "render_scatter": 3.49e-4, "scatter_repeats": 12,
+        })
+        self.assertEqual(restored.single_render_scatter, 3.49e-4)
+        self.assertEqual(restored.single_render_repeats, 12)
+        self.assertIsNone(restored.clip_render_scatter)
+        self.assertIsNone(restored.cue_render_scatter)
+
+    def test_a_record_written_before_any_scatter_existed_leaves_all_three_absent(self):
+        restored = CalibrationRecord.from_dict({
+            "onset_rms": 3e-3, "bed_rms": 1e-3, "separation_db": 18.0,
+            "n_poses": 16, "global_volume": 1.0,
+        })
+        self.assertIsNone(restored.cue_render_scatter)
+        self.assertIsNone(restored.clip_render_scatter)
+        self.assertIsNone(restored.single_render_scatter)
+        self.assertEqual(restored.cue_phase_folds, 0)
+        self.assertIsNone(restored.cue_phase_aggregation)
 
 
 if __name__ == "__main__":

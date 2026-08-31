@@ -117,6 +117,43 @@ CLAP_PROBE = "clap_instantiable"
 # provenance: box — ticket 13's known-good CLAP checkpoint.
 CLAP_MODEL_ID = "laion/clap-htsat-unfused"
 
+# DUPLICATED, DELIBERATELY, from `task/models.py`. ADR-0013's layer graph gives this module
+# no intra-package imports at all -- "ticket 17's assertion answers to the environment, not
+# to the tree" -- so it cannot import `resolve_clap_source`. Both sites carry this comment.
+# If one moves, the box gate's `test_clap_source_agrees` fails rather than the probe and the
+# runtime quietly loading different checkpoints.
+CLAP_LOCAL_DIR = "models/clap-htsat-unfused"
+CLAP_STAGED_MARKER = "PROVENANCE.json"
+
+
+def _clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOCAL_DIR) -> str:
+    """The staged safetensors copy when complete AND it names this model, else the Hub id.
+
+    Mirrors `models.resolve_clap_source`, including the identity check the first version was
+    missing. Without it this function returned the staged directory for any `model_id`, so
+    `probe_clap_instantiable("earshot/definitely-not-a-model")` loaded the real checkpoint and
+    reported PASS -- the forced-failure arm below asserting nothing at all.
+    """
+    import json
+    import os
+
+    needed = (
+        "model.safetensors",
+        "config.json",
+        "preprocessor_config.json",
+        "tokenizer.json",
+        CLAP_STAGED_MARKER,
+    )
+    if not all(os.path.isfile(os.path.join(local_dir, name)) for name in needed):
+        return model_id
+    try:
+        with open(os.path.join(local_dir, CLAP_STAGED_MARKER), encoding="utf-8") as handle:
+            staged = str(json.load(handle).get("model_id", ""))
+    except (ValueError, OSError):
+        return model_id
+    return local_dir if staged == model_id else model_id
+
+
 
 class EnvCheckError(RuntimeError):
     """The environment cannot run an episode. Raised before the episode, never during."""
@@ -465,8 +502,9 @@ def probe_clap_instantiable(model_id: str = CLAP_MODEL_ID) -> Probe:
         return Probe(
             CLAP_PROBE, ProbeStatus.NOT_RUN, "transformers/torch did not import: {}".format(exc)
         )
+    source = _clap_source(model_id)
     try:
-        model = ClapModel.from_pretrained(model_id)
+        model = ClapModel.from_pretrained(source)
         model.eval()
         n_params = sum(int(p.numel()) for p in model.parameters())
         with torch.no_grad():

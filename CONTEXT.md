@@ -26,6 +26,143 @@ _Avoid_: resume, abort (both name the transition, neither says the source was ne
 **Mission**:
 One episode = the primary find-task PLUS the anomaly response. "Mission complete" is not a single number — see Find-SR and Anomaly-response SR.
 
+### The sounding window (sound-source finding)
+
+Terms resolved in the 2026-08-20 grilling session, when the task pivoted from anomaly response to sound-source finding.
+The section is OPEN: only the decisions listed here are settled, and the anomaly-response language above is not yet retired.
+
+**Sounding window**:
+The contiguous run of steps over which the positioned source emits.
+It opens at `t_anom` and closes after a chosen duration, so the source is silent for the rest of the episode.
+This is the pivot's load-bearing change: a source that sounds forever is reachable by gradient climb alone, which leaves memory nothing to do and makes all four generalization cells score alike.
+The convention is the field's — SAVi (Chen et al., CVPR 2021) and SAVN-CE (CVPR 2026) both draw an onset and a duration per episode rather than sounding continuously.
+_Avoid_: onset (it already means something else here — see below); playback, clip length (the recording's own duration is not the window).
+
+**Offset step**:
+The first step at which the source no longer emits, i.e. the step the sounding window closes.
+_Avoid_: onset for either end of the window; "the sound ends" without saying which step.
+
+**Onset step** (unchanged, and the collision is the point):
+In this tree `onset_step` is the step the AGENT's own measured RMS crossed threshold — when it HEARD the source, not when the source STARTED.
+`t_anom` is when the source starts.
+The field's vocabulary uses "onset" for the source's start, so a paper sentence and a log line can use the same word for different steps.
+Carry the tree's meaning and say "sounding window opens" for the other.
+_Avoid_: importing SAVi's "onset"/"offset" pair wholesale onto `onset_step`; reading a cross-quoted onset time as a threshold crossing.
+
+**Silent phase**:
+The steps after the offset step, during which the source no longer emits.
+It is where both memories are supposed to pay, because there is no cue left to climb.
+The bed sounds throughout, and for the first few steps the room's reverberation is still arriving: the source's own energy is audible for `cue_tail_steps` steps past the offset step (3 at the box's numbers), which is what the accumulation buffer exists to produce.
+_Avoid_: silence (the bed still sounds, and so does the tail); "the only live signal is the bed" (true only after the cue tail has run out); "after the sound" (say the offset step).
+
+**Accumulation buffer**:
+The per-episode running signal each sounding step's convolution is ADDED into, at that step's own offset in time (`earshot/audio/tail.py`, required by ADR-0017, read correctly by ADR-0019).
+It is what makes the offset step arrive as a decay rather than as an unphysical hard cut to the bed, and it is what SoundSpaces 2.0 does not do on its own.
+It has ONE buffer and TWO readouts, below.
+An episode whose buffer never folded a render is refused an SWS rather than counted, at `silent_phase_tally`.
+_Avoid_: reverb tail as a synonym (the buffer is the mechanism, the tail is what one readout of it shows); calling it a filter or a smoother (that is the defect ADR-0019 removed, not the design).
+
+**Cue readout**:
+The last `hop = round(step_seconds * sample_rate)` samples of the accumulation buffer -- the audio that arrived at the ears DURING this step, one second at the shipped defaults.
+It is what the AGENT reads: `measured_rms`, `lateral_sign`, the onset detector, and therefore the controller and the calibration threshold.
+Its decay is set by the IR length rather than by the clip length, so it IS reverberation: at the box's numbers the room falls to zero over 3 folds while an anechoic 1-sample IR falls over 1.
+_Avoid_: instantaneous (it is one step of audio, not one sample); "the readout" unqualified (there are two, and they differ in width by a factor of five); comparing a `measured_rms` written before ADR-0019 against one written after -- different domains, and `cue_tail_steps` on the record is the marker of which.
+
+**Clip readout**:
+The last `N = len(clip)` samples of the same buffer -- five seconds at the shipped defaults.
+Since ADR-0019 it feeds CLAP and nothing else, because ADR-0018's bank of record was measured on clip-length waveforms.
+Before ADR-0019 it was the only readout, so the number called instantaneous was a five-second moving average and its post-offset decay was the analysis window emptying: an anechoic 1-sample IR reproduces that decay to within 1.24 points.
+_Avoid_: reverb tail for its decay (the anechoic control refutes it); reading `SoundingWindowRecord.tail_steps` or `ramp_steps` as bounds on what the agent hears -- both are this readout's, they keep their names on disk, and their role changed at ADR-0019.
+
+**Cue tail**:
+`cue_tail_steps = ceil((hop + L - 1) / hop)` for an IR of length `L`: how many steps the cue readout takes to reach exactly the bed after the last sounding step.
+It is the first number on the audit record that is evidence the geometric acoustics did any work -- 1 means the IR fits inside one step and the silent phase opens with an honest hard cut, more than 1 means the room outlives a step.
+3 at the box's numbers; 2 and 4 at the two runner-fixture IR widths, which is what stops it from being writable as a literal.
+Smoke criterion 4 measures its fence post from this, never from `tail_steps`.
+_Avoid_: tail steps unqualified (`SoundingWindowRecord.tail_steps` is the CLIP tail and keeps that name on disk); reading a `None` as 1 (it is a record written before the split, so unknown); citing it as the reverb time (it is a step count, and `hop` is in it).
+
+**Clip ramp**:
+`clip_ramp_steps = ceil(N / hop)`: how many sounding folds the clip readout needs before it holds a whole clip. 5 at the shipped defaults.
+Since ADR-0019 its only consumer is the CLAP deferral, which waits for a full clip window and is therefore bounded at `clip_ramp_steps - 1` steps.
+The cue readout has no ramp at all -- one fold writes its window whole (`CUE_RAMP_STEPS = 1`) -- which is why `onset_delay_steps` no longer carries the 0-to-4 step upward bias it did before the split.
+_Avoid_: treating FILL and LEVEL-SETTLE as one number (they nearly coincide for the clip readout at 5 and 7 only because `N >> L`; for the cue they are 1 and the cue tail); correcting a post-split `onset_delay_steps` for a fill ramp; pairing "the ramp" with "the tail" without saying which readout each belongs to.
+
+**Loop phase**:
+The clip is looped, so at a settled pose the cue readout cycles with period `phase_folds = N // gcd(N, hop)` -- 5 at the shipped defaults -- and reads the clip's own envelope one hop at a time.
+A clip whose energy sits inside one hop is loud on one fold and near the bed on the others: a 0.6 s transient on a 5 s loop measures a crest of 2.2361 and a minimum ratio of 0.0000.
+It is an honest property of the loop rather than noise, it is bounded and recorded (`metrics["sounding_phase_folds"]`, `cue_phase_crest`, `cue_phase_min_ratio`), and it can delay the first onset crossing by at most `phase_folds - 1` steps because the detector is one-shot and monotone-latching.
+_Avoid_: calling it render scatter or renderer noise (it is present with a perfectly deterministic renderer); smoothing it in the DETECTOR (that is the five-second moving average again, under a new name; if it is ever smoothed it belongs in the controller with its own paired arm); assuming it cancels in `is_rising` (it does at the shipped defaults only because `RISING_WINDOW == phase_folds == 5`, which is arithmetic coincidence).
+
+**Inferred goal class**:
+The agent is told NOTHING at step 0.
+The goal category is what CLAP returns for the clip the agent heard, so audio-to-class is inside the agent's own loop rather than handed to it.
+This is what makes the not-heard column non-vacuous: told the category outright, the sound's identity never matters and heard and not-heard score alike by construction.
+It is also the claim against MAGNet, whose 21-way head is welded into its tensor shapes and cannot take a 22nd class without retraining, while an open-set text encoder takes one more prompt and no training at all.
+_Avoid_: goal category (unqualified — say whether it was inferred or given); treating a given category as a weaker version of the same task.
+
+**CLAP separation gate**:
+The measurement that must clear before anything reads the inferred class: CLAP's discrimination on clips rendered through a real reverberant IR at the distances episodes actually pose, not on dry recordings.
+It exists because the capability is unproven here rather than merely untested — the one arc that ran it had the gate reject 0 of 8, which is what a gate that discriminates nothing also looks like.
+Its number is a separation, in the pattern of the EER and CapRL gates, and a failure is fixed at the audio path, never by lowering the bar.
+_Avoid_: reading a CLAP call that returns a finite logit as evidence the gate passed; depending on the inferred class before the gate has a number.
+
+**Episodic LTM**:
+The scene-keyed store: what was seen where, on a prior visit to THIS scene.
+It is what the seen axis tests, and it pays in both heard and not-heard columns of the seen row.
+It cannot pay in an unseen scene, and that is a property of the design rather than a shortfall — the archived stack made the same commitment structurally by hard-filtering its fine layer to the current scene.
+_Avoid_: LTM (unqualified — say episodic or semantic; they are different stores answering different cells).
+
+**Semantic LTM**:
+The scene-AGNOSTIC store: sound class to object category to a spatial prior, accumulated across prior visits to OTHER scenes.
+It is the only thing that can fill the unseen-and-heard cell, so it is what makes the matrix a factorial rather than three arms and a duplicate.
+Its associations must be LEARNED from the prior passes, never handed over as a table: the dataset's own sound-to-object mapping is placement ground truth and giving it to the agent would test the author's prior instead of the agent's memory.
+_Avoid_: prior, world knowledge (neither says the agent acquired it); reading a hand-authored placement table as if the agent had learned it.
+
+**STM**:
+Within-episode state, rebuilt every episode and never persisted.
+Its job is the silent phase: carry the energy history and the lateral-sign trace from the sounding window so a bearing survives the offset step.
+It is the counterpart to the cross-visit stores, and the axis it serves is time-within-episode rather than either generalization axis.
+_Avoid_: memory (unqualified — STM crosses no episode boundary and settles no cell of the matrix).
+
+**Sound-room mapping**:
+The dataset's table from a sound class to the ROOM its source is placed in — a flush in the bathroom, an alarm in the bedroom, a TV audience in the living room.
+The room resolves to an HM3D ObjectNav category for PLACEMENT (bathroom is the toilet, bedroom the bed, living room a sofa, tv_monitor or chair), so the object is where the source physically sits and the room is what the semantic store learns.
+It is PLACEMENT GROUND TRUTH and analyst-only, fenced off in the same way `sourceIsVisible()` is: handing it to the agent turns the unseen-and-heard cell into a measurement of the author's table rather than the agent's memory.
+**It was OBJECT-level until 2026-08-20 and the `clapsmoke-3` gate refuted that**: the `plant` anchor scored 0.383 with 187 of 480 rows landing on `toilet`, because water sounds predict a room with plumbing and a houseplant is not one. Rooms are the level the sounds encode.
+_Avoid_: sound-object mapping (superseded — the anchor is a room); sound prior, class prior (both read as something the agent holds); using it anywhere in the controller.
+
+**Sounding class vocabulary**:
+The set of ESC-50 classes an episode can draw its source clip from, each anchored to one of three rooms and placed at that room's HM3D object.
+The vocabulary is built at the CLASS level rather than being the anchors themselves: three rooms cannot be split heard-from-not-heard, but thirteen classes over three rooms can.
+A class needs a room to belong to. Outdoor sounds have none, so `chirping_birds`, `crickets` and `rain` moved to `ABSENT_CLASSES` rather than being deleted — a sound whose source is not in the house is the hardest honest negative the forced-failure arm can have.
+_Avoid_: goal category as a synonym for sound class (the mapping is many-to-one); assuming a class exists because ESC-50 has it — it must have a room.
+
+**Sound-room affinity**:
+How strongly a sound class implies one ROOM rather than any other.
+It is the membership test for the sounding class vocabulary, and it binds harder than CLAP accuracy does: a flush implies a bathroom and an alarm a bedroom, but coughing and vacuuming happen in every room, so a vocabulary carrying them asks the semantic store to learn noise and it will correctly fail to.
+A class that CLAP separates perfectly is still disqualified if its affinity is flat — `coughing` scored 1.000 in `clapsmoke-3` and is out.
+**Grades are never derived from measured recall.** Fitting the ground truth to the classifier would make the matrix circular: the semantic store would be scored against a table built from the very model it depends on. `mouse_click` keeps its grade at 0.017 recall, and the separation gate is what cuts it.
+_Avoid_: sound-object affinity (superseded); audibility or CLAP separability as the membership test (both are about the signal, affinity is about what the signal predicts); re-grading a class because the gate scored it badly.
+
+**Pruned vocabulary**:
+The sounding class vocabulary AFTER the separation gate has cut the classes CLAP cannot resolve to a ROOM through reverb at the distances episodes pose.
+The candidate set going in is deliberately generous, including the weak anchors, so the surviving set is a measured artefact rather than an author's judgement.
+Three independent cuts, each reported with its own count: too few rows, too little separation, wrong affinity.
+The separation cut reads **anchor recall, not class recall** (ADR-0018, from `clapgate-1`): a class confused for a sibling of the same room still sends the agent to the right room, so cutting on class recall prices a cost the task never pays.
+_Avoid_: fixing the vocabulary before the gate has run; reporting the pruned set without the candidate set it was cut from; quoting a survivor count without saying which recall the cut read.
+
+**Bank of record**:
+The INTERSECTION of the pruned vocabularies of two or more gate runs staged on disjoint ESC-50 recordings (`earshot/tools/bank_intersect.py`).
+One run's prune is not stable: `water_drops` scored 0.998 anchor recall on clips 0-7 and 0.449 on clips 8-15, so `clapgate-2` and `clapheld-1` picked a different twelfth class each.
+A class in the intersection cleared the bar on audio the other run never saw, which is a held-out validation per class rather than per aggregate.
+A **disputed** class, kept by one run and cut by another, is cut: its recall depends on which recordings it drew, which is exactly what the heard/not-heard column must not be confounded by.
+_Avoid_: shipping a single run's prune; scoring an input run against the bank it helped derive and calling it unbiased; asserting disjointness instead of reading `clip_start` from both `provenance.txt` files.
+
+**Success when silent (SWS)**:
+The published fraction of episodes the agent completes by reaching the goal AFTER the sounding window closed (Chen et al., CVPR 2021, §5).
+Adopted verbatim so it is cross-quotable against SAVi and SAVN-CE, and because it is the one standard metric that isolates what the silent phase tests.
+_Avoid_: re-deriving it under a local name; reporting it without SR beside it.
+
 ### The four headline metrics (per setting S1/S2/S3)
 
 **Find-SR**:
@@ -73,7 +210,12 @@ _Avoid_: DOA (the near-zero time-difference cue is not what drives this).
 Warm = the agent mapped this scene on a prior silent pass (visual LTM has it). Cold = first visit.
 
 **Heard vs not-heard (audio axis)**:
-Whether the anomaly sound was heard/stored on a prior visit. Currently a CLOSED negative (audio-memory value redundant with vision) — not a live experimental axis.
+Whether the sound CLASS has an LTM entry from a prior visit. Class-level, not recording-level: heard means an entry exists, not-heard means CLAP must place the class open-set from its name alone.
+**REOPENED 2026-08-20**, having been a closed negative (audio-memory value redundant with vision) since the `write_audio_event` A/B.
+The old null was measured on a single-goal harness where the agent could SEE the goal, so a stored audio event never carried anything vision was not already supplying.
+Under the sounding window the source is silent for most of the episode, so in the silent phase there is nothing left for a stored audio-place association to be redundant WITH. That is the mechanical reason the null does not transfer, and it is the only thing licensing the reopening.
+Reopening costs a prior visit per episode, which couples this axis to the seen axis: both need the same prior pass.
+_Avoid_: recording-level "unheard" (that is a CLAP robustness question, not a memory one, and is the SECONDARY axis); citing the old redundant-with-vision null against the silent phase without saying the harness differed.
 
 ### Anomaly detection
 
@@ -105,7 +247,10 @@ _Avoid_: reading `n_audio_onset_fired` as evidence the anomaly was heard (it cou
 The ray-traced renderer disagreeing with itself — the spread of received RMS across repeated renders at ONE fixed pose, holding distance, geometry and clip constant.
 It is the noise floor any "did it get louder?" test has to clear, and it is measured per episode rather than assumed.
 It is NOT the calibration sweep's spread: those poses sit at different distances, so their spread is the distance gradient, which is the very thing a rise is being read for.
-_Avoid_: render noise (unqualified — say scatter at a fixed pose, or say the gradient); reading an unmeasured scatter as zero (unmeasured is null, and the run then falls back to the pre-`detour-2` threshold).
+**Since ADR-0019 it is THREE named arms and never one word**: `single_render_scatter` (repeated bare whole-clip renders, the pre-ADR-0017 estimator), `clip_render_scatter` (the loop read at clip width, the ADR-0017 estimator), and `cue_render_scatter` (the loop read at cue width, which is the reading `is_rising` actually compares and the one `climb_eps` is fed).
+Every number on disk under the bare key `render_scatter` is one of the first two, and `single_render_scatter` sitting beside it is what says which.
+The cue arm is not only the renderer: on a bursty clip it is dominated by the loop phase, measured at SD/level 2.014 for a 0.6 s transient with a perfectly DETERMINISTIC renderer, against ~1e-15 on the clip arm.
+_Avoid_: render noise (unqualified — say scatter at a fixed pose, or say the gradient); `render_scatter` unqualified (say which of the three arms); differencing a scatter across ADR-0019 (two domains under one label); reading the cue arm as renderer disagreement on a bursty clip; reading an unmeasured scatter as zero (unmeasured is null, and the run then falls back to the pre-`detour-2` threshold).
 
 **Surge / cast**:
 The two things the climb does. **Surge** is a forward step taken because the cue rose. **Cast** is what it does when the cue is dead: a turn, then a committed run of forward steps, with successive legs alternating direction so the sweep cannot close into an orbit.

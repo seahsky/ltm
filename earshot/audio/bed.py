@@ -55,9 +55,34 @@ def bed_signal(n_samples: int, level_rms: float, seed: int = BED_SEED) -> np.nda
     ``AudioConfig.pre_onset_rms_tol`` be a tolerance on drift rather than a slack budget
     for sampling noise.
 
-    Generated once per run at the clip's length, not once per step: it is time-invariant
-    as well as position-invariant, and regenerating it per step would make the pre-onset
-    reading a fresh random draw — the very variance the assertion is trying to see.
+    Generated once per EPISODE, not once per step: it is time-invariant as well as
+    position-invariant, and regenerating it per step would make the pre-onset reading a
+    fresh random draw — the very variance the assertion is trying to see. This line used
+    to say "once per run" while ``audio/config.py`` said "per step"; both were wrong and
+    a future reader would have sized a buffer against one of them.
+
+    **Since ADR-0019's split readout the runner builds TWO beds from this function**, one
+    at ``hop`` for ``tail.heard_step`` and one at ``len(clip)`` for
+    ``tail.heard_clip_window``, each normalised at its own length. A ``hop``-length SLICE
+    of the clip-length bed was rejected, and the arithmetic is why: a slice of ``n``
+    Gaussian samples carries a relative RMS error of about ``1/sqrt(2n)``, and ``n`` is
+    ``hop``, which is a free parameter (``step_seconds`` × ``sample_rate``). Measured
+    against the fixed ``BED_SEED`` — at the shipped hop of 44100 the last-hop slice
+    deviates 0.0023% and the worst disjoint slice 0.3107%, harmless; at the runner
+    fixture's hop of 441 the last-hop slice deviates 3.8960% and the worst disjoint slice
+    6.7906%; at the tail fixture's hop of 100 the worst disjoint slice is 17.7320%.
+    ``AudioConfig.pre_onset_rms_tol`` is 0.05, so a slice would raise ``ProvenanceError``
+    outright at two configurations this tree ships tests at and would spend 78% of the
+    tolerance at a third — and the cost scales the wrong way, since the smaller the step
+    the worse it gets. The paragraph above promises that normalising after generation is
+    what makes that tolerance a bound on DRIFT rather than a slack budget for sampling
+    noise; slicing spends exactly what it promised not to. Two beds are exact to within
+    a measured 3.7e-08 relative at every length.
+
+    **The two beds are NOT sample-aligned**, so nothing may compare their samples: they
+    share ``BED_SEED`` and therefore their leading samples, but each is scaled by its own
+    RMS. Nothing does compare them — the cue bed feeds the onset and the clip bed feeds
+    CLAP, and neither is diffed against the other.
     """
     n = int(n_samples)
     if n <= 0:
@@ -77,17 +102,25 @@ def bed_signal(n_samples: int, level_rms: float, seed: int = BED_SEED) -> np.nda
 def mix_bed(rendered: Any, bed: Any) -> np.ndarray:
     """Add the bed to a rendered binaural signal. Lengths must already agree.
 
-    Deliberately not tolerant of a mismatch. The bed is generated at the clip's length
-    and ``clips.render_through_ir`` trims to the same, so a mismatch means one of those
-    two changed — and the tempting fixes (tile the bed, crop the render) would each
-    silently change the RMS the onset threshold was calibrated against.
+    Deliberately not tolerant of a mismatch, and since ADR-0019 the refusal is
+    load-bearing rather than defensive. There are now exactly TWO lengths a caller can
+    legitimately be at — ``hop``, the cue readout's width, and ``len(clip)``, the clip
+    readout's — so a mismatch means the bed was built for the OTHER readout. That is what
+    catches ``tail.heard_step(bed_cue=bed_clip)``, which would otherwise compose a signal
+    of the wrong length and, worse, of the wrong domain.
+
+    The tempting fixes (tile the bed, crop the render) would each silently change the RMS
+    the onset threshold was calibrated against, and cropping in particular is the exact
+    move ``bed_signal``'s docstring measures at 6.79% error against a 5% tolerance.
     """
     signal = np.asarray(rendered, dtype=np.float32)
     floor = np.asarray(bed, dtype=np.float32)
     if signal.shape != floor.shape:
         raise ValueError(
-            "bed is {} but the rendered signal is {} — both are built at the clip's "
-            "length, so a mismatch means the clip changed under one of them".format(
+            "bed is {} but the signal is {} — a bed is built either at hop (the cue "
+            "readout's width) or at len(clip) (the clip readout's), so a mismatch means "
+            "the bed was built for the other readout. Pass bed_cue to heard_step and "
+            "bed_clip to heard_clip_window; never slice one from the other.".format(
                 floor.shape, signal.shape
             )
         )
@@ -107,6 +140,14 @@ def heard_signal(ir: Any, clip: Any, bed: Any, *, playing: bool) -> np.ndarray:
     where ``nearest`` could fabricate audio for a pose it had no data for (ADR-0003).
     Here the geometry is already inside the IR the simulator just rendered, and the bed
     is position-invariant, so there is nowhere for a coordinate to enter.
+
+    **Since ADR-0017 the runner composes through ``audio.tail.heard_step`` instead.** A
+    bounded sounding window cut to the bed with no tail is unphysical: this function's
+    not-playing branch returns the bed itself, so the silence arrives as a hard step. It
+    is retained, unchanged and un-called by the runner, as the **continuous-source
+    composition and the named control** the tail's Mac tests measure their decay
+    against — the way ``test_rising_window.py`` keeps ``OLD_EPS``. A control that is
+    deleted is a comparison that cannot be made twice.
     """
     if not playing:
         return np.asarray(bed, dtype=np.float32)

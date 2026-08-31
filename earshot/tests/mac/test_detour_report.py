@@ -357,7 +357,22 @@ class TestTheThresholdComesFromTheEpisode(unittest.TestCase):
             steps=rms_steps(self.RISES),
             calibration=None if scatter is None else CalibrationRecord(
                 onset_rms=0.01, bed_rms=0.001, separation_db=40.0, n_poses=16,
-                global_volume=1.0, render_scatter=scatter, scatter_repeats=12),
+                global_volume=1.0, cue_render_scatter=scatter,
+                cue_scatter_repeats=12),
+        )
+
+    def _clip_only_audit(self, scatter):
+        """A run written between ADR-0017 and ADR-0019: a clip-domain scatter and no cue."""
+        return EpisodeAudit(
+            episode_index=0,
+            source_xyz=SOURCE,
+            funnel_stage=FunnelStage.INVESTIGATE_ENTERED,
+            onset=OnsetRecord(onset_step=ONSET_STEP),
+            steps=rms_steps(self.RISES),
+            calibration=CalibrationRecord(
+                onset_rms=0.01, bed_rms=0.001, separation_db=40.0, n_poses=16,
+                global_volume=1.0, clip_render_scatter=scatter,
+                clip_scatter_repeats=12),
         )
 
     def test_a_measured_floor_is_used_and_reported(self):
@@ -373,6 +388,26 @@ class TestTheThresholdComesFromTheEpisode(unittest.TestCase):
         self.assertFalse(row["eps_measured"])
         # The same trace at the pre-detour-2 threshold is a climb with no plateau at all.
         self.assertEqual(row["plateau_steps"], 0)
+
+    def test_a_pre_split_run_falls_back_rather_than_replaying_at_the_CLIP_number(self):
+        """The arm ADR-0019 makes possible, and the one a shortcut would get wrong.
+
+        A run written between ADR-0017 and ADR-0019 carries a `clip_render_scatter` and no
+        `cue_render_scatter`, because its climb read the 5 s clip readout. Reusing that
+        number here would replay `rising` at a threshold measured on a quantity this
+        controller does not read -- 2.8e-3 turns the whole trace into a plateau where the
+        fallback reads it as a clean climb, which is the same trace with opposite
+        readings. The fallback is reported instead, and `eps_measured` says so.
+        """
+        row = trace_one(self._clip_only_audit(2.8e-3))
+        self.assertEqual(row["rising_eps"], RISING_EPS)
+        self.assertFalse(row["eps_measured"])
+        self.assertEqual(row["plateau_steps"], 0)
+        # ...and the cue-domain arm on the same trace really does clamp it, so the line
+        # above is a fallback rather than a threshold that never binds.
+        self.assertEqual(
+            trace_one(self._audit(2.8e-3))["plateau_steps"], len(self.RISES) - 1
+        )
 
     def test_the_report_discloses_which_threshold_was_in_force(self):
         text = format_report(aggregate([

@@ -25,7 +25,7 @@ from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.__main__ import build_parser, config_from_args
 from earshot.agent.config import ControllerConfig, DetectorConfig, PlannerConfig
-from earshot.audio.config import AudioConfig
+from earshot.audio.config import AudioConfig, WindowPolicy
 from earshot.config import Detector, Localization, RunConfig
 
 # The fields that are composed rather than flagged: each is a module's own frozen config,
@@ -84,6 +84,35 @@ class TestRunConfig(unittest.TestCase):
             sorted(payload),
             sorted(field.name for field in dataclasses.fields(RunConfig)),
         )
+
+    def test_the_sounding_window_defaults_round_trip_as_json(self):
+        """Why the policy is a TOP-LEVEL field and not on a sub-config.
+
+        ``as_dict`` passes the four module configs through ``dataclasses.asdict``, which
+        leaves an Enum member as an Enum OBJECT — ``json.dumps`` then raises and the run
+        record cannot be written at all. Top-level enums are hand-mapped to ``.value``
+        beside ``localization`` and ``detector``, which is the only shape that survives
+        this round trip.
+        """
+        payload = json.loads(json.dumps(RunConfig(run_dir="runs/x").as_dict()))
+        self.assertEqual(payload["sounding_policy"], "fixed_steps")
+        self.assertEqual(payload["sounding_steps"], 60)
+        self.assertAlmostEqual(payload["sounding_budget_fraction"], 0.12)
+        self.assertEqual(payload["sounding_draw_steps"], [30, 90])
+
+    def test_the_three_bounded_policies_agree_at_the_defaults(self):
+        """60 steps, ``floor(0.12 * 500)`` and ``mean(30, 90)`` are all 60, on purpose.
+
+        Switching policy at the defaults changes the VARIANCE of the duration and not its
+        level, so the first policy comparison is not confounded by a level change riding
+        along with it. The default itself is PROVISIONAL and has no sweep behind it —
+        this pins the agreement, not the number.
+        """
+        config = RunConfig(run_dir="runs/x")
+        self.assertEqual(config.sounding_steps, 60)
+        self.assertEqual(int(config.sounding_budget_fraction * config.max_steps), 60)
+        lo, hi = config.sounding_draw_steps
+        self.assertEqual((lo + hi) // 2, 60)
 
     def test_onset_rms_is_not_a_field_anywhere_in_the_configuration(self):
         """§2.3 derives it; ``AudioConfig`` holds the sweep's INPUTS instead."""
@@ -169,6 +198,10 @@ class TestTheCli(unittest.TestCase):
                     "--min-source-sep-m", "5.5",
                     "--max-source-dy-m", "0.5",
                     "--audio-step-ceiling-s", "0.25",
+                    "--sounding-policy", "drawn",
+                    "--sounding-steps", "45",
+                    "--sounding-budget-fraction", "0.2",
+                    "--sounding-draw-steps", "10", "20",
                     "--overwrite",
                 ]
             )
@@ -190,6 +223,10 @@ class TestTheCli(unittest.TestCase):
         self.assertAlmostEqual(config.min_source_sep_m, 5.5)
         self.assertAlmostEqual(config.max_source_dy_m, 0.5)
         self.assertAlmostEqual(config.audio_step_ceiling_s, 0.25)
+        self.assertIs(config.sounding_policy, WindowPolicy.DRAWN)
+        self.assertEqual(config.sounding_steps, 45)
+        self.assertAlmostEqual(config.sounding_budget_fraction, 0.2)
+        self.assertEqual(config.sounding_draw_steps, (10, 20))
         self.assertTrue(config.overwrite)
 
     def test_the_arms_are_enums_rather_than_booleans(self):
@@ -199,6 +236,23 @@ class TestTheCli(unittest.TestCase):
         the shape that cannot grow a third value.
         """
         self._reject(["--run-dir", "runs/x", "--localization", "sometimes"])
+        self._reject(["--run-dir", "runs/x", "--sounding-policy", "sometimes"])
+
+    def test_the_drawn_range_arrives_as_a_tuple(self):
+        """argparse's ``nargs=2`` yields a LIST, and ``RunConfig`` is compared by equality.
+
+        ``test_the_defaults_round_trip_to_the_config_defaults`` above asserts the built
+        config equals ``RunConfig(run_dir=...)``, which a list would fail for a reason
+        that has nothing to do with the value. Frozen dataclasses also want a hashable
+        field.
+        """
+        config = config_from_args(
+            build_parser().parse_args(
+                ["--run-dir", "runs/x", "--sounding-draw-steps", "10", "20"]
+            )
+        )
+        self.assertEqual(config.sounding_draw_steps, (10, 20))
+        self.assertIsInstance(config.sounding_draw_steps, tuple)
 
     def test_the_anomaly_class_is_restricted_to_the_locked_three(self):
         """``clips.ANOMALY_CLASSES`` — the classes ESC-50 is staged for.

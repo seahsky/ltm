@@ -20,7 +20,12 @@ import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
 
-from earshot.metrics import compute_benchmark_spl, compute_soft_spl
+from earshot.metrics import (
+    compute_benchmark_spl,
+    compute_soft_spl,
+    compute_sws,
+    sws_episode,
+)
 
 
 class TestBenchmarkSpl(unittest.TestCase):
@@ -176,6 +181,151 @@ class TestSoftSpl(unittest.TestCase):
             ),
             0.0,
         )
+
+
+class TestSuccessWhenSilent(unittest.TestCase):
+    """SWS (Chen et al., CVPR 2021 §5), adopted verbatim to stay cross-quotable.
+
+    Two decisions are being pinned here rather than the arithmetic, because both are
+    real and both are silently reversible. SWS counts reaching the SOUND SOURCE, not the
+    primary ObjectNav goal — there are two successes in this record and ADR-0017 makes
+    the source the find-task. And the denominator is episodes that ran past their OWN
+    offset step, not every episode: one that ended first never had a silent phase.
+    """
+
+    def test_an_episode_that_ended_before_its_window_closed_is_not_eligible(self):
+        """It never had a silent phase, so it cannot answer the question SWS asks.
+
+        Counting it in the denominator would score every short episode as a failure to
+        succeed in silence, which is a claim about the step budget rather than about the
+        agent.
+        """
+        eligible, reached = sws_episode(
+            offset_step=60, n_loop_steps=40, source_reached_step=30
+        )
+        self.assertFalse(eligible)
+        self.assertFalse(reached)
+
+    def test_an_episode_that_ended_ON_its_offset_step_is_not_eligible_either(self):
+        """THE DENOMINATOR'S BOUNDARY, and the fixtures above sit nowhere near it.
+
+        60 against 40 and 60 against 200 both answer under any comparison; the real edge
+        is ``offset_step == n_loop_steps``. An episode with steps 0..59 has
+        ``n_loop_steps`` 60 and its LAST step is 59 -- the step before the source was due
+        to stop -- so it never ran a silent step at all. Widening ``<`` to ``<=`` here
+        puts it in SWS's denominator as a failure to succeed in silence, which is a claim
+        about the step budget rather than about the agent, and the numerator's own
+        boundary check cannot see it.
+        """
+        eligible, reached = sws_episode(
+            offset_step=60, n_loop_steps=60, source_reached_step=59
+        )
+        self.assertFalse(eligible)
+        self.assertFalse(reached)
+        # ...and one more step IS the whole difference: step 60 is the first silent one.
+        eligible, reached = sws_episode(
+            offset_step=60, n_loop_steps=61, source_reached_step=60
+        )
+        self.assertTrue(eligible)
+        self.assertTrue(reached)
+
+    def test_reaching_the_source_before_the_offset_step_is_eligible_and_not_a_success(self):
+        """The definition's sharp edge, and the whole content of the metric.
+
+        The episode ran past its offset step, so it IS in the denominator — the agent
+        had a silent phase available to it. It reached the source while the source was
+        still sounding, so it is not in the numerator: it did not complete when silent.
+        """
+        eligible, reached = sws_episode(
+            offset_step=60, n_loop_steps=200, source_reached_step=42
+        )
+        self.assertTrue(eligible)
+        self.assertFalse(reached)
+
+    def test_reaching_it_after_the_offset_step_is_the_metric(self):
+        eligible, reached = sws_episode(
+            offset_step=60, n_loop_steps=200, source_reached_step=131
+        )
+        self.assertTrue(eligible)
+        self.assertTrue(reached)
+
+    def test_the_offset_step_itself_counts_as_silent(self):
+        """``[opens_at, offset_step)`` is the sounding phase, so the offset step is the
+        FIRST silent step and a reach on it is a reach in silence."""
+        eligible, reached = sws_episode(
+            offset_step=60, n_loop_steps=200, source_reached_step=60
+        )
+        self.assertTrue(eligible)
+        self.assertTrue(reached)
+
+    def test_never_reaching_the_source_is_eligible_and_not_a_success(self):
+        eligible, reached = sws_episode(
+            offset_step=60, n_loop_steps=200, source_reached_step=None
+        )
+        self.assertTrue(eligible)
+        self.assertFalse(reached)
+
+    def test_a_continuous_arm_episode_is_never_eligible(self):
+        """No offset step means no silent phase, whatever else the episode did.
+
+        ``WindowPolicy.CONTINUOUS`` is the control arm every windowed delta is measured
+        against, and an SWS quietly computed over it would be a number about an arm in
+        which the metric is undefined.
+        """
+        eligible, reached = sws_episode(
+            offset_step=None, n_loop_steps=500, source_reached_step=310
+        )
+        self.assertFalse(eligible)
+        self.assertFalse(reached)
+
+    def test_sws_over_no_eligible_episodes_is_not_run_rather_than_zero(self):
+        """THE FORCED-FAILURE ARM (ADR-0014). ``None``, and explicitly not ``0.0``.
+
+        Two incidents are behind the rule: a probe that skipped and reported success, and
+        a canary that was never armed reading as a pass. 0.0 says *the agent never
+        succeeded in silence*; NOT_RUN says *nobody asked*, and a reader cannot tell
+        those apart from a float. The healthy arm below is the same call with a
+        denominator.
+        """
+        result = compute_sws(n_eligible=0, n_reached_after_offset=0)
+        self.assertIsNone(result)
+        self.assertIsNot(result, 0.0)
+        # the healthy arm, so the None above is not just a function that never works
+        self.assertAlmostEqual(compute_sws(n_eligible=8, n_reached_after_offset=0), 0.0)
+        self.assertAlmostEqual(compute_sws(n_eligible=8, n_reached_after_offset=3), 0.375)
+
+    def test_an_sws_over_episodes_whose_tail_never_ran_is_refused(self):
+        """ADR-0017's bar carried INTO the primitive, and it is the whole of line 49.
+
+        An episode whose accumulation buffer folded no render had a silent phase that
+        arrived as a HARD CUT to the bed, so an SWS counting it is a number about the
+        mechanism ADR-0017 replaced rather than about the agent. ``n_tail_active`` is
+        Optional only because this function takes two ints and cannot fetch the records
+        itself -- a caller that HAS the evidence must pass it, and a caller that does not
+        is publishing an unverified rate.
+        """
+        with self.assertRaises(ValueError) as caught:
+            compute_sws(n_eligible=8, n_reached_after_offset=3, n_tail_active=5)
+        self.assertIn("3 of the 8", str(caught.exception))
+        self.assertIn("hard cut", str(caught.exception))
+        # the healthy arm: every eligible episode carried one, so the rate stands
+        self.assertAlmostEqual(
+            compute_sws(n_eligible=8, n_reached_after_offset=3, n_tail_active=8), 0.375
+        )
+        # ...and omitting it is permitted-but-unverified rather than refused, because a
+        # caller with counts and no records must not be forced to fabricate the number.
+        self.assertAlmostEqual(
+            compute_sws(n_eligible=8, n_reached_after_offset=3), 0.375
+        )
+
+    def test_impossible_counts_raise(self):
+        """The quiet fix — ``min(numerator, denominator)`` — would publish 1.0 for a bug."""
+        with self.assertRaises(ValueError):
+            compute_sws(n_eligible=3, n_reached_after_offset=4)
+        with self.assertRaises(ValueError):
+            compute_sws(n_eligible=-1, n_reached_after_offset=0)
+        with self.assertRaises(ValueError):
+            compute_sws(n_eligible=3, n_reached_after_offset=-1)
 
 
 if __name__ == "__main__":
