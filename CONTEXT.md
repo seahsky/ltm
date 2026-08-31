@@ -50,9 +50,48 @@ Carry the tree's meaning and say "sounding window opens" for the other.
 _Avoid_: importing SAVi's "onset"/"offset" pair wholesale onto `onset_step`; reading a cross-quoted onset time as a threshold crossing.
 
 **Silent phase**:
-The steps after the offset step, during which the only live signal is the background bed.
+The steps after the offset step, during which the source no longer emits.
 It is where both memories are supposed to pay, because there is no cue left to climb.
-_Avoid_: silence (the bed still sounds); "after the sound" (say the offset step).
+The bed sounds throughout, and for the first few steps the room's reverberation is still arriving: the source's own energy is audible for `cue_tail_steps` steps past the offset step (3 at the box's numbers), which is what the accumulation buffer exists to produce.
+_Avoid_: silence (the bed still sounds, and so does the tail); "the only live signal is the bed" (true only after the cue tail has run out); "after the sound" (say the offset step).
+
+**Accumulation buffer**:
+The per-episode running signal each sounding step's convolution is ADDED into, at that step's own offset in time (`earshot/audio/tail.py`, required by ADR-0017, read correctly by ADR-0019).
+It is what makes the offset step arrive as a decay rather than as an unphysical hard cut to the bed, and it is what SoundSpaces 2.0 does not do on its own.
+It has ONE buffer and TWO readouts, below.
+An episode whose buffer never folded a render is refused an SWS rather than counted, at `silent_phase_tally`.
+_Avoid_: reverb tail as a synonym (the buffer is the mechanism, the tail is what one readout of it shows); calling it a filter or a smoother (that is the defect ADR-0019 removed, not the design).
+
+**Cue readout**:
+The last `hop = round(step_seconds * sample_rate)` samples of the accumulation buffer -- the audio that arrived at the ears DURING this step, one second at the shipped defaults.
+It is what the AGENT reads: `measured_rms`, `lateral_sign`, the onset detector, and therefore the controller and the calibration threshold.
+Its decay is set by the IR length rather than by the clip length, so it IS reverberation: at the box's numbers the room falls to zero over 3 folds while an anechoic 1-sample IR falls over 1.
+_Avoid_: instantaneous (it is one step of audio, not one sample); "the readout" unqualified (there are two, and they differ in width by a factor of five); comparing a `measured_rms` written before ADR-0019 against one written after -- different domains, and `cue_tail_steps` on the record is the marker of which.
+
+**Clip readout**:
+The last `N = len(clip)` samples of the same buffer -- five seconds at the shipped defaults.
+Since ADR-0019 it feeds CLAP and nothing else, because ADR-0018's bank of record was measured on clip-length waveforms.
+Before ADR-0019 it was the only readout, so the number called instantaneous was a five-second moving average and its post-offset decay was the analysis window emptying: an anechoic 1-sample IR reproduces that decay to within 1.24 points.
+_Avoid_: reverb tail for its decay (the anechoic control refutes it); reading `SoundingWindowRecord.tail_steps` or `ramp_steps` as bounds on what the agent hears -- both are this readout's, they keep their names on disk, and their role changed at ADR-0019.
+
+**Cue tail**:
+`cue_tail_steps = ceil((hop + L - 1) / hop)` for an IR of length `L`: how many steps the cue readout takes to reach exactly the bed after the last sounding step.
+It is the first number on the audit record that is evidence the geometric acoustics did any work -- 1 means the IR fits inside one step and the silent phase opens with an honest hard cut, more than 1 means the room outlives a step.
+3 at the box's numbers; 2 and 4 at the two runner-fixture IR widths, which is what stops it from being writable as a literal.
+Smoke criterion 4 measures its fence post from this, never from `tail_steps`.
+_Avoid_: tail steps unqualified (`SoundingWindowRecord.tail_steps` is the CLIP tail and keeps that name on disk); reading a `None` as 1 (it is a record written before the split, so unknown); citing it as the reverb time (it is a step count, and `hop` is in it).
+
+**Clip ramp**:
+`clip_ramp_steps = ceil(N / hop)`: how many sounding folds the clip readout needs before it holds a whole clip. 5 at the shipped defaults.
+Since ADR-0019 its only consumer is the CLAP deferral, which waits for a full clip window and is therefore bounded at `clip_ramp_steps - 1` steps.
+The cue readout has no ramp at all -- one fold writes its window whole (`CUE_RAMP_STEPS = 1`) -- which is why `onset_delay_steps` no longer carries the 0-to-4 step upward bias it did before the split.
+_Avoid_: treating FILL and LEVEL-SETTLE as one number (they nearly coincide for the clip readout at 5 and 7 only because `N >> L`; for the cue they are 1 and the cue tail); correcting a post-split `onset_delay_steps` for a fill ramp; pairing "the ramp" with "the tail" without saying which readout each belongs to.
+
+**Loop phase**:
+The clip is looped, so at a settled pose the cue readout cycles with period `phase_folds = N // gcd(N, hop)` -- 5 at the shipped defaults -- and reads the clip's own envelope one hop at a time.
+A clip whose energy sits inside one hop is loud on one fold and near the bed on the others: a 0.6 s transient on a 5 s loop measures a crest of 2.2361 and a minimum ratio of 0.0000.
+It is an honest property of the loop rather than noise, it is bounded and recorded (`metrics["sounding_phase_folds"]`, `cue_phase_crest`, `cue_phase_min_ratio`), and it can delay the first onset crossing by at most `phase_folds - 1` steps because the detector is one-shot and monotone-latching.
+_Avoid_: calling it render scatter or renderer noise (it is present with a perfectly deterministic renderer); smoothing it in the DETECTOR (that is the five-second moving average again, under a new name; if it is ever smoothed it belongs in the controller with its own paired arm); assuming it cancels in `is_rising` (it does at the shipped defaults only because `RISING_WINDOW == phase_folds == 5`, which is arithmetic coincidence).
 
 **Inferred goal class**:
 The agent is told NOTHING at step 0.
@@ -208,7 +247,10 @@ _Avoid_: reading `n_audio_onset_fired` as evidence the anomaly was heard (it cou
 The ray-traced renderer disagreeing with itself — the spread of received RMS across repeated renders at ONE fixed pose, holding distance, geometry and clip constant.
 It is the noise floor any "did it get louder?" test has to clear, and it is measured per episode rather than assumed.
 It is NOT the calibration sweep's spread: those poses sit at different distances, so their spread is the distance gradient, which is the very thing a rise is being read for.
-_Avoid_: render noise (unqualified — say scatter at a fixed pose, or say the gradient); reading an unmeasured scatter as zero (unmeasured is null, and the run then falls back to the pre-`detour-2` threshold).
+**Since ADR-0019 it is THREE named arms and never one word**: `single_render_scatter` (repeated bare whole-clip renders, the pre-ADR-0017 estimator), `clip_render_scatter` (the loop read at clip width, the ADR-0017 estimator), and `cue_render_scatter` (the loop read at cue width, which is the reading `is_rising` actually compares and the one `climb_eps` is fed).
+Every number on disk under the bare key `render_scatter` is one of the first two, and `single_render_scatter` sitting beside it is what says which.
+The cue arm is not only the renderer: on a bursty clip it is dominated by the loop phase, measured at SD/level 2.014 for a 0.6 s transient with a perfectly DETERMINISTIC renderer, against ~1e-15 on the clip arm.
+_Avoid_: render noise (unqualified — say scatter at a fixed pose, or say the gradient); `render_scatter` unqualified (say which of the three arms); differencing a scatter across ADR-0019 (two domains under one label); reading the cue arm as renderer disagreement on a bursty clip; reading an unmeasured scatter as zero (unmeasured is null, and the run then falls back to the pre-`detour-2` threshold).
 
 **Surge / cast**:
 The two things the climb does. **Surge** is a forward step taken because the cue rose. **Cast** is what it does when the cue is dead: a turn, then a committed run of forward steps, with successive legs alternating direction so the sweep cannot close into an orbit.

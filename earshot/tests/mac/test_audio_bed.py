@@ -45,6 +45,75 @@ class TestBedSignal(unittest.TestCase):
             bed_signal(64, -1.0)
 
 
+class TestTwoBedsAtTwoLengths(unittest.TestCase):
+    """ADR-0019 decision 1: the runner builds TWO beds, and never slices one from the
+    other. This is the arm that makes that decision evidence rather than a preference.
+
+    ``tail.heard_step`` composes at ``hop`` and ``tail.heard_clip_window`` at
+    ``len(clip)``. The smaller diff was to keep one clip-length bed and slice its last
+    ``hop`` samples for the cue; the slice is out of ``AudioConfig.pre_onset_rms_tol`` at
+    two of the three configurations this tree ships tests at.
+    """
+
+    TOLERANCE = 0.05  # AudioConfig.pre_onset_rms_tol
+
+    def test_a_bed_built_at_its_own_length_is_exact_at_every_length(self):
+        """THE HEALTHY ARM. Normalising after generation is what makes the tolerance a
+        bound on DRIFT rather than a slack budget for sampling noise."""
+        for n_samples in (100, 441, 800, 2205, 44100, 220500):
+            self.assertAlmostEqual(rms(bed_signal(n_samples, 1e-3)), 1e-3, places=9)
+
+    def test_a_slice_of_the_clip_bed_is_out_of_tolerance_where_its_own_bed_is_not(self):
+        """THE FORCED-FAILURE ARM -- the rejected alternative, measured.
+
+        A slice of ``n`` Gaussian samples carries a relative RMS error of about
+        ``1/sqrt(2n)``, and ``n`` is ``hop``, a free parameter. Measured against the fixed
+        ``BED_SEED``: at the shipped 220500/44100 the worst disjoint hop-slice deviates
+        0.3107% (harmless); at the runner fixture's 2205/441 it deviates 6.7906%; at the
+        tail fixture's 800/100 it deviates 17.7320%. Against a 5% tolerance the last two
+        would raise ``ProvenanceError`` on the pre-onset step -- which is §3.1's first
+        invariant, so a bed built by slicing would take out the assertion that exists to
+        catch a fabricated signal.
+
+        The cost scales the wrong way, which is the reason this is a decision rather than
+        a tuning: the smaller the step, the worse the slice gets.
+        """
+        expected = {(220500, 44100): 0.0031, (2205, 441): 0.0679, (800, 100): 0.1773}
+        for (window, hop), worst_expected in sorted(expected.items()):
+            long_bed = bed_signal(window, 1e-3)
+            worst = max(
+                abs(rms(long_bed[:, start : start + hop]) - 1e-3) / 1e-3
+                for start in range(0, window - hop + 1, hop)
+            )
+            own = abs(rms(bed_signal(hop, 1e-3)) - 1e-3) / 1e-3
+            print(
+                "\n  [bed] {}/{}: worst disjoint slice {:.4%}  own bed {:.3e}".format(
+                    window, hop, worst, own),
+                flush=True,
+            )
+            self.assertAlmostEqual(worst, worst_expected, places=3, msg=str(hop))
+            self.assertLess(own, 1e-6, str(hop))
+            if hop <= 441:
+                self.assertGreater(worst, self.TOLERANCE, str(hop))
+            else:
+                # the shipped hop is the one configuration a slice would survive, which
+                # is exactly why the tests below it are the ones that matter
+                self.assertLess(worst, self.TOLERANCE, str(hop))
+
+    def test_the_two_beds_are_not_sample_aligned_and_nothing_may_compare_them(self):
+        """The stated NON-property. Same seed, so the same draws; different scaling, so
+        different samples. The cue bed feeds the onset and the clip bed feeds CLAP, and
+        neither is diffed against the other -- but a future edit that assumed alignment
+        would find the first few samples agreeing and the rest not."""
+        cue_bed = bed_signal(441, 1e-3)
+        clip_bed = bed_signal(2205, 1e-3)
+        self.assertFalse(np.array_equal(cue_bed, clip_bed[:, :441]))
+        # ...and they are not merely rescaled copies of one another either
+        ratio = clip_bed[0, :441] / cue_bed[0, :441]
+        self.assertLess(float(np.std(ratio)), 1e-5)  # same draws
+        self.assertNotAlmostEqual(float(np.mean(ratio)), 1.0, places=3)  # own scaling
+
+
 class TestMixBed(unittest.TestCase):
     def test_mixing_adds(self):
         rendered = np.ones((2, 8), dtype=np.float32)
@@ -55,7 +124,23 @@ class TestMixBed(unittest.TestCase):
         """Tiling or cropping would silently move the RMS the threshold was set against."""
         with self.assertRaises(ValueError) as caught:
             mix_bed(np.ones((2, 8)), np.ones((2, 9)))
-        self.assertIn("clip's length", str(caught.exception))
+        self.assertIn("(2, 9)", str(caught.exception))
+        self.assertIn("(2, 8)", str(caught.exception))
+
+    def test_a_cue_length_signal_against_a_clip_length_bed_names_both_lengths(self):
+        """The guard ADR-0019 leans on: it is what catches ``heard_step(bed_cue=bed_clip)``.
+
+        The message has to name BOTH lengths, because "the bed is the wrong length" is not
+        actionable while "the bed is 2205 and the signal is 441" says immediately which of
+        the two readouts the caller meant.
+        """
+        with self.assertRaises(ValueError) as caught:
+            mix_bed(np.ones((2, 441), dtype=np.float32), bed_signal(2205, 1e-3))
+        message = str(caught.exception)
+        self.assertIn("441", message)
+        self.assertIn("2205", message)
+        self.assertIn("bed_cue", message)
+        self.assertIn("bed_clip", message)
 
 
 class TestHeardSignal(unittest.TestCase):

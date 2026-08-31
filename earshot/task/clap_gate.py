@@ -23,6 +23,23 @@ each affordable: the simulator cost scales with poses, not with the vocabulary.
 answer a question the agent never asks -- which is the exact mistake the offline calibration
 made.
 
+**ADR-0017 MOVED THE LIVE SIGNAL AND THIS GATE HAS NOT BEEN RE-MEASURED ON IT.** The runner
+no longer hands CLAP `render_through_ir(ir, clip)`; it hands the accumulation buffer's read
+window (`audio/tail.py`), and that differs from a whole-clip render in three ways at once,
+none of which changes the RMS. The clip is LOOPED, so the recording arrives as one period of
+a repeating source rather than as a single event. The readout is a cyclic ROTATION of that
+period whose phase is `(step - t_anom) mod (N/hop)`, so two episodes at the same pose whose
+onset step differs by one hand CLAP different waveforms -- and with a `step_seconds` that
+does not divide the clip length, the event can be split across the buffer boundary. And the
+window can be PARTLY FULL: it fills over `ceil(N/hop)` folds, so an early crossing gives CLAP
+a waveform whose older part is bed only, while an onset on the tail gives it a decay.
+
+The runner records `clap_window_fill` and `clap_after_offset` per episode so the confound is
+visible in `audit.json`, and this file is the arm that would price it: re-running this gate
+through `tail.steady_state_render` at a spread of phases, against the numbers below, is a box
+job and is not done. **Until it is, ADR-0018's bank of record and this gate's separation
+describe the pre-ADR-0017 waveform.**
+
 **Both arms, or it is red.** In-vocabulary recordings are the healthy arm.
 `vocabulary.ABSENT_CLASSES` are the induced failure: classes never placed in the prompt bank,
 so an open-set rule that accepts them is accepting anything. `separation.summarise` raises

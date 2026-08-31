@@ -155,6 +155,13 @@ def climb_eps(render_scatter: Optional[float]) -> float:
     ``None`` means *not measured* and never zero — `calibrate_onset` leaves it ``None``
     when fewer than two repeats arrived, and a zero threshold would read as a renderer
     that agreed with itself exactly, which would be a finding rather than a default.
+
+    **The parameter is deliberately domain-agnostic** -- it is the episode's measured
+    scatter, whatever domain the runner measured it in -- and the runner's choice is named
+    rather than assumed: since ADR-0019 it passes ``CalibrationRecord.cue_render_scatter``,
+    because the cue readout is what ``is_rising`` compares. A record written before the
+    split carries none, so a replay of an old run falls back to ``UNMEASURED_EPS`` above
+    rather than silently judging ``rising`` at a foreign domain's epsilon.
     """
     return UNMEASURED_EPS if render_scatter is None else float(render_scatter)
 
@@ -298,17 +305,80 @@ def realizable_investigate_step(
     arrival still preempts everything: ``visual_confirm`` with a dead cue is a STOP even
     mid-leg, because a cast is what the agent does when it has not arrived.
 
-    **The rule does not read the collision flag, and ticket 26 measured why it should
-    not.** The first box episode walked 110 forwards for 6.57 m of path and never reached
-    line-of-sight, which looks like a rule pushing a wall it cannot see. It is not.
-    ``allow_sliding`` is **False** (``sim/world.py``, the ObjectNav benchmark's setting),
-    so a collided forward leaves the pose *unchanged*; ``heard_signal`` convolves the whole
-    clip every step and takes no pose, so the RMS is a pure function of pose; so the reading
-    after a collision **equals** the one before it, ``rising`` is False, and the stall branch
-    below already turns. Adding a collision branch produces the action that branch produces
-    anyway — verified over four wall geometries against the carried rule, trajectories
+    **The rule does not read the collision flag, ticket 26 measured why it should not,
+    and ADR-0017 has since falsified the argument's premise.** The first box episode
+    walked 110 forwards for 6.57 m of path and never reached line-of-sight, which looks
+    like a rule pushing a wall it cannot see. It is not. ``allow_sliding`` is **False**
+    (``sim/world.py``, the ObjectNav benchmark's setting), so a collided forward leaves
+    the pose *unchanged*; ``heard_signal`` convolved the whole clip every step and took no
+    pose, so the RMS was a pure function of pose; so the reading after a collision
+    **equalled** the one before it, ``rising`` was False, and the stall branch below
+    turned. Adding a collision branch produced the action that branch produces anyway —
+    verified over four wall geometries against the carried rule, trajectories
     byte-identical in all four. What the flag is genuinely for is the *record*
     (``report/audit.StepRecord``), which is where it now goes.
+
+    **That premise is gone and the conclusion is now UNVERIFIED, not refuted.** The runner
+    composes through ``audio/tail.py``'s accumulation buffer, so a reading is no longer a
+    pure function of pose. THREE ARMS are needed to say what moved it and by how much: the
+    pre-ADR-0017 whole-clip renderer, the CLIP readout (the runner's behaviour between the
+    two ADRs), and the CUE readout (today). Differencing the cue arm against the
+    pre-ADR-0017 one alone confounds ADR-0019's split with ADR-0017's accumulator.
+    Measured on ``test_task_runner.TestTheWallAgainstThePreAdr0017Renderer``, the same
+    fixture the paragraph above rests on, all three run in one process, 40 steps:
+
+        arm                             pre-ADR-0017   clip readout   cue readout
+        blocked forwards, episode                 27             22            26
+        first turn at step                        13             17             5
+        blocked forwards before the turn           9              13            1
+        rising blocked pairs                       0             14            14
+        distinct readings, 5 held steps            1              5             5
+        held-pose spread / max                 0.000         0.0038         0.548
+        first nonzero ``lateral_sign``            14             18             6
+
+    The scope is stated on every count because the first version of this block was not:
+    it read "9 / 13 blocked forwards" beside "14 rising blocked pairs", which is the
+    before-the-turn count beside the whole-episode one, and 14 adjacent pairs cannot come
+    out of 13 forwards at all. ``TestTheWallAgainstThePreAdr0017Renderer`` asserts both
+    scopes and both tables come off one run, so the two files cannot drift apart again --
+    the same failure ``bed.py`` and ``audio/config.py`` had over "once per run" against
+    "per step".
+
+    **THE FOUR-STEP STALL LAG DID NOT SURVIVE THE SPLIT -- IT INVERTED, BY EIGHT STEPS.**
+    The clip readout turned four steps LATE because its 5 s window kept filling with the
+    nearer pose the agent reached just before the wall. The cue readout turns EIGHT steps
+    EARLY against the pre-ADR-0017 control and twelve ahead of the clip readout, and the
+    reason is the spread row: the held-pose reading went from 0.38% of the level to 54.8%,
+    because one fold in five of this fixture's clip carries little energy. The stall branch
+    fires on the first quiet fold, one blocked forward after the wall. The manufactured
+    rises are UNCHANGED at 14, so the buffer's memory is not what moved -- the loop's
+    intermittency is.
+
+    **THE HAZARD IS NOW ``is_rising``, AND IT IS SAFE TODAY BY ARITHMETIC COINCIDENCE.**
+    The cue reading cycles with ``tail.phase_folds`` = ``N // gcd(N, hop)``, and at the
+    shipped defaults ``RISING_WINDOW`` == ``phase_folds`` == 5 -- so each of ``is_rising``'s
+    two averaging windows spans exactly one loop period and the phase cancels in the mean.
+    That is luck, not design. Change ``step_seconds``, use a clip whose length is not a
+    whole number of hops, or change ``RISING_WINDOW``, and the windows beat against the
+    period and the climb reads a phase artefact as a gradient. Pre-registered: if the two
+    are ever coprime, expect a step-rate oscillation in ``rising`` at a held pose. The
+    bound reaches the artefact as ``metrics["sounding_phase_folds"]``.
+
+    The reading also depends on pose HISTORY, but on much less of it: ``cue_tail_steps``
+    poses (3 at the box's numbers, 2 at this fixture) rather than ``clip_tail_steps`` (7
+    and 6). The sentence this block used to carry -- that ``RISING_WINDOW`` is 5 against a
+    tail of 6 to 7, so a climb out of the buffer spans both halves of the comparison -- was
+    true of the clip readout and is **false** of the cue one. ``RISING_WINDOW`` and
+    ``climb_eps`` were both tuned (``detour-2``, ``eps-1``) on the instantaneous renderer,
+    and ``climb_eps`` now reads ``cue_render_scatter``, a third domain again.
+
+    **Nothing here changed, deliberately**: an audio change and a policy change in one
+    commit is a confound, and ``WindowPolicy.CONTINUOUS`` is the arm that separates them.
+    What a collision branch would now buy is a real question and it is open. So is whether
+    the controller should smooth over the loop's phase -- which belongs HERE, as a policy
+    decision with its own paired arm, and never in ``observe_step``, where it would be the
+    moving average ADR-0019 removed. The arm that settles either is a paired sweep, not an
+    argument in this docstring.
 
     ``turn_left`` and ``turn_right`` change the measured RMS without changing the
     distance, and §4.1 instruments that rather than fixing it — the per-step record

@@ -544,8 +544,14 @@ def trace_one(
     # detour: a run that fell back to the unmeasured constant ran a different controller
     # from one that did not, and that has to be visible in the record rather than inferred
     # from a version number.
+    #
+    # THE CUE ARM since ADR-0019, because that is what the runner passes. A run written
+    # before the split carries no `cue_render_scatter`, so this reports `climb_eps`'
+    # UNMEASURED_EPS fallback and `eps_measured` False -- which is correct rather than
+    # unfortunate: the agent never ran at a cue-domain epsilon, and replaying at the
+    # clip-domain number would judge `rising` at a threshold no controller ever used.
     calibration = audit.calibration
-    scatter = None if calibration is None else calibration.render_scatter
+    scatter = None if calibration is None else calibration.cue_render_scatter
     eps = climb_eps(scatter)
 
     row: Dict[str, Any] = {

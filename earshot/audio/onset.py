@@ -78,10 +78,49 @@ def observe_step(
 ) -> OnsetState:
     """Fold one step's measured RMS into the onset state. Raises on a §3.1 violation.
 
-    ``measured_rms`` is ``clips.rms`` of ``bed.heard_signal`` — the agent's own signal,
-    the same number the per-step record carries and CLAP is handed. Passing anything
-    else (the IR's energy, a windowed slice) would silently move the domain the
+    ``measured_rms`` is ``clips.rms`` of ``audio.tail.heard_step`` — the agent's own
+    signal, the same number the per-step record carries and CLAP is handed. Passing
+    anything else (the IR's energy, a windowed slice) would silently move the domain the
     threshold was calibrated in.
+
+    **The domain has moved TWICE, on purpose and with the sweep moved with it each
+    time.** ADR-0017 replaced ``bed.heard_signal``'s fresh whole-clip render with the
+    accumulation buffer's clip-length readout. ADR-0019 split that readout and put this
+    detector on the CUE half: ``measured_rms`` is now ``clips.rms`` of
+    ``tail.heard_step``, which returns ``hop`` samples -- the ones that arrived DURING
+    this step -- and ``calibration.sweep_cue_rms`` measures the same quantity, so the
+    threshold and the reading still come off one code path. The LEVEL did not move with
+    it: the quadratic mean of a pose's loop phases equals its clip-readout RMS exactly
+    (``tail.cue_level``), which is what makes ADR-0019 one number that must not move
+    beside several that must.
+
+    **The two consequences ADR-0017 listed here are both RETIRED, and their replacements
+    are not the same shape.**
+
+    - The fill-ramp bias is GONE. ``tail.CUE_RAMP_STEPS`` is 1: one sounding fold writes
+      the cue window whole, so the level no longer ramps over ``ceil(N/hop)`` folds and
+      the crossing carries no fill bias. What is left is the room's own build-up, at most
+      ``cue_tail_steps - 1`` steps (3 at the box, 7 at the mac tail fixture).
+    - A reading is a function of the last ``cue_tail_steps`` poses rather than of the last
+      ``clip_tail_steps`` -- 3 rather than 7 at the box's numbers.
+
+    **The NEW consequence is a bound, and it is stated as one.** The clip loops with
+    period ``phase_folds``, so a recording whose energy sits inside one hop is loud on one
+    fold and quiet on the others -- measured settled phases 0.000 0.000 2.236 0.002 0.000
+    for a 0.6 s transient on a 5 s loop at a 1 s hop. A crossing can therefore be delayed
+    by up to ``phase_folds - 1`` steps. It cannot be PREVENTED: this detector is one-shot
+    and monotone-latching, so a delayed fold is a delay and never a miss. The bound is
+    recorded as ``metrics["sounding_phase_folds"]``.
+
+    Note that the worst-case delay is unchanged in MAGNITUDE from the fill ramp it
+    replaces -- 4 steps at the defaults, both -- and what changed is that it now has a
+    stated physical cause instead of being an artefact of the analysis window.
+
+    **Nothing here compensates for it, deliberately.** A max over the last
+    ``phase_folds`` readings, or a smoothed level, is a moving average by another name,
+    and a moving average over the analysis window is exactly the defect ADR-0019 removed.
+    If smoothing is ever wanted it belongs in the CONTROLLER, where it is a policy
+    decision with its own paired arm.
 
     ``tolerance`` is **relative** to ``bed_rms``. Absolute would need re-picking every
     time the bed level moved, and the bed level is a free constant (§2.3).

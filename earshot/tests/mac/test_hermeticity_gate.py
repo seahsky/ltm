@@ -35,6 +35,29 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 GATE = REPO_ROOT / "earshot" / "tools" / "hermeticity_gate.sh"
 
 
+def _temp_base():
+    """A scratch directory that is NOT inside this repository, or ``None``.
+
+    ``tempfile``'s search order ends at ``os.getcwd()``, so on a machine where
+    ``TMPDIR`` is unset and ``/tmp`` is not writable -- a sandboxed agent shell is
+    exactly that -- a bare ``TemporaryDirectory()`` lands INSIDE the repo. That is one
+    half of the incident this function and the guard in ``GateHarness`` exist for; see
+    that guard for the other half and for what it cost.
+    """
+    base = pathlib.Path(tempfile.gettempdir()).resolve()
+    if base == REPO_ROOT or REPO_ROOT in base.parents:
+        return None
+    return str(base)
+
+
+TEMP_BASE = _temp_base()
+
+
+def scratch_dir():
+    """``TemporaryDirectory`` pinned outside the repo wherever that is possible."""
+    return tempfile.TemporaryDirectory(dir=TEMP_BASE)
+
+
 class GateHarness:
     """A throwaway git repo shaped like this one, with the gate script inside it."""
 
@@ -53,9 +76,47 @@ class GateHarness:
                 target.mkdir(parents=True, exist_ok=True)
                 (target / "content.py").write_text("doomed = True\n", encoding="utf-8")
         (self.repo / "survivor.md").write_text("kept\n", encoding="utf-8")
-        self._git("init", "-q")
+        self._assert_isolated(self._git("init", "-q"))
         self._git("add", "-A")
         self._git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+
+    def _assert_isolated(self, init):
+        """Refuse to touch git at all unless ``self.repo`` is its OWN repository.
+
+        **This raises because it once did not, and the cost was the developer's working
+        tree.** ``git init`` was called and its exit code ignored. When it fails -- a
+        sandbox that permits no ``.git`` outside one allowlisted path makes it fail with
+        ``could not write config file ... Operation not permitted`` -- git leaves a
+        half-built ``.git`` that it will not accept, so every later call in this class
+        walks UP and finds the enclosing repository instead. ``git add -A`` then staged
+        the whole worktree, uncommitted work included, and ``git commit -qm base``
+        committed it; measured, 136 such commits in one session of running the mac suite,
+        each one carrying this file's scratch directories into the tree.
+
+        Two conditions, because the exit code alone is not enough: a future git could
+        succeed at building something this class does not own. The toplevel is the
+        property that actually matters.
+        """
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=str(self.repo),
+            capture_output=True, text=True,
+        )
+        owned = (
+            top.returncode == 0
+            and pathlib.Path(top.stdout.strip() or ".").resolve() == self.repo.resolve()
+        )
+        if init.returncode != 0 or not owned:
+            raise RuntimeError(
+                "the scratch repo at {} is not its own git repository (git init exit "
+                "{}, toplevel {!r}), so every git call in this harness would act on the "
+                "ENCLOSING repository instead -- `git add -A` would stage the "
+                "developer's uncommitted work and `git commit` would commit it. "
+                "tempfile put the scratch dir at {}; if that is inside the repo, TMPDIR "
+                "is unset or unwritable. stderr: {}".format(
+                    self.repo, init.returncode, top.stdout.strip(),
+                    tempfile.gettempdir(), init.stderr.strip(),
+                )
+            )
 
     def _git(self, *args):
         return subprocess.run(["git", *args], cwd=str(self.repo), capture_output=True,
@@ -82,7 +143,7 @@ class GateHarness:
 
 class TestRestore(unittest.TestCase):
     def test_dry_run_moves_everything_out_and_puts_it_back(self):
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_dir() as td:
             h = GateHarness(td)
             proc = h.run("--dry-run")
             missing, dirt = h.missing(), h.porcelain()
@@ -97,7 +158,7 @@ class TestRestore(unittest.TestCase):
 
     def test_an_abort_with_the_repo_taken_apart_still_restores(self):
         """The arm that matters. Exits 42 mid-disassembly; the EXIT trap must repair it."""
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_dir() as td:
             h = GateHarness(td)
             proc = h.run("--dry-run", "--self-test-abort")
             missing, dirt = h.missing(), h.porcelain()
@@ -108,7 +169,7 @@ class TestRestore(unittest.TestCase):
         self.assertEqual(dirt, "", "an aborted gate left the tree dirty")
 
     def test_a_dirty_tree_is_refused_before_anything_moves(self):
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_dir() as td:
             h = GateHarness(td)
             (h.repo / "survivor.md").write_text("edited\n", encoding="utf-8")
             proc = h.run("--dry-run")
@@ -127,7 +188,7 @@ class TestRestore(unittest.TestCase):
         generic dirty-tree refusal would tell the operator to commit or stash, and
         stashing here records the deletion of every moved file.
         """
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_dir() as td:
             h = GateHarness(td)
             shutil.rmtree(h.repo / "embodied_memory")
             (h.repo / "README_MSC_EVAL.md").unlink()
@@ -141,7 +202,7 @@ class TestRestore(unittest.TestCase):
 
     def test_a_second_gate_is_refused_while_one_is_running(self):
         """Two at once move the same paths twice and restore into each other."""
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_dir() as td:
             h = GateHarness(td)
             # This test process is alive, so its pid is a live lock by construction.
             pathlib.Path(td, ".earshot-hermeticity.lock").write_text(
@@ -155,7 +216,7 @@ class TestRestore(unittest.TestCase):
 
     def test_a_stale_lock_alone_does_not_block(self):
         """A dead pid's lock is a note, not a refusal — the tree is the real subject."""
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_dir() as td:
             h = GateHarness(td)
             pathlib.Path(td, ".earshot-hermeticity.lock").write_text(
                 "999999", encoding="utf-8")
@@ -170,14 +231,14 @@ class TestRestore(unittest.TestCase):
         so the trap judges now. This pins the other direction: it must not judge when
         there is nothing to judge, which would be a verdict about a previous run.
         """
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_dir() as td:
             h = GateHarness(td)
             out = h.run("--dry-run").stdout
         self.assertNotIn("the nine criteria", out)
 
     def test_the_recovery_command_is_in_the_log_before_the_move(self):
         """Layer 3 of the restore: a SIGKILL leaves no trap, only what was printed."""
-        with tempfile.TemporaryDirectory() as td:
+        with scratch_dir() as td:
             h = GateHarness(td)
             proc = h.run("--dry-run")
             out = proc.stdout

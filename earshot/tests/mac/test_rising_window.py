@@ -170,19 +170,21 @@ class RenderScatterTest(unittest.TestCase):
             sweep_render_scatter("p", lambda p: p, [0.5], repeats=1)
 
     def test_calibration_carries_the_scatter_without_moving_the_threshold(self):
+        """`climb_eps` reads the CUE arm since ADR-0019, which is why that is the field
+        named here. The other two ride along on the record and never enter the climb."""
         without = calibrate_onset(0.001, [0.01, 0.02, 0.03])
         with_scatter = calibrate_onset(
-            0.001, [0.01, 0.02, 0.03], scatter_samples=[0.009, 0.010, 0.011])
+            0.001, [0.01, 0.02, 0.03], cue_scatter_samples=[0.009, 0.010, 0.011])
         self.assertEqual(without.onset_rms, with_scatter.onset_rms)
-        self.assertIsNone(without.render_scatter)
-        self.assertEqual(without.scatter_repeats, 0)
-        self.assertAlmostEqual(with_scatter.render_scatter, 1e-3, places=12)
-        self.assertEqual(with_scatter.scatter_repeats, 3)
+        self.assertIsNone(without.cue_render_scatter)
+        self.assertEqual(without.cue_scatter_repeats, 0)
+        self.assertAlmostEqual(with_scatter.cue_render_scatter, 1e-3, places=12)
+        self.assertEqual(with_scatter.cue_scatter_repeats, 3)
 
     def test_unmeasured_scatter_is_none_and_never_zero(self):
         """`None` and `0.0` mean opposite things and the record must not conflate them."""
-        result = calibrate_onset(0.001, [0.01, 0.02, 0.03], scatter_samples=[])
-        self.assertIsNone(result.as_dict()["render_scatter"])
+        result = calibrate_onset(0.001, [0.01, 0.02, 0.03], cue_scatter_samples=[])
+        self.assertIsNone(result.as_dict()["cue_render_scatter"])
 
 
 class TwoSidedWindowTest(unittest.TestCase):
