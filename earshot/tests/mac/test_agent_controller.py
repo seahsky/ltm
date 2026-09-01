@@ -24,10 +24,14 @@ from earshot.agent.controller import (
     ACT_STOP,
     ACT_TURN_LEFT,
     ACT_TURN_RIGHT,
+    CAST_STEPS,
+    SCAN_STEPS,
     SOURCE_PSEUDO_GOAL,
     ControllerState,
     NavMode,
     is_diverting,
+    is_rising,
+    next_plateau_steps,
     realizable_investigate_probe,
     realizable_investigate_step,
     step_controller,
@@ -607,6 +611,266 @@ class TestTheStateIsAValue(unittest.TestCase):
         self.assertIsNone(realizable.investigate_waypoint)
         self.assertIsNone(oracle.realizable_action)
         self.assertIsNotNone(oracle.investigate_waypoint)
+
+
+class TestClimbRuleOff(unittest.TestCase):
+    """ADR-0018's ``ClimbRule`` arm, on the pure rule directly.
+
+    `pilot-2` measured the climb as already inert in BOTH arms on real energy traces —
+    rise/eps below 1 in every distance band, 90-99% of detour steps plateaued, so the
+    pre-registered expectation for ``ClimbRule.OFF`` is NO CHANGE on the box. Nothing
+    here is tuned to make the arm look effective; this suite proves the switch is clean
+    on a fixture built to fire the rule, which real traces mostly don't.
+    """
+
+    # A strictly climbing trace, chosen so `is_rising` reads a real gap against the
+    # dispersion term (see the module's worked calculation in `is_rising`'s docstring):
+    # both windows are full (`MIN_DISPERSION_SAMPLES` = 6 readings) and the gap (0.3)
+    # clears the measured bar (~0.153) with room to spare.
+    RISING = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+
+    def test_on_reproduces_the_climb(self):
+        action = realizable_investigate_step(self.RISING, 0, False, climb_enabled=True)
+        print("ClimbRule.LIVE on a rising trace:", action)
+        self.assertEqual(action, ACT_FORWARD)
+
+    def test_off_forces_the_scan_cast_cycle_on_the_identical_trace(self):
+        action = realizable_investigate_step(self.RISING, 0, False, climb_enabled=False)
+        print("ClimbRule.OFF on the SAME rising trace:", action)
+        # Not merely "not forward" -- the OFF arm must actually run the cycle: at
+        # plateau_steps=0 (the default) that is the scan phase's turn.
+        self.assertEqual(action, ACT_TURN_LEFT)
+
+    def test_off_does_not_depend_on_a_doctored_epsilon(self):
+        """The rule must SKIP calling `is_rising`, not call it with a huge threshold --
+        a huge `eps` would make OFF depend on a magic number instead of a branch. Proven
+        by showing an eps of exactly zero still fails to produce a rise."""
+        action = realizable_investigate_step(
+            self.RISING, 0, False, eps=0.0, climb_enabled=False
+        )
+        print("ClimbRule.OFF at eps=0.0:", action)
+        self.assertNotEqual(action, ACT_FORWARD)
+
+    def test_next_plateau_steps_on_reads_the_climb(self):
+        n = next_plateau_steps(self.RISING, plateau_steps=0, climb_enabled=True)
+        print("next_plateau_steps, climb ON, rising trace:", n)
+        self.assertEqual(n, 0)  # a real rise resets the plateau counter
+
+    def test_next_plateau_steps_off_advances_on_the_identical_trace(self):
+        """The counter must honour the same short-circuit the action rule does, or the
+        cast cycle restarts every tick of a detour whose climb is supposedly off."""
+        n = next_plateau_steps(self.RISING, plateau_steps=0, climb_enabled=False)
+        print("next_plateau_steps, climb OFF, SAME rising trace:", n)
+        self.assertEqual(n, 1)
+
+    def test_is_rising_sigmas_is_now_a_parameter_and_defaults_unchanged(self):
+        """`sigmas` moved from module scope to a keyword; the default must still equal
+        the module constant so no caller's behaviour shifted by adding it."""
+        from earshot.agent.controller import RISING_SIGMAS
+
+        default_verdict = is_rising(self.RISING, eps=1e-6, window=5)
+        explicit_verdict = is_rising(self.RISING, eps=1e-6, window=5, sigmas=RISING_SIGMAS)
+        self.assertEqual(default_verdict, explicit_verdict)
+        self.assertTrue(default_verdict)
+
+
+class TestLateralCueOff(unittest.TestCase):
+    """ADR-0018's ``LateralCue`` arm: the sign is treated as absent, i.e. the same path
+    an episode with a genuinely ambiguous cue already takes -- ``_turn_toward``'s own
+    documented default of scanning left."""
+
+    DEAD = [0.3, 0.3]  # flat: never rising, isolates the stall turn
+
+    def test_on_turns_toward_the_cued_side(self):
+        action = realizable_investigate_step(
+            self.DEAD, +1, False, plateau_steps=0, lateral_cue_enabled=True
+        )
+        print("LateralCue.LIVE, sign=+1:", action)
+        self.assertEqual(action, ACT_TURN_RIGHT)
+
+    def test_off_scans_left_regardless_of_the_sign(self):
+        action = realizable_investigate_step(
+            self.DEAD, +1, False, plateau_steps=0, lateral_cue_enabled=False
+        )
+        print("LateralCue.OFF, sign=+1 (must read as absent):", action)
+        self.assertEqual(action, ACT_TURN_LEFT)
+
+    def test_off_flips_a_left_leaning_sign_too(self):
+        """Not just "ignores +1" -- -1 must ALSO read as absent, not as a second vote
+        for the same answer left already gives by coincidence."""
+        action = realizable_investigate_step(
+            self.DEAD, -1, False, plateau_steps=0, lateral_cue_enabled=False
+        )
+        print("LateralCue.OFF, sign=-1 (must ALSO read as absent):", action)
+        self.assertEqual(action, ACT_TURN_LEFT)
+
+
+class TestCastPolicyScanOnly(unittest.TestCase):
+    """ADR-0018's ``CastPolicy`` arm, past the scan phase where the two arms diverge."""
+
+    DEAD = [0.3, 0.3]  # flat: never rising, isolates the cast/scan cycle
+    PAST_SCAN = SCAN_STEPS + 1  # one dead step into the cast phase (index == 1)
+
+    def test_cast_runs_a_leg(self):
+        action = realizable_investigate_step(
+            self.DEAD, 0, False, plateau_steps=self.PAST_SCAN, cast_steps=CAST_STEPS
+        )
+        print("CastPolicy.CAST, one step past the scan:", action)
+        self.assertEqual(action, ACT_FORWARD)
+
+    def test_scan_only_turns_on_the_identical_dead_step(self):
+        action = realizable_investigate_step(
+            self.DEAD, 0, False, plateau_steps=self.PAST_SCAN, cast_steps=0
+        )
+        print("CastPolicy.SCAN_ONLY, the SAME dead step:", action)
+        self.assertIn(action, (ACT_TURN_LEFT, ACT_TURN_RIGHT))
+
+    def test_scan_only_never_produces_a_leg_across_several_dead_steps(self):
+        """Not one lucky sample -- every plateau depth past the scan turns, never walks,
+        under SCAN_ONLY. `cast_action`'s own docstring calls this the pre-`eps-1`
+        control arm; this pins that a dead step never reads as a leg under it."""
+        actions = [
+            realizable_investigate_step(
+                self.DEAD, 0, False, plateau_steps=self.PAST_SCAN + k, cast_steps=0
+            )
+            for k in range(5)
+        ]
+        print("CastPolicy.SCAN_ONLY, five consecutive dead steps:", actions)
+        self.assertTrue(all(a in (ACT_TURN_LEFT, ACT_TURN_RIGHT) for a in actions))
+
+
+class TestTheArmsReachBothCallSites(unittest.TestCase):
+    """`step_controller` calls the realizable rule from two places: the SEARCH-entry
+    tick that opens the detour, and every INVESTIGATE tick after (contract §5.2). A
+    forward that lands on only one of the two is the bug where the first tick of a
+    detour runs a different policy from the rest of it -- so each arm below is checked
+    at BOTH call sites, not just one.
+    """
+
+    RISING = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    DEAD = [0.3, 0.3]
+
+    def _investigating(self, plateau_steps=0):
+        """A state already inside INVESTIGATE, to exercise the SECOND call site
+        directly rather than through however many ticks it takes to reach it."""
+        return ControllerState(
+            primary_goal="chair", active_goal="toilet",
+            mode=NavMode.INVESTIGATE, plateau_steps=plateau_steps,
+        )
+
+    # -- ClimbRule, at both call sites --------------------------------------
+
+    def test_climb_on_at_the_search_entry_call_site(self):
+        _, decision = tick(
+            searching(), onset_fired=True, is_anomaly=True,
+            energy_history=self.RISING, climb_enabled=True,
+        )
+        print("ClimbRule.LIVE, SEARCH-entry call site:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_FORWARD)
+
+    def test_climb_off_at_the_search_entry_call_site(self):
+        _, decision = tick(
+            searching(), onset_fired=True, is_anomaly=True,
+            energy_history=self.RISING, climb_enabled=False,
+        )
+        print("ClimbRule.OFF, SEARCH-entry call site:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_TURN_LEFT)
+
+    def test_climb_on_at_the_investigate_call_site(self):
+        _, decision = tick(
+            self._investigating(), energy_history=self.RISING, climb_enabled=True
+        )
+        print("ClimbRule.LIVE, INVESTIGATE call site:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_FORWARD)
+
+    def test_climb_off_at_the_investigate_call_site(self):
+        _, decision = tick(
+            self._investigating(), energy_history=self.RISING, climb_enabled=False
+        )
+        print("ClimbRule.OFF, INVESTIGATE call site:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_TURN_LEFT)
+
+    # -- LateralCue, at both call sites --------------------------------------
+
+    def test_lateral_on_at_the_search_entry_call_site(self):
+        _, decision = tick(
+            searching(), onset_fired=True, is_anomaly=True,
+            energy_history=self.DEAD, lateral_sign=+1, lateral_cue_enabled=True,
+        )
+        print("LateralCue.LIVE, SEARCH-entry call site:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_TURN_RIGHT)
+
+    def test_lateral_off_at_the_search_entry_call_site(self):
+        _, decision = tick(
+            searching(), onset_fired=True, is_anomaly=True,
+            energy_history=self.DEAD, lateral_sign=+1, lateral_cue_enabled=False,
+        )
+        print("LateralCue.OFF, SEARCH-entry call site:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_TURN_LEFT)
+
+    def test_lateral_on_at_the_investigate_call_site(self):
+        _, decision = tick(
+            self._investigating(), energy_history=self.DEAD,
+            lateral_sign=+1, lateral_cue_enabled=True,
+        )
+        print("LateralCue.LIVE, INVESTIGATE call site:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_TURN_RIGHT)
+
+    def test_lateral_off_at_the_investigate_call_site(self):
+        _, decision = tick(
+            self._investigating(), energy_history=self.DEAD,
+            lateral_sign=+1, lateral_cue_enabled=False,
+        )
+        print("LateralCue.OFF, INVESTIGATE call site:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_TURN_LEFT)
+
+
+class TestCastPolicyAcrossAFullDetour(unittest.TestCase):
+    """`CastPolicy` diverges from `CastPolicy.CAST` only once the scan phase is
+    exhausted, and the SEARCH-entry call always opens at `plateau_steps=0` -- inside the
+    scan phase regardless of `cast_steps` -- so the two arms cannot be told apart on
+    that FIRST tick alone. This drives `step_controller` the way the runner actually
+    does: repeatedly, holding the arm constant tick to tick, which is the only way the
+    divergence is observable and exercises both call sites end to end in the process.
+    """
+
+    DEAD = [0.3, 0.3]
+    # The module-level `CFG`/`tick()` cap a detour at 4 steps, well short of the
+    # `SCAN_STEPS + 1` INVESTIGATE ticks this drive needs to reach the cast leg -- an
+    # abort there would resume the primary task and read as a `None` action, not as
+    # either arm's answer. A local, wider budget is this class's own thing to own.
+    CFG = ControllerConfig(investigate_max_steps=SCAN_STEPS + 5)
+
+    def _drive_past_the_scan(self, *, cast_steps):
+        state, decision = step_controller(
+            searching(), self.CFG,
+            onset_fired=True, is_anomaly=True, primary_goal_reached=False, pose=POSE,
+            energy_history=self.DEAD, cast_steps=cast_steps,
+        )
+        for _ in range(SCAN_STEPS + 1):
+            state, decision = step_controller(
+                state, self.CFG,
+                onset_fired=False, is_anomaly=None, primary_goal_reached=False, pose=POSE,
+                energy_history=self.DEAD, cast_steps=cast_steps,
+            )
+        self.assertEqual(
+            state.mode, NavMode.INVESTIGATE,
+            "the drive aborted or arrived before reaching the cast leg -- widen CFG",
+        )
+        return decision
+
+    def test_cast_runs_a_leg_once_the_scan_is_exhausted(self):
+        decision = self._drive_past_the_scan(cast_steps=CAST_STEPS)
+        print("CastPolicy.CAST, end of a full driven detour:", decision.realizable_action)
+        self.assertEqual(decision.realizable_action, ACT_FORWARD)
+
+    def test_scan_only_never_runs_a_leg_over_the_same_drive(self):
+        decision = self._drive_past_the_scan(cast_steps=0)
+        print(
+            "CastPolicy.SCAN_ONLY, end of the SAME driven detour:",
+            decision.realizable_action,
+        )
+        self.assertIn(decision.realizable_action, (ACT_TURN_LEFT, ACT_TURN_RIGHT))
 
 
 if __name__ == "__main__":

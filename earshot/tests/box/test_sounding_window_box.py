@@ -105,6 +105,12 @@ from earshot.audio.clips import (
     synthetic_burst,
 )
 from earshot.audio.config import AudioConfig, WindowPolicy
+# This file's own `_anechoic_like` was the original; ADR-0018 promoted it verbatim to
+# `audio/ir.py` so `IrPolicy.ANECHOIC` renders through the same function this control
+# arm measures against. Imported rather than kept as a second copy: a control that
+# drifted from the policy it controls would compare the run against a room the run
+# never rendered in.
+from earshot.audio.ir import anechoic_like as _anechoic_like
 from earshot.audio.sensor import AudioSensorHandle
 from earshot.audio.spec import audio_sensor_spec
 from earshot.audio.tail import (
@@ -386,17 +392,6 @@ def _expected_cue_tail_steps(ir_samples: int, hop: int) -> int:
     geometric acoustics did any work.
     """
     return int(math.ceil((int(hop) + int(ir_samples) - 1) / float(hop)))
-
-
-def _anechoic_like(impulse: np.ndarray) -> np.ndarray:
-    """A ``(2, 1)`` IR at the same peak as ``impulse`` -- a room with no reverberation.
-
-    Scaled to the real IR's peak only so the printed absolute levels stay in the same
-    range; every comparison against it is on a curve normalised by its own settled level,
-    where the scale cancels exactly.
-    """
-    peak = float(np.max(np.abs(np.asarray(impulse, dtype=np.float32))))
-    return np.full((2, 1), max(peak, 1e-12), dtype=np.float32)
 
 
 def _phase_energies(clip: Any, hop: int) -> Tuple[float, ...]:

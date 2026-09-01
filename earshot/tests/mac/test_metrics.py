@@ -22,7 +22,9 @@ from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.metrics import (
     compute_benchmark_spl,
+    compute_dtg_source_final,
     compute_soft_spl,
+    compute_source_spl,
     compute_sws,
     sws_episode,
 )
@@ -181,6 +183,186 @@ class TestSoftSpl(unittest.TestCase):
             ),
             0.0,
         )
+
+
+class TestComputeSourceSpl(unittest.TestCase):
+    """SPL against the ANOMALY SOURCE, scored at the controller's CHECK transition.
+
+    ``compute_benchmark_spl`` cannot serve this (its ``success`` needs the primary
+    ``stopped`` flag, still False when the source is reached mid-episode), so this is a
+    new function and gets its own cases -- not a reparameterisation of the benchmark
+    suite above. The NOT_RUN cases are the whole point of ADR-0014: an unwinnable episode
+    (no route to the source) and an episode whose reach was never measured must both read
+    as ``None``, never as the real zero a failed-but-winnable episode gets.
+    """
+
+    def test_reach_within_radius_on_the_optimal_path_is_spl_one(self):
+        # L_opt == L_taken == 8.0 -> denom = max(8.0, 8.0) = 8.0 -> spl = 8.0 / 8.0 = 1.0
+        result = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=0.4,
+            geodesic_optimal_to_source=8.0,
+            path_len_at_reach=8.0,
+        )
+        self.assertEqual(result, (True, 1.0))
+
+    def test_a_path_equal_to_the_optimal_is_spl_one(self):
+        """Pinned separately from the doubled-path case below, so the ratio's direction
+        is unambiguous: no path inflation here at all."""
+        # L_opt == L_taken == 12.0 -> denom = 12.0 -> spl = 12.0 / 12.0 = 1.0
+        result = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=0.2,
+            geodesic_optimal_to_source=12.0,
+            path_len_at_reach=12.0,
+        )
+        self.assertEqual(result, (True, 1.0))
+
+    def test_a_path_twice_the_optimal_halves_the_spl(self):
+        # L_opt = 8.0, L_taken = 16.0 -> denom = max(16.0, 8.0) = 16.0
+        # spl = L_opt / denom = 8.0 / 16.0 = 0.5
+        result = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=0.9,
+            geodesic_optimal_to_source=8.0,
+            path_len_at_reach=16.0,
+        )
+        self.assertIsNotNone(result)
+        ok, spl = result
+        self.assertTrue(ok)
+        self.assertAlmostEqual(spl, 0.5)
+
+    def test_reach_beyond_the_radius_fails(self):
+        result = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=1.5,
+            geodesic_optimal_to_source=10.0,
+            path_len_at_reach=10.0,
+        )
+        self.assertEqual(result, (False, 0.0))
+
+    def test_a_custom_radius_tightens_the_ring(self):
+        """Same STOP-equivalent distance, a 0.1 m ring, now a failure."""
+        result = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=0.5,
+            geodesic_optimal_to_source=10.0,
+            path_len_at_reach=10.0,
+            success_radius=0.1,
+        )
+        self.assertEqual(result, (False, 0.0))
+
+    def test_started_on_the_source_is_spl_one(self):
+        """L_opt == 0 -- the boundary case, matching ``compute_benchmark_spl`` verbatim."""
+        result = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=0.05,
+            geodesic_optimal_to_source=0.0,
+            path_len_at_reach=0.0,
+        )
+        self.assertEqual(result, (True, 1.0))
+
+    def test_never_reaching_the_source_with_a_route_is_a_real_reportable_zero(self):
+        """The episode ran, had a route to the source, and did not reach it.
+
+        Distinct from the NOT_RUN cases below: this is a real failure, not an absence.
+        """
+        result = compute_source_spl(
+            source_reached=False,
+            dist_at_reach=None,
+            geodesic_optimal_to_source=10.0,
+            path_len_at_reach=None,
+        )
+        self.assertEqual(result, (False, 0.0))
+
+    def test_no_navmesh_route_to_the_source_is_not_run_rather_than_a_failure(self):
+        """THE FORCED-FAILURE ARM (ADR-0014). An unwinnable episode is not a failed one.
+
+        ``None``, and explicitly not ``(False, 0.0)`` -- 23 of ``yield-2``'s 365 episodes
+        have no navmesh route to the source at all, and scoring them ``(False, 0.0)``
+        would put them in the same bucket as an episode that had a route and missed it.
+        """
+        result = compute_source_spl(
+            source_reached=False,
+            dist_at_reach=None,
+            geodesic_optimal_to_source=None,
+            path_len_at_reach=None,
+        )
+        self.assertIsNone(result)
+        self.assertIsNot(result, (False, 0.0))
+        # the healthy arm, so the None above is not just a function that never works
+        healthy = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=0.3,
+            geodesic_optimal_to_source=5.0,
+            path_len_at_reach=5.0,
+        )
+        self.assertEqual(healthy, (True, 1.0))
+
+    def test_reached_but_missing_the_reach_distance_is_not_run(self):
+        """A reach that was never measured is an accounting gap, not a fact about the
+        episode -- ``None``, not the ``(False, 0.0)`` a genuine miss would score."""
+        result = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=None,
+            geodesic_optimal_to_source=10.0,
+            path_len_at_reach=6.0,
+        )
+        self.assertIsNone(result)
+        self.assertIsNot(result, (False, 0.0))
+
+    def test_reached_but_missing_the_path_length_is_not_run(self):
+        result = compute_source_spl(
+            source_reached=True,
+            dist_at_reach=0.3,
+            geodesic_optimal_to_source=10.0,
+            path_len_at_reach=None,
+        )
+        self.assertIsNone(result)
+        self.assertIsNot(result, (False, 0.0))
+
+
+class TestComputeDtgSourceFinal(unittest.TestCase):
+    """The final-pose distance-to-goal, taken against the SOURCE.
+
+    The source-side twin of the ``dist_to_goal_final`` argument ``compute_soft_spl``'s
+    call site computes inline and discards -- a second, separate pathfinder query.
+    """
+
+    def test_a_computable_distance_passes_through(self):
+        self.assertAlmostEqual(compute_dtg_source_final(geodesic_to_source=6.25), 6.25)
+
+    def test_zero_distance_passes_through(self):
+        """Standing on the source at the final pose is a real, computable zero."""
+        self.assertAlmostEqual(compute_dtg_source_final(geodesic_to_source=0.0), 0.0)
+
+    def test_an_unreachable_source_is_none_rather_than_zero(self):
+        """THE FORCED-FAILURE ARM (ADR-0014). ``None``, explicitly not ``0.0``.
+
+        ``World.geodesic_distance`` already returns ``None`` for unreachable; a 0.0 here
+        would read as "still standing on the source" for what is really "no route at
+        all", which is exactly the confusion ``min_d2source``'s own comment warns about.
+        """
+        result = compute_dtg_source_final(geodesic_to_source=None)
+        self.assertIsNone(result)
+        self.assertIsNot(result, 0.0)
+        # the healthy arm, so the None above is not just a function that never works
+        self.assertAlmostEqual(compute_dtg_source_final(geodesic_to_source=3.0), 3.0)
+
+    def test_non_finite_input_is_none_rather_than_reaching_json(self):
+        """``inf`` / ``nan`` never reach the return -- ``json.dump`` writes those as bare
+        tokens that are not valid JSON, the failure mode ``runner.py``'s own comment on
+        the ``inf``-seeded ``min_d2source`` accumulator names."""
+        for bad in (float("inf"), float("-inf"), float("nan")):
+            result = compute_dtg_source_final(geodesic_to_source=bad)
+            self.assertIsNone(result)
+            self.assertIsNot(result, 0.0)
+
+    def test_a_negative_distance_raises_rather_than_being_clamped(self):
+        """The quiet fix -- ``max(0.0, value)`` -- would publish a caller's bug as a
+        legitimate zero-distance reading."""
+        with self.assertRaises(ValueError):
+            compute_dtg_source_final(geodesic_to_source=-1.0)
 
 
 class TestSuccessWhenSilent(unittest.TestCase):

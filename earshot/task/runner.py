@@ -54,7 +54,9 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from earshot.agent.config import PlannerConfig
 from earshot.agent.controller import (
     ACT_STOP,
+    CAST_STEPS,
     RISING_WINDOW,
+    SCAN_STEPS,
     ControllerState,
     NavMode,
     climb_eps,
@@ -77,16 +79,27 @@ from earshot.audio.calibration import (
 )
 from earshot.audio.clap import heard_clip_for_clap, is_anomaly
 from earshot.audio.clips import load_anomaly_clip, render_through_ir, resolve_anomaly_clip, rms
+from earshot.audio.ir import anechoic_like
 from earshot.audio.lateral import lateral_sign
 from earshot.audio.normality import NullRoomLabeler, RoomLabeler, is_anomalous_here
 from earshot.audio.onset import OnsetState, assert_provenance, observe_step
 from earshot.audio.tail import heard_clip_window, heard_step, hop_samples, open_tail
 from earshot.audio.window import plan_window
-from earshot.config import Detector, Localization, RunConfig
+from earshot.config import (
+    CastPolicy,
+    ClimbRule,
+    Detector,
+    IrPolicy,
+    LateralCue,
+    Localization,
+    RunConfig,
+)
 from earshot.env_check import assert_env
 from earshot.metrics import (
     compute_benchmark_spl,
+    compute_dtg_source_final,
     compute_soft_spl,
+    compute_source_spl,
     compute_sws,
     post_offset_audible_steps,
     sws_episode,
@@ -114,6 +127,7 @@ __all__ = [
     "tail_is_active",
     "calibration_poses",
     "calibrate_episode",
+    "ir_under_policy",
     "make_detector",
     "run_episode",
     "run",
@@ -138,6 +152,24 @@ ENERGY_HISTORY = 2 * RISING_WINDOW
 # `FrontierProposer._emit` issues ids from 1, so 0 is never a proposed candidate and the
 # divert is identifiable in the audit by its id as well as by its source.
 DIVERT_CANDIDATE_ID = 0
+
+
+def ir_under_policy(impulse: Any, policy: IrPolicy) -> Any:
+    """The impulse response the run actually convolves, under ADR-0018's ``IrPolicy``.
+
+    A module-level function rather than a closure per call site, because there are THREE
+    places an IR leaves the sensor — the calibration sweep, §2.5's start-pose audibility
+    probe, and the step loop — and ADR-0017's rule is that the sweep and the loop must
+    take the same path. Two closures in two functions is two places for that rule to be
+    edited apart; ``calibrate_episode``'s comment already names the failure it causes,
+    which is a threshold calibrated in a domain the loop does not run in.
+
+    ``FULL`` hands the IR back untouched, so the default configuration convolves exactly
+    the array the sensor produced and no arm-shaped code runs at all.
+    """
+    if policy is IrPolicy.FULL:
+        return impulse
+    return anechoic_like(impulse)
 
 
 @dataclass(frozen=True)
@@ -598,7 +630,11 @@ def calibrate_episode(
     def render_at(position: Xyz) -> Any:
         world.set_pose(position)
         observation, _guard = handle.observe()
-        return handle.audio_of(observation)
+        # The FIRST of `ir_under_policy`'s three sites. If the sweep took the real IR
+        # while the loop took the anechoic stand-in, `onset_rms` and the scatter
+        # `climb_eps` reads would both be calibrated in a domain the loop never runs in —
+        # the exact failure the comment below this call names.
+        return ir_under_policy(handle.audio_of(observation), cfg.ir_policy)
 
     # THE SWEEP AND THE LOOP MUST TAKE THE SAME PATH (ADR-0017), AND SINCE ADR-0019 THAT
     # PATH IS THE CUE READOUT. `onset_rms` and the scatter `climb_eps` reads are both
@@ -861,6 +897,14 @@ def run_episode(
         episode_index=int(index),
     )
     realizable = cfg.localization is Localization.REALIZABLE
+    # ADR-0018's three controller arms, mapped to plain primitives exactly as
+    # `realizable` above is. `agent/` may not import `earshot.config` (ADR-0013's layer
+    # graph), so the enum stops here and the controller stays a decision function over
+    # bools and ints that `tests/mac/test_agent_controller.py` can drive with no config
+    # at all.
+    climb_enabled = cfg.climb_rule is ClimbRule.LIVE
+    lateral_cue_enabled = cfg.lateral_cue is LateralCue.LIVE
+    cast_steps = CAST_STEPS if cfg.cast_policy is CastPolicy.CAST else 0
     labeler = room_labeler if room_labeler is not None else NullRoomLabeler()
     say = progress if progress is not None else (lambda _message: None)
 
@@ -932,12 +976,36 @@ def run_episode(
             return None
         return float(distance)
 
+    # `L_opt` AGAINST THE SOURCE: the navmesh route from this episode's own start pose to
+    # the source, which is `compute_source_spl`'s numerator and the floor of its
+    # denominator. Nothing on disk carried it — `start_end_distance` above is the route to
+    # the PRIMARY goal — so no SPL against the source was computable from any artefact
+    # this tree wrote.
+    #
+    # `None` is the load-bearing case and not an edge one: 23 of `yield-2`'s 365 episodes
+    # have no navmesh route to their source at all, and an SPL of 0.0 there would put an
+    # unwinnable episode in the same bucket as one that had a route and failed to walk it.
+    # `compute_source_spl` returns None on it and the metric key is then simply absent.
+    #
+    # Taken from `start_pose` and not from `world.pose()`: the calibration sweep leaves
+    # the agent at its last swept pose, and the block above re-seats it and re-reads
+    # `start_pose`. Reading the position rather than the agent puts this out of that
+    # ordering's reach entirely.
+    source_start_route = route_to_source(start_pose.position)
+
     # §2.5's one smoke exception: verify audibility at the episode's own start pose, once,
     # with a calibration render, so the smoke is deterministic. It is a measurement rather
     # than a screen — nothing is rejected on it, and it is recorded next to the threshold
     # it is compared against.
     observation, _guard = handle.observe()
-    start_anomaly_rms = rms(render_through_ir(handle.audio_of(observation), clip))
+    # The SECOND site. The probe is compared against `calibration.onset_rms`, which came
+    # off the sweep above, so it has to be rendered through the same IR the sweep used or
+    # `start_pose_audible` is a comparison between two domains.
+    start_anomaly_rms = rms(
+        render_through_ir(
+            ir_under_policy(handle.audio_of(observation), cfg.ir_policy), clip
+        )
+    )
     n_renders_before = int(getattr(world, "n_renders", 0))
 
     steps: List[StepRecord] = []
@@ -967,6 +1035,11 @@ def run_episode(
     min_route_in_window: Optional[float] = None
     # The step the SOURCE was reached, which SWS needs and which nothing on disk carried.
     source_reached_step: Optional[int] = None
+    # The path length AT that step, which is `compute_source_spl`'s `L_taken`. The
+    # whole-episode `path_len` cannot serve: the detour ends mid-episode and the primary
+    # search keeps walking afterwards, so an SPL against the source computed on it would
+    # be a function of how long the primary task ran after the source was already found.
+    path_len_at_reach: Optional[float] = None
     # What the CLIP read window held on the step CLAP was handed it -- see
     # `TailState.clip_source_fill`, whose prefix is load-bearing since the split readout
     # -- how it was rotated, which step that was, and how long the classification waited
@@ -986,7 +1059,10 @@ def run_episode(
     for step in range(int(cfg.max_steps)):
         audio_t0 = time.perf_counter()
         observation, _guard = handle.observe()
-        impulse = handle.audio_of(observation)
+        # The THIRD site, and the one the agent actually hears. Applied here rather than
+        # inside `heard_step` so the whole cost of the substitution sits inside the
+        # bracket criterion 7 audits, like every other part of the per-step audio bill.
+        impulse = ir_under_policy(handle.audio_of(observation), cfg.ir_policy)
         sounding = window.is_sounding(step)
         tail, cue = heard_step(
             tail, ir=impulse, clip=clip, bed_cue=bed_cue, sounding=sounding
@@ -1178,6 +1254,14 @@ def run_episode(
             # the ADR-0017 era and `single_render_scatter` for the one before it -- so
             # this episode's `eps` can be priced against both.
             rising_eps=climb_eps(calibration.cue_render_scatter),
+            # ADR-0018's three controller arms. `scan_steps` is passed EXPLICITLY at
+            # `SCAN_STEPS` rather than left to the default two functions away: the scan
+            # length is not an arm, and a value the call site does not name is a value a
+            # reader of this call has to go and find.
+            cast_steps=cast_steps,
+            scan_steps=SCAN_STEPS,
+            climb_enabled=climb_enabled,
+            lateral_cue_enabled=lateral_cue_enabled,
         )
         # SWS's numerator, captured here and NOT in the controller. `state.investigated`
         # flips exactly once, in both localization arms, and the runner already holds the
@@ -1187,6 +1271,12 @@ def run_episode(
         # commit is a confound.
         if state.investigated and source_reached_step is None:
             source_reached_step = step
+            # THE TENSE IS DELIBERATE. `path_len` here excludes this step's own
+            # displacement, which is added further down after the action is applied. The
+            # reach is decided BEFORE the action is taken, so the distance walked to earn
+            # it is the distance walked before this step — not after. Do not "fix" this
+            # by moving the capture past the `path_len +=` below.
+            path_len_at_reach = path_len
         if state.mode is NavMode.INVESTIGATE or decision.mode is NavMode.INVESTIGATE:
             entered_investigate = True
         if decision.save_primary_state:
@@ -1307,6 +1397,29 @@ def run_episode(
     source_dist_at_stop = (
         stop_pose.position.horizontal_distance_to(source) if stop_pose is not None else None
     )
+    # THE FINAL-POSE ROUTE TO THE SOURCE, and it is a DIFFERENT quantity from
+    # `min_d2source_m` two screens down. That one is the CLOSEST APPROACH over the whole
+    # episode, horizontal, and it answers "did the agent ever get near". This answers
+    # "where did the agent end up" — the source-side twin of the `dist_to_goal_final`
+    # expression that is computed inline for `compute_soft_spl` below and then thrown
+    # away. An episode that walked to the source and then walked back to the primary goal
+    # has a small closest approach and a large final distance, and reporting either as the
+    # other is the confusion this comment exists to prevent.
+    #
+    # A second pathfinder query rather than a reuse: the last per-step `route` was taken
+    # at the last step's PRE-action pose, and the final pose is after that action.
+    dtg_source_final = compute_dtg_source_final(
+        geodesic_to_source=route_to_source(final_pose.position)
+    )
+    # SPL against the SOURCE. `source_dist_at_stop` is reused rather than recomputed: it
+    # already IS the distance at the reach, measured at the investigation stop pose.
+    source_spl = compute_source_spl(
+        source_reached=source_reached_step is not None,
+        dist_at_reach=source_dist_at_stop,
+        geodesic_optimal_to_source=source_start_route,
+        path_len_at_reach=path_len_at_reach,
+        success_radius=1.0,
+    )
 
     report = AgentReport(
         primary_completed=state.mode in (NavMode.COMPLETE, NavMode.REPORTED),
@@ -1386,6 +1499,19 @@ def run_episode(
         metrics["min_d2source_m"] = float(min_d2source)
     if source_reached_step is not None:
         metrics["source_reached_step"] = float(source_reached_step)
+    if dtg_source_final is not None:
+        # ABSENT means "the final pose has no navmesh route to the source", which is a
+        # real fact about a disconnected island and is NOT a distance of zero. The key
+        # is simply not written, the same way `min_d2g_m` is not.
+        metrics["dtg_source_final_m"] = float(dtg_source_final)
+    if source_spl is not None:
+        # WRITTEN TOGETHER OR NOT AT ALL. An SPL with no success flag beside it is
+        # unreadable — 0.0 could be "did not reach" or "reached outside the ring" — and
+        # `compute_source_spl` returns both from one decision, so splitting them across
+        # two conditionals is how they would come to disagree.
+        source_success, source_spl_value = source_spl
+        metrics["source_find_sr_1m"] = float(source_success)
+        metrics["source_spl"] = float(source_spl_value)
     # ALWAYS present, and it is what makes the delay distribution below readable. A
     # `onset_delay_steps` recorded only when the onset fired is RIGHT-CENSORED by
     # construction -- every value in it is smaller than the window that produced it -- so
@@ -1581,6 +1707,14 @@ def run_episode(
         scene_id=episode.scene_id,
         localization_arm=cfg.localization.value,
         detector_arm=cfg.detector.value,
+        # The four ADR-0018 arms, per episode. `summary.json` carries the run config once
+        # per RUN, and every comparison this tree makes is per EPISODE
+        # (`tools/episode_diff.py` pairs by index), so an arm recorded only at run level
+        # is an arm a paired diff cannot check it was comparing like with like on.
+        climb_rule=cfg.climb_rule.value,
+        lateral_cue=cfg.lateral_cue.value,
+        cast_policy=cfg.cast_policy.value,
+        ir_policy=cfg.ir_policy.value,
         source_xyz=source,
         t_anom=t_anom,
         sounding_window=window_record,

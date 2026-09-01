@@ -84,14 +84,26 @@ def write_scene(arm_dir, scene, episodes):
 
 
 def episode(*, stage=REACHED, n_steps=20, reached_step=None, win=None, metrics=None,
-            render_s=0.05):
-    return dict(
+            render_s=0.05, arms=None):
+    spec = dict(
         funnel_stage=stage,
         steps=steps(n_steps, render_s=render_s),
         source_reached_step=reached_step,
         sounding_window=win,
         metrics=metrics or {},
     )
+    # Omitted by default, so the pre-ADR-0018 record — every audit already on disk — is
+    # what most of this file exercises, and the arm columns are read on an episode that
+    # actually carries them.
+    if arms is not None:
+        spec.update(arms)
+    return spec
+
+
+LIVE_ARMS = dict(climb_rule="live", lateral_cue="live", cast_policy="cast",
+                 ir_policy="full")
+OFF_ARMS = dict(climb_rule="off", lateral_cue="off", cast_policy="scan_only",
+                ir_policy="anechoic")
 
 
 class TestTheReaderFindsWhatTheWriterWrote(unittest.TestCase):
@@ -309,6 +321,178 @@ class TestTheThreeNumbersThePilotRunsFor(unittest.TestCase):
         numbers are, not in a driver header the emailed tail may have scrolled past."""
         text = format_report(read_sweep(self.root))
         self.assertIn("16.2% flip rate", text)
+
+
+class TestTheSourceSideColumns(unittest.TestCase):
+    """The new columns, both arms each: present-and-printed, absent-and-said-so.
+
+    `pilot-1` is the standing reason. A metric the runner computes and the readout does
+    not print is a metric that does not exist, and the failure is silent — an arm reads
+    as ordinary attrition either way. So each column is asserted on a record the REAL
+    writer produced, in both the populated and the empty case.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def arm_with(self, episodes, name="win-alarm"):
+        arm = pathlib.Path(self.root) / name
+        write_scene(arm, "sceneA", episodes)
+        return read_arm(str(arm), arm=name)
+
+    def test_the_source_spl_and_its_success_flag_are_read_and_printed(self):
+        reading = self.arm_with([
+            episode(reached_step=9,
+                    metrics={"source_spl": 0.8, "source_find_sr_1m": 1.0}),
+            episode(reached_step=12,
+                    metrics={"source_spl": 0.4, "source_find_sr_1m": 1.0}),
+            # Had a route and did not reach it: a real, reportable zero.
+            episode(stage=ABANDONED,
+                    metrics={"source_spl": 0.0, "source_find_sr_1m": 0.0}),
+        ])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.source_spls, (0.8, 0.4, 0.0))
+        self.assertEqual(reading.n_source_spl_absent, 0)
+        self.assertEqual(reading.n_source_find_sr_1m, 2)
+        self.assertIn("source SPL: n=3 of 3", lines)
+        self.assertIn("mean 0.400", lines)
+        self.assertIn("Find-SR@1m 2 of 3", lines)
+        print("source SPL n=3 mean {:.3f}, Find-SR@1m {}/3".format(
+            sum(reading.source_spls) / 3.0, reading.n_source_find_sr_1m))
+
+    def test_an_unwinnable_episode_is_absent_with_its_reason_and_never_a_zero(self):
+        """The forced-failure arm. 23 of `yield-2`'s 365 episodes have no navmesh route
+        to their source at all, so the runner writes no `source_spl` for them. Counting
+        those as SPL 0.0 and as a failed find is the confusion the key exists to
+        prevent."""
+        reading = self.arm_with([
+            episode(reached_step=9,
+                    metrics={"source_spl": 0.8, "source_find_sr_1m": 1.0}),
+            # No route from the start pose: no key at all.
+            episode(stage=ABANDONED, metrics={}),
+        ])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.source_spls, (0.8,))
+        self.assertEqual(reading.n_source_spl_absent, 1)
+        self.assertEqual(reading.n_source_find_sr_1m, 1,
+                         "the denominator is the episodes that had one, not the arm")
+        self.assertIn("source SPL: n=1 of 2", lines)
+        self.assertIn("ABSENT on 1 of 2", lines)
+        self.assertIn("unwinnable, not a zero", lines)
+        self.assertIn("Find-SR@1m 1 of 1", lines)
+        self.assertNotIn("Find-SR@1m 1 of 2", lines, "absent is not a miss")
+
+    def test_an_arm_with_no_source_spl_at_all_says_absent_rather_than_printing_zero(self):
+        reading = self.arm_with([episode(), episode()])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.source_spls, ())
+        self.assertEqual(reading.n_source_spl_absent, 2)
+        self.assertIn("source SPL: n/a on all 2 episode(s)", lines)
+        self.assertIn("ABSENT, not 0.0.", lines)
+        self.assertNotIn("mean 0.000", lines)
+
+    def test_the_final_pose_route_is_read_and_labelled_as_not_the_closest_approach(self):
+        """`min_d2source_m` is a MINIMUM over the episode and this is a distance at its
+        end. An episode that walked to the source and back has a small one and a large
+        other, so the column has to name which it is where it is printed."""
+        reading = self.arm_with([
+            episode(metrics={"dtg_source_final_m": 2.0, "min_d2source_m": 0.4}),
+            episode(metrics={"dtg_source_final_m": 6.0, "min_d2source_m": 0.5}),
+        ])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.dtg_source_final, (2.0, 6.0))
+        self.assertEqual(reading.n_dtg_source_final_absent, 0)
+        self.assertIn("route to source at the FINAL pose (not the closest approach)",
+                      lines)
+        self.assertIn("n=2 of 2", lines)
+        self.assertIn("median 4.00 m", lines)
+        print("final-pose route median 4.00 m over 2 episode(s)")
+
+    def test_an_unrouted_final_pose_is_absent_with_its_reason(self):
+        reading = self.arm_with([
+            episode(metrics={"dtg_source_final_m": 2.0}),
+            episode(metrics={}),
+        ])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.dtg_source_final, (2.0,))
+        self.assertEqual(reading.n_dtg_source_final_absent, 1)
+        self.assertIn("ABSENT on 1 of 2: the final pose has no navmesh route", lines)
+        self.assertIn("not a distance of 0", lines)
+
+    def test_an_arm_with_no_final_pose_route_at_all_says_absent(self):
+        reading = self.arm_with([episode(), episode()])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.dtg_source_final, ())
+        self.assertIn("route to source at the FINAL pose: n/a on all 2 episode(s)",
+                      lines)
+        self.assertNotIn("median 0.00 m", lines)
+
+
+class TestTheAblationArmsAreReadOffTheRecord(unittest.TestCase):
+    """Which arm ran, per episode. Both arms: recorded-and-printed, and absent."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def arm_with(self, episodes, name="win-alarm"):
+        arm = pathlib.Path(self.root) / name
+        write_scene(arm, "sceneA", episodes)
+        return read_arm(str(arm), arm=name)
+
+    def test_a_uniform_arm_prints_its_one_setting(self):
+        reading = self.arm_with([episode(arms=OFF_ARMS), episode(arms=OFF_ARMS)])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(
+            reading.ablation_arms,
+            ("climb=off lateral=off cast=scan_only ir=anechoic",))
+        self.assertEqual(reading.n_arms_unrecorded, 0)
+        self.assertIn("arms: climb=off lateral=off cast=scan_only ir=anechoic", lines)
+        self.assertNotIn("MIXED", lines)
+        print("arms read back: {}".format(reading.ablation_arms))
+
+    def test_two_settings_under_one_arm_directory_are_reported_as_mixed(self):
+        """The forced failure. `episode_diff` pairs by index across two directories, so a
+        directory holding both settings is a comparison that is not comparing like with
+        like — and nothing else in the tree would say so."""
+        reading = self.arm_with([episode(arms=LIVE_ARMS), episode(arms=OFF_ARMS)])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(len(reading.ablation_arms), 2)
+        self.assertIn("MIXED", lines)
+        self.assertIn("not comparing like with like", lines)
+
+    def test_a_record_written_before_the_arms_reads_as_unknown_not_as_the_default(self):
+        """`None` on all four is "this run predates the arms". Printing it as the
+        shipped defaults would let an unmeasured run read as a measured one."""
+        reading = self.arm_with([episode(), episode(arms=LIVE_ARMS)])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.n_arms_unrecorded, 1)
+        self.assertIn("arms NOT RECORDED on 1 of 2", lines)
+        self.assertIn("UNKNOWN rather than the default", lines)
+        self.assertEqual(reading.ablation_arms,
+                         ("climb=live lateral=live cast=cast ir=full",))
+
+    def test_an_empty_arm_carries_no_arm_label_and_no_absence_count(self):
+        (pathlib.Path(self.root) / "win-burst").mkdir()
+
+        reading = read_arm(str(pathlib.Path(self.root) / "win-burst"), arm="win-burst")
+
+        self.assertEqual(reading.ablation_arms, ())
+        self.assertEqual(reading.n_arms_unrecorded, 0)
+        self.assertEqual(reading.source_spls, ())
+        self.assertEqual(reading.n_source_spl_absent, 0,
+                         "0 of 0 absent is not 0 absences to explain")
+        self.assertIn("NOT_RUN", format_arm(reading)[0])
 
 
 class TestTheDriverUsesThisReader(unittest.TestCase):

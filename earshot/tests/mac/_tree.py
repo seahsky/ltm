@@ -104,6 +104,7 @@ ENV_ACCESS_ALLOWED = frozenset(
 #     sim                                -> audio.guard, types
 #     audio                              -> audio.guard, vlm, types  (NOT sim)
 #     agent                              -> vlm, types               (NOT sim)
+#     memory                             -> types                    (NOT audio, NOT agent)
 #     report                             -> audio.guard, types
 #     task                               -> everything               (the wiring layer)
 #
@@ -127,6 +128,13 @@ LAYER_IMPORTS: Dict[str, Tuple[str, ...]] = {
     # audio owns the sensor and never reaches for the simulator
     "audio": ("audio", "vlm", "types"),
     "agent": ("agent", "vlm", "types"),
+    # the memory stack (ADR-0018's matrix). A LEAF beside `metrics`: numpy plus the one
+    # geometric type, and deliberately NOT `audio` — reading `audio.vocabulary` would
+    # make the store an oracle over its own answer key (`test_audio_vocabulary.py`'s
+    # `TestAnchorFence` is the enforcement; this edge is the structural half of it, since
+    # `audio.vocabulary` is not under this prefix). No self-reference either: the store
+    # is one module, so there is no intra-package edge to allow.
+    "memory": ("types",),
     "report": ("report", "audio.guard", "types"),
     # the only wiring layers
     "task": _EVERYTHING,

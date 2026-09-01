@@ -42,7 +42,15 @@ from typing import Any, Dict, Optional, Tuple
 from earshot.agent.config import ControllerConfig, DetectorConfig, PlannerConfig
 from earshot.audio.config import AudioConfig, WindowPolicy
 
-__all__ = ["Localization", "Detector", "RunConfig"]
+__all__ = [
+    "Localization",
+    "Detector",
+    "ClimbRule",
+    "LateralCue",
+    "CastPolicy",
+    "IrPolicy",
+    "RunConfig",
+]
 
 
 class Localization(Enum):
@@ -70,6 +78,55 @@ class Detector(Enum):
 
     ORACLE = "oracle"
     CAPTION = "caption"
+
+
+class ClimbRule(Enum):
+    """Whether the energy climb steers INVESTIGATE (ADR-0018's memory matrix).
+
+    ``OFF`` prices how much of localization the gradient is worth: ``is_rising``'s
+    verdict is not consulted, so the cue counts as dead at every step and the agent runs
+    the scan/cast cycle alone. ``LIVE`` is what ships today.
+    """
+
+    LIVE = "live"
+    OFF = "off"
+
+
+class LateralCue(Enum):
+    """Whether the interaural sign steers INVESTIGATE's turns.
+
+    ``OFF`` treats the sign as ``0`` (ambiguous) inside the controller, so the turn
+    decision always takes its documented zero/absent default rather than reading the
+    binaural cue. ``LIVE`` is what ships today.
+    """
+
+    LIVE = "live"
+    OFF = "off"
+
+
+class CastPolicy(Enum):
+    """How INVESTIGATE moves once the climb goes dead.
+
+    ``SCAN_ONLY`` collapses the cast leg to zero steps, which is the pre-``eps-1``
+    behaviour and a control arm: every dead step turns instead of walking a leg.
+    ``CAST`` is what ships today.
+    """
+
+    CAST = "cast"
+    SCAN_ONLY = "scan_only"
+
+
+class IrPolicy(Enum):
+    """Which impulse response the sensor's audio is rendered through.
+
+    ``ANECHOIC`` replaces every rendered IR with ``audio.ir.anechoic_like``'s flat,
+    reverberation-free stand-in before it is convolved, at all three call sites that
+    render one, so the calibration sweep and the step loop stay on the same path
+    (ADR-0017). ``FULL`` is what ships today: the room's real, reverberant IR.
+    """
+
+    FULL = "full"
+    ANECHOIC = "anechoic"
 
 
 @dataclass(frozen=True)
@@ -165,6 +222,15 @@ class RunConfig:
     localization: Localization = Localization.REALIZABLE
     detector: Detector = Detector.ORACLE
 
+    # -- the ablation arms (the memory matrix's controls) ----------------
+    # provenance: fake — no sweep behind any of the four defaults; each names the
+    # behaviour that ships today, so the default configuration is byte-identical to the
+    # pre-arm runner and a delta is attributable to the flag that was set.
+    climb_rule: ClimbRule = ClimbRule.LIVE
+    lateral_cue: LateralCue = LateralCue.LIVE
+    cast_policy: CastPolicy = CastPolicy.CAST
+    ir_policy: IrPolicy = IrPolicy.FULL
+
     # -- the anomaly ----------------------------------------------------
     # provenance: source — one of `audio.clips.ANOMALY_CLASSES`. It selects the ESC-50
     # recording staged at `<AudioConfig.clip_dir>/<class>.wav`; `anomaly_clip` overrides
@@ -247,6 +313,10 @@ class RunConfig:
             "seed": int(self.seed),
             "localization": self.localization.value,
             "detector": self.detector.value,
+            "climb_rule": self.climb_rule.value,
+            "lateral_cue": self.lateral_cue.value,
+            "cast_policy": self.cast_policy.value,
+            "ir_policy": self.ir_policy.value,
             "anomaly_class": self.anomaly_class,
             "anomaly_clip": self.anomaly_clip,
             "clap": bool(self.clap),

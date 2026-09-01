@@ -3722,7 +3722,7 @@ So `detour-2`'s reading was half right. The single-step test *was* reading noise
 
 **What is not established.** That a better estimator cannot help — the two-sided window is untested against either arm. And nothing here is per-episode paired: `summary.json` records how many episodes reached the source, never which, so the 15-of-16 sign test is the strongest claim these records support.
 
-**File index.** `climb_eps`/`UNMEASURED_EPS`/`RISING_SIGMAS`/`MIN_DISPERSION_SAMPLES` and the two-sided `is_rising` in `earshot/agent/controller.py`; `ENERGY_HISTORY` and `route_to_source` in `earshot/task/runner.py`; `band_rows`, `BAND_EDGES_M`, `_eps_lines`, `_band_lines`, the axis selection in `trace_one` in `earshot/tools/detour_report.py`; `CalibrationResult.profile` in `earshot/audio/calibration.py`; `CalibrationRecord.profile` and `StepRecord.geodesic_to_source` in `earshot/report/audit.py`; `tests/mac/test_detour_report.py`, `tests/mac/test_rising_window.py`, `tests/mac/test_task_runner.py`. Data: `runs/eps-1/<scene>` (RACE). See ADR-0015 for the placement rule that fixed this denominator.
+**File index.** `climb_eps`/`UNMEASURED_EPS`/`RISING_SIGMAS`/`MIN_DISPERSION_SAMPLES` and the two-sided `is_rising` in `earshot/agent/controller.py`; `ENERGY_HISTORY` and `route_to_source` in `earshot/task/runner.py`; `band_rows`, `BAND_EDGES_M`, `_eps_lines`, `_band_lines`, the axis selection in `trace_one` in `earshot/tools/detour_report.py`; `CalibrationResult.profile` in `earshot/audio/calibration.py`; `CalibrationRecord.profile` and `StepRecord.geodesic_to_source` in `earshot/report/audit.py`; `tests/mac/test_detour_report.py`, `tests/mac/test_rising_window.py`, `tests/mac/test_task_runner.py`. Data: `runs/eps-1/<scene>` (RACE). See ADR-0020 for the placement rule that fixed this denominator (renumbered from ADR-0015 on 2026-09-01; see that ADR's header).
 
 ---
 
@@ -4040,3 +4040,67 @@ The two 2500-ray runs also agree with each other in the ordinary way — net −
 `rays-1` was closed on `signal_to_scatter` in `detour-2`, correctly, for the question *was the cue recoverable at 500 rays*. The reproducibility question it did not cover is now closed too, by measurement rather than by argument, and in the same direction: **the ray count is not a lever on anything this project has looked at.** `earshot/tools/ray_variance.sh`, `flip_report.py` and `AudioConfig.indirect_ray_count` stay in the tree — they answered the question they were built for, and the knob is how anyone re-opens it.
 
 **File index.** `AudioConfig.indirect_ray_count` in `earshot/audio/config.py`; `ACOUSTICS_PRESET`, `audio_config_mapping` in `earshot/audio/spec.py`; `--indirect-ray-count` in `earshot/__main__.py` and `earshot/tools/yield_sweep.sh`; `earshot/tools/episode_diff.py`, `earshot/tools/flip_report.py`, `earshot/tools/ray_variance.sh`. Data: `runs/r2500-{a,b}`, `runs/rays-2-r{500,2500}-{1,2,3}` (RACE).
+
+---
+
+# pilot-2 - the windowed task beats CONTINUOUS at both grains, and the reverb tail buys nothing measurable (run report, recorded 2026-09-01)
+
+**Source: the run's email report, not `runs/` in this worktree.** Every number below is transcribed from that report. The two p-values were independently recomputed in this session with `python3` and `math.comb`, exact two-sided binomial, from the gained/lost and up/down counts the report gives, before being written down here.
+
+## What ran
+
+Three arms, `cont-alarm`, `win-alarm` and `win-burst` (`window_pilot.sh`'s `PILOT_ARMS`), 365 episodes per arm across the 19 HM3D scenes that build any episodes at this box's dataset. The 20th, `mL8ThkuaVTM`, yields zero episodes in every sweep this repo has run and does again here.
+1095 episode-runs, 7h21m56s wall clock, 24.2 s/episode all-in.
+`cont-alarm` is `WindowPolicy.CONTINUOUS` through the ADR-0019 renderer, the control `window_pilot.sh` was built to require: it isolates the offset step from the renderer change, where a windowed run differenced against a historic pre-ADR-0019 sweep would cross both.
+`win-alarm` and `win-burst` are the two windowed arms, sharing the window and differing in clip: `alarm`'s loop against `glass_break`'s burst.
+
+## Source reached, by arm
+
+| arm | reached | rate |
+|---|---|---|
+| `cont-alarm` | 149 / 365 | 40.8% |
+| `win-alarm` | 125 / 365 | 34.2% |
+| `win-burst` | 111 / 365 | 30.4% |
+
+## The windowed-vs-continuous contrast: both tests agree
+
+`cont-alarm` against `win-alarm` isolates exactly the offset step: same renderer, same clip class, the only thing that differs is whether the source goes silent.
+
+**Paired by episode:** net −24 (win-alarm minus cont-alarm, 125 − 149), 18 gained and 42 lost of 60 discordant. Exact McNemar two-sided p = 0.0027, recomputed here from the 18/42 counts and confirmed.
+**Scene-level sign test:** 4 scenes up, 15 down, of 19. Two-sided exact sign-test p = 0.019, likewise recomputed and confirmed.
+
+Both readings agree in direction and both clear significance on their own, which the run's report calls the first time that has happened in this project.
+**The windowed task is measurably, not just directionally, harder than the continuous control**, at the project's standard 365-episode-per-arm scale.
+
+## SWS: a well-powered null, with a confound disclosed rather than buried
+
+`cont-alarm` has no window to close, so its SWS is NOT_RUN by design, exactly what `window_report.format_arm` prints for it: an absence, never a zero, for an arm with nothing to be silent about.
+
+`win-alarm` SWS 41/356 = 0.115, silent-phase tail audible in 356 of 356 eligible episodes.
+`win-burst` SWS 40/356 = 0.112, silent-phase tail audible in 0 of 356.
+
+The two rates sit 0.003 apart despite the tail being audible in every eligible `win-alarm` episode and in none of `win-burst`'s. **That near-identity is a well-powered null**: at n=356 a reverb tail buying anything sizeable in SWS should have shown, and it did not.
+
+**The confound, named rather than hidden:** `win-alarm` and `win-burst` differ in sound class as well as in tail audibility, which is exactly why `window_pilot.sh` built `win-burst` as a class-controlled arm against `win-alarm` rather than a clean tail-only manipulation. This null does not distinguish "the tail doesn't matter" from "the class difference happens to cancel the tail difference," and the next section names the cheap fix.
+
+## Onset delay and `cue_tail_steps` are both degenerate, for different reasons
+
+**Onset delay:** median 0.0, max 0.0, zero censored, across all 1095 episodes and all three arms. The source sounds from the first step of the episode (ADR-0017), which is consistent with there being nothing to delay onto under the ADR-0019 cue readout: onset fires at step 0 or not at all, and it fired at step 0 in every episode that fired.
+
+**`cue_tail_steps`:** 2, in all 1095 episodes, across all 19 rooms. ADR-0019 defines it as `ceil((hop + L - 1) / hop)`, a function of the IR width and the hop, and a constant across 19 different rooms says the metric is structural at this box's configuration rather than a signal any room varies, one step of resolution either side of the IR width and nothing finer to read. ADR-0019's own closing section names exactly this as the honest first move: "a sweep reporting the distribution of `cue_tail_steps` across scenes." This is that sweep, and the distribution is a point mass.
+
+## What the funnel does not price
+
+**60 to 85 percent of episodes across the three arms entered INVESTIGATE and never reached CHECK and RESUME.** Smoke criterion 5 greens a scene the moment `n_pass > 0` (`task/smoke.py`'s `CriterionTally.ok`, a RATE criterion), so a scene where most of its episodes stall in the investigation still reads PASS. The gate refuses a scene with zero passes, which is what it was built for; it was never built to price how much of the funnel above the pass line is failing. That gap belongs to the gate, not to this run, and it is worth a tenth criterion or a documented non-goal rather than a silent read of PASS as "the funnel is healthy."
+
+## The dead scene, again
+
+The sweep exited 1 because `mL8ThkuaVTM` yields zero episodes in all three arms: the same scene, 99 candidates and none placed, that `yield-1`, `yield-2`, `eps-1`, `cast-1` and `arrive-2` all carried as a true zero-yield row. `CONTINUE-ON-FAILURE` did its job: the other 19 scenes ran to completion and the nonzero exit is the gate correctly refusing to call a known-dead scene a pass.
+
+## What is measured next
+
+**ADR-0018's 2026-09-01 co-primary contrast**, `unseen_heard` minus `unseen_unheard`, needs the memory stack this pilot does not build. `pilot-2` is still the three arms `pilot-1` was meant to be, run correctly this time: it prices the offset step and the episode's cost, not the matrix.
+
+**The SWS confound above is the next cheap read.** A tail-only manipulation at fixed class, or a `win-burst`-class control run under `WindowPolicy.CONTINUOUS`, would separate the class effect from the tail effect at no additional box design cost.
+
+**File index.** `earshot/tools/window_pilot.sh`'s `PILOT_ARMS`; `earshot/tools/window_report.py`'s `read_arm`, `format_arm`, `ArmReading`; `earshot/tools/episode_diff.py` for the paired McNemar; ADR-0017 for the sounding window and SWS; ADR-0019 for the cue readout and `cue_tail_steps`; ADR-0018's 2026-09-01 amendment for the co-primary contrast this pilot does not yet test. Data: the run's email report, not on disk in this worktree.

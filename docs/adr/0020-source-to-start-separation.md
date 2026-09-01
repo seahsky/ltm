@@ -1,6 +1,10 @@
 # The anomaly source is kept away from the agent's start, and every yield before it is dead
 
 **Status:** accepted (2026-08-08, grilling session on the `eps-1` sweep).
+**Renumbered from ADR-0015 to ADR-0020 on 2026-09-01.**
+Two accepted ADRs had both claimed the number 0015; the other keeps it (`0015-mp3d-on-the-box-for-a-reproduced-reference.md`).
+Only the number and the filename moved.
+Nothing below changed, and no content here ever referred to its own former number.
 **Mirrors the builder's xz decoupling rule** (`min_sep_m = 3.0`), which kept the source away from the *goal* and left the *agent* unguarded.
 
 The dataset builder requires the anomaly source to clear `MIN_SOURCE_START_SEP_M = 2.0` m in `xz` from the episode start, alongside the existing separation from every primary goal view point.

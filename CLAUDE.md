@@ -88,6 +88,15 @@ nrun bash earshot/tools/window_pilot.sh --tag <fresh-tag>
 # dead arms over 120 episodes that were on disk the whole time
 python -m earshot.tools.window_report runs/<tag>
 
+# THE OVERNIGHT SWEEP: the paper's HM3D baseline and the ablation table, in one run.
+# Five arms — `full` is the baseline of record (ADR-0021), the other four each remove one
+# component. Every arm shares its episodes with the baseline, so `episode_diff` pairs
+# them. It prints the MDE it is buying BEFORE it spends the night earning it: ~9.6 h and
+# 6.68 points at the defaults (15 episodes x 19 scenes x 5 arms)
+nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag>
+python -m earshot.tools.window_report runs/<tag> \
+  --arms "full no-climb no-cue scan-only anechoic"
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```
