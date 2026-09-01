@@ -13,6 +13,8 @@ unpaired at the same total rendering cost. That ratio was asserted as "three tim
 was computed, so it is pinned below rather than described.
 """
 
+import contextlib
+import io
 import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
@@ -21,6 +23,7 @@ from earshot.tools.power import (
     HISTORICAL_EFFECT,
     MEASURED_FLIP_RATE,
     episodes_for_mde,
+    main,
     mde_between_cells,
     mde_paired,
     sd_between_cells,
@@ -125,6 +128,49 @@ class TestTheSceneLevelTest(unittest.TestCase):
     def test_a_zero_scene_count_raises(self):
         with self.assertRaises(ValueError):
             sign_test_threshold(0)
+
+
+class TestTheCliPricesTheSweepInFrontOfIt(unittest.TestCase):
+    """`ablation_sweep.sh` prints its own MDE before it spends ten hours earning it.
+
+    The paired block was fixed at the n=365 of the run that measured the flip rate, so a
+    driver could only quote its own number in a comment -- which is the shape of every
+    figure ADR-0018 spent three amendments arguing about. `--paired-n` and `--n-scenes`
+    exist so the driver prints what it is buying, and these tests hold the two numbers
+    the ablation sweep's header states.
+    """
+
+    def _run(self, *argv):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main(list(argv))
+        self.assertEqual(code, 0)
+        return buffer.getvalue()
+
+    def test_paired_n_prints_the_sweeps_own_mde_and_not_only_the_historic_one(self):
+        out = self._run("--n-per-cell", "285", "--paired-n", "285")
+        self.assertIn("THIS SWEEP, paired at n=285", out)
+        # 6.68 points is what `ablation_sweep.sh`'s header claims at 15 episodes over 19
+        # scenes. If this moves, that header is wrong and this test is how it is found.
+        self.assertIn("MDE {:.2f} points".format(100 * mde_paired(285)), out)
+        self.assertIn("6.68", out)
+        # The historic reference stays, and stays labelled as the other thing.
+        self.assertIn("n=365", out)
+
+    def test_the_paired_block_is_silent_about_this_sweep_when_not_asked(self):
+        out = self._run("--n-per-cell", "285")
+        self.assertNotIn("THIS SWEEP", out)
+        self.assertIn("n=365", out)
+
+    def test_n_scenes_adds_its_own_row_without_dropping_the_reference_rows(self):
+        out = self._run("--n-scenes", "19")
+        self.assertIn("15 of 19", out)
+        for reference in ("9 of 10", "12 of 15", "15 of 20"):
+            self.assertIn(reference, out)
+
+    def test_a_scene_count_already_in_the_table_is_not_printed_twice(self):
+        out = self._run("--n-scenes", "20")
+        self.assertEqual(out.count("15 of 20"), 1)
 
 
 if __name__ == "__main__":

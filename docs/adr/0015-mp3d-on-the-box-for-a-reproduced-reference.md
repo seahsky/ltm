@@ -2,6 +2,10 @@
 
 **Status:** accepted (2026-08-27, grilling session over the request to stand SAVN-CE up as a baseline).
 
+**Narrowed 2026-09-01 by [ADR-0021](0021-the-baseline-is-an-hm3d-internal-arm.md).**
+Everything below is unchanged and still binds: SAVN-CE is reproduced wholly inside its own world, and no SAVN-CE number is ever tabled beside an earshot number.
+What changed is scheduling, not scope. The paper's baseline is now an internal HM3D arm, so nothing in the results section waits on the Matterport licence and this ADR is off the critical path.
+
 MP3D scene data, the SAVN-CE episode dataset, and a second conda env (`savnce`) are staged on the box for exactly one purpose: to re-measure SAVN-CE's published result **on SAVN-CE's own benchmark**.
 The earshot experiment stays on HM3D.
 ADR-0007 is **narrowed to what it always decided** — the clean room's scene dataset — and is not superseded.

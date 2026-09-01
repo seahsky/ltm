@@ -150,6 +150,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Effect sizes the matrix can detect. No GPU.")
     parser.add_argument("--n-per-cell", type=int, default=None)
     parser.add_argument("--target", type=float, default=None)
+    # A PAIRED sweep -- `ablation_sweep.sh`, or any two arms `episode_diff` can pair --
+    # must be priced by the paired formula, and the paired block below was fixed at the
+    # n=365 of the run that measured the flip rate. Passing the sweep's own n is how a
+    # driver prints the MDE it is actually buying instead of quoting a comment.
+    parser.add_argument("--paired-n", type=int, default=None)
+    # Likewise the sign-test table: the binding constraint is SCENES, and a sweep over 19
+    # of them should see the row for 19 rather than interpolate between 15 and 20.
+    parser.add_argument("--n-scenes", type=int, default=None)
     parser.add_argument("--p", type=float, default=0.5)
     parser.add_argument("--alpha", type=float, default=0.05)
     parser.add_argument("--power", type=float, default=0.8)
@@ -211,7 +219,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("")
     print("=== the scene-level test, which episodes cannot buy ===")
     print("  {:>10s}  {}".format("scenes", "how many must agree for a two-sided sign test"))
-    for n_scenes in (10, 15, 20, 30, 40):
+    scene_rows = sorted({10, 15, 20, 30, 40} | ({args.n_scenes} if args.n_scenes else set()))
+    for n_scenes in scene_rows:
         threshold = sign_test_threshold(n_scenes, args.alpha)
         verdict = (
             "IMPOSSIBLE - even a clean sweep does not reach alpha"
@@ -226,6 +235,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("")
 
     print("=== the PAIRED formula, for contrast -- it does NOT apply to the matrix ===")
+    if args.paired_n:
+        # Printed FIRST and labelled as the answer, because a driver that asks for it is
+        # a paired sweep and the n=365 line below is then the historical reference rather
+        # than the number in front of the reader.
+        print(
+            "  THIS SWEEP, paired at n={} with the measured {:.3f} flip rate:".format(
+                args.paired_n, MEASURED_FLIP_RATE
+            )
+        )
+        print(
+            "    SD {:.1f} episodes, MDE {:.2f} points. An effect smaller than that is"
+            .format(sd_paired(args.paired_n), 100 * mde_paired(args.paired_n))
+        )
+        print("    NOT resolvable by this sweep at {:.0f}% power, however it is read.".format(
+            100 * args.power
+        ))
+        print("")
     print(
         "  a byte-identical re-run at n=365 with the measured {:.3f} flip rate:".format(
             MEASURED_FLIP_RATE
