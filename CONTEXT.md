@@ -272,7 +272,7 @@ _Avoid_: near miss, almost reached (neither says the agent was inside the ring t
 **Unrouted source**:
 An episode whose source the navmesh could never reach — `find_path` returned nothing at every step, which the audit records as `distance_axis == "horizontal"` on a run that wrote routes.
 It is unwinnable rather than failed: the detector asks the same pathfinder about the same target and reads a `None` distance as not-detected, so no confirm can fire whatever the controller does.
-The builder screens xz separation and `|Δy|` (ADR-0010, ADR-0015) but never asks whether the source is REACHABLE, so these sit in the headline's denominator as losses no policy could have avoided — 23 of the 365 built episodes, identical across arms.
+The builder screens xz separation and `|Δy|` (ADR-0010, ADR-0020 — renumbered from ADR-0015 on 2026-09-01) but never asks whether the source is REACHABLE, so these sit in the headline's denominator as losses no policy could have avoided — 23 of the 365 built episodes, identical across arms.
 _Avoid_: unreachable (says nothing about which of the two pathfinder queries failed); dropping them from a denominator without printing the count you dropped.
 
 **Floor-constrained source**:

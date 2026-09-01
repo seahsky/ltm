@@ -5,6 +5,11 @@ handing `anchor_object` to the agent turns the unseen-and-heard cell of the gene
 matrix into a measurement of the author's table rather than the agent's semantic store.
 ADR-0018 records the decision; this file is the enforcement.
 
+The fence covers two prefixes now, not one: `agent/` (the controller) and `memory/`
+(ADR-0018's semantic store). Both are named in `VOCABULARY_FENCED_PREFIXES` below, and
+`memory/` gets an extra AST-level test the import check alone cannot give it — see
+`test_no_memory_module_names_the_placement_table`.
+
 ADR-0013's layer graph already forbids `agent/` importing `audio/` at all, so the naive leak
 cannot compile. The leak that CAN happen is the wiring layer reading the anchor and passing
 it in, which no layer rule catches. So the fence here is an ALLOWLIST of call sites, in the
@@ -45,6 +50,17 @@ ANCHOR_CALLERS_ALLOWED = (
     "task/dataset.py",
     "task/clap_gate.py",
 )
+
+# The prefixes that may not reach the placement table by any route. `memory/` joins
+# `agent/` because the semantic store's whole claim is that it LEARNED the association;
+# a store that can read ROOM_OF_ANCHOR measures the author's table instead.
+VOCABULARY_FENCED_PREFIXES = ("agent/", "memory/")
+
+# The same three strings, however they are reached: the exact name, and the two ways of
+# naming it that the AST walker's helpers still see through a hand-edit --
+# `code_string_constants` catches `getattr(vocabulary, "room_of")`, and
+# `attribute_names` catches `vocabulary.room_of(...)` written as a real attribute.
+PLACEMENT_TABLE_NAMES = ("ROOM_OF_ANCHOR", "anchor_object", "room_of")
 
 
 class TestVocabularyTable(unittest.TestCase):
@@ -152,20 +168,60 @@ class TestAnchorFence(unittest.TestCase):
     """The sound-object mapping must not reach the agent, by any route."""
 
     def test_no_agent_module_imports_the_vocabulary(self):
-        """Belt to the layer graph's braces, and greppable by the name of the rule."""
+        """Belt to the layer graph's braces, and greppable by the name of the rule.
+
+        Generalised over `VOCABULARY_FENCED_PREFIXES`, with the vacuousness guard kept
+        PER PREFIX: a typo in `"memory/"` must fail loudly by scanning nothing for that
+        prefix, rather than being masked by `agent/` alone having files to scan.
+        """
         offenders = []
-        scanned = 0
-        for path in _tree.agent_python_files():
-            if not _tree.relative_path(path).startswith("agent/"):
-                continue
-            scanned += 1
-            if _tree.imports_module(_tree.parse(path), "earshot.audio.vocabulary"):
-                offenders.append(_tree.relative_path(path))
-        self.assertGreater(scanned, 0, "the fence scanned no agent module — vacuous")
+        for prefix in VOCABULARY_FENCED_PREFIXES:
+            scanned = 0
+            for path in _tree.agent_python_files():
+                if not _tree.relative_path(path).startswith(prefix):
+                    continue
+                scanned += 1
+                if _tree.imports_module(_tree.parse(path), "earshot.audio.vocabulary"):
+                    offenders.append(_tree.relative_path(path))
+            self.assertGreater(
+                scanned, 0, "the fence scanned no {} module — vacuous".format(prefix)
+            )
         self.assertEqual(
             offenders,
             [],
-            "agent module(s) importing the vocabulary: {}".format(offenders),
+            "fenced module(s) importing the vocabulary: {}".format(offenders),
+        )
+
+    def test_no_memory_module_names_the_placement_table(self):
+        """The AST-level half: `memory/` may not even NAME the table, call or no call.
+
+        `test_no_agent_module_imports_the_vocabulary` above catches the import; this
+        catches the harder-to-see case of the string or attribute name reaching a
+        `memory/` file some other way (`getattr(vocabulary, "room_of")`,
+        `earshot.audio.vocabulary.ROOM_OF_ANCHOR` copied inline) — the same two helpers
+        `test_analyst_only.py` uses for the `sourceIsVisible` fence.
+        """
+        offenders = []
+        scanned = 0
+        for path in _tree.agent_python_files():
+            relative = _tree.relative_path(path)
+            if not relative.startswith("memory/"):
+                continue
+            scanned += 1
+            tree = _tree.parse(path)
+            for lineno, name in _tree.code_string_constants(tree):
+                if name in PLACEMENT_TABLE_NAMES:
+                    offenders.append("{}:{} — {!r}".format(relative, lineno, name))
+            for lineno, name in _tree.attribute_names(tree):
+                if name in PLACEMENT_TABLE_NAMES:
+                    offenders.append("{}:{} — .{}".format(relative, lineno, name))
+        self.assertGreater(scanned, 0, "the fence scanned no memory/ module — vacuous")
+        self.assertEqual(
+            offenders,
+            [],
+            "memory/ module(s) naming the placement table {}:\n{}".format(
+                PLACEMENT_TABLE_NAMES, "\n".join(offenders)
+            ),
         )
 
     def test_anchor_object_is_called_only_from_the_allowlist(self):

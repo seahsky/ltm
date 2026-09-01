@@ -26,7 +26,15 @@ from _interpreter import assert_interpreter  # noqa: F401
 from earshot.__main__ import build_parser, config_from_args
 from earshot.agent.config import ControllerConfig, DetectorConfig, PlannerConfig
 from earshot.audio.config import AudioConfig, WindowPolicy
-from earshot.config import Detector, Localization, RunConfig
+from earshot.config import (
+    CastPolicy,
+    ClimbRule,
+    Detector,
+    IrPolicy,
+    LateralCue,
+    Localization,
+    RunConfig,
+)
 
 # The fields that are composed rather than flagged: each is a module's own frozen config,
 # defined beside the code it configures (ADR-0013). Pinned here so a new sub-config is a
@@ -48,6 +56,18 @@ class TestRunConfig(unittest.TestCase):
         self.assertIs(config.localization, Localization.REALIZABLE)
         self.assertIs(config.detector, Detector.ORACLE)
 
+    def test_the_default_arms_reproduce_todays_behaviour(self):
+        """ADR-0018's four new arms: adding them must change NOTHING until one is set.
+
+        Each default names the behaviour that ships today, so a run built with no
+        arm flags at all is byte-identical to the pre-arm runner.
+        """
+        config = RunConfig(run_dir="runs/x")
+        self.assertIs(config.climb_rule, ClimbRule.LIVE)
+        self.assertIs(config.lateral_cue, LateralCue.LIVE)
+        self.assertIs(config.cast_policy, CastPolicy.CAST)
+        self.assertIs(config.ir_policy, IrPolicy.FULL)
+
     def test_it_is_frozen(self):
         config = RunConfig(run_dir="runs/x")
         with self.assertRaises(dataclasses.FrozenInstanceError):
@@ -58,6 +78,18 @@ class TestRunConfig(unittest.TestCase):
         payload = json.loads(json.dumps(RunConfig(run_dir="runs/x").as_dict()))
         self.assertEqual(payload["localization"], "realizable")
         self.assertEqual(payload["detector"], "oracle")
+
+    def test_the_four_new_arms_round_trip_through_as_dict_by_value(self):
+        """Same shape as ``localization``/``detector``: hand-mapped to ``.value``.
+
+        A sub-config would leave an Enum member as an Enum object and ``json.dumps``
+        would raise before this ever reached ``env_report.json``.
+        """
+        payload = json.loads(json.dumps(RunConfig(run_dir="runs/x").as_dict()))
+        self.assertEqual(payload["climb_rule"], "live")
+        self.assertEqual(payload["lateral_cue"], "live")
+        self.assertEqual(payload["cast_policy"], "cast")
+        self.assertEqual(payload["ir_policy"], "full")
 
     def test_as_dict_carries_every_sub_config_field(self):
         """Through ``dataclasses.asdict``, so a new ``PlannerConfig`` field needs no edit here.
@@ -192,6 +224,10 @@ class TestTheCli(unittest.TestCase):
                     "--seed", "7",
                     "--localization", "oracle",
                     "--detector", "caption",
+                    "--climb-rule", "off",
+                    "--lateral-cue", "off",
+                    "--cast-policy", "scan_only",
+                    "--ir-policy", "anechoic",
                     "--anomaly-class", "glass_break",
                     "--anomaly-clip", "/tmp/x.wav",
                     "--clap",
@@ -217,6 +253,10 @@ class TestTheCli(unittest.TestCase):
         self.assertEqual(config.seed, 7)
         self.assertIs(config.localization, Localization.ORACLE)
         self.assertIs(config.detector, Detector.CAPTION)
+        self.assertIs(config.climb_rule, ClimbRule.OFF)
+        self.assertIs(config.lateral_cue, LateralCue.OFF)
+        self.assertIs(config.cast_policy, CastPolicy.SCAN_ONLY)
+        self.assertIs(config.ir_policy, IrPolicy.ANECHOIC)
         self.assertEqual(config.anomaly_class, "glass_break")
         self.assertEqual(config.anomaly_clip, "/tmp/x.wav")
         self.assertTrue(config.clap)
@@ -237,6 +277,7 @@ class TestTheCli(unittest.TestCase):
         """
         self._reject(["--run-dir", "runs/x", "--localization", "sometimes"])
         self._reject(["--run-dir", "runs/x", "--sounding-policy", "sometimes"])
+        self._reject(["--run-dir", "runs/x", "--climb-rule", "sometimes"])
 
     def test_the_drawn_range_arrives_as_a_tuple(self):
         """argparse's ``nargs=2`` yields a LIST, and ``RunConfig`` is compared by equality.

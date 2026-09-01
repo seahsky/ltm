@@ -39,6 +39,17 @@ agent's real transform, so ``audio/lateral.lateral_sign`` returns an agent-frame
 the same arithmetic on the same samples. Carried across with the old compensation the
 agent turns the wrong way on every stall, and it looks like a mediocre climb rather than a
 bug. ``tests/box/test_audio_box.py`` pins the convention.
+
+**ADR-0018's three controller arms (``ClimbRule``, ``LateralCue``, ``CastPolicy``) arrive
+as plain typed keyword parameters, injected by the runner — not as a config object.**
+``agent/`` cannot import ``config`` (the layer graph does not permit it), so ``RunConfig``
+is mapped to ``bool``/``int`` at the runner's call site exactly as ``Localization``
+already is for ``realizable``. See ``realizable_investigate_step``, ``next_plateau_steps``
+and ``step_controller`` for the three knobs (``climb_enabled``, ``lateral_cue_enabled``,
+``cast_steps``); pilot-2 measured the climb as already inert in both arms (rise/eps below
+1 in every distance band, 90-99% of detour steps plateaued), so the pre-registered
+expectation for ``ClimbRule.OFF`` is no change on real energy traces — this module's job
+is a clean switch, not a better climb.
 """
 
 from __future__ import annotations
@@ -184,8 +195,16 @@ def is_rising(
     *,
     eps: float,
     window: int = RISING_WINDOW,
+    sigmas: float = RISING_SIGMAS,
 ) -> bool:
     """Is the agent getting louder, judged as a trend between two windows?
+
+    ``sigmas`` used to be read from module scope; it is a parameter now so
+    ``tools/detour_report``'s replay can reconstruct the exact verdict an episode ran
+    with. It is **not** ADR-0018's ``ClimbRule`` arm — that arm does not tune this
+    threshold, it skips calling this function at all (see
+    ``realizable_investigate_step``'s ``climb_enabled``). Every caller in this module
+    passes ``sigmas`` at its default.
 
     **Both sides average, and `eps-1` is why.** The version this replaces compared the
     single latest reading against a median of the preceding ``window`` — which halves the
@@ -244,7 +263,7 @@ def is_rising(
     pooled = recent + baseline
     if len(pooled) >= MIN_DISPERSION_SAMPLES:
         dispersion = _sample_sd(pooled) * math.sqrt(2.0 / len(recent))
-        bar = max(bar, RISING_SIGMAS * dispersion)
+        bar = max(bar, float(sigmas) * dispersion)
     return gap > bar
 
 
@@ -257,8 +276,30 @@ def realizable_investigate_step(
     window: int = RISING_WINDOW,
     plateau_steps: int = 0,
     cast_steps: int = CAST_STEPS,
+    scan_steps: int = SCAN_STEPS,
+    climb_enabled: bool = True,
+    lateral_cue_enabled: bool = True,
 ) -> str:
     """One step of realizable anomaly-source localization (ADR-0011): SURGE, or CAST.
+
+    **ADR-0018's three controller arms land here, as injected parameters, never as a
+    config object** (``agent/`` cannot import ``config``; see the module docstring).
+
+    - ``climb_enabled=False`` is ``ClimbRule.OFF``: the live binaural gradient never
+      steers. ``rising`` is forced ``False`` without calling ``is_rising`` at all — not a
+      doctored ``eps``, because a huge epsilon would make the OFF arm depend on a magic
+      number instead of on a branch. The scan/cast cycle below runs on every tick.
+    - ``lateral_cue_enabled=False`` is ``LateralCue.OFF``: the interaural sign is treated
+      as ``0`` (ambiguous) for this call only, which is the same path an episode already
+      takes when the cue genuinely carries no side information — ``_turn_toward``'s own
+      default.
+    - ``cast_steps=0`` is ``CastPolicy.SCAN_ONLY``: unchanged from ``cast_action``'s
+      existing contract, forwarded through rather than read from module scope so the
+      value is visible at every call site.
+
+    ``scan_steps`` is forwarded to ``cast_action`` explicitly (it used to fall back to
+    that function's own default and was never reachable from here) so the scan length is
+    named at the point the cast cycle is entered, matching ``cast_steps``.
 
     Pure, and from **agent-estimable signals only** — it never reads a ground-truth source
     distance or coordinate:
@@ -388,7 +429,7 @@ def realizable_investigate_step(
     history = [float(e) for e in energy_history if e is not None]
     if not history:
         return ACT_FORWARD  # no reading yet, probe forward
-    rising = is_rising(history, eps=eps, window=window)
+    rising = is_rising(history, eps=eps, window=window) if climb_enabled else False
     # **ARM BRANCH: the confirm alone ends the detour, without a plateau beside it.**
     #
     # `cast-1` measured what the conjunct costs. Seven of fifteen abandoned episodes in
@@ -415,7 +456,8 @@ def realizable_investigate_step(
         return ACT_STOP
     if rising:
         return ACT_FORWARD  # surge
-    return cast_action(plateau_steps, lateral_sign, cast_steps=cast_steps)
+    sign = int(lateral_sign) if lateral_cue_enabled else 0
+    return cast_action(plateau_steps, sign, cast_steps=cast_steps, scan_steps=scan_steps)
 
 
 def _turn_toward(lateral_sign: int) -> str:
@@ -474,6 +516,7 @@ def next_plateau_steps(
     eps: float = UNMEASURED_EPS,
     window: int = RISING_WINDOW,
     plateau_steps: int = 0,
+    climb_enabled: bool = True,
 ) -> int:
     """The plateau count after this tick: zero if the cue is alive, one more if not. Pure.
 
@@ -484,9 +527,18 @@ def next_plateau_steps(
 
     A *replay* has the whole series and can derive it, which is what makes the reconstructed
     action checkable against the recorded one (`tools/detour_report`).
+
+    ``climb_enabled=False`` (``ClimbRule.OFF``) must honour the same short-circuit
+    ``realizable_investigate_step`` does: if it did not, the plateau counter would reset
+    to zero on a rise the rule is ignoring, and the cast cycle would restart every tick of
+    a detour whose climb is supposedly off — neither the climb nor the cast would be
+    running.
     """
     history = [float(e) for e in energy_history if e is not None]
-    if not history or is_rising(history, eps=eps, window=window):
+    if not history:
+        return 0
+    rising = is_rising(history, eps=eps, window=window) if climb_enabled else False
+    if rising:
         return 0
     return max(0, int(plateau_steps)) + 1
 
@@ -676,6 +728,10 @@ def step_controller(
     visual_confirm: bool = False,
     pose: Optional[Pose] = None,
     rising_eps: float = UNMEASURED_EPS,
+    cast_steps: int = CAST_STEPS,
+    scan_steps: int = SCAN_STEPS,
+    climb_enabled: bool = True,
+    lateral_cue_enabled: bool = True,
 ) -> Tuple[ControllerState, ControllerDecision]:
     """Advance the machine one tick. Returns ``(next_state, decision)``.
 
@@ -689,6 +745,16 @@ def step_controller(
     ``source_xyz`` or ``arrived_at_source``, so the reach numbers it produces are not
     measured on privileged information; the oracle branch reads both, and its privilege
     shows in its trajectory and its audit record rather than in its report.
+
+    ``cast_steps``, ``scan_steps``, ``climb_enabled`` and ``lateral_cue_enabled`` are
+    ADR-0018's ``CastPolicy``, ``ClimbRule`` and ``LateralCue`` arms, mapped from
+    ``RunConfig`` to these plain parameters at the call site in ``task/runner.py`` — this
+    module does not and cannot import ``config`` (``LAYER_IMPORTS["agent"]``). They are
+    forwarded to **both** places the realizable arm calls
+    ``realizable_investigate_step``/``next_plateau_steps`` — the SEARCH-entry tick that
+    opens the detour, and every INVESTIGATE tick after — because a forward that lands on
+    only one of the two is the bug where the first tick of a detour runs a different
+    policy from the rest of it.
     """
     primary = state.primary_goal
 
@@ -727,9 +793,13 @@ def step_controller(
                     entry = realizable_investigate_step(
                         energy_history or [], lateral_sign, visual_confirm,
                         eps=rising_eps, plateau_steps=0,
+                        cast_steps=cast_steps, scan_steps=scan_steps,
+                        climb_enabled=climb_enabled,
+                        lateral_cue_enabled=lateral_cue_enabled,
                     )
                     nxt = replace(nxt, plateau_steps=next_plateau_steps(
-                        energy_history or [], eps=rising_eps, plateau_steps=0))
+                        energy_history or [], eps=rising_eps, plateau_steps=0,
+                        climb_enabled=climb_enabled))
                     return nxt, ControllerDecision(
                         mode=NavMode.INVESTIGATE,
                         active_goal=goal,
@@ -761,13 +831,17 @@ def step_controller(
             action = realizable_investigate_step(
                 energy_history or [], lateral_sign, visual_confirm, eps=rising_eps,
                 plateau_steps=state.plateau_steps,
+                cast_steps=cast_steps, scan_steps=scan_steps,
+                climb_enabled=climb_enabled,
+                lateral_cue_enabled=lateral_cue_enabled,
             )
             # Advanced whatever the action was, including a forward mid-leg: the count is
             # of dead-cue STEPS, not of turns, and resetting it on the leg's own forwards
             # would restart the cycle every other tick.
             state = replace(state, plateau_steps=next_plateau_steps(
                 energy_history or [], eps=rising_eps,
-                plateau_steps=state.plateau_steps))
+                plateau_steps=state.plateau_steps,
+                climb_enabled=climb_enabled))
         arrived = (action == ACT_STOP) if realizable else bool(arrived_at_source)
 
         if arrived:

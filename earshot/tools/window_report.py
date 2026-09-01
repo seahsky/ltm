@@ -20,6 +20,13 @@ tally refuses to publish. The refusal is caught and REPORTED here rather than al
 kill the readout: an arm whose SWS is barred is a finding about that arm, and the other
 arms' numbers are still what the pilot ran for.
 
+**The source-side columns land here on the same day the runner starts writing them**, for
+that reason and no other. ``source_spl``, ``source_find_sr_1m`` and ``dtg_source_final_m``
+are absent on the episodes that could not produce them — no navmesh route from the start
+pose to the source, or no route from the final pose — so each is printed as a count of
+what EXISTS beside a count of what is missing and the cause of the missing. An unwinnable
+episode is not a zero and is not a failed find.
+
 Every number below is written by the runner into the audit record. A disagreement between
 this module and an audit is a bug in this module and never a second opinion about a run.
 """
@@ -64,6 +71,13 @@ class ArmReading:
     each means nothing was eligible, which is NOT_RUN and never 0.0. A populated
     ``sws_refused`` is ADR-0017's bar firing: the tally would not publish a rate over
     episodes whose silent phase carried no tail.
+
+    The source-side series carry their own absences as COUNTS rather than as padding.
+    ``source_spls`` holds one value per episode that HAD one and ``n_source_spl_absent``
+    counts the rest, because the runner writes ``source_spl`` only where the episode had
+    a navmesh route from its start pose to the source — 23 of ``yield-2``'s 365 episodes
+    did not — and a 0.0 in that gap would put an unwinnable episode in the same bucket as
+    one that had a route and failed to walk it.
     """
 
     arm: str
@@ -82,6 +96,21 @@ class ArmReading:
     n_heard_within_window: int
     cue_tail_steps: Tuple[int, ...]
     phase_folds: Tuple[int, ...]
+    # One entry per episode that carried the key; the absences counted beside it.
+    source_spls: Tuple[float, ...]
+    n_source_spl_absent: int
+    # The success flag written alongside every `source_spl`, summed. Its denominator is
+    # `len(source_spls)` and never `n_episodes`: an episode with no route has no
+    # Find-SR@1m either, and dividing by the arm would report the unwinnable episodes as
+    # failures to find.
+    n_source_find_sr_1m: int
+    dtg_source_final: Tuple[float, ...]
+    n_dtg_source_final_absent: int
+    # Which ADR-0018 arms the episodes on disk actually ran under, distinct and sorted,
+    # and how many carried no arm at all. More than one label on one arm directory is a
+    # mixed sweep, which is the thing a paired diff must not be handed.
+    ablation_arms: Tuple[str, ...]
+    n_arms_unrecorded: int
 
     @property
     def reached_rate(self) -> Optional[float]:
@@ -131,6 +160,37 @@ def _metric(audit: EpisodeAudit, key: str) -> Optional[float]:
     return None if value is None else float(value)
 
 
+def _present(audits: Sequence[EpisodeAudit], key: str) -> Tuple[Tuple[float, ...], int]:
+    """``(the values that exist, how many episodes had none)``.
+
+    The one shape every absent-not-zero column in this file is built from. A list
+    comprehension that filtered ``None`` and dropped the count is the same reader that
+    prints a confident mean over three of forty episodes and says nothing about the
+    thirty-seven.
+    """
+    values = tuple(
+        value
+        for value in (_metric(audit, key) for audit in audits)
+        if value is not None
+    )
+    return values, len(audits) - len(values)
+
+
+def _arm_label(audit: EpisodeAudit) -> Optional[str]:
+    """This episode's four ADR-0018 arms as one label, or ``None`` if it carried none.
+
+    ``None`` means the record predates the arms and which arm ran is UNKNOWN. It is not
+    ``"climb=live lateral=live cast=cast ir=full"``: filling the shipped defaults in
+    here would let a run written before the arms existed read as a run that was measured
+    to have used them.
+    """
+    parts = (audit.climb_rule, audit.lateral_cue, audit.cast_policy, audit.ir_policy)
+    if all(part is None for part in parts):
+        return None
+    climb, lateral, cast, ir = ("?" if part is None else part for part in parts)
+    return "climb={} lateral={} cast={} ir={}".format(climb, lateral, cast, ir)
+
+
 def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
     """Read one arm directory into an ``ArmReading``.
 
@@ -157,6 +217,13 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
             n_heard_within_window=0,
             cue_tail_steps=(),
             phase_folds=(),
+            source_spls=(),
+            n_source_spl_absent=0,
+            n_source_find_sr_1m=0,
+            dtg_source_final=(),
+            n_dtg_source_final_absent=0,
+            ablation_arms=(),
+            n_arms_unrecorded=0,
         )
 
     steps = [float(len(audit.steps)) for audit in audits]
@@ -188,6 +255,20 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
         for value in (_metric(audit, "sounding_phase_folds") for audit in audits)
         if value is not None
     )
+
+    source_spls, n_source_spl_absent = _present(audits, "source_spl")
+    dtg_source, n_dtg_absent = _present(audits, "dtg_source_final_m")
+    # Counted over the episodes that carried a `source_spl`, because the runner writes
+    # the two together or neither — see the metric block in `task/runner.py`. Summing
+    # `source_find_sr_1m` over the whole arm would be a rate whose denominator includes
+    # episodes for which the numerator was never defined.
+    n_find_sr = sum(
+        1
+        for audit in audits
+        if _metric(audit, "source_spl") is not None
+        and _metric(audit, "source_find_sr_1m")
+    )
+    labels = [_arm_label(audit) for audit in audits]
 
     return ArmReading(
         arm=arm,
@@ -227,6 +308,13 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
         ),
         cue_tail_steps=cue_tail,
         phase_folds=folds,
+        source_spls=source_spls,
+        n_source_spl_absent=n_source_spl_absent,
+        n_source_find_sr_1m=n_find_sr,
+        dtg_source_final=dtg_source,
+        n_dtg_source_final_absent=n_dtg_absent,
+        ablation_arms=tuple(sorted({label for label in labels if label is not None})),
+        n_arms_unrecorded=sum(1 for label in labels if label is None),
     )
 
 
@@ -331,6 +419,79 @@ def format_arm(reading: ArmReading) -> List[str]:
         lines.append(
             "  {:11s}   cue_tail_steps {}   phase folds {}".format(
                 "", _histogram(reading.cue_tail_steps), _histogram(reading.phase_folds) or "-"
+            )
+        )
+
+    # THE SOURCE-SIDE COLUMNS. `heard_within_window`'s pattern exactly, and for its
+    # reason: `pilot-1` measured everything and reported nothing, and a metric with no
+    # readout is a metric that does not exist. Absence is printed AS absence, with the
+    # cause named, and never as 0.0 or as a failure to find.
+    n = reading.n_episodes
+    if reading.source_spls:
+        lines.append(
+            "  {:11s}   source SPL: n={} of {}   mean {:.3f} median {:.3f}   "
+            "Find-SR@1m {} of {}".format(
+                "",
+                len(reading.source_spls),
+                n,
+                statistics.mean(reading.source_spls),
+                statistics.median(reading.source_spls),
+                reading.n_source_find_sr_1m,
+                len(reading.source_spls),
+            )
+        )
+        if reading.n_source_spl_absent:
+            lines.append(
+                "  {:11s}     ABSENT on {} of {}: no navmesh route from the start pose "
+                "to the source, or the reach carried no measurement — unwinnable, not "
+                "a zero and not a miss".format("", reading.n_source_spl_absent, n)
+            )
+    else:
+        lines.append(
+            "  {:11s}   source SPL: n/a on all {} episode(s) — none had a navmesh route "
+            "from its start pose to the source (or none recorded the reach). ABSENT, "
+            "not 0.0.".format("", n)
+        )
+
+    if reading.dtg_source_final:
+        lines.append(
+            "  {:11s}   route to source at the FINAL pose (not the closest approach): "
+            "n={} of {}   median {:.2f} m   max {:.2f} m".format(
+                "",
+                len(reading.dtg_source_final),
+                n,
+                statistics.median(reading.dtg_source_final),
+                max(reading.dtg_source_final),
+            )
+        )
+        if reading.n_dtg_source_final_absent:
+            lines.append(
+                "  {:11s}     ABSENT on {} of {}: the final pose has no navmesh route "
+                "to the source — a disconnected island, not a distance of 0".format(
+                    "", reading.n_dtg_source_final_absent, n
+                )
+            )
+    else:
+        lines.append(
+            "  {:11s}   route to source at the FINAL pose: n/a on all {} episode(s) — "
+            "no final pose had a route to the source. ABSENT, not 0.0.".format("", n)
+        )
+
+    if reading.ablation_arms:
+        lines.append(
+            "  {:11s}   arms: {}".format("", "; ".join(reading.ablation_arms))
+        )
+        if len(reading.ablation_arms) > 1:
+            lines.append(
+                "  {:11s}     MIXED — this arm directory holds more than one arm "
+                "setting, so a paired diff against it is not comparing like with "
+                "like".format("")
+            )
+    if reading.n_arms_unrecorded:
+        lines.append(
+            "  {:11s}   arms NOT RECORDED on {} of {} episode(s): written before the "
+            "arms existed, so which arm ran is UNKNOWN rather than the default".format(
+                "", reading.n_arms_unrecorded, n
             )
         )
     return lines

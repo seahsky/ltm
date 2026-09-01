@@ -586,6 +586,20 @@ class EpisodeAudit:
     scene_id: Optional[str] = None
     localization_arm: Optional[str] = None
     detector_arm: Optional[str] = None
+    # ADR-0018's four ablation arms, for `localization_arm`'s reason and found the same
+    # way: the run config is written once per RUN (`summary.json`) and the comparison
+    # this tree keeps making is per EPISODE. `tools/episode_diff.py` pairs two sweeps by
+    # episode index, and without these it can pair an episode that ran with the climb
+    # against one that ran without it and call the difference a result.
+    #
+    # Held as the enum's `.value` string, never the enum: `metrics` is `Mapping[str,
+    # float]` and every reader in the tree does `float(value)` on it, so an arm cannot
+    # live there. `None` means the record predates the arms — which is NOT the same fact
+    # as "the arm was off", and is why the default is None rather than `"live"`.
+    climb_rule: Optional[str] = None
+    lateral_cue: Optional[str] = None
+    cast_policy: Optional[str] = None
+    ir_policy: Optional[str] = None
     source_xyz: Optional[Xyz] = None
     t_anom: Optional[int] = None
     # ADR-0017's window, beside the step it opens at. `None` on every record written
@@ -711,6 +725,10 @@ class EpisodeAudit:
             "scene_id": self.scene_id,
             "localization_arm": self.localization_arm,
             "detector_arm": self.detector_arm,
+            "climb_rule": self.climb_rule,
+            "lateral_cue": self.lateral_cue,
+            "cast_policy": self.cast_policy,
+            "ir_policy": self.ir_policy,
             "source_xyz": list(self.source_xyz.as_tuple()) if self.source_xyz else None,
             "t_anom": None if self.t_anom is None else int(self.t_anom),
             "sounding_window": (
@@ -754,6 +772,12 @@ class EpisodeAudit:
             scene_id=data.get("scene_id"),
             localization_arm=data.get("localization_arm"),
             detector_arm=data.get("detector_arm"),
+            # `.get`, so every record written before the arms existed reads back None —
+            # "this run predates the ablation arms", and not "the arm was off".
+            climb_rule=data.get("climb_rule"),
+            lateral_cue=data.get("lateral_cue"),
+            cast_policy=data.get("cast_policy"),
+            ir_policy=data.get("ir_policy"),
             source_xyz=Xyz.from_sequence(source) if source is not None else None,
             t_anom=None if t_anom is None else int(t_anom),
             sounding_window=(

@@ -14,9 +14,17 @@ deliberately not a dependency of the clean room. Task spec §6 requires soft-SPL
 computed — not headlined, but computed, because the follow-on memory effort inherits
 it already wired — so the arithmetic is written out here from habitat-lab's source
 with the citation, exactly as ``task/episodes.py`` did for the dataset loader.
+
+``compute_source_spl`` and ``compute_dtg_source_final`` are ADR-0018's addition: the
+memory matrix needs an SPL and a final-pose distance scored against the ANOMALY SOURCE,
+not the primary ObjectNav goal, and neither of the two functions above can be
+reparameterised into that shape (see each docstring for why). Both follow the house
+pattern set by ``compute_sws`` below: an explicit ``Optional`` return, and ``None`` —
+never ``0.0`` — for an input that was not measured rather than a real answer of zero.
 """
 from __future__ import annotations
 
+import math
 from typing import Optional, Sequence, Tuple
 
 
@@ -215,6 +223,105 @@ def post_offset_audible_steps(
         for step, measured in readings
         if int(step) >= offset and abs(float(measured) - bed) > margin
     )
+
+
+def compute_source_spl(
+    *,
+    source_reached: bool,
+    dist_at_reach: Optional[float],
+    geodesic_optimal_to_source: Optional[float],
+    path_len_at_reach: Optional[float],
+    success_radius: float = 1.0,
+) -> Optional[Tuple[bool, float]]:
+    """SPL against the ANOMALY SOURCE, scored at the controller's CHECK transition.
+
+    ``compute_benchmark_spl`` cannot serve this: its ``success`` requires the primary
+    ``stopped`` flag, and that is still False when the source is reached mid-episode, so
+    parameterising the old function by radius would score every source find as 0.0. This
+    is a new function, not a reparameterisation.
+
+        success = source_reached and dist_at_reach is not None
+                  and dist_at_reach <= success_radius
+        spl     = success * L_opt / max(L_taken, L_opt)
+
+    ``L_opt`` (``geodesic_optimal_to_source``) is the start-pose-to-source navmesh route;
+    ``L_taken`` (``path_len_at_reach``) is the agent's realized path length ACCUMULATED UP
+    TO THE STEP THE SOURCE WAS REACHED, not the whole episode's path length -- charging
+    the source find for metres walked afterwards on the primary task would make the
+    number a function of how long the primary search ran after the source was already
+    found. ``dist_at_reach`` is a horizontal distance (the shape the runner already
+    records at the investigation stop pose) while ``geodesic_optimal_to_source`` is a
+    route length -- two axes, inherited from what the runner already computes rather than
+    invented here.
+
+    ``None`` -- NOT_RUN, never ``(False, 0.0)`` -- in exactly two cases, both real
+    absences and not measured zeros (ADR-0014):
+
+    * ``geodesic_optimal_to_source is None``: no navmesh route from the start pose to the
+      source at all (23 of ``yield-2``'s 365 episodes). An unwinnable episode scored
+      ``(False, 0.0)`` would sit in the same bucket as a episode that had a route and
+      failed to take it, which is the exact confusion ``min_route_to_source_in_window_m``
+      was added to prevent.
+    * ``source_reached`` is True and either ``dist_at_reach`` or ``path_len_at_reach`` is
+      ``None``: the source was reached but the measurement that would score the reach was
+      not captured, which is an accounting gap and not a fact about the episode.
+
+    ``(False, 0.0)`` is the real, reportable zero: the episode ran, had a route to the
+    source, and did not reach it (or reached it outside ``success_radius``).
+
+    ``denom <= 0.0`` returns ``(True, 1.0)`` -- started on the source -- matching
+    ``compute_benchmark_spl``'s boundary case verbatim.
+    """
+    if geodesic_optimal_to_source is None:
+        return None
+    if source_reached and (dist_at_reach is None or path_len_at_reach is None):
+        return None
+    success = bool(
+        source_reached
+        and dist_at_reach is not None
+        and float(dist_at_reach) <= float(success_radius)
+    )
+    if not success:
+        return False, 0.0
+    # ``path_len_at_reach`` is not None here: `success` required it above.
+    denom = max(float(path_len_at_reach), float(geodesic_optimal_to_source))
+    if denom <= 0.0:
+        # Started on the source and reached it with zero displacement: L_opt == 0.
+        return True, 1.0
+    return True, float(geodesic_optimal_to_source) / denom
+
+
+def compute_dtg_source_final(*, geodesic_to_source: Optional[float]) -> Optional[float]:
+    """Final-pose distance-to-goal, taken against the SOURCE rather than the primary goal.
+
+    The source-side twin of the ``dist_to_goal_final`` argument computed inline (and
+    discarded) at the ``compute_soft_spl`` call site in ``runner.py`` -- a second,
+    separate pathfinder query, not a re-derivation of the first.
+
+    Pure and single-axis: it never falls back to a horizontal distance when the route is
+    missing. Substituting one axis for the other is how an un-measured detour comes to
+    look like a converging one (``report/audit.py``'s own warning against exactly this).
+
+    ``None`` in (unreachable from the final pose, or the query was never made) -> ``None``
+    out. Non-finite in (``inf``, ``nan``) -> ``None`` also: ``World.geodesic_distance``
+    already returns ``None`` for unreachable, but a caller that seeds an accumulator with
+    ``inf`` and forgets to convert it back would otherwise hand this function a value
+    whose ``json.dump`` writes a bare ``Infinity`` -- not valid JSON, and the failure
+    ``runner.py``'s own comment on ``min_d2source`` names.
+
+    Raises ``ValueError`` on a negative distance -- an arithmetic bug in the caller, and
+    clamping it (``max(0.0, value)``) would publish it as a real number instead.
+    """
+    if geodesic_to_source is None:
+        return None
+    value = float(geodesic_to_source)
+    if not math.isfinite(value):
+        return None
+    if value < 0.0:
+        raise ValueError(
+            "geodesic_to_source cannot be negative: {}".format(value)
+        )
+    return value
 
 
 def compute_sws(

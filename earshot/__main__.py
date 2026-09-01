@@ -37,7 +37,15 @@ from typing import Optional, Sequence
 
 from earshot.audio.clips import ANOMALY_CLASSES
 from earshot.audio.config import WindowPolicy
-from earshot.config import Detector, Localization, RunConfig
+from earshot.config import (
+    CastPolicy,
+    ClimbRule,
+    Detector,
+    IrPolicy,
+    LateralCue,
+    Localization,
+    RunConfig,
+)
 
 __all__ = ["build_parser", "config_from_args", "main"]
 
@@ -127,6 +135,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="oracle (the smoke) or caption (R2; needs earshot/vlm.py, not yet built)",
     )
     parser.add_argument(
+        "--climb-rule",
+        choices=[arm.value for arm in ClimbRule],
+        default=defaults.climb_rule.value,
+        help="live (the energy climb steers INVESTIGATE) or off (the climb is never "
+        "consulted, so the agent runs the scan/cast cycle alone) — ADR-0018's matrix",
+    )
+    parser.add_argument(
+        "--lateral-cue",
+        choices=[arm.value for arm in LateralCue],
+        default=defaults.lateral_cue.value,
+        help="live (the interaural sign steers turns) or off (the sign is treated as "
+        "ambiguous, so the turn decision falls to its zero/absent default)",
+    )
+    parser.add_argument(
+        "--cast-policy",
+        choices=[arm.value for arm in CastPolicy],
+        default=defaults.cast_policy.value,
+        help="cast (a leg is walked once the climb goes dead) or scan_only (every dead "
+        "step turns instead, the pre-`eps-1` control arm)",
+    )
+    parser.add_argument(
+        "--ir-policy",
+        choices=[arm.value for arm in IrPolicy],
+        default=defaults.ir_policy.value,
+        help="full (the room's real IR) or anechoic (every rendered IR is replaced by "
+        "a flat, reverberation-free stand-in at all three render sites)",
+    )
+    parser.add_argument(
         "--anomaly-class",
         choices=list(ANOMALY_CLASSES),
         default=defaults.anomaly_class,
@@ -192,6 +228,10 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         seed=int(args.seed),
         localization=Localization(args.localization),
         detector=Detector(args.detector),
+        climb_rule=ClimbRule(args.climb_rule),
+        lateral_cue=LateralCue(args.lateral_cue),
+        cast_policy=CastPolicy(args.cast_policy),
+        ir_policy=IrPolicy(args.ir_policy),
         anomaly_class=args.anomaly_class,
         anomaly_clip=args.anomaly_clip,
         clap=bool(args.clap),

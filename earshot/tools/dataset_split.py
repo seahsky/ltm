@@ -30,10 +30,15 @@ exactly this reason.
 - *Recordings* are split into CONTIGUOUS index blocks, because `clap_gate.sh --clip-start`
   takes a start offset. A hashed scatter would be unusable by the tool that consumes it.
 
-**The collision this prints and does not resolve.** The matrix needs its own 10/10 seen/unseen
-scene split. Twenty val scenes cannot serve both that and a 10/6/4 methodological split. The
-tool reports the arithmetic; which axis gets the scenes is a decision, and it is flagged rather
-than silently taken.
+**The collision this prints below is superseded.** ADR-0018's 2026-09-01 amendment records
+that the seen/unseen axis is realized by FILTERING one built store (``without_scene``), not
+by holding scenes out for the matrix: an episode is ``(scene, class, anchor instance,
+recording)``, and all four cells of the matrix run on the identical episode set. There is no
+second 10/10 seen/unseen scene split competing with this tool's 5/3/2 ratio (10/6/4 of
+twenty val scenes) -- the printed warning below predates that decision and describes a
+design ADR-0018 does not use. See
+``docs/adr/0018-two-memories-and-the-generalization-matrix.md``, the amendment dated
+2026-09-01.
 """
 
 from __future__ import annotations
@@ -212,15 +217,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("    {}".format(", ".join(block.members) or "none"))
 
         print("")
-        print("  !! COLLISION, and this tool does not resolve it.")
-        print("     The matrix needs its OWN seen/unseen scene split, 10 and 10.")
+        # This block used to print a COLLISION warning telling the operator the matrix
+        # needed its own 10/10 seen/unseen scene split. ADR-0018's 2026-09-01 amendment
+        # decided otherwise, and a tool that keeps printing a superseded instruction is
+        # how a decision gets re-litigated at the terminal by someone who never reads the
+        # ADR. The note stays (the split above is still a real constraint on THIS tool's
+        # axis) but it now says what was decided instead of what was open.
+        print("  NOTE — this is no longer a collision. ADR-0018 (amended 2026-09-01)")
+        print("     realizes the matrix's seen/unseen axis by FILTERING one built store")
+        print("     (`memory.store.without_scene`), not by holding scenes out, so all")
         print(
-            "     {} scenes cannot serve that and a {} methodological split at once.".format(
-                len(labels), ":".join(str(part) for part in ratio)
+            "     four cells run on the identical episode set and the {} split above".format(
+                ":".join(str(part) for part in ratio)
             )
         )
-        print("     Either the scene pool widens (HM3D train), or the ratio applies to")
-        print("     RECORDINGS only and scenes carry the seen/unseen axis alone.")
+        print(
+            "     is the only claim on these {} scenes.".format(len(labels))
+        )
 
     record_blocks = split_recordings(args.n_recordings, ratio)
     payload["recordings"] = {

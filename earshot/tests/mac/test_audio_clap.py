@@ -13,6 +13,7 @@ import numpy as np
 import _audio_fakes as fakes
 from _interpreter import assert_interpreter  # noqa: F401
 
+import earshot.audio.vocabulary as vocabulary
 from earshot.audio.clap import (
     AMBIGUOUS_CLASSES,
     ANOMALY_CLASSES,
@@ -20,6 +21,7 @@ from earshot.audio.clap import (
     ANOMALY_GATE_TAU,
     CLASS_TO_CLAP_PROMPT,
     NORMAL_PROMPTS,
+    _CARRIED_CLAP_PROMPTS,
     classify_anomaly,
     heard_clip_for_clap,
     is_anomaly,
@@ -117,6 +119,71 @@ class TestOpenSetGate(unittest.TestCase):
         _, _, scores = is_anomaly(np.zeros(16), 44100, encoder)
         for key in ("s_anom", "s_norm", "margin"):
             self.assertIn(key, scores)
+
+
+class TestTheWidenedBankCannotDrift(unittest.TestCase):
+    """ADR-0018 widened ``CLASS_TO_CLAP_PROMPT`` from the five carried names to 22.
+
+    The widening is written as ``dict(_CARRIED_CLAP_PROMPTS)`` updated with
+    ``vocabulary.prompts()`` rather than re-typed, so the bank cannot drift from the bank
+    of record by a hand edit. That is the *intent*; these are the assertions that make it
+    a fact, because a later hand-edit of either side is exactly what the construction is
+    defending against and nothing else in the suite reads the two together.
+    """
+
+    def test_every_vocabulary_class_reaches_the_bank_with_its_own_prompt(self):
+        names = tuple(vocabulary.class_names())
+        missing = [name for name in names if name not in CLASS_TO_CLAP_PROMPT]
+        drifted = [
+            name
+            for name in names
+            if name in CLASS_TO_CLAP_PROMPT
+            and CLASS_TO_CLAP_PROMPT[name] != vocabulary.prompt_of(name)
+        ]
+        print("vocabulary classes in the bank:", len(names) - len(missing), "of", len(names))
+        self.assertEqual(missing, [], "vocabulary class(es) absent from the bank")
+        self.assertEqual(drifted, [], "bank prompt(s) differing from the vocabulary's")
+
+    def test_the_carried_five_survived_the_update_unchanged(self):
+        """The calibrated thresholds name THIS bank. An update that overwrote one of the
+        five would silently re-point ``ANOMALY_GATE_DELTA`` at a prompt it was never
+        measured on, and ``.update()`` overwrites without complaint."""
+        for name, prompt in _CARRIED_CLAP_PROMPTS.items():
+            self.assertEqual(CLASS_TO_CLAP_PROMPT[name], prompt)
+        print("carried prompts intact:", sorted(_CARRIED_CLAP_PROMPTS))
+
+    def test_the_two_banks_are_disjoint_by_name(self):
+        """Hazard 1's first half, and the reason the test above can pass: the vocabulary
+        contributes no name the carried bank already holds, so the ``.update()`` only
+        ever adds."""
+        collisions = sorted(set(_CARRIED_CLAP_PROMPTS) & set(vocabulary.class_names()))
+        self.assertEqual(collisions, [], "a vocabulary name would overwrite a carried one")
+
+    def test_the_bank_is_exactly_the_two_banks_and_nothing_hand_added(self):
+        expected = set(_CARRIED_CLAP_PROMPTS) | set(vocabulary.class_names())
+        print("bank size:", len(CLASS_TO_CLAP_PROMPT), "expected:", len(expected))
+        self.assertEqual(set(CLASS_TO_CLAP_PROMPT), expected)
+
+    def test_the_duplicate_prompt_text_hazard_is_the_documented_one_and_no_other(self):
+        """Hazard 1's second half. ``baby_cry`` and ``crying_baby`` share "a baby crying",
+        so ``classify_anomaly``'s argmax ties on that pair and breaks the tie on dict
+        order — the reason the module forbids mixing the two banks in one ``classes``
+        sequence. A NEW duplicate would be a second, undocumented tie, so this pins the
+        known one rather than asserting there are none."""
+        by_text = {}
+        for name, text in CLASS_TO_CLAP_PROMPT.items():
+            by_text.setdefault(text, []).append(name)
+        shared = sorted(
+            tuple(sorted(names)) for names in by_text.values() if len(names) > 1
+        )
+        print("prompt texts shared by more than one class:", shared)
+        self.assertEqual(shared, [("baby_cry", "crying_baby")])
+
+    def test_no_class_the_gate_actually_scores_is_missing_a_prompt(self):
+        """``classify_anomaly`` indexes the bank by name, so an absence is a ``KeyError``
+        at the moment a run needs it rather than a low score."""
+        for name in tuple(ANOMALY_CLASSES) + tuple(AMBIGUOUS_CLASSES):
+            self.assertIn(name, CLASS_TO_CLAP_PROMPT)
 
 
 class TestHeardClip(unittest.TestCase):

@@ -47,7 +47,15 @@ from earshot.audio.tail import (
     steady_state_cue_rms,
 )
 from earshot.audio.window import plan_window
-from earshot.config import Detector, Localization, RunConfig
+from earshot.config import (
+    CastPolicy,
+    ClimbRule,
+    Detector,
+    IrPolicy,
+    LateralCue,
+    Localization,
+    RunConfig,
+)
 from earshot.report.agent import SCHEMA_FIELDS
 from earshot.report.audit import (
     CalibrationRecord,
@@ -3497,6 +3505,182 @@ class TestTheAccumulatorsOneConfigurationRefusal(unittest.TestCase):
         under = make_config(audio=AudioConfig(step_seconds=4.9))
         with self.assertRaises(_StoppedAfterThePreflight):
             _run_to_the_preflight(under, clip, self.CLIP_PATH, [])
+
+
+def _detour_episode(world=None, **cfg_overrides):
+    """The `TestTheFullLoop` fixture as a function: source 5 m ahead, goal 9 m ahead.
+
+    Returned rather than shared on a class, because every arm below has to run the SAME
+    task under a DIFFERENT config, and a `setUpClass` result cannot be re-run.
+    """
+    source = Xyz(0.0, 0.0, -5.0)
+    if world is None:
+        world = FakeWorld(start=Xyz(0.0, 0.0, 0.0), yaw=0.0)
+    handle = FakeAudioSensorHandle(world, source)
+    anomaly_episode = make_anomaly_episode(
+        source=source,
+        episode=make_episode(goals=[make_goal(Xyz(0.0, 0.0, -9.0))]),
+        t_anom=2,
+    )
+    cfg = make_config(**cfg_overrides)
+    return run(world, handle, anomaly_episode, cfg, calibration=CALIBRATION)
+
+
+class TestTheSourceSideMetrics(unittest.TestCase):
+    """SPL and distance-to-goal taken against the SOURCE, which nothing carried.
+
+    Both arms per ADR-0014: an episode that had a route to its source writes the keys,
+    and an episode with no route writes NOTHING rather than a zero. The second is the
+    one that matters -- 23 of `yield-2`'s 365 episodes are unwinnable, and scoring them
+    0.0 puts them in the same bucket as an episode that had a route and failed to walk
+    it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result = _detour_episode()
+
+    def test_the_reach_is_scored_against_the_source_and_not_the_primary_stop(self):
+        metrics = self.result.audit.metrics
+        self.assertEqual(metrics["source_find_sr_1m"], 1.0)
+        self.assertAlmostEqual(metrics["source_spl"], 1.0)
+        # `compute_benchmark_spl` could not have produced this: the primary `stopped`
+        # flag is what gates it, and the source is reached mid-episode with the primary
+        # task still running.
+        self.assertIsNotNone(self.result.audit.source_reached_step)
+        print("source SPL {:.3f}, Find-SR@1m {:.0f}, reached at step {}".format(
+            metrics["source_spl"], metrics["source_find_sr_1m"],
+            self.result.audit.source_reached_step))
+
+    def test_the_final_distance_is_a_different_number_from_the_closest_approach(self):
+        """The conflation this key exists to prevent, as an assertion.
+
+        `min_d2source_m` is a MINIMUM over the episode; `dtg_source_final_m` is the
+        distance at its end. This episode walks to the source and then resumes toward a
+        goal 4 m past it, so the two differ by metres.
+        """
+        metrics = self.result.audit.metrics
+        self.assertIn("dtg_source_final_m", metrics)
+        self.assertIn("min_d2source_m", metrics)
+        self.assertGreater(metrics["dtg_source_final_m"], metrics["min_d2source_m"])
+        print("closest approach {:.2f} m, final route to source {:.2f} m".format(
+            metrics["min_d2source_m"], metrics["dtg_source_final_m"]))
+
+    def test_the_source_path_length_is_the_one_at_the_reach_and_not_the_episodes(self):
+        """`L_taken` stops at the reach. If the whole episode's `path_len_m` were used,
+        the SPL would fall as the primary search walked on after the source was already
+        found -- which would make the number a function of the OTHER task."""
+        metrics = self.result.audit.metrics
+        # The agent kept walking after the reach, so the two lengths differ.
+        self.assertGreater(metrics["path_len_m"], 0.0)
+        # SPL 1.0 is only reachable if `L_taken` was the length at the reach: the whole
+        # episode's path is longer than the start-to-source route.
+        self.assertAlmostEqual(metrics["source_spl"], 1.0)
+
+    def test_an_episode_with_no_route_to_its_source_writes_no_spl_and_no_zero(self):
+        """The forced-failure arm. ABSENT, and absent is not 0.0 and not a failed find."""
+        world = _UnroutableSourceWorld(
+            start=Xyz(0.0, 0.0, 0.0), yaw=0.0, unroutable=Xyz(0.0, 0.0, -5.0)
+        )
+        metrics = _detour_episode(world=world).audit.metrics
+
+        self.assertNotIn("source_spl", metrics)
+        self.assertNotIn("source_find_sr_1m", metrics)
+        self.assertNotIn("dtg_source_final_m", metrics)
+        # The control, on the same task with a routable source: the keys ARE written, so
+        # their absence above is the missing route and not a broken call site.
+        self.assertIn("source_spl", self.result.audit.metrics)
+        print("unroutable source: source_spl / source_find_sr_1m / dtg_source_final_m "
+              "all ABSENT, and the routable control has all three")
+
+
+class TestTheAblationArmsReachTheLoop(unittest.TestCase):
+    """ADR-0018's four arms, threaded from `RunConfig` into the loop.
+
+    Each is asserted on the OUTCOME and not on the stored flag: an arm that is recorded
+    and never read is the shape of failure this tree keeps paying for.
+    """
+
+    def test_the_defaults_are_recorded_on_every_episode(self):
+        """`summary.json` holds the run config once per RUN and every comparison here is
+        per EPISODE, so the arm has to be on the audit or a paired diff cannot check it
+        was comparing like with like."""
+        audit = _detour_episode().audit
+        self.assertEqual(
+            (audit.climb_rule, audit.lateral_cue, audit.cast_policy, audit.ir_policy),
+            ("live", "live", "cast", "full"),
+        )
+
+    def test_a_selected_arm_is_recorded_as_selected(self):
+        audit = _detour_episode(
+            climb_rule=ClimbRule.OFF,
+            lateral_cue=LateralCue.OFF,
+            cast_policy=CastPolicy.SCAN_ONLY,
+            ir_policy=IrPolicy.ANECHOIC,
+        ).audit
+        self.assertEqual(
+            (audit.climb_rule, audit.lateral_cue, audit.cast_policy, audit.ir_policy),
+            ("off", "off", "scan_only", "anechoic"),
+        )
+
+    def test_the_controller_arms_off_actually_change_what_the_episode_reaches(self):
+        """The OFF arm has to change the OUTCOME, not just the record. With the climb,
+        the lateral cue and the cast all dead the agent has nothing left to localize
+        with, so the detour is entered and never converts."""
+        live = _detour_episode()
+        off = _detour_episode(
+            climb_rule=ClimbRule.OFF,
+            lateral_cue=LateralCue.OFF,
+            cast_policy=CastPolicy.SCAN_ONLY,
+        )
+
+        self.assertEqual(live.audit.funnel_stage, FunnelStage.PRIMARY_RESUMED)
+        self.assertIsNotNone(live.audit.source_reached_step)
+        self.assertEqual(off.audit.funnel_stage, FunnelStage.INVESTIGATE_ENTERED)
+        self.assertIsNone(off.audit.source_reached_step)
+        # It had a route the whole time, so this zero is the real, reportable kind.
+        self.assertEqual(off.audit.metrics["source_spl"], 0.0)
+        self.assertEqual(off.audit.metrics["source_find_sr_1m"], 0.0)
+        print("arms LIVE: reached at step {}   arms OFF: never reached (funnel {})".format(
+            live.audit.source_reached_step, off.audit.funnel_stage.name))
+
+    def test_the_anechoic_policy_reaches_the_render_and_shortens_the_room(self):
+        """`IrPolicy` is applied where the IR leaves the sensor, so what changes is the
+        AUDIO and not a config value. The accumulator's own measurement of how long the
+        room stays audible past a step is the readout: a `(2, 1)` IR has no tail to
+        outlive one."""
+        full = _detour_episode().audit.sounding_window
+        anechoic = _detour_episode(ir_policy=IrPolicy.ANECHOIC).audit.sounding_window
+
+        self.assertGreater(full.cue_tail_steps, 1)
+        self.assertEqual(anechoic.cue_tail_steps, 1)
+        self.assertLess(anechoic.max_ir_samples, full.max_ir_samples)
+        print("cue_tail_steps FULL {} -> ANECHOIC {}   max_ir_samples {} -> {}".format(
+            full.cue_tail_steps, anechoic.cue_tail_steps,
+            full.max_ir_samples, anechoic.max_ir_samples))
+
+    def test_the_calibration_sweep_takes_the_same_ir_path_as_the_loop(self):
+        """ADR-0017's rule, on the arm that could break it. `calibrate_episode` is run
+        here rather than injected, so the sweep renders through `ir_under_policy` too --
+        an `onset_rms` derived through the real IR and applied to an anechoic reading
+        would be a threshold in a domain the loop does not run in."""
+        source = Xyz(0.0, 0.0, -5.0)
+
+        def sweep(cfg):
+            # A FRESH world per sweep. `FakeWorld.random_navigable_point` is seeded by
+            # its own call count, so a second sweep against the same world draws a
+            # different band of poses and the two arms would differ for that reason
+            # rather than for the IR's.
+            world = FakeWorld(start=Xyz(0.0, 0.0, 0.0), yaw=0.0)
+            handle = FakeAudioSensorHandle(world, source)
+            return calibrate_episode(world, handle, source, CLIP, cfg)[0]
+
+        swept = sweep(make_config(ir_policy=IrPolicy.ANECHOIC))
+        control = sweep(make_config())
+
+        self.assertNotAlmostEqual(swept.onset_rms, control.onset_rms)
+        print("onset_rms swept through ANECHOIC {:.6g} vs FULL {:.6g}".format(
+            swept.onset_rms, control.onset_rms))
 
 
 if __name__ == "__main__":

@@ -401,3 +401,60 @@ The second fix made the headline ratio **worse** (1.71 to 1.83) while the real s
 ### Unchanged
 
 The analysis plan, the both-tests rule, the assumed base rate and the primary contrast all carry from the amendment above. The scene-level sign test is still bounded by scene count and still needs 9 of 10 to agree; 2000 runs do not buy a single scene.
+
+---
+
+## Amendment, 2026-09-01: the matrix is paired by filtering, a co-primary contrast, and the oracle held constant
+
+**Status:** accepted. ADR-0018 states above that a pre-registered parameter may move only before any episode of the matrix exists, and none does, so this amendment is made under the ADR's own rule rather than as a post-hoc adjustment.
+Three corrections, and a re-derivation of the power figures this ADR has quoted twice already, this time run rather than typed.
+
+### (a) The seen/unseen axis is a filter on one built store, not a scene holdout
+
+The 2026-08-21 amendment above already says this, without saying it against the comment that contradicts it.
+An episode is `(scene, class, anchor instance, recording)`, and which cell it lands in depends on what the prior pass toured and sounded, so the identical episode runs under all four conditions.
+`earshot/tools/dataset_split.py` still prints a warning that the matrix needs its own 10/10 seen/unseen scene split, and that twenty val scenes cannot serve both that split and a 5/3/2 methodological one.
+That warning describes a design this ADR does not use, and it is superseded by this amendment.
+There is no second scene split competing with `dataset_split`'s own 5/3/2, because the seen/unseen axis is realized by filtering one episodic store (`without_scene`) and never by holding scenes out of a role.
+The pairing this buys is what already dropped the MDE from 14.0 points (200 episodes a cell, unpaired) to 5.04 points (500 episodes, paired) in the amendment above, at the identical rendering cost.
+A scene-holdout design would have thrown that difference away for nothing.
+
+### (b) `unseen_heard` minus `unseen_unheard` is promoted to co-primary
+
+The pre-registered primary contrast is `seen_heard` against `unseen_not_heard`, both memories against neither.
+That contrast is also the weakest test of the semantic store specifically, because a large delta there is fully explained by the episodic map alone.
+The episodic store already answers everything a seen scene can ask, so a positive result on the primary is consistent with the semantic store contributing nothing at all.
+`unseen_heard` minus `unseen_unheard` isolates the semantic store completely: both cells are unseen, so the episodic store is empty in both, and the only thing that can move the delta is whether the sound class had been heard before.
+This is where the paper's actual claim about a scene-agnostic memory lives, so it is promoted to co-primary rather than left secondary, and a null on it can no longer be buried under a primary result that never tested it.
+Both primaries are reported, always, at both grains, exactly as the both-tests rule already requires.
+
+### (c) The oracle detector's view points are widened in all four cells, and disclosed as an upper bound
+
+`agent/detector.py`'s `OracleDetector` answers "is object X here" from a table `task/runner.py`'s `make_detector` builds, keyed by object name.
+For the anomaly source that table today holds exactly one point, the source's own position, unless the source's category happens to match the primary goal's category, in which case it inherits that goal's whole list of view points instead.
+A store that routes the agent to a different instance of the same room and category, which is exactly what `EpisodicStore.points_for_room` can return, would then be confirmed or refused by an oracle whose generosity differs by accident of which instance the store happened to pick, not by anything the memory taught the agent.
+That is a confound the four cells must not carry.
+The oracle's table is widened identically in every cell, to every navigable view point of every instance the episode plan admits for that room, so the detector's sensitivity is a constant across the matrix and cannot manufacture the contrast the matrix exists to measure.
+This is disclosed rather than banked as free precision: a widened oracle is a ceiling on what a real, grounded perception system would recognize as the same find, and every number the matrix reports is an oracle-perception upper bound, not a claim about what `Detector.CAPTION` would score.
+
+### The corrected power figures, run rather than quoted
+
+`earshot/tools/power.py` computed every number in the 2026-08-21 amendments above, and it computed these on 2026-09-01, from `mde_paired` and `mde_between_cells` directly rather than by hand:
+
+| n | comparison | MDE @ 80% power |
+|---|---|---|
+| 365 | paired | 5.90 pt |
+| 500 | paired | **5.04 pt** |
+| 1095 | paired | 3.41 pt |
+| 500 | between cells (unpaired) | 8.86 pt |
+
+The 500-paired figure is the one the matrix runs at.
+It is the precise value the 2026-08-21 amendment rounded to "5.0 pt", and it is what filtering one store rather than holding scenes out buys over the 8.86-point unpaired floor at the same n.
+
+### A number this ADR has repeated that was never an MDE
+
+The Consequences section above, written 2026-08-20, reads "the MDE is 15 episodes or 4.1 points at n=365."
+That figure divides `sd_paired(365)` by 365 after multiplying by 2, and 2 is the two-sided significance multiplier at alpha = 0.05, not the 80%-power multiplier of 2.80 an MDE requires.
+An effect sitting exactly on the significance line is detected half the time, which is what "significant" means and not what "detectable" means, and `power.py`'s own module docstring already names this trap for the unpaired table.
+The correctly computed paired MDE at n=365 is 5.90 points, in the table above, and the 4.1-point figure this ADR circulated twice understates what the design actually requires by about 40 percent.
+The same correction was already made once for the between-cell table, in the "200 episodes a cell" amendment; this is the paired formula's turn.

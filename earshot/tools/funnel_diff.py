@@ -150,8 +150,9 @@ def diff(
         a_built, b_built = int(a.get("n_episodes") or 0), int(b.get("n_episodes") or 0)
         if a_built != b_built:
             # The builder moved, so the two are different episode sets wearing one scene
-            # label. ADR-0015's rule, applied: a pre/post claim needs both arms built the
+            # label. ADR-0020's rule, applied: a pre/post claim needs both arms built the
             # same way, and `at_the_start` has already invalidated one such comparison.
+            # (That ADR was renumbered from 0015 on 2026-09-01; 0015 is now SAVN-CE.)
             unpaired.append({
                 "scene": scene,
                 "reason": "built {} against {} — different episode sets".format(

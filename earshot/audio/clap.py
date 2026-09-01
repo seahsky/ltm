@@ -32,6 +32,7 @@ from typing import Any, Dict, Sequence, Tuple
 import numpy as np
 
 from earshot.audio.clips import ANOMALY_CLASSES
+from earshot.audio.vocabulary import prompts as _vocabulary_prompts
 
 __all__ = [
     "ANOMALY_CLASSES",
@@ -52,14 +53,39 @@ __all__ = [
 AMBIGUOUS_CLASSES: Tuple[str, ...] = ("running_water", "appliance_hum")
 
 # Zero-shot text prompts. Classification only, never retrieval: the old
-# ``CLASS_TO_OBJECT`` map fed a memory query, and memory is out of this build.
-CLASS_TO_CLAP_PROMPT: Dict[str, str] = {
+# ``CLASS_TO_OBJECT`` map fed a memory query, and memory was out of this build when this
+# five-name bank was calibrated. Kept under its own name, verbatim, so the calibrated
+# pair below still names the exact bank it was measured against (see the widened map and
+# its hazards, immediately after).
+_CARRIED_CLAP_PROMPTS: Dict[str, str] = {
     "baby_cry": "a baby crying",
     "alarm": "a loud alarm beeping",
     "glass_break": "the sound of breaking glass",
     "running_water": "running water or a faucet",
     "appliance_hum": "an appliance humming",
 }
+
+# The full prompt bank: the five carried names above, plus ADR-0018's 17-class candidate
+# vocabulary from ``vocabulary.prompts()`` -- never re-typed here, so this file cannot
+# drift from the bank of record the way the gap this widening closes was found (a reader,
+# not the suite). ``classify_anomaly`` and ``is_anomaly`` index this dict by name for
+# every class they are asked to score, so a class in the vocabulary and not here is a
+# ``KeyError`` at the moment a run needs it, not a silent miss.
+#
+# HAZARD 1 -- the two banks are disjoint by NAME (pinned in ``test_audio_clap.py``) but
+# NOT by prompt TEXT: ``"crying_baby"`` (vocabulary) and ``"baby_cry"`` (carried) both
+# map to "a baby crying". ``classify_anomaly``'s argmax over whatever ``classes``
+# sequence it is given would tie exactly on that pair and break the tie on dict order.
+# RULE: never pass carried names and vocabulary names in the same ``classes`` sequence --
+# a caller picks one bank.
+#
+# HAZARD 2 -- ``ANOMALY_GATE_DELTA`` / ``ANOMALY_GATE_TAU`` below were measured on the
+# five-name carried bank alone, against ``NORMAL_PROMPTS``. Widening the anomaly bank can
+# only raise ``s_anom`` (an argmax over more prompts) and so can only make ``is_anomaly``
+# fire more often; the widened 22-name bank must not be passed to ``is_anomaly`` as
+# ``classes`` in any run that quotes those thresholds as calibrated for it.
+CLASS_TO_CLAP_PROMPT: Dict[str, str] = dict(_CARRIED_CLAP_PROMPTS)
+CLASS_TO_CLAP_PROMPT.update(_vocabulary_prompts())
 
 # The "routine, ignore it" reference set. Not anomaly classes: the gate fires only when
 # the best anomaly prompt beats the best of these, so a merely loud benign sound is
