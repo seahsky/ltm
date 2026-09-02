@@ -128,6 +128,40 @@ OUT_DIR="${OUT_DIR:-runs/$TAG}"
 
 banner() { printf '\n========== %s ==========\n' "$1"; }
 
+# A ZERO-YIELD cell is a scene that placed no episode: a measured fact about HM3D, not a
+# broken run. `runner.run` writes `summary.json` and THEN re-raises on EmptyDatasetError
+# precisely so the answer lives in the artefact rather than in a log line, which is what
+# lets both the run loop and the readout loop below ask the same question of the same file.
+# `abl-1` is why they must: the run loop skipped `mL8ThkuaVTM` correctly and the readout
+# loop then judged it anyway, `smoke` returned 2 for NOT_RUN as it should, and a sweep with
+# 1410 good episodes and five complete arms reported RED over five empty directories.
+is_zero_yield() {
+  [ -f "$1/summary.json" ] || return 1
+  python -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))['n_episodes']==0 else 1)" \
+    "$1/summary.json" 2>/dev/null
+}
+
+# What one scene's smoke gate means for the sweep. `gate_verdict <arm> <rc> <output>`:
+#   0  the gate passed
+#   1  criterion 5 ALONE, in an ablation arm: 0 episodes in this scene closed the loop.
+#      A measurement, not a failure -- see the readout loop for why.
+#   2  red.
+#
+# This is a function so the decision can be exercised rather than described: a rule this
+# permissive, asserted only by reading the script's text, is a rule nothing checks.
+gate_verdict() {
+  local arm="$1" rc="$2" out="$3"
+  [ "$rc" -eq 0 ] && return 0
+  # A glob on the captured string, never `| grep -q`: under pipefail a matching grep
+  # exits early and SIGPIPEs its producer, which is the footgun line 182 already names.
+  # The match is ANCHORED at the end, so "criteria 5, 7" is red -- an arm that also
+  # failed the audio or hermeticity criteria must not ride through on this allowance.
+  if [ "$arm" != "full" ] && [[ "$out" == *"criteria 5" ]]; then
+    return 1
+  fi
+  return 2
+}
+
 # --- ONE DIRECTORY IS ONE RUN, before anything expensive ------------------
 if [ -d "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
   if [ "$FORCE" = 0 ]; then
@@ -325,12 +359,8 @@ for i in "${!ARM_NAMES[@]}"; do
       > "$OUT_DIR/$arm-$scene.log" 2>&1
     status=$?
     if [ "$status" -ne 0 ]; then
-      # A ZERO-YIELD scene is a measured fact, not a broken run. `runner.run` writes the
-      # summary and THEN re-raises on EmptyDatasetError precisely so this is readable
-      # from disk rather than from a log line. Anything else is red.
-      if [ -f "$run_dir/summary.json" ] \
-         && python -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))['n_episodes']==0 else 1)" \
-              "$run_dir/summary.json" 2>/dev/null; then
+      # Anything that is not zero yield is red.
+      if is_zero_yield "$run_dir"; then
         echo "      ZERO YIELD — this scene placed no episode. Recorded, not a failure."
         ZERO_YIELD="$ZERO_YIELD $arm/$scene"
         continue
@@ -358,13 +388,55 @@ done
 banner "[5/5] the ablation table"
 GATE_FAILED=0
 READ_FAILED=0
+# Criterion 5 is a RATE criterion: green iff at least one episode reached CHECK and
+# RESUME. `tally` still fails it at 0/n, and that floor exists to catch ADR-0014's
+# VACUOUS ARM -- a loop that never once ran is a loop that is not wired.
+#
+# `abl-1` showed the floor is at the wrong GRAIN for an ablation. Ten scene/arm cells
+# came back `RED -- criteria 5` and every one of them was in an arm built to cripple the
+# controller: `scan-only` in seven scenes, one each in `no-climb`, `no-cue` and
+# `anechoic`, and NONE in `full`. Identical episodes, identical harness, and the baseline
+# completed the loop in all nineteen scenes -- so a crippled arm failing to close the loop
+# in one room is the ablation working, not the loop being unwired, and it is a
+# MEASUREMENT. Asking per scene turns the strongest result in the table into a red banner.
+#
+# So the floor moves to the arm: an ablation arm is vacuous only if it completes the loop
+# in NO scene at all, which is still exactly the condition ADR-0014 wants caught. `full`
+# is the baseline of record and keeps the per-scene bar, because there a zero IS a bug.
+VACUOUS_CELLS=""
+VACUOUS_BY_ARM=""
 for arm in "${ARM_NAMES[@]}"; do
+  arm_green=0
+  arm_vacuous=0
   for scene in "${SCENE_LIST[@]}"; do
     [ -d "$OUT_DIR/$arm/$scene" ] || continue
+    if is_zero_yield "$OUT_DIR/$arm/$scene"; then
+      echo ""
+      echo "  --- smoke gate: $arm / $scene --- SKIPPED, zero yield (see the list below)"
+      continue
+    fi
     echo ""
     echo "  --- smoke gate: $arm / $scene ---"
-    python -m earshot.task.smoke --run-dir "$OUT_DIR/$arm/$scene" || GATE_FAILED=1
+    gate_out="$(python -m earshot.task.smoke --run-dir "$OUT_DIR/$arm/$scene" 2>&1)"
+    gate_rc=$?
+    echo "$gate_out"
+    gate_verdict "$arm" "$gate_rc" "$gate_out"
+    case $? in
+      0) arm_green=$((arm_green + 1)) ;;
+      1) echo "      criterion 5 alone, and this is an ablation arm: 0 of the episodes in"
+         echo "      this scene closed the loop. Recorded as a measurement, not a failure."
+         arm_vacuous=$((arm_vacuous + 1))
+         VACUOUS_CELLS="$VACUOUS_CELLS $arm/$scene" ;;
+      *) GATE_FAILED=1 ;;
+    esac
   done
+  VACUOUS_BY_ARM="$VACUOUS_BY_ARM $arm=$arm_vacuous"
+  if [ "$arm_green" -eq 0 ]; then
+    echo ""
+    echo "  RED: arm $arm closed the loop in NO scene. That is the vacuous arm ADR-0014"
+    echo "       exists to catch, and no per-scene allowance covers it."
+    GATE_FAILED=1
+  fi
 done
 
 echo ""
@@ -402,6 +474,14 @@ echo "  audits:     $OUT_DIR/<arm>/<scene>/"
 if [ -n "$ZERO_YIELD" ]; then
   echo ""
   echo "  zero-yield scene/arm cells (measured, not failures):$ZERO_YIELD"
+fi
+if [ -n "$VACUOUS_CELLS" ]; then
+  echo ""
+  echo "  scenes where an ablation arm closed the loop ZERO times, by arm:$VACUOUS_BY_ARM"
+  echo "  This is a second ordering of the same table and it belongs beside the SR column:"
+  echo "  the baseline is absent from it by construction, and an arm that appears often is"
+  echo "  an arm that stops working in whole rooms rather than losing episodes evenly."
+  echo " $VACUOUS_CELLS"
 fi
 
 if [ "$FAILED_RUNS" -ne 0 ]; then

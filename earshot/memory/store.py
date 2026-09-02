@@ -61,7 +61,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -85,10 +85,23 @@ class SemanticEntry:
     `donor_scene` is provenance, not a filter axis — see `SemanticStore.donor_scenes`
     and the module docstring on why the unseen column is realised on the episodic store
     alone.
+
+    **`category` is what makes the unseen-and-heard cell answerable at all.** In an unseen
+    scene the episodic store is empty by construction, so `points_for_room` has nothing to
+    return and a room name alone points at no coordinate the agent can walk to. The object
+    category the class was heard AT — a flush heard at a toilet, an alarm heard at a
+    fireplace — transfers to a scene never visited, because the new scene has its own
+    instances of that category. So the semantic row carries both: `room` is what ADR-0018's
+    heard axis is about, `category` is the half that survives `without_scene`.
+
+    It is required and has no default. A row built without one would score every category
+    query and answer none of them, and the cell that needed it is the one cell whose
+    mechanism has to be argued for rather than assumed.
     """
 
     sound_class: str
     room: str
+    category: str
     embedding: np.ndarray
     donor_scene: str
 
@@ -178,8 +191,37 @@ class SemanticStore:
 
         Pure: sorts a local list, never mutates `self.entries` or the caller's `embedding`.
         """
+        return self._vote(embedding, k, lambda entry: entry.room, "predict_room")
+
+    def predict_category(
+        self, embedding: np.ndarray, k: int
+    ) -> Optional[Tuple[str, float]]:
+        """The same k-NN vote as `predict_room`, grouped by object category instead.
+
+        This is the query the unseen-and-heard cell runs. A room name cannot be walked to
+        in a scene the episodic store has never seen; a category can, because the scene
+        under test has its own instances of it and the task layer can look them up. Every
+        contract above holds identically — same `k >= 1` rule, same dimension check, same
+        `None` rather than a zero-scored answer, same purity.
+        """
+        return self._vote(embedding, k, lambda entry: entry.category, "predict_category")
+
+    def _vote(
+        self,
+        embedding: np.ndarray,
+        k: int,
+        label: Callable[[SemanticEntry], str],
+        where: str,
+    ) -> Optional[Tuple[str, float]]:
+        """The k-NN vote both public queries run, differing only in what they group by.
+
+        One body rather than two: the two predictions must agree about a zero-norm query,
+        a dimension mismatch and a tie, and two copies of thirty lines is two places for
+        those three rules to drift. `where` names the caller in the raised messages so a
+        `ValueError` still says which query the caller made.
+        """
         if k < 1:
-            raise ValueError("predict_room needs k >= 1, got {}".format(k))
+            raise ValueError("{} needs k >= 1, got {}".format(where, k))
         query = np.asarray(embedding, dtype=np.float32).reshape(-1)
         if not self.entries:
             return None
@@ -203,23 +245,23 @@ class SemanticStore:
                 # is a skip and not a cosine of 0.0.
                 continue
             cosine = float(np.dot(unit_query, entry.embedding / entry_norm))
-            scored.append((cosine, entry.room))
+            scored.append((cosine, label(entry)))
         if not scored:
             return None
 
         scored.sort(key=lambda item: -item[0])
         nearest = scored[: min(k, len(scored))]
 
-        by_room: Dict[str, List[float]] = {}
-        for cosine, room in nearest:
-            by_room.setdefault(room, []).append(cosine)
-        means = [(room, sum(cosines) / len(cosines)) for room, cosines in by_room.items()]
-        # Ties broken by room name ascending -- data-independent and reproducible from a
-        # log, unlike insertion order or ROOMS' declaration order (unreachable here by
-        # design: that table lives in the fenced `audio.vocabulary`).
+        by_label: Dict[str, List[float]] = {}
+        for cosine, name in nearest:
+            by_label.setdefault(name, []).append(cosine)
+        means = [(name, sum(cosines) / len(cosines)) for name, cosines in by_label.items()]
+        # Ties broken by name ascending -- data-independent and reproducible from a log,
+        # unlike insertion order or ROOMS' declaration order (unreachable here by design:
+        # that table lives in the fenced `audio.vocabulary`).
         means.sort(key=lambda item: (-item[1], item[0]))
-        winner_room, winner_score = means[0]
-        return (winner_room, winner_score)
+        winner, winner_score = means[0]
+        return (winner, winner_score)
 
 
 @dataclass(frozen=True)

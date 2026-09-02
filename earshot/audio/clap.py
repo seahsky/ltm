@@ -41,6 +41,7 @@ __all__ = [
     "NORMAL_PROMPTS",
     "ANOMALY_GATE_DELTA",
     "ANOMALY_GATE_TAU",
+    "audio_embedding",
     "classify_anomaly",
     "is_anomaly",
     "heard_clip_for_clap",
@@ -118,6 +119,21 @@ def _unit(vector: Any) -> np.ndarray:
     return values / (float(np.linalg.norm(values)) + 1e-8)
 
 
+def audio_embedding(waveform: Any, sample_rate: int, encoder: Any) -> np.ndarray:
+    """The unit audio embedding, as `classify_anomaly` and `is_anomaly` already compute it.
+
+    Public because two different processes have to agree on it: `task.prior_pass`'s observe
+    callback writes these vectors into a `SemanticStore`, and `task.runner` queries that
+    store with one at run time. A store learned under one encoder path and queried under
+    another answers a different question with no symptom, so there is one path and it is
+    this function. `_unit` stays private; this is the thing callers outside the module want.
+
+    Returns a 1-D `float32` of the encoder's own width -- never re-shaped to a fixed 512, so
+    a differently sized encoder raises at `SemanticStore` rather than broadcasting.
+    """
+    return _unit(encoder.encode_audio(waveform, sample_rate))
+
+
 def classify_anomaly(
     waveform: Any,
     sample_rate: int,
@@ -130,7 +146,7 @@ def classify_anomaly(
     the right shape for "what was it, given that it was one of these", and the wrong
     shape for "was it anything at all", which is ``is_anomaly``.
     """
-    audio = _unit(encoder.encode_audio(waveform, sample_rate))
+    audio = audio_embedding(waveform, sample_rate, encoder)
     scores = {
         name: float(np.dot(audio, _unit(encoder.encode_text(CLASS_TO_CLAP_PROMPT[name]))))
         for name in classes
@@ -163,7 +179,7 @@ def is_anomaly(
     had to remember them, which is how the plain path needed two extra flags to get a
     working gate.
     """
-    audio = _unit(encoder.encode_audio(waveform, sample_rate))
+    audio = audio_embedding(waveform, sample_rate, encoder)
 
     def cosine(text: str) -> float:
         return float(np.dot(audio, _unit(encoder.encode_text(text))))

@@ -49,6 +49,14 @@ ANCHOR_CALLERS_ALLOWED = (
     "audio/vocabulary.py",
     "task/dataset.py",
     "task/clap_gate.py",
+    # `task/prior_build.py` decides WHICH SOUND IS PLAYED at each stop of the prior pass,
+    # which is the same decision `task/dataset.py` makes for the test episode and is the
+    # dataset builder's licence this allowlist exists to grant. It is on the WRITE side of
+    # the store: what reaches `memory/` is a CLAP embedding the agent recorded through a
+    # real IR, tagged with the category it was recorded at. `memory/` still cannot reach
+    # the table -- the sibling scan above holds that, and it is what makes the heard
+    # column a claim about learning rather than about the author's map.
+    "task/prior_build.py",
 )
 
 # The prefixes that may not reach the placement table by any route. `memory/` joins

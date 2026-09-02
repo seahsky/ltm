@@ -600,6 +600,23 @@ class EpisodeAudit:
     lateral_cue: Optional[str] = None
     cast_policy: Optional[str] = None
     ir_policy: Optional[str] = None
+    # ADR-0018's matrix cell, on the same terms as the four arms above and for the same
+    # reason: `episode_diff` pairs by episode index, so a cell that is only in
+    # `summary.json` lets a `heard_seen` episode be subtracted from an `unseen_unheard`
+    # one. Held as `MemoryCondition.value`, never the enum, because `metrics` is
+    # `Mapping[str, float]` and a string cannot live there.
+    #
+    # `None` means the record predates the field, which is NOT the same fact as
+    # `MemoryCondition.NONE` ("this run had no memory arm"). The writer landed with the
+    # field, so no record can carry a `None` that means the second thing.
+    memory_condition: Optional[str] = None
+    # What the memory actually said, once, at the step the room went quiet. Exactly one
+    # of these is ever set on a run with a live memory arm: the category it recalled, or
+    # the named reason it recalled nothing (`memory_prior.PriorMiss`). Both `None` means
+    # the prior was never consulted -- the source never went silent while investigating,
+    # or there is no memory arm -- and that is a third fact again.
+    memory_prior_category: Optional[str] = None
+    memory_prior_miss: Optional[str] = None
     source_xyz: Optional[Xyz] = None
     t_anom: Optional[int] = None
     # ADR-0017's window, beside the step it opens at. `None` on every record written
@@ -726,6 +743,9 @@ class EpisodeAudit:
             "localization_arm": self.localization_arm,
             "detector_arm": self.detector_arm,
             "climb_rule": self.climb_rule,
+            "memory_condition": self.memory_condition,
+            "memory_prior_category": self.memory_prior_category,
+            "memory_prior_miss": self.memory_prior_miss,
             "lateral_cue": self.lateral_cue,
             "cast_policy": self.cast_policy,
             "ir_policy": self.ir_policy,
@@ -775,6 +795,9 @@ class EpisodeAudit:
             # `.get`, so every record written before the arms existed reads back None —
             # "this run predates the ablation arms", and not "the arm was off".
             climb_rule=data.get("climb_rule"),
+            memory_condition=data.get("memory_condition"),
+            memory_prior_category=data.get("memory_prior_category"),
+            memory_prior_miss=data.get("memory_prior_miss"),
             lateral_cue=data.get("lateral_cue"),
             cast_policy=data.get("cast_policy"),
             ir_policy=data.get("ir_policy"),

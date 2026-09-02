@@ -74,7 +74,13 @@ OBSERVATION_KEYS: Tuple[str, ...] = ("sound_class", "room", "category", "embeddi
 # Bumped when the on-disk shape changes in a way an old reader would misread. `load_stores`
 # refuses an unknown version rather than guessing at it: a store read under the wrong
 # schema answers queries confidently and wrongly, which is the failure mode with no symptom.
-STORE_FORMAT_VERSION = 1
+#
+# 2 (2026-09-02): the semantic row carries `category`. A version-1 file has none, and a
+# reader that defaulted it would build a store that answers `predict_category` for every
+# query and points the unseen cell at the wrong object. No version-1 file has ever been
+# written by a run -- the writer landed unwired -- so there is nothing to migrate, and
+# refusing is both correct and free.
+STORE_FORMAT_VERSION = 2
 
 
 class MemoryBuildError(ValueError):
@@ -171,6 +177,7 @@ def semantic_from_tour(record: TourRecord) -> SemanticStore:
             SemanticEntry(
                 sound_class=str(payload["sound_class"]),
                 room=str(payload["room"]),
+                category=str(payload["category"]),
                 embedding=vector,
                 donor_scene=record.scene,
             )
@@ -224,6 +231,7 @@ def _semantic_as_dict(store: SemanticStore) -> List[Dict[str, Any]]:
         {
             "sound_class": entry.sound_class,
             "room": entry.room,
+            "category": entry.category,
             "donor_scene": entry.donor_scene,
             # `tolist()` on a float32 array yields Python floats that `repr` round-trips
             # exactly, so the reader's `float32` cast lands on the same bits. Rounding
@@ -302,6 +310,7 @@ def load_stores(path: str) -> Tuple[SemanticStore, EpisodicStore, Dict[str, Any]
             SemanticEntry(
                 sound_class=str(row["sound_class"]),
                 room=str(row["room"]),
+                category=str(row["category"]),
                 embedding=np.asarray(row["embedding"], dtype=np.float32),
                 donor_scene=str(row["donor_scene"]),
             )

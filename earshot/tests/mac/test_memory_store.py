@@ -37,10 +37,15 @@ from earshot.memory.store import (
 from earshot.types import Xyz
 
 
-def _entry(sound_class, room, embedding, donor_scene="scene_a"):
+def _entry(sound_class, room, embedding, donor_scene="scene_a", category=None):
+    # `category` defaults to one derived from the room so the existing room tests read
+    # unchanged, and the category tests below pass it explicitly. It is a REQUIRED field
+    # on the entry itself -- the default lives here, in the test factory, not on the
+    # dataclass, where it would let an unusable row through.
     return SemanticEntry(
         sound_class=sound_class,
         room=room,
+        category=("{}_object".format(room) if category is None else category),
         embedding=np.asarray(embedding, dtype=np.float32),
         donor_scene=donor_scene,
     )
@@ -190,6 +195,91 @@ class TestSemanticStorePredictRoom(unittest.TestCase):
         self.store.predict_room(query, k=2)
         self.assertIs(self.store.entries, before)
         self.assertTrue(np.array_equal(query, query_before))
+
+
+class TestSemanticStorePredictCategory(unittest.TestCase):
+    """The query the unseen-and-heard cell runs, and the reason it exists.
+
+    In an unseen scene `without_scene` has emptied the episodic store, so `points_for_room`
+    returns `()` and a room name points at no coordinate. The category the class was heard
+    AT transfers, because the scene under test has its own instances of it. This class holds
+    that `predict_category` answers the category rather than the room, and that it inherits
+    every contract `predict_room` already had rather than re-deriving them loosely.
+    """
+
+    def setUp(self):
+        # The SAME rows answer two different questions: the two near [1,0,0] were heard at
+        # a stove in a kitchen, the far one at a toilet in a bathroom. A vote that returned
+        # the room here would be the bug this test exists to catch.
+        self.store = SemanticStore(
+            entries=(
+                _entry("alarm", "kitchen", [1.0, 0.0, 0.0], category="stove"),
+                _entry("alarm", "kitchen", [0.9, 0.1, 0.0], category="stove"),
+                _entry("alarm", "bathroom", [0.0, 1.0, 0.0], category="toilet"),
+            )
+        )
+
+    def test_the_healthy_arm_predicts_the_planted_category(self):
+        category, score = self.store.predict_category(np.array([1.0, 0.0, 0.0]), k=2)
+        print(
+            "\n  [memory] predict_category(k=2) -> {!r} at mean cosine {:.6f}".format(
+                category, score
+            ),
+            flush=True,
+        )
+        self.assertEqual(category, "stove")
+        expected_second = 0.9 / float(np.linalg.norm([0.9, 0.1, 0.0]))
+        self.assertAlmostEqual(score, (1.0 + expected_second) / 2.0, places=6)
+
+    def test_the_forced_arm_predicts_the_other_category(self):
+        # ADR-0014: the healthy path passing is half a detector. Query the far cluster and
+        # the answer must move, or the vote is returning a constant.
+        category, _ = self.store.predict_category(np.array([0.0, 1.0, 0.0]), k=1)
+        self.assertEqual(category, "toilet")
+
+    def test_room_and_category_disagree_on_the_same_query(self):
+        """The whole point: one store, two answers, and they are not the same string."""
+        query = np.array([1.0, 0.0, 0.0])
+        self.assertEqual(self.store.predict_room(query, k=2)[0], "kitchen")
+        self.assertEqual(self.store.predict_category(query, k=2)[0], "stove")
+
+    def test_it_inherits_every_contract_predict_room_has(self):
+        query = np.array([1.0, 0.0, 0.0])
+        with self.assertRaises(ValueError) as caught:
+            self.store.predict_category(query, k=0)
+        # The message names the query the caller actually made, not the shared helper.
+        self.assertIn("predict_category", str(caught.exception))
+        with self.assertRaises(ValueError):
+            self.store.predict_category(np.array([1.0, 0.0]), k=1)
+        self.assertIsNone(SemanticStore().predict_category(query, k=1))
+        self.assertIsNone(self.store.predict_category(np.zeros(3), k=1))
+
+    def test_ties_are_broken_by_category_name_ascending(self):
+        store = SemanticStore(
+            entries=(
+                _entry("alarm", "kitchen", [1.0, 0.0, 0.0], category="stove"),
+                _entry("alarm", "kitchen", [1.0, 0.0, 0.0], category="counter"),
+            )
+        )
+        category, score = store.predict_category(np.array([1.0, 0.0, 0.0]), k=2)
+        self.assertEqual(category, "counter")
+        self.assertAlmostEqual(score, 1.0, places=6)
+
+    def test_it_never_mutates_the_store_or_the_query(self):
+        query = np.array([1.0, 0.0, 0.0])
+        before = [e.category for e in self.store.entries]
+        self.store.predict_category(query, k=3)
+        self.assertEqual(before, [e.category for e in self.store.entries])
+        np.testing.assert_array_equal(query, np.array([1.0, 0.0, 0.0]))
+
+    def test_the_category_survives_the_unseen_filter(self):
+        """`without_scene` is episodic-only, so the semantic answer is untouched by it."""
+        episodic = EpisodicStore(entries=(_episodic("scene_x", "kitchen", "stove"),))
+        self.assertEqual(without_scene(episodic, "scene_x").entries, ())
+        # Same store, same query, same answer: this is the mechanism the cell rests on.
+        self.assertEqual(
+            self.store.predict_category(np.array([1.0, 0.0, 0.0]), k=2)[0], "stove"
+        )
 
 
 class TestWithoutClass(unittest.TestCase):
