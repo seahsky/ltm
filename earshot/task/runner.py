@@ -77,7 +77,7 @@ from earshot.audio.calibration import (
     sweep_loop_scatter,
     sweep_render_scatter,
 )
-from earshot.audio.clap import heard_clip_for_clap, is_anomaly
+from earshot.audio.clap import audio_embedding, heard_clip_for_clap, is_anomaly
 from earshot.audio.clips import load_anomaly_clip, render_through_ir, resolve_anomaly_clip, rms
 from earshot.audio.ir import anechoic_like
 from earshot.audio.lateral import lateral_sign
@@ -116,6 +116,7 @@ from earshot.report.audit import (
 )
 from earshot.task.dataset import AnomalyEpisode, EmptyDatasetError, build_anomaly_episodes
 from earshot.task.episodes import available_scenes, find_scenes_dir, find_split_dir, load_scene
+from earshot.task.memory_prior import MemoryContext, PriorMiss, resolve_prior
 from earshot.types import NoRouteError, Pose, Xyz
 
 __all__ = [
@@ -860,6 +861,7 @@ def run_episode(
     room_labeler: Optional[RoomLabeler] = None,
     clap_encoder: Optional[Any] = None,
     calibration: Optional[CalibrationResult] = None,
+    memory: Optional[MemoryContext] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> EpisodeResult:
     """One mission: the primary find-task, the interrupt, the detour, the resume.
@@ -907,6 +909,17 @@ def run_episode(
     cast_steps = CAST_STEPS if cfg.cast_policy is CastPolicy.CAST else 0
     labeler = room_labeler if room_labeler is not None else NullRoomLabeler()
     say = progress if progress is not None else (lambda _message: None)
+
+    if memory is not None and clap_encoder is None:
+        # The store's rows are CLAP embeddings, so the query has to be one too. Without an
+        # encoder the prior could never fire and every episode of the cell would record a
+        # miss it did not actually make -- four cells of identical numbers, arrived at
+        # silently. This is the one wiring mistake that would look exactly like a result.
+        raise ValueError(
+            "a memory arm was passed ({}) but no CLAP encoder; the semantic store is "
+            "queried with an audio embedding and there is nothing here to make one, so "
+            "the prior would silently never fire".format(memory.condition)
+        )
 
     goal_positions = [view_point.position for view_point in episode.view_points()]
     world.set_pose(episode.start_position, episode.start_rotation)
@@ -1048,6 +1061,20 @@ def run_episode(
     clap_step: Optional[int] = None
     clap_rotation_phase: Optional[int] = None
     clap_deferred_steps: Optional[int] = None
+    # The vector the memory prior queries its store with, captured at the classification
+    # step from the SAME `audio_embedding` path that produced the store's rows. Two
+    # processes have to agree on it -- the prior pass wrote the store, this run reads it --
+    # and a second encode here would be a second place for them to drift apart.
+    # `Any` rather than `np.ndarray`: this module imports no numpy today and adding the
+    # import for one local annotation would be the only reason it did.
+    heard_embedding: Optional[Any] = None
+    # The prior is resolved ONCE, at the first investigate step after the source has gone
+    # silent, and then reused. Re-resolving every step would let the recalled category
+    # change under the agent mid-detour, which is not memory, and would pay the k-NN and
+    # the navmesh queries per step for an answer that cannot change.
+    memory_prior = None
+    memory_miss: Optional[PriorMiss] = None
+    memory_consulted = False
     # The step the onset FIRED, which is the classification step only when the buffer was
     # already full. The two apart is the deferral; the first set with the second still
     # None at the end of the loop is an episode that ended mid-ramp.
@@ -1148,6 +1175,14 @@ def run_episode(
                     fired, best_class, _scores = is_anomaly(waveform, sample_rate, clap_encoder)
                     anomaly_class = best_class
                     verdict = is_anomalous_here(fired, best_class, room)
+                    if memory is not None:
+                        # Captured from the clip the AGENT heard, not from the source
+                        # file: the store was learned the same way, through a real IR at
+                        # a real stop, and querying it with clean audio would be asking a
+                        # different question from the one it was taught.
+                        heard_embedding = audio_embedding(
+                            waveform, sample_rate, clap_encoder
+                        )
                 # With no CLAP the verdict stays None, which `step_controller` reads as
                 # "nothing conditioned this, so any onset interrupts" — the smoke's case
                 # (§4.3: one sound, the anomaly by construction), and honest about it: the
@@ -1304,6 +1339,42 @@ def run_episode(
             action = ACT_STOP
         elif action is None:
             target = decision.investigate_waypoint or decision.investigate_probe
+            # THE MEMORY SPEAKS WHEN THE ROOM HAS GONE QUIET, and only then. While the
+            # source is sounding the live cue is real evidence about where it is and a
+            # recalled category must not override it. After ADR-0017's offset step the cue
+            # has nothing left to say: `_probe_for` still names a place every step, but it
+            # is a 2 m hop in whatever direction the scan/cast cycle last chose, and
+            # `abl-1` priced that at SWS 27 of 272. That silence is the headroom, and it is
+            # the regime the four cells are meant to differ in.
+            if memory is not None and is_diverting(decision.mode) and not sounding:
+                if not memory_consulted:
+                    memory_consulted = True
+                    if memory.is_live and heard_embedding is not None:
+                        memory_prior, memory_miss = resolve_prior(
+                            memory.semantic,
+                            heard_embedding,
+                            k=int(memory.k),
+                            points_by_category=memory.points_by_category,
+                            # The NAVMESH, not a straight line: an instance behind a wall
+                            # is not nearer than one down the hall, and a point with no
+                            # route is excluded rather than ranked at some large number.
+                            distance_to=lambda point: geodesic(pose.position, point),
+                        )
+                    else:
+                        # An empty store or a scene with no annotated object cannot name a
+                        # place. That is `NO_PREDICTION` -- the `not_heard` cells' expected
+                        # value -- and it is recorded rather than left blank, because a
+                        # blank would mean "never consulted", which is a different fact.
+                        memory_prior, memory_miss = (None, PriorMiss.NO_PREDICTION)
+                    say("  step {}: the window has closed — memory says {}".format(
+                        step,
+                        "{} at {:.1f} m".format(
+                            memory_prior.category, memory_prior.distance_m
+                        ) if memory_prior is not None else
+                        "nothing ({})".format(memory_miss.value),
+                    ))
+                if memory_prior is not None:
+                    target = memory_prior.target
             divert = _divert_candidate(target, pose) if target is not None else None
             waypoint, action, step_counters = _steer(
                 proposer,
@@ -1701,6 +1772,11 @@ def run_episode(
             metrics["sws"] = float(reached_after)
     metrics.update({key: float(value) for key, value in proposer.stats().items()})
     metrics.update({key: float(value) for key, value in counters.items()})
+    if memory_prior is not None:
+        # The numeric half only. The recalled category is a string and lives in the typed
+        # field above -- `metrics` is `Mapping[str, float]` and every reader does
+        # `float(value)` on it.
+        metrics.update(memory_prior.as_metrics())
 
     audit = EpisodeAudit(
         episode_index=int(index),
@@ -1715,6 +1791,15 @@ def run_episode(
         lateral_cue=cfg.lateral_cue.value,
         cast_policy=cfg.cast_policy.value,
         ir_policy=cfg.ir_policy.value,
+        # The matrix cell, on the same terms and for the same reason as the four arms
+        # above. `None` here means no memory arm ran, which `MemoryCondition.NONE` also
+        # means -- so a run WITH a context writes the string even for `NONE`, and a run
+        # without one writes nothing. The two are told apart by the presence of a value.
+        memory_condition=(None if memory is None else str(memory.condition.value)),
+        # Exactly one of these, or neither. Neither means the prior was never consulted:
+        # the source never went silent while the agent was investigating.
+        memory_prior_category=(None if memory_prior is None else memory_prior.category),
+        memory_prior_miss=(None if memory_miss is None else memory_miss.value),
         source_xyz=source,
         t_anom=t_anom,
         sounding_window=window_record,
