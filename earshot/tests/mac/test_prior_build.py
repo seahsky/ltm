@@ -77,24 +77,27 @@ class TestTheClassNamespaces(unittest.TestCase):
         self.assertIsNone(class_at_category("bed", classes=["glass_break"]))
 
 
-class TestTheMechanismCannotLearnAnythingYet(unittest.TestCase):
-    """Two facts about the TASK that make the tour-learned category unlearnable today.
+class TestTheOneBlockerThatIsLeft(unittest.TestCase):
+    """Placement now follows the class. The class SET is still too small to discriminate.
 
-    Neither is fixable in `prior_build.py`. Both are pinned here so that the day the task
-    changes, these fail and say what to re-read -- rather than a sweep quietly running four
-    cells that could never have differed.
+    The first blocker this file pinned is fixed: `place_anomaly_source` prefers the class's
+    anchor category, so a store that learned "an alarm is heard at a bed" is predicting a
+    rule the task follows. The second is not, and it is pinned here for the same reason the
+    first was -- so the day the sounding vocabulary widens, this fails and says what to
+    re-read rather than a sweep quietly running four cells that could not have differed.
     """
 
-    def test_the_run_class_set_maps_onto_a_single_category(self):
+    def test_the_run_class_set_still_maps_onto_a_single_category(self):
         """A predictor with one answer is not a predictor.
 
         `clips.ANOMALY_CLASSES` is three names. `alarm` and `baby_cry` both anchor at
         `bed`; `glass_break` has no vocabulary row. Over HM3D's six goal categories that
-        leaves exactly one category any sound is anchored at, so `predict_category` would
-        answer `bed` to every query it ever got.
+        leaves exactly one category any sound is anchored at.
 
         FIXING IT means widening the sounding class set from the three emergency names to
-        the vocabulary's seventeen, which is a task decision and re-baselines `abl-1`.
+        the vocabulary's seventeen, which needs `task/clap_gate.py` run first: the gate's
+        `ANOMALY_GATE_DELTA` / `ANOMALY_GATE_TAU` are calibrated for the three-class bank
+        and decide whether the interrupt fires at all.
         """
         table = categories_with_a_sound(HM3D_GOAL_CATEGORIES)
         print(
@@ -111,31 +114,22 @@ class TestTheMechanismCannotLearnAnythingYet(unittest.TestCase):
             "decide whether the memory arm is now learnable",
         )
 
-    def test_the_episode_builder_still_ignores_the_sound_class_when_placing(self):
-        """The source is placed by GEOMETRY, so a learned category has nothing to predict.
+    def test_the_vocabulary_itself_would_discriminate_five_categories(self):
+        """What widening buys, measured rather than asserted.
 
-        `place_anomaly_source` ranks candidates by `(same_category, separation, category)`
-        and nothing in `task/` calls `vocabulary.anchor_object`. In every episode this repo
-        has run, `abl-1` included, the alarm sits at whatever object cleared the separation
-        rules. A store that learned "alarm at bed" is predicting a rule the task does not
-        follow.
-
-        FIXING IT means anchoring the placement to the class, which changes the task and
-        re-baselines `abl-1`. This asserts the CURRENT state so the change is visible.
+        The seventeen vocabulary names spread over five anchor categories. That is the
+        prize, and it is why the blocker above is worth the gate run.
         """
-        import inspect
+        from earshot.audio.vocabulary import CANDIDATE_VOCABULARY
 
-        from earshot.task import dataset
-
-        source = inspect.getsource(dataset)
-        self.assertNotIn(
-            "anchor_object",
-            source,
-            "task/dataset.py now reads the anchor table — if placement is anchored to the "
-            "sound class, prior_build's header is out of date and the memory arm may now "
-            "be learnable",
+        anchors = sorted({entry.anchor_object for entry in CANDIDATE_VOCABULARY})
+        print(
+            "\n  [prior] the full vocabulary: {} class(es) over {} anchor "
+            "categories {}".format(len(CANDIDATE_VOCABULARY), len(anchors), anchors),
+            flush=True,
         )
-        self.assertIn("qualifying.sort(key=lambda row: (row[1], row[0], row[2]))", source)
+        self.assertEqual(len(anchors), 5)
+        self.assertGreaterEqual(len(CANDIDATE_VOCABULARY), 17)
 
 
 class TestObservationFor(unittest.TestCase):

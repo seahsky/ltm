@@ -117,6 +117,7 @@ from earshot.report.audit import (
 from earshot.task.dataset import AnomalyEpisode, EmptyDatasetError, build_anomaly_episodes
 from earshot.task.episodes import available_scenes, find_scenes_dir, find_split_dir, load_scene
 from earshot.task.memory_prior import MemoryContext, PriorMiss, resolve_prior
+from earshot.task.prior_build import anchor_of_run_class
 from earshot.types import NoRouteError, Pose, Xyz
 
 __all__ = [
@@ -1552,6 +1553,12 @@ def run_episode(
         # is visible in the record rather than inferred from raw coordinates.
         "source_dy_start_m": float(anomaly_episode.source.height_difference_to_start_m),
         "source_same_category": float(anomaly_episode.source.same_category),
+        # Whether the source landed on the class's OWN anchor category, or on the geometric
+        # fallback because no instance of that anchor qualified. The memory prior recalls a
+        # category, so an episode with this at 0.0 is one the prior could not have got
+        # right -- and a readout that pooled the two would charge the memory for episodes
+        # that did not follow the rule it learned.
+        "source_at_class_anchor": float(anomaly_episode.source.at_class_anchor),
         # Did the source stop at all? 0.0 is the CONTINUOUS control arm, and it is a
         # fact about the run rather than a missing measurement, so it is always present.
         "sounding_window_closed": float(window.offset_step is not None),
@@ -1986,6 +1993,11 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
         build = build_anomaly_episodes(
             dataset,
             anomaly_class=cfg.anomaly_class,
+            # The source now goes at the object its CLASS belongs at, when the scene has a
+            # qualifying one. Before this the placement was geometric and a semantic memory
+            # had nothing to predict -- see `place_anomaly_source` rule 4. The lookup is
+            # here rather than inside the builder because the builder imports no `audio/`.
+            anchor_category=anchor_of_run_class(cfg.anomaly_class),
             t_anom=cfg.t_anom,
             category=cfg.category,
             n_episodes=cfg.n_episodes,

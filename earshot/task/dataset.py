@@ -178,6 +178,14 @@ class SourcePlacement:
     height_difference_m: float
     height_difference_to_start_m: float
     same_category: bool
+    # Whether the source landed on the class's OWN anchor category, or on the geometric
+    # fallback because no instance of that anchor qualified. Recorded rather than merely
+    # preferred: the memory arm's prior recalls a category, and an episode whose source is
+    # NOT at that category is one the prior could not have got right. Splitting the readout
+    # on this is the difference between "the memory was wrong" and "the memory was right
+    # and this episode did not follow the rule" -- and pooling them would charge the first
+    # for the second.
+    at_class_anchor: bool = False
 
     def as_dict(self) -> Dict[str, object]:
         return {
@@ -188,6 +196,7 @@ class SourcePlacement:
             "height_difference_m": float(self.height_difference_m),
             "height_difference_to_start_m": float(self.height_difference_to_start_m),
             "same_category": bool(self.same_category),
+            "at_class_anchor": bool(self.at_class_anchor),
         }
 
 
@@ -366,6 +375,7 @@ def place_anomaly_source(
     episode: Episode,
     table: Dict[str, Tuple[ObjectGoal, ...]],
     *,
+    anchor_category: Optional[str] = None,
     min_sep_m: float = 3.0,
     max_dy_m: float = 1.0,
     min_start_sep_m: float = MIN_SOURCE_START_SEP_M,
@@ -416,7 +426,27 @@ def place_anomaly_source(
        cross-floor episode the two anchors are further apart than ``max_dy_m``, so nothing
        qualifies and the episode is skipped with a reason instead of running as a silent
        null.
-    4. Among survivors: a different category first, then the nearest.
+    4. Among survivors: **the class's own anchor category first**, then a different
+       category from the primary goal, then the nearest.
+
+       **Rule 4's first key is new and it changes what the task IS.** Before it, the
+       source was placed by geometry alone -- nothing in this module read
+       `vocabulary.anchor_object`, so an alarm sat at whatever object cleared the
+       separation rules. Every episode this repo ran before 2026-09-02, `abl-1` included,
+       was built that way. A semantic memory that learns "an alarm is heard at a bed" has
+       nothing to predict in a world where the alarm is wherever the geometry put it, so
+       ADR-0018's heard axis could not have measured anything. This key is what gives the
+       world the structure the memory is supposed to learn.
+
+       **It is a PREFERENCE, not a filter.** When no instance of the anchor qualifies --
+       the scene has no bed, or every bed is too near the goal or on another floor -- the
+       ranking falls through to exactly the pre-2026-09-02 behaviour and the placement
+       records `at_class_anchor=False`. So yield cannot drop, and an episode that could
+       not follow the rule says so on its own record rather than being counted against
+       the memory that recalled correctly.
+
+       `anchor_category=None` reproduces the old ordering exactly, which is what every
+       caller that does not know its sound class still gets.
 
     Nothing about audibility is consulted, and nothing renders (§2.5).
     """
@@ -425,8 +455,8 @@ def place_anomaly_source(
     keep_out = _primary_keep_out(episode)
     primary_category = episode.object_category
 
-    # (separation, same_category, category, position, object_id)
-    qualifying: List[Tuple[float, bool, str, Xyz, Optional[str]]] = []
+    # (separation, same_category, category, position, object_id, at_class_anchor)
+    qualifying: List[Tuple[float, bool, str, Xyz, Optional[str], bool]] = []
     n_too_near = n_wrong_floor = n_no_view_point = n_at_the_start = 0
     for category in sorted(table):
         for goal in table[category]:
@@ -458,6 +488,7 @@ def place_anomaly_source(
                     category,
                     position,
                     goal.object_id,
+                    anchor_category is not None and category == anchor_category,
                 )
             )
 
@@ -497,13 +528,17 @@ def place_anomaly_source(
 
     # A different category (False) before the same one (True), then nearest first, then
     # the category name so the pick is reproducible when two candidates tie exactly.
-    qualifying.sort(key=lambda row: (row[1], row[0], row[2]))
-    separation, same_category, category, position, object_id = qualifying[0]
+    # `not row[5]` first: an anchor candidate sorts False and therefore ahead. The
+    # decoupling preference (`row[1]`) stays, one rank down, so it still breaks ties among
+    # anchors and still orders the fallback exactly as it always did.
+    qualifying.sort(key=lambda row: (not row[5], row[1], row[0], row[2]))
+    separation, same_category, category, position, object_id, at_anchor = qualifying[0]
     return SourcePlacement(
         position=position,
         anomaly_object=category,
         object_id=object_id,
         separation_m=separation,
+        at_class_anchor=bool(at_anchor),
         height_difference_m=position.height_difference_to(anchor),
         height_difference_to_start_m=position.height_difference_to(
             episode.start_position
@@ -516,6 +551,14 @@ def build_anomaly_episodes(
     dataset: EpisodeDataset,
     *,
     anomaly_class: str,
+    # WHICH OBJECT CATEGORY THIS CLASS BELONGS AT, passed in rather than looked up.
+    # The lookup lives in `task/prior_build.py` because it reads `audio.vocabulary`, and
+    # `test_task_dataset.TestAudibilityIsNotScreened` holds that this module reaches into
+    # `audio/` for nothing at all -- §2.5's rule is that audibility is not screened at
+    # build time, and the cheapest way to keep that true is to import none of it. So the
+    # DECISION stays here, in `place_anomaly_source`'s ranking; only the table is elsewhere,
+    # and a caller that does not know its class still gets the pre-2026-09-02 ordering.
+    anchor_category: Optional[str] = None,
     t_anom: Optional[int] = None,
     category: Optional[str] = None,
     n_episodes: Optional[int] = None,
@@ -569,7 +612,14 @@ def build_anomaly_episodes(
             break
         try:
             placement = place_anomaly_source(
-                episode, table, min_sep_m=min_sep_m, max_dy_m=max_dy_m,
+                episode, table,
+                # THE RUN'S OWN CLASS DECIDES WHERE ITS SOURCE GOES. Passing it here is
+                # what makes the class-to-category association a fact about the world
+                # rather than a fiction the prior pass teaches. Every episode of a build
+                # shares one class, so this is constant across the loop and is computed
+                # once above it.
+                anchor_category=anchor_category,
+                min_sep_m=min_sep_m, max_dy_m=max_dy_m,
                 min_start_sep_m=min_start_sep_m,
             )
         except PlacementError as exc:
