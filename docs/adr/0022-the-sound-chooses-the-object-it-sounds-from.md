@@ -54,18 +54,29 @@ The oracle detector's table is keyed by object name, so the visual confirm can f
 
 ## The half of the direction that is NOT taken here
 
-The direction was also to **widen the sounding class set from the three emergency names to the vocabulary's seventeen**, and that is deliberately not in this ADR.
+The direction was also to **widen the sounding class set beyond the three emergency names**, and that is a separate commit rather than a separate decision: ADR-0018 already made it.
 
-The reason is a dependency that already exists in the tree.
-`clips.ANOMALY_CLASSES` is `("baby_cry", "alarm", "glass_break")`; `alarm` and `baby_cry` both anchor at `bed` and `glass_break` has no vocabulary row, so over HM3D's six goal categories exactly one category any sound is anchored at.
+`clips.ANOMALY_CLASSES` is `("baby_cry", "alarm", "glass_break")`.
+`alarm` and `baby_cry` both anchor at `bed` and `glass_break` has no vocabulary row, so over HM3D's six goal categories exactly one category any sound is anchored at.
 **A predictor with one answer is not a predictor**, so the anchoring above is necessary and not sufficient.
 
-Widening means the CLAP gate's anomaly bank widens with it, because the gate decides whether the interrupt fires at all.
-`ANOMALY_GATE_DELTA` and `ANOMALY_GATE_TAU` are calibrated for the three-class bank and their own comment forbids tidying them without re-running the calibration.
-`task/clap_gate.py` is that calibration, it is built, it measures the full seventeen-class vocabulary against `ABSENT_CLASSES` as the forced-failure arm, and **its header says it has never been run on the ADR-0017 waveform.**
+**The class set to widen to is already decided and already measured.**
+ADR-0018's amendment of 2026-08-24 accepts a **bank of record** of 11 classes on `clapgate-2` (ESC-50 clips 0-7) and `clapheld-1` (clips 8-15), two disjoint recording sets, each class clearing the bar on both.
+Mapped onto anchors it is four categories, which is a real discrimination:
 
-So the order is: this ADR, then the gate run, then the widening.
-`tests/mac/test_prior_build.py::TestTheOneBlockerThatIsLeft` pins the current state so the day the vocabulary widens, it fails and names what to re-read.
+| anchor | classes |
+|---|---|
+| `bed` | `breathing`, `clock_alarm`, `clock_tick`, `crying_baby`, `snoring` |
+| `toilet` | `brushing_teeth`, `pouring_water`, `toilet_flush` |
+| `tv_monitor` | `clapping`, `laughing` |
+| `chair` | `keyboard_typing` |
+
+So the widening needs no new gate run.
+What it needs is the bank in code rather than only in an ADR and a gitignored `runs/bank_of_record.json`, the clips staged for eleven names instead of three, and the run-time classifier reading the bank instead of the three emergency prompts — which is what ADR-0018 means by the goal class being **inferred**.
+
+**One caveat carries and it is ADR-0018's own.** `task/clap_gate.py`'s header records that the gate has never been re-measured on the ADR-0017 waveform: it scored `render_through_ir(ir, clip)`, and the runner now hands CLAP the accumulation buffer's read window, which is looped, rotated by phase, and can be partly full. The bank's *membership* rests on two agreeing runs and is not in doubt; its *separation numbers* describe the pre-ADR-0017 waveform. The runner already records `clap_window_fill` and `clap_after_offset` per episode so the confound is visible, and re-running the gate through `tail.steady_state_render` remains a box job worth doing before any accuracy number from it is quoted in the paper.
+
+`tests/mac/test_prior_build.py::TestTheOneBlockerThatIsLeft` pins the three-class state so the day the sounding set widens, it fails and names what to re-read.
 
 ## Considered and rejected
 
