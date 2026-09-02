@@ -328,6 +328,105 @@ class TestPlacement(unittest.TestCase):
             place_anomaly_source(episode, table(sofa=[Xyz(5.0, 0.9, 0.0)]))
 
 
+class TestTheClassChoosesTheObject(unittest.TestCase):
+    """Rule 4's first key, and the change to the task that it is.
+
+    Before 2026-09-02 this module read nothing about the sound class: the source went to
+    whatever object cleared the separation rules, so every episode this repo ran -- `abl-1`
+    included -- placed an alarm wherever the geometry put it. A semantic memory that learns
+    "an alarm is heard at a bed" has nothing to predict in a world like that, which is why
+    ADR-0018's heard axis could not have measured anything.
+
+    It is a PREFERENCE, not a filter, and both arms are here: the anchor wins when it
+    qualifies, and when nothing of that category qualifies the ranking falls through to
+    exactly the old behaviour and the record says so.
+    """
+
+    def test_the_anchor_category_beats_a_nearer_instance_of_another_category(self):
+        episode = make_episode(category="chair", goals=[make_goal(Xyz(0.0, 0.0, -9.0))])
+        placement = place_anomaly_source(
+            episode,
+            table(sofa=[Xyz(4.0, 0.0, -9.0)], bed=[Xyz(12.0, 0.0, -9.0)]),
+            anchor_category="bed",
+        )
+        self.assertEqual(placement.anomaly_object, "bed")
+        self.assertTrue(placement.at_class_anchor)
+
+    def test_the_anchor_beats_the_decoupling_preference_too(self):
+        """The anchor outranks "a different category from the primary goal".
+
+        The decoupling preference is a soft tiebreak; the class rule is what the memory
+        learns. `same_category` is still recorded, so an episode that paid for it is
+        visible rather than merely allowed.
+        """
+        episode = make_episode(category="bed", goals=[make_goal(Xyz(0.0, 0.0, -9.0))])
+        placement = place_anomaly_source(
+            episode,
+            table(bed=[Xyz(0.0, 0.0, -9.0), Xyz(6.0, 0.0, -9.0)], sofa=[Xyz(8.0, 0.0, -9.0)]),
+            anchor_category="bed",
+        )
+        self.assertEqual(placement.anomaly_object, "bed")
+        self.assertTrue(placement.at_class_anchor)
+        self.assertTrue(placement.same_category)
+
+    def test_among_the_anchors_the_nearest_qualifier_still_wins(self):
+        episode = make_episode(goals=[make_goal(Xyz(0.0, 0.0, 0.0))])
+        placement = place_anomaly_source(
+            episode,
+            table(bed=[Xyz(20.0, 0.0, 0.0), Xyz(4.0, 0.0, 0.0)]),
+            anchor_category="bed",
+        )
+        self.assertEqual(placement.position, Xyz(4.0, 0.0, 0.0))
+
+    def test_a_scene_with_no_qualifying_anchor_falls_back_and_records_it(self):
+        """The forced-failure arm. Yield cannot drop, and the record says why.
+
+        An episode whose source is NOT at the class's anchor is one the memory prior could
+        not have got right. Splitting the readout on `at_class_anchor` is the difference
+        between "the memory was wrong" and "this episode did not follow the rule".
+        """
+        episode = make_episode(category="chair", goals=[make_goal(Xyz(0.0, 0.0, -9.0))])
+        placement = place_anomaly_source(
+            episode, table(sofa=[Xyz(4.0, 0.0, -9.0)]), anchor_category="bed"
+        )
+        self.assertEqual(placement.anomaly_object, "sofa")
+        self.assertFalse(placement.at_class_anchor)
+
+    def test_an_anchor_that_fails_the_separation_rule_is_not_rescued_by_being_the_anchor(self):
+        """The preference reorders SURVIVORS. It does not readmit a rejected candidate.
+
+        A bed 0.5 m from the goal is still too near, and an anchor rule that overrode
+        ADR-0010's geometry would place sources on top of the thing the agent is finding.
+        """
+        episode = make_episode(category="chair", goals=[make_goal(Xyz(0.0, 0.0, -9.0))])
+        placement = place_anomaly_source(
+            episode,
+            table(bed=[Xyz(0.5, 0.0, -9.0)], sofa=[Xyz(8.0, 0.0, -9.0)]),
+            anchor_category="bed",
+        )
+        self.assertEqual(placement.anomaly_object, "sofa")
+        self.assertFalse(placement.at_class_anchor)
+
+    def test_no_anchor_category_reproduces_the_old_ordering_exactly(self):
+        """Every caller that does not know its class gets the pre-2026-09-02 behaviour."""
+        episode = make_episode(category="chair", goals=[make_goal(Xyz(0.0, 0.0, -9.0))])
+        args = (episode, table(sofa=[Xyz(4.0, 0.0, -9.0)], bed=[Xyz(12.0, 0.0, -9.0)]))
+        old = place_anomaly_source(*args)
+        self.assertEqual(old.anomaly_object, "sofa")
+        self.assertFalse(old.at_class_anchor)
+        # And a class whose anchor is absent from the scene behaves identically.
+        absent = place_anomaly_source(*args, anchor_category="toilet")
+        self.assertEqual(absent.position, old.position)
+        self.assertFalse(absent.at_class_anchor)
+
+    def test_the_flag_reaches_the_serialized_record(self):
+        episode = make_episode(goals=[make_goal(Xyz(0.0, 0.0, 0.0))])
+        placement = place_anomaly_source(
+            episode, table(bed=[Xyz(4.0, 0.0, 0.0)]), anchor_category="bed"
+        )
+        self.assertIs(placement.as_dict()["at_class_anchor"], True)
+
+
 class TestTheSourceIsKeptOffTheAgentToo(unittest.TestCase):
     """The mirror of the 3 m goal keep-out, and it was missing until `detour-1`.
 

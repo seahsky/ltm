@@ -7,26 +7,23 @@ many scenes' tours merge into the one store the matrix carves its four cells fro
 driver supplies the two things that do need a simulator -- a world to walk and an encoder to
 hear with -- and nothing else.
 
-**THIS MODULE IS BUILT AND THE TASK CANNOT CURRENTLY USE IT. Read this before wiring a
-sweep to it.** The mechanism is "the class was heard at this object category on prior
-tours, so look for it at this scene's instance of that category". Two facts about the tree
-as it stands make that unlearnable, and both are about the TASK rather than about this code:
+**ONE OF THE TWO BLOCKERS IS FIXED; THE OTHER IS NOT. Read this before wiring a sweep.**
+The mechanism is "the class was heard at this object category on prior tours, so look for it
+at this scene's instance of that category".
 
-1. **The test episode does not place the source at the class's anchor.**
-   `task.dataset.place_anomaly_source` ranks candidates by
-   `(same_category, separation, category)` -- geometry only. Nothing in `task/` calls
-   `vocabulary.anchor_object`; only `tools/` analysis scripts do. So in every episode this
-   repo has ever run, `abl-1` included, the alarm sits at whatever object the separation
-   rules picked. A store that learned "alarm at bed" has nothing to predict.
-2. **At run-class granularity the association is nearly constant.** `clips.ANOMALY_CLASSES`
-   is three names; `alarm` and `baby_cry` both anchor at `bed` and `glass_break` has no
-   vocabulary row at all. `categories_with_a_sound` over HM3D's six goal categories returns
-   exactly `{"bed": "alarm"}`. A predictor with one answer is not a predictor.
+FIXED (ADR-0022): `task.dataset.place_anomaly_source` now prefers the class's anchor
+category, so a store that learned "an alarm is heard at a bed" is predicting a rule the
+world follows. Every result measured before 2026-09-02 was under geometric placement and
+does not carry forward, `abl-1` included.
 
-Making it work needs a decision that changes the task and re-baselines `abl-1`: anchor the
-placement to the class, and widen the sounding class set from the three emergency names to
-the vocabulary's seventeen. Neither is taken here. What IS here is correct and tested, and
-it is the half that has no opinion about that decision.
+NOT FIXED: at run-class granularity the association is still nearly constant.
+`clips.ANOMALY_CLASSES` is three names; `alarm` and `baby_cry` both anchor at `bed` and
+`glass_break` has no vocabulary row, so `categories_with_a_sound` over HM3D's six goal
+categories returns exactly `{"bed": "alarm"}`. A predictor with one answer is not a
+predictor. Widening to the vocabulary's seventeen names needs `task/clap_gate.py` run first:
+the gate's `ANOMALY_GATE_DELTA` / `ANOMALY_GATE_TAU` are calibrated for the three-class bank
+and decide whether the interrupt fires at all, and that gate has never been run on the
+ADR-0017 waveform. `tests/mac/test_prior_build.py` pins both states.
 
 **What the store would learn, once the decision is made.** `class_at_category` reads
 `audio.vocabulary`'s `anchor_object`, which is placement ground truth and is fenced from

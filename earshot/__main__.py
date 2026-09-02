@@ -35,7 +35,7 @@ import dataclasses
 import sys
 from typing import Optional, Sequence
 
-from earshot.audio.clips import ANOMALY_CLASSES
+from earshot.audio.clips import ANOMALY_CLASSES, SOUNDING_CLASSES
 from earshot.audio.config import WindowPolicy
 from earshot.config import (
     CastPolicy,
@@ -164,7 +164,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--anomaly-class",
-        choices=list(ANOMALY_CLASSES),
+        # The three carried emergency names, plus ADR-0018's bank of record. The bank is
+        # what ADR-0022's matrix draws from: it spans FOUR anchor categories against the
+        # emergency bank's one, which is what makes a recalled category a prediction
+        # rather than a constant. Sorted so `--help` reads as a list rather than as two.
+        choices=sorted(set(ANOMALY_CLASSES) | set(SOUNDING_CLASSES)),
         default=defaults.anomaly_class,
     )
     parser.add_argument(

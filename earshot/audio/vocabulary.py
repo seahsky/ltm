@@ -44,6 +44,7 @@ __all__ = [
     "SoundClass",
     "CANDIDATE_VOCABULARY",
     "ABSENT_CLASSES",
+    "BANK_OF_RECORD",
     "class_names",
     "prompts",
     "prompt_of",
@@ -51,6 +52,40 @@ __all__ = [
     "anchor_object",
     "room_of",
 ]
+
+# provenance: measured -- ADR-0018's amendment of 2026-08-24, on `clapgate-2` (ESC-50 clips
+# 0-7) and `clapheld-1` (clips 8-15). The two runs share no audio, and every class here
+# cleared the anchor-recall bar on BOTH, so each carries a held-out validation rather than
+# the aggregate carrying one. `water_drops` (0.998 then 0.449) and `mouse_click` (0.308 then
+# 0.789) are DISPUTED and are cut: a class whose recall depends on which recordings it drew
+# is the one confound the heard/not-heard column cannot survive.
+#
+# It lives here rather than only in the ADR and `runs/bank_of_record.json` because `runs/` is
+# gitignored, and a decision the sounding set is drawn from cannot live only in a file the
+# repo does not carry. `tools/bank_intersect.py` is what computed it and raises on
+# overlapping clip ranges.
+#
+# Eleven classes over FOUR anchor categories, which is what makes a category prediction a
+# real choice: the three emergency names of `clips.ANOMALY_CLASSES` span one.
+#
+# CAVEAT, carried from ADR-0018 and from `task/clap_gate.py`'s own header: the gate scored
+# `render_through_ir(ir, clip)` and the runner now hands CLAP the accumulation buffer's read
+# window, which is looped, phase-rotated and can be partly full. MEMBERSHIP rests on two
+# agreeing runs and is not in doubt; the SEPARATION NUMBERS describe the pre-ADR-0017
+# waveform and must not be quoted as this renderer's.
+BANK_OF_RECORD: Tuple[str, ...] = (
+    "breathing",
+    "brushing_teeth",
+    "clapping",
+    "clock_alarm",
+    "clock_tick",
+    "crying_baby",
+    "keyboard_typing",
+    "laughing",
+    "pouring_water",
+    "snoring",
+    "toilet_flush",
+)
 
 # provenance: source -- HM3D ObjectNav's goal set, the six the episode JSON carries and the
 # only objects `task/dataset.place_anomaly_source` can anchor a source at. Measured across the

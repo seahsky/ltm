@@ -35,9 +35,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from earshot.audio.vocabulary import BANK_OF_RECORD
+
 __all__ = [
     "ANOMALY_CLASSES",
     "CLASS_TO_ESC50",
+    "SOUNDING_CLASSES",
     "BENIGN_TO_ESC50",
     "ESC50_BASE",
     "rms",
@@ -66,6 +69,23 @@ CLASS_TO_ESC50: Dict[str, str] = {
     "alarm": "clock_alarm",
     "glass_break": "glass_breaking",
 }
+# ADR-0018's BANK OF RECORD, staged under its own names. Every entry is an identity: the
+# bank's names ARE ESC-50 category names, which is what collapses the tree's two
+# namespaces for these eleven -- a run says `--anomaly-class toilet_flush`, the store
+# keys on `toilet_flush`, and `<clip_dir>/toilet_flush.wav` is what plays. The three
+# carried emergency names above keep their aliases so every earlier run still resolves.
+#
+# ADDED here rather than replacing the three, because `ANOMALY_CLASSES` is the bank
+# `clap.ANOMALY_GATE_DELTA` / `ANOMALY_GATE_TAU` were calibrated against and `clap.py`'s
+# HAZARD 2 forbids widening THAT bank without re-calibrating. Staging a clip is not
+# widening a prompt bank; the two are deliberately separate here.
+CLASS_TO_ESC50.update({name: name for name in BANK_OF_RECORD})
+
+# What an episode's source may sound. `ANOMALY_CLASSES` stays the three-name emergency
+# bank the open-set gate was measured on; this is the set the MATRIX draws from, and it
+# spans four anchor categories against the emergency bank's one -- which is the whole
+# reason a recalled category can be a prediction rather than a constant (ADR-0022).
+SOUNDING_CLASSES: Tuple[str, ...] = tuple(BANK_OF_RECORD)
 # The "routine, do not respond" negatives the open-set gate must REJECT. Staged into
 # their own directory so they can never be resolved as an anomaly clip by accident.
 BENIGN_TO_ESC50: Dict[str, str] = {

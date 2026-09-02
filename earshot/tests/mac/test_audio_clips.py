@@ -15,8 +15,11 @@ import numpy as np
 import _audio_fakes as fakes
 from _interpreter import assert_interpreter  # noqa: F401
 
+from earshot.audio.vocabulary import BANK_OF_RECORD
 from earshot.audio.clips import (
+    ANOMALY_CLASSES,
     CLASS_TO_ESC50,
+    SOUNDING_CLASSES,
     as_binaural,
     load_anomaly_clip,
     normalize_clip,
@@ -144,9 +147,29 @@ class TestEsc50Selection(unittest.TestCase):
         self.assertIsNone(select_esc50_clip(self.ROWS, "vacuum_cleaner", 0))
 
     def test_the_three_locked_classes_all_have_a_source_category(self):
-        self.assertEqual(
-            sorted(CLASS_TO_ESC50), ["alarm", "baby_cry", "glass_break"]
-        )
+        # Still locked, still aliased to their ESC-50 names, so every run before ADR-0022
+        # still resolves its clip.
+        for name in ("alarm", "baby_cry", "glass_break"):
+            self.assertIn(name, CLASS_TO_ESC50)
+        self.assertEqual(sorted(ANOMALY_CLASSES), ["alarm", "baby_cry", "glass_break"])
+
+    def test_the_bank_of_record_stages_under_its_own_names(self):
+        """ADR-0022's matrix draws from the bank, so every one of its clips must resolve.
+
+        The entries are identities: the bank's names ARE ESC-50 category names, which is
+        what collapses the tree's two namespaces for these eleven. A run says
+        `--anomaly-class toilet_flush`, the store keys on `toilet_flush`, and
+        `<clip_dir>/toilet_flush.wav` is what plays.
+        """
+        for name in SOUNDING_CLASSES:
+            self.assertEqual(CLASS_TO_ESC50[name], name, name)
+        self.assertEqual(sorted(SOUNDING_CLASSES), sorted(BANK_OF_RECORD))
+
+    def test_widening_the_clip_map_did_not_widen_the_calibrated_gate_bank(self):
+        """`clap.py`'s HAZARD 2: `ANOMALY_GATE_DELTA` / `ANOMALY_GATE_TAU` were measured on
+        the carried bank, and staging a clip is not widening a prompt bank."""
+        self.assertEqual(len(ANOMALY_CLASSES), 3)
+        self.assertFalse(set(SOUNDING_CLASSES) & set(ANOMALY_CLASSES))
 
 
 if __name__ == "__main__":
