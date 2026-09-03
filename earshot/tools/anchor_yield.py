@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from earshot.audio.clips import ANOMALY_CLASSES, SOUNDING_CLASSES
+from earshot.audio.vocabulary import ROOM_OF_ANCHOR
 from earshot.task.dataset import (
     DatasetBuild,
     EmptyDatasetError,
@@ -70,6 +71,9 @@ __all__ = [
     "fold_by_class",
     "best_class_per_scene",
     "anchors_by_scene",
+    "rooms_by_scene",
+    "anchors_without_a_room",
+    "room_assignment_detail",
     "constant_predictor_share",
     "balanced_assignment",
     "format_report",
@@ -245,6 +249,80 @@ def anchors_by_scene(cells: Sequence[CellYield]) -> Dict[str, Dict[str, int]]:
     return grouped
 
 
+def rooms_by_scene(cells: Sequence[CellYield]) -> Dict[str, Dict[str, int]]:
+    """`{scene: {room: n_anchored}}` -- the anchor objects collapsed onto ADR-0018's ROOMS.
+
+    **The room is the unit the store is scored on, and it is not the anchor object.**
+    `vocabulary.ROOM_OF_ANCHOR` puts `chair`, `sofa` and `tv_monitor` in the living room,
+    so an assignment balanced over four anchor OBJECTS is balanced over three ROOMS, and it
+    hands the living room nearly half the scenes. ADR-0018's amendment of 2026-08-20 made
+    the anchor a room because object-level grading was refuted by measurement, and
+    `vocabulary.room_of` says so in as many words: "this is the level the semantic store
+    learns at". A null computed over objects therefore under-states itself.
+
+    A scene's count for a room is the BEST of its objects in that room. The sweep picks the
+    class, every class at one anchor builds identically (`anchors_by_scene`), and two
+    objects in one room are the same answer -- so nothing is lost by taking the better one.
+
+    An anchor with no `ROOM_OF_ANCHOR` row is skipped rather than guessed at. `plant` is the
+    live case: it maps to nothing on purpose, because a houseplant has no characteristic
+    sound. `anchors_without_a_room` reports the skip so it is never silent.
+    """
+    grouped: Dict[str, Dict[str, int]] = {}
+    for scene, anchors in anchors_by_scene(cells).items():
+        for anchor, anchored in anchors.items():
+            room = ROOM_OF_ANCHOR.get(anchor)
+            if room is None:
+                continue
+            bucket = grouped.setdefault(scene, {})
+            bucket[room] = max(bucket.get(room, 0), anchored)
+    return grouped
+
+
+def anchors_without_a_room(cells: Sequence[CellYield]) -> Tuple[str, ...]:
+    """Anchor objects the room table has no row for, so the skip above can be printed."""
+    return tuple(sorted({
+        cell.anchor_category
+        for cell in cells
+        if cell.anchor_category is not None and cell.anchor_category not in ROOM_OF_ANCHOR
+    }))
+
+
+def room_assignment_detail(
+    cells: Sequence[CellYield], assignment: Mapping[str, Tuple[str, int]]
+) -> Dict[str, Tuple[str, str, str, int]]:
+    """`{scene: (room, anchor_object, class, n_anchored)}` -- what a sweep would run.
+
+    A room-level assignment names the answer the store must produce; a sweep needs a class
+    to render. This resolves one to the other by taking the best-anchoring cell whose anchor
+    sits in the assigned room, ties on `(anchor, class)` so the answer is stable between
+    invocations. A scene whose assigned room has no cell is omitted rather than handed an
+    arbitrary class.
+    """
+    detail: Dict[str, Tuple[str, str, str, int]] = {}
+    for scene, (room, _anchored) in assignment.items():
+        candidates = [
+            cell
+            for cell in cells
+            if cell.scene == scene
+            and cell.anchor_category is not None
+            and ROOM_OF_ANCHOR.get(cell.anchor_category) == room
+        ]
+        if not candidates:
+            continue
+        best = max(
+            candidates,
+            key=lambda cell: (cell.n_anchored, cell.anchor_category, cell.anomaly_class),
+        )
+        detail[scene] = (
+            room,
+            best.anchor_category or "",
+            best.anomaly_class,
+            best.n_anchored,
+        )
+    return detail
+
+
 def constant_predictor_share(assignment: Mapping[str, Tuple[str, int]]) -> Tuple[str, int, int]:
     """`(anchor, its anchored episodes, all anchored episodes)` for the commonest anchor.
 
@@ -399,65 +477,149 @@ def _assignment_lines(
     title: str,
     assignment: Mapping[str, Tuple[str, int]],
     *,
+    unit: str,
     note: str,
 ) -> List[str]:
-    anchor, share, overall = constant_predictor_share(assignment)
+    value, share, overall = constant_predictor_share(assignment)
     counts: Dict[str, int] = {}
-    for value, _anchored in assignment.values():
-        counts[value] = counts.get(value, 0) + 1
+    for name, _anchored in assignment.values():
+        counts[name] = counts.get(name, 0) + 1
     lines = ["", "  {}".format(title)]
-    lines.append("    anchored episodes      {}".format(overall))
-    lines.append("    scenes per anchor      {}".format(
-        ", ".join("{} {}".format(name, counts[name]) for name in sorted(counts)) or "none"
+    lines.append("    {:<22s} {}".format("anchored episodes", overall))
+    lines.append("    {:<22s} {}".format(
+        "scenes per " + unit,
+        ", ".join("{} {}".format(name, counts[name]) for name in sorted(counts)) or "none",
     ))
-    lines.append("    ALWAYS-{:<12s}  {} of {} = {}   <- what a memory that learned "
+    lines.append("    ALWAYS-{:<12s} {:>4d} of {} = {}   <- what a memory that learned "
                  "NOTHING scores".format(
-                     (anchor or "?").upper(), share, overall, _pct(share, overall)
+                     (value or "?").upper(), share, overall, _pct(share, overall)
                  ))
     lines.append("    {}".format(note))
+    return lines
+
+
+def _object_unit_lines(balanced_by_object: Mapping[str, Tuple[str, int]]) -> List[str]:
+    """The object-balanced design, scored under BOTH units. Same assignment, two readings.
+
+    This is the reconciliation with the box output of 2026-09-03, which printed the first
+    row and not the second: an even split over four anchor objects reads as a well-spread
+    design and is a living room holding nearly half the scenes.
+    """
+    obj_value, obj_share, obj_total = constant_predictor_share(balanced_by_object)
+    by_room = {
+        scene: (ROOM_OF_ANCHOR[anchor], anchored)
+        for scene, (anchor, anchored) in balanced_by_object.items()
+        if anchor in ROOM_OF_ANCHOR
+    }
+    room_value, room_share, room_total = constant_predictor_share(by_room)
+    lines = ["", "  BALANCING OVER ANCHOR OBJECTS INSTEAD -- one assignment, two readings:"]
+    lines.append("    scored by object   ALWAYS-{:<12s} {:>4d} of {} = {}".format(
+        (obj_value or "?").upper(), obj_share, obj_total, _pct(obj_share, obj_total)
+    ))
+    lines.append("    scored by room     ALWAYS-{:<12s} {:>4d} of {} = {}".format(
+        (room_value or "?").upper(), room_share, room_total, _pct(room_share, room_total)
+    ))
+    lines.append("  The second is the real null. An even split over objects is not an even")
+    lines.append("  split over rooms, and the first is the number this tool used to print.")
+    return lines
+
+
+def _assignment_table_lines(
+    cells: Sequence[CellYield], assignment: Mapping[str, Tuple[str, int]]
+) -> List[str]:
+    """The balanced design scene by scene: the class a sweep would actually render.
+
+    A room-level assignment names the answer; a driver needs the class. `ablation_sweep.sh`
+    takes one `--anomaly-class` per run, so this is the column that becomes the sweep's
+    per-scene argument. Import `balanced_assignment` and `room_assignment_detail` rather
+    than parsing this table -- the seam is the function, the table is for reading.
+    """
+    detail = room_assignment_detail(cells, assignment)
+    if not detail:
+        return []
+    lines = ["", "  the BALANCED design scene by scene -- the class a sweep would render"]
+    lines.append("    {:<18s} {:<13s} {:<12s} {:<18s} {:>8s}".format(
+        "scene", "room", "anchor", "class", "anchored"
+    ))
+    total = 0
+    for scene in sorted(detail):
+        room, anchor, name, anchored = detail[scene]
+        total += anchored
+        lines.append("    {:<18s} {:<13s} {:<12s} {:<18s} {:>8d}".format(
+            scene, room, anchor, name, anchored
+        ))
+    lines.append("    {:<18s} {:<13s} {:<12s} {:<18s} {:>8d}".format(
+        "TOTAL", "", "", "", total
+    ))
     return lines
 
 
 def _discrimination_lines(
     cells: Sequence[CellYield], best: Mapping[str, CellYield]
 ) -> List[str]:
-    """The two assignments side by side, each with the score its null hypothesis gets.
+    """The two designs side by side, each with the score its null hypothesis gets.
 
-    Printed together on purpose. The greedy assignment reads as the better design until its
+    Printed together on purpose. The greedy design reads as the better one until its
     constant-predictor share is beside it, and that share is the whole reason the matrix
     cannot simply maximise anchored episodes.
+
+    **Scored by ROOM.** The first version of this section scored by anchor OBJECT and made
+    the balanced design look twice as discriminating as it is: `chair` and `tv_monitor` are
+    both the living room, so four objects balanced evenly is three rooms with one of them
+    holding nearly half the scenes.
     """
-    per_scene = anchors_by_scene(cells)
-    anchors = sorted({
+    per_object = anchors_by_scene(cells)
+    per_room = rooms_by_scene(cells)
+    objects = sorted({
         cell.anchor_category for cell in cells if cell.anchor_category is not None
     })
-    if not per_scene or not anchors:
+    rooms = sorted({room for scene in per_room.values() for room in scene})
+    if not per_room or not rooms:
         return []
 
-    greedy = {
-        scene: (cell.anchor_category, cell.n_anchored)
+    greedy_room = {
+        scene: (ROOM_OF_ANCHOR[cell.anchor_category], cell.n_anchored)
         for scene, cell in best.items()
-        if cell.anchor_category is not None and cell.n_anchored
+        if cell.anchor_category in ROOM_OF_ANCHOR and cell.n_anchored
     }
-    balanced = balanced_assignment(per_scene, anchors)
+    balanced_room = balanced_assignment(per_room, rooms)
+    balanced_object = balanced_assignment(per_object, objects)
 
-    lines = ["", "=== what the null hypothesis scores under each assignment ==="]
+    lines = ["", "=== what the null hypothesis scores under each design ==="]
+    lines.append("")
+    lines.append("  THE UNIT IS THE ROOM, NOT THE ANCHOR OBJECT. `vocabulary.ROOM_OF_ANCHOR`")
+    lines.append("  puts chair, sofa and tv_monitor in the living room, and ADR-0018's")
+    lines.append("  amendment made the anchor a room because object-level grading was refuted")
+    lines.append("  by measurement. The object is only where the source sits.")
     lines.extend(_assignment_lines(
-        "GREEDY — every scene takes the class it anchors most",
-        greedy,
+        "GREEDY -- every scene takes the class it anchors most",
+        greedy_room,
+        unit="room",
         note="maximises episodes and concentrates them; the cell is large and cheap to win",
     ))
     lines.extend(_assignment_lines(
-        "BALANCED — scene counts as even as {} anchors allow".format(len(anchors)),
-        balanced,
+        "BALANCED -- scene counts as even as {} rooms allow".format(len(rooms)),
+        balanced_room,
+        unit="room",
         note="fewer episodes over more answers; the memory has to discriminate to beat it",
     ))
+    lines.extend(_object_unit_lines(balanced_object))
+    lines.extend(_assignment_table_lines(cells, balanced_room))
+
+    orphans = anchors_without_a_room(cells)
+    if orphans:
+        lines.append("")
+        lines.append("  anchor(s) with no `ROOM_OF_ANCHOR` row, EXCLUDED from every room count")
+        lines.append("  above: {}. A sound placed there has no room to predict.".format(
+            ", ".join(orphans)
+        ))
+
     lines.append("")
     lines.append("  READ THE ALWAYS- ROWS, NOT THE TOTALS. ADR-0018's heard axis claims the")
     lines.append("  store learned WHERE a class sounds, and a prior is scored on naming the")
-    lines.append("  right category. An assignment that piles the anchored episodes onto one")
-    lines.append("  category hands that score to a predictor that learned nothing, so more")
-    lines.append("  anchored episodes can buy a strictly weaker experiment.")
+    lines.append("  right room. A design that piles the anchored episodes into one room hands")
+    lines.append("  that score to a predictor that learned nothing, so more anchored episodes")
+    lines.append("  can buy a strictly weaker experiment.")
     return lines
 
 

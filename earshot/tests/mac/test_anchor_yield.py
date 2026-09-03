@@ -21,12 +21,14 @@ from earshot.audio.clips import ANOMALY_CLASSES, SOUNDING_CLASSES
 from earshot.task.episodes import EpisodeDataset
 from earshot.task.prior_build import anchor_of_run_class
 from earshot.types import Xyz
+from earshot.audio.vocabulary import ROOM_OF_ANCHOR
 from earshot.tools.anchor_yield import (
     ABL2_ALARM_ANCHORED,
     ABL2_ALARM_BUILT,
     SWEEP_N_EPISODES,
     CellYield,
     anchors_by_scene,
+    anchors_without_a_room,
     balanced_assignment,
     best_class_per_scene,
     cell_yield,
@@ -34,6 +36,8 @@ from earshot.tools.anchor_yield import (
     fold_by_class,
     format_report,
     main,
+    room_assignment_detail,
+    rooms_by_scene,
 )
 
 # `alarm` anchors here; `_a_class_with_no_anchor` below asserts the other arm exists.
@@ -375,6 +379,188 @@ class TestTheDiscriminationSection(unittest.TestCase):
                          (27, 27))
         self.assertLess(constant_predictor_share(balanced)[1],
                         constant_predictor_share(balanced)[2])
+
+
+# Six scenes, four anchor objects, THREE rooms. `chair` and `tv_monitor` are both the living
+# room, which is the whole subject of the class below: an assignment balanced over four
+# objects gives the living room four of the six scenes, and its own object-level null cannot
+# see that.
+_TWO_ROOM_OBJECTS_CELLS = tuple(
+    cell
+    for scene in ("s1", "s2", "s3", "s4", "s5", "s6")
+    for cell in (
+        CellYield(scene, "keyboard_typing", "chair", n_built=15, n_anchored=10, n_skipped=0),
+        CellYield(scene, "clapping", "tv_monitor", n_built=15, n_anchored=9, n_skipped=0),
+        CellYield(scene, "snoring", "bed", n_built=15, n_anchored=3, n_skipped=0),
+        CellYield(scene, "toilet_flush", "toilet", n_built=15, n_anchored=3, n_skipped=0),
+    )
+)
+_SIX_SCENE_OBJECTS = ("bed", "chair", "toilet", "tv_monitor")
+
+
+def _room_level_share(assignment):
+    """Re-key an object-level assignment onto rooms and score the null there."""
+    return constant_predictor_share({
+        scene: (ROOM_OF_ANCHOR[anchor], anchored)
+        for scene, (anchor, anchored) in assignment.items()
+    })
+
+
+class TestTheUnitIsTheRoom(unittest.TestCase):
+    """ADR-0018's amendment made the anchor a ROOM. Scoring the null over anchor OBJECTS
+    under-states it, and that is what the first `anchor_yield` run on the box printed."""
+
+    def test_two_anchor_objects_really_do_share_a_room(self):
+        """Asserted against the live table, so the premise cannot drift out from under the
+        rest of this class without a failure here."""
+        self.assertEqual(ROOM_OF_ANCHOR["chair"], ROOM_OF_ANCHOR["tv_monitor"])
+        self.assertLess(
+            len(set(ROOM_OF_ANCHOR.values())), len(set(ROOM_OF_ANCHOR)),
+            "the collapse this module corrects for no longer exists",
+        )
+
+    def test_a_scene_takes_the_better_object_in_a_room(self):
+        """Two objects in one room are one answer, so the scene keeps the better of them."""
+        per_room = rooms_by_scene(_TWO_ROOM_OBJECTS_CELLS)
+        self.assertEqual(per_room["s1"][ROOM_OF_ANCHOR["chair"]], 10)
+
+    def test_the_rooms_are_fewer_than_the_anchors(self):
+        per_object = anchors_by_scene(_TWO_ROOM_OBJECTS_CELLS)
+        per_room = rooms_by_scene(_TWO_ROOM_OBJECTS_CELLS)
+        self.assertEqual(len(per_object["s1"]), 4)
+        self.assertEqual(len(per_room["s1"]), 3)
+
+    def test_the_object_level_null_under_states_the_real_one(self):
+        """THE DEFECT, stated as a test. The object-balanced design prints one number and
+        a store predicting rooms is scored against a strictly larger one."""
+        balanced = balanced_assignment(
+            anchors_by_scene(_TWO_ROOM_OBJECTS_CELLS), _SIX_SCENE_OBJECTS
+        )
+        _obj, obj_share, obj_total = constant_predictor_share(balanced)
+        _room, room_share, room_total = _room_level_share(balanced)
+        self.assertEqual(obj_total, room_total)
+        self.assertGreater(room_share, obj_share)
+
+    def test_balancing_over_rooms_caps_the_room_the_objects_could_not(self):
+        """The mechanism: a room quota bounds the dominant room's scene count. Balancing
+        over objects has no such bound, because two of them are the same room."""
+        rooms = sorted({ROOM_OF_ANCHOR[a] for a in _SIX_SCENE_OBJECTS})
+        by_room = balanced_assignment(rooms_by_scene(_TWO_ROOM_OBJECTS_CELLS), rooms)
+        by_object = balanced_assignment(
+            anchors_by_scene(_TWO_ROOM_OBJECTS_CELLS), _SIX_SCENE_OBJECTS
+        )
+        living = ROOM_OF_ANCHOR["chair"]
+        scenes_by_room = collections.Counter(room for room, _n in by_room.values())
+        scenes_by_object = collections.Counter(
+            ROOM_OF_ANCHOR[anchor] for anchor, _n in by_object.values()
+        )
+        self.assertEqual(scenes_by_room[living], 2)     # ceil(6 / 3 rooms)
+        self.assertEqual(scenes_by_object[living], 4)   # chair 2 + tv_monitor 2
+
+    def test_balancing_over_rooms_leaves_the_null_lower(self):
+        rooms = sorted({ROOM_OF_ANCHOR[a] for a in _SIX_SCENE_OBJECTS})
+        by_room = balanced_assignment(rooms_by_scene(_TWO_ROOM_OBJECTS_CELLS), rooms)
+        by_object = balanced_assignment(
+            anchors_by_scene(_TWO_ROOM_OBJECTS_CELLS), _SIX_SCENE_OBJECTS
+        )
+        _r, room_share, room_total = constant_predictor_share(by_room)
+        _o, object_share, object_total = _room_level_share(by_object)
+        self.assertLess(room_share / room_total, object_share / object_total)
+
+    def test_it_buys_that_with_fewer_anchored_episodes(self):
+        """The trade is real and the tool must not hide it: balance costs episodes."""
+        rooms = sorted({ROOM_OF_ANCHOR[a] for a in _SIX_SCENE_OBJECTS})
+        by_room = balanced_assignment(rooms_by_scene(_TWO_ROOM_OBJECTS_CELLS), rooms)
+        by_object = balanced_assignment(
+            anchors_by_scene(_TWO_ROOM_OBJECTS_CELLS), _SIX_SCENE_OBJECTS
+        )
+        self.assertLess(
+            sum(n for _room, n in by_room.values()),
+            sum(n for _anchor, n in by_object.values()),
+        )
+
+
+class TestTheAnchorWithNoRoom(unittest.TestCase):
+    def test_plant_is_still_the_live_case(self):
+        """`plant` maps to no room on purpose. If that ever changes, the skip below is
+        testing nothing and this fails first."""
+        self.assertNotIn("plant", ROOM_OF_ANCHOR)
+
+    def test_it_is_skipped_rather_than_guessed_at(self):
+        cells = (
+            CellYield("s1", "snoring", "bed", n_built=15, n_anchored=4, n_skipped=0),
+            CellYield("s1", "a_plant_sound", "plant", n_built=15, n_anchored=9, n_skipped=0),
+        )
+        self.assertEqual(rooms_by_scene(cells)["s1"], {ROOM_OF_ANCHOR["bed"]: 4})
+
+    def test_it_is_reported_rather_than_silent(self):
+        cells = (
+            CellYield("s1", "snoring", "bed", n_built=15, n_anchored=4, n_skipped=0),
+            CellYield("s1", "a_plant_sound", "plant", n_built=15, n_anchored=9, n_skipped=0),
+        )
+        self.assertEqual(anchors_without_a_room(cells), ("plant",))
+        text = format_report(cells, scenes=["s1"], n_episodes=15, split="val")
+        self.assertIn("no `ROOM_OF_ANCHOR` row", text)
+        self.assertIn("plant", text)
+
+    def test_a_class_with_no_anchor_at_all_is_not_an_orphan_room(self):
+        """`glass_break` has no anchor object, so it never reaches the room table."""
+        cells = (CellYield("s1", "glass_break", None, n_built=15, n_anchored=0, n_skipped=0),)
+        self.assertEqual(anchors_without_a_room(cells), ())
+
+
+class TestTheAssignmentTable(unittest.TestCase):
+    def test_it_names_a_class_that_anchors_in_the_assigned_room(self):
+        rooms = sorted({ROOM_OF_ANCHOR[a] for a in _SIX_SCENE_OBJECTS})
+        by_room = balanced_assignment(rooms_by_scene(_TWO_ROOM_OBJECTS_CELLS), rooms)
+        detail = room_assignment_detail(_TWO_ROOM_OBJECTS_CELLS, by_room)
+        for scene, (room, anchor, name, anchored) in detail.items():
+            self.assertEqual(ROOM_OF_ANCHOR[anchor], room, scene)
+            self.assertGreater(anchored, 0, scene)
+
+    def test_a_living_room_scene_takes_the_better_of_its_two_objects(self):
+        living = ROOM_OF_ANCHOR["chair"]
+        detail = room_assignment_detail(
+            _TWO_ROOM_OBJECTS_CELLS, {"s1": (living, 10)}
+        )
+        self.assertEqual(detail["s1"][1:], ("chair", "keyboard_typing", 10))
+
+    def test_a_room_with_no_cell_is_omitted_not_invented(self):
+        detail = room_assignment_detail(
+            _TWO_ROOM_OBJECTS_CELLS, {"s99": (ROOM_OF_ANCHOR["bed"], 4)}
+        )
+        self.assertEqual(detail, {})
+
+    def test_the_report_prints_the_table_and_both_units(self):
+        text = format_report(
+            _TWO_ROOM_OBJECTS_CELLS,
+            scenes=["s1", "s2", "s3", "s4", "s5", "s6"],
+            n_episodes=15,
+            split="val",
+        )
+        self.assertIn("THE UNIT IS THE ROOM", text)
+        self.assertIn("ALWAYS-{}".format(ROOM_OF_ANCHOR["chair"].upper()), text)
+        self.assertIn("BALANCING OVER ANCHOR OBJECTS INSTEAD", text)
+        self.assertIn("scene by scene", text)
+        self.assertIn("keyboard_typing", text)
+
+    def test_the_object_balanced_design_is_printed_under_both_units(self):
+        """The reconciliation with the box output that exposed this: the same assignment,
+        the number it printed and the number that was true."""
+        text = format_report(
+            _TWO_ROOM_OBJECTS_CELLS,
+            scenes=["s1", "s2", "s3", "s4", "s5", "s6"],
+            n_episodes=15,
+            split="val",
+        )
+        block = text[text.index("BALANCING OVER ANCHOR OBJECTS"):]
+        by_object = block[block.index("scored by object"):block.index("scored by room")]
+        by_room = block[block.index("scored by room"):block.index("The second")]
+        self.assertIn("ALWAYS-CHAIR", by_object)
+        self.assertIn("ALWAYS-{}".format(ROOM_OF_ANCHOR["chair"].upper()), by_room)
+        # Same denominator, larger numerator: one assignment, two readings of it.
+        self.assertIn("of 44", by_object)
+        self.assertIn("of 44", by_room)
 
 
 class TestTheExitCode(unittest.TestCase):
