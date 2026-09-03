@@ -160,6 +160,16 @@ echo "  python: $(python -V 2>&1)"
   exit 1
 }
 
+# Idempotent — a second run prints "already staged" and returns — so it is safe to leave
+# in the path. `prior_pass.sh` and `clap_gate.sh` both do this; this script calls
+# `task/prior_driver.py` directly rather than through `prior_pass.sh`, so it is not
+# inherited for free and has to be its own step. Both this sweep's CLAP arm (`--clap`
+# below) and the prior pass's rendering need the local safetensors copy — the box pins
+# torch 2.2.2+cu118, and transformers refuses `torch.load` on the Hub's raw
+# `pytorch_model.bin` below torch 2.6 (CVE-2025-32434).
+python -m earshot.task.models \
+  || { echo "FATAL: could not stage the CLAP checkpoint — nothing below can classify"; exit 1; }
+
 mkdir -p "$OUT_DIR"
 
 # --- 3. the assignment -------------------------------------------------------
