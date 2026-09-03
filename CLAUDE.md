@@ -108,9 +108,10 @@ python -m earshot.tools.placement_report runs/<tag>
 # it. Runs the real `build_anomaly_episodes` over the published goals for every sounding
 # class, so it is the build a sweep would do and not a model of one. It reproduces `abl-2`'s
 # measured 134 of 282 as its own check. READ THE `ALWAYS-` ROWS, NOT THE TOTALS: it prints
-# what a memory that learned nothing scores under each assignment, and the assignment with
-# the most anchored episodes is the one that hands the null hypothesis the highest score.
-# No GPU, no simulator, seconds
+# what a memory that learned nothing scores under each design, and the design with the most
+# anchored episodes is the one that hands the null hypothesis the highest score. THE UNIT IS
+# THE ROOM: `chair`, `sofa` and `tv_monitor` are all the living room, so a design balanced
+# over four anchor OBJECTS is one room holding half the scenes. No GPU, no simulator, seconds
 python -m earshot.tools.anchor_yield
 
 # the box test suite (a few minutes, read-only, installs nothing)
