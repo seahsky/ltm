@@ -11,6 +11,7 @@ Both arms ship (ADR-0014): a scene that HAS the anchor and a scene that does not
 an `anchor_object` row and a class without one, and a scene that can build nothing at all.
 """
 
+import collections
 import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
@@ -25,8 +26,11 @@ from earshot.tools.anchor_yield import (
     ABL2_ALARM_BUILT,
     SWEEP_N_EPISODES,
     CellYield,
+    anchors_by_scene,
+    balanced_assignment,
     best_class_per_scene,
     cell_yield,
+    constant_predictor_share,
     fold_by_class,
     format_report,
     main,
@@ -231,6 +235,146 @@ class TestTheReport(unittest.TestCase):
         cells = (CellYield("s1", "alarm", "bed", n_built=10, n_anchored=5, n_skipped=0),)
         text = format_report(cells, scenes=["s1"], n_episodes=15, split="val")
         self.assertIn("CEILING, NOT A RESULT", text)
+
+
+class TestTheClassWithinAnAnchorIsFree(unittest.TestCase):
+    """Placement reads the anchor CATEGORY and nothing else about the class.
+
+    Load-bearing for ADR-0018, not a curiosity: it means the heard/not-heard axis can swap
+    the class while holding the episode fixed, so the delta is the association rather than a
+    different task. `anchors_by_scene` collapses classes onto anchors on this basis, and a
+    day when it stops being true is a day that collapse becomes a silent averaging.
+    """
+
+    def test_two_classes_at_one_anchor_build_identically(self):
+        scene_with_bed = a_scene_with_a_bed()
+        first = cell_yield(scene_with_bed, scene="S", anomaly_class="alarm", n_episodes=5)
+        second = cell_yield(scene_with_bed, scene="S", anomaly_class="snoring", n_episodes=5)
+        self.assertEqual(first.anchor_category, second.anchor_category)
+        self.assertEqual(
+            (first.n_built, first.n_anchored), (second.n_built, second.n_anchored)
+        )
+
+    def test_collapsing_onto_anchors_keeps_the_count(self):
+        cells = (
+            CellYield("s1", "alarm", "bed", n_built=10, n_anchored=6, n_skipped=0),
+            CellYield("s1", "snoring", "bed", n_built=10, n_anchored=6, n_skipped=0),
+            CellYield("s1", "toilet_flush", "toilet", n_built=10, n_anchored=2, n_skipped=0),
+        )
+        self.assertEqual(anchors_by_scene(cells), {"s1": {"bed": 6, "toilet": 2}})
+
+    def test_a_class_with_no_anchor_contributes_no_column(self):
+        cells = (CellYield("s1", "glass_break", None, n_built=10, n_anchored=0, n_skipped=0),)
+        self.assertEqual(anchors_by_scene(cells), {})
+
+
+class TestTheConstantPredictor(unittest.TestCase):
+    """The number that makes a greedy assignment a trap rather than a win."""
+
+    def test_it_names_the_commonest_anchor_and_its_share(self):
+        assignment = {"s1": ("chair", 90), "s2": ("chair", 80), "s3": ("bed", 30)}
+        anchor, share, overall = constant_predictor_share(assignment)
+        self.assertEqual((anchor, share, overall), ("chair", 170, 200))
+
+    def test_an_even_assignment_leaves_the_null_hypothesis_less(self):
+        """The whole point. Same tool, two designs, and the weaker design scores HIGHER."""
+        lopsided = {"s1": ("chair", 90), "s2": ("chair", 80), "s3": ("bed", 30)}
+        even = {"s1": ("chair", 50), "s2": ("bed", 50), "s3": ("toilet", 50)}
+        self.assertGreater(
+            constant_predictor_share(lopsided)[1] / constant_predictor_share(lopsided)[2],
+            constant_predictor_share(even)[1] / constant_predictor_share(even)[2],
+        )
+
+    def test_an_empty_assignment_is_zero_of_zero_and_not_a_crash(self):
+        self.assertEqual(constant_predictor_share({}), ("", 0, 0))
+
+
+class TestTheBalancedAssignment(unittest.TestCase):
+    ANCHORS = ("bed", "chair", "toilet", "tv_monitor")
+
+    def test_every_anchor_gets_its_quota(self):
+        per_scene = {
+            "s{}".format(i): {anchor: 10 for anchor in self.ANCHORS} for i in range(8)
+        }
+        assignment = balanced_assignment(per_scene, self.ANCHORS)
+        counts = collections.Counter(anchor for anchor, _ in assignment.values())
+        self.assertEqual(sorted(counts.values()), [2, 2, 2, 2])
+
+    def test_an_uneven_scene_count_splits_within_one(self):
+        per_scene = {
+            "s{}".format(i): {anchor: 10 for anchor in self.ANCHORS} for i in range(19)
+        }
+        assignment = balanced_assignment(per_scene, self.ANCHORS)
+        counts = collections.Counter(anchor for anchor, _ in assignment.values())
+        self.assertEqual(len(assignment), 19)
+        self.assertLessEqual(max(counts.values()) - min(counts.values()), 1)
+
+    def test_within_the_quota_it_maximises_anchored_episodes(self):
+        """Balance is the constraint; among balanced answers more episodes still wins."""
+        per_scene = {
+            "s0": {"bed": 9, "chair": 1},
+            "s1": {"bed": 1, "chair": 9},
+        }
+        assignment = balanced_assignment(per_scene, ("bed", "chair"))
+        self.assertEqual(assignment["s0"], ("bed", 9))
+        self.assertEqual(assignment["s1"], ("chair", 9))
+
+    def test_it_takes_a_worse_scene_rather_than_break_the_quota(self):
+        """The forced-failure arm for the balance rule: greedy would put both on `chair`."""
+        per_scene = {
+            "s0": {"bed": 2, "chair": 9},
+            "s1": {"bed": 3, "chair": 9},
+        }
+        assignment = balanced_assignment(per_scene, ("bed", "chair"))
+        self.assertEqual(sorted(anchor for anchor, _ in assignment.values()),
+                         ["bed", "chair"])
+        # One scene must take `bed` and lose episodes for it. Which one is the optimiser's
+        # call: s0->chair, s1->bed keeps 12 and the other way keeps 11, so it takes the 12.
+        self.assertEqual(sum(anchored for _, anchored in assignment.values()), 12)
+
+    def test_a_scene_that_anchors_nothing_anywhere_is_left_out(self):
+        per_scene = {"s0": {"bed": 5}, "barren": {"bed": 0, "chair": 0}}
+        assignment = balanced_assignment(per_scene, ("bed", "chair"))
+        self.assertNotIn("barren", assignment)
+
+    def test_no_scenes_is_an_empty_answer_and_not_a_crash(self):
+        self.assertEqual(balanced_assignment({}, self.ANCHORS), {})
+
+
+class TestTheDiscriminationSection(unittest.TestCase):
+    def test_both_assignments_are_printed_with_their_null_scores(self):
+        cells = (
+            CellYield("s1", "keyboard_typing", "chair", n_built=15, n_anchored=14,
+                      n_skipped=0),
+            CellYield("s1", "snoring", "bed", n_built=15, n_anchored=3, n_skipped=0),
+            CellYield("s2", "keyboard_typing", "chair", n_built=15, n_anchored=13,
+                      n_skipped=0),
+            CellYield("s2", "snoring", "bed", n_built=15, n_anchored=4, n_skipped=0),
+        )
+        text = format_report(cells, scenes=["s1", "s2"], n_episodes=15, split="val")
+        self.assertIn("GREEDY", text)
+        self.assertIn("BALANCED", text)
+        self.assertIn("ALWAYS-", text)
+        self.assertIn("learned NOTHING", text)
+
+    def test_the_greedy_assignment_hands_the_null_a_perfect_score(self):
+        """Two scenes both won by `chair` means an always-chair predictor is never wrong,
+        and the balanced answer must not read the same."""
+        cells = (
+            CellYield("s1", "keyboard_typing", "chair", n_built=15, n_anchored=14,
+                      n_skipped=0),
+            CellYield("s1", "snoring", "bed", n_built=15, n_anchored=3, n_skipped=0),
+            CellYield("s2", "keyboard_typing", "chair", n_built=15, n_anchored=13,
+                      n_skipped=0),
+            CellYield("s2", "snoring", "bed", n_built=15, n_anchored=4, n_skipped=0),
+        )
+        greedy = {scene: (cell.anchor_category, cell.n_anchored)
+                  for scene, cell in best_class_per_scene(cells).items()}
+        balanced = balanced_assignment(anchors_by_scene(cells), ("bed", "chair"))
+        self.assertEqual(constant_predictor_share(greedy)[1:],
+                         (27, 27))
+        self.assertLess(constant_predictor_share(balanced)[1],
+                        constant_predictor_share(balanced)[2])
 
 
 class TestTheExitCode(unittest.TestCase):
