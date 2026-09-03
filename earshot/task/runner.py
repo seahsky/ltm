@@ -101,6 +101,7 @@ from earshot.config import (
     RunConfig,
 )
 from earshot.env_check import assert_env
+from earshot.memory.store import EpisodicStore, MemoryCondition, SemanticStore
 from earshot.metrics import (
     compute_benchmark_spl,
     compute_dtg_source_final,
@@ -122,7 +123,14 @@ from earshot.report.audit import (
 )
 from earshot.task.dataset import AnomalyEpisode, EmptyDatasetError, build_anomaly_episodes
 from earshot.task.episodes import available_scenes, find_scenes_dir, find_split_dir, load_scene
-from earshot.task.memory_prior import MemoryContext, PriorMiss, resolve_prior
+from earshot.task.memory_build import stores_for_cell
+from earshot.task.memory_prior import (
+    RUN_DISCLOSURE,
+    MemoryContext,
+    PriorMiss,
+    points_by_category_for_cell,
+    resolve_prior,
+)
 from earshot.task.prior_build import anchor_of_run_class
 from earshot.types import NoRouteError, Pose, Xyz
 
@@ -2004,7 +2012,14 @@ def _pick_scene(split_dir: str, scenes_dir: str, wanted: str) -> Any:
     )
 
 
-def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> RunSummary:
+def run(
+    cfg: RunConfig,
+    *,
+    progress: Optional[Callable[[str], None]] = None,
+    memory_condition: Optional[MemoryCondition] = None,
+    memory_prior_stores: Optional[Tuple[SemanticStore, EpisodicStore]] = None,
+    memory_k: int = 5,
+) -> RunSummary:
     """Assert the environment, build the dataset, run the episodes, write the artefacts.
 
     The box-only half. Everything expensive is constructed once, before the first step:
@@ -2015,6 +2030,18 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
     environment. One artefact, two kinds of fact, and both answer the same question about
     a run directory a year from now — which is the argument ``agent/config.py`` makes for
     ``DetectorConfig`` existing at all.
+
+    **The matrix cell, not on ``RunConfig``.** ``memory.store.MemoryCondition``'s own
+    docstring gives the reason: the config layer has no edge to ``memory/`` (ADR-0013),
+    and a cell selected by a branch inside the config rather than by which stores the
+    caller built is exactly what that docstring forbids. ``memory_prior_stores`` is the
+    UNFILTERED pair a prior pass built (``memory_build.dump_stores`` / ``load_stores``);
+    ``stores_for_cell`` filters it to the one condition, once, before the episode loop --
+    the filter depends only on the scene under test and ``cfg.anomaly_class``, both fixed
+    for the whole call, so building it once and reusing it every episode is exact, not an
+    approximation. Passing a condition with no stores raises rather than silently running
+    every episode under ``MemoryCondition.NONE``, which would be a matrix cell that looks
+    populated and measures nothing.
     """
     say = progress if progress is not None else print
 
@@ -2025,6 +2052,37 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
     split_dir = find_split_dir(cfg.split, root=cfg.data_root)
     scenes_dir = find_scenes_dir(root=cfg.data_root)
     dataset = _pick_scene(split_dir, scenes_dir, cfg.scene)
+
+    memory: Optional[MemoryContext] = None
+    if memory_condition is not None:
+        if memory_prior_stores is None:
+            raise ValueError(
+                "memory_condition={!r} was given with no memory_prior_stores; the "
+                "matrix cell cannot be realised without the stores a prior pass "
+                "built (see memory_build.dump_stores / load_stores)".format(
+                    memory_condition
+                )
+            )
+        full_semantic, full_episodic = memory_prior_stores
+        cell_semantic, cell_episodic = stores_for_cell(
+            full_semantic,
+            full_episodic,
+            memory_condition,
+            sound_class=cfg.anomaly_class,
+            scene=dataset.scene_label,
+        )
+        memory = MemoryContext(
+            condition=memory_condition,
+            semantic=cell_semantic,
+            points_by_category=points_by_category_for_cell(
+                dataset, cell_episodic, dataset.scene_label
+            ),
+            k=memory_k,
+        )
+        say("memory: {} ({} semantic row(s)) -- {}".format(
+            memory_condition.value, len(memory.semantic), RUN_DISCLOSURE
+        ))
+
     try:
         build = build_anomaly_episodes(
             dataset,
@@ -2191,6 +2249,7 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
                 index=index,
                 clap_encoder=clap_encoder,
                 calibration=calibration,
+                memory=memory,
                 progress=say,
             )
             write_episode(

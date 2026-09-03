@@ -290,6 +290,21 @@ class EpisodicStore:
             if entry.scene == scene and entry.room == room
         )
 
+    def points_for_category(self, scene: str, category: str) -> Tuple[Xyz, ...]:
+        """Every reached point of `category` in `scene`, in stored order.
+
+        `resolve_prior`'s vote is at the OBJECT-CATEGORY grain (`predict_category`), not
+        the room's, so this is the accessor a point resolver actually needs — `room` is
+        what the heard axis is about (ADR-0018), `category` is what a recalled class
+        resolves to. Same total contract as `points_for_room`: `()`, never `None`, is a
+        complete answer.
+        """
+        return tuple(
+            entry.point
+            for entry in self.entries
+            if entry.scene == scene and entry.category == category
+        )
+
 
 class MemoryCondition(Enum):
     """Which cell of ADR-0018's matrix an episode ran in.

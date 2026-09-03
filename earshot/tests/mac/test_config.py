@@ -19,11 +19,12 @@ import contextlib
 import dataclasses
 import io
 import json
+import tempfile
 import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
 
-from earshot.__main__ import build_parser, config_from_args
+from earshot.__main__ import build_parser, config_from_args, memory_kwargs_from_args
 from earshot.agent.config import ControllerConfig, DetectorConfig, PlannerConfig
 from earshot.audio.config import AudioConfig, WindowPolicy
 from earshot.config import (
@@ -35,6 +36,7 @@ from earshot.config import (
     Localization,
     RunConfig,
 )
+from earshot.memory.store import EpisodicStore, MemoryCondition, SemanticEntry, SemanticStore
 
 # The fields that are composed rather than flagged: each is a module's own frozen config,
 # defined beside the code it configures (ADR-0013). Pinned here so a new sub-config is a
@@ -303,6 +305,76 @@ class TestTheCli(unittest.TestCase):
         the typo.
         """
         self._reject(["--run-dir", "runs/x", "--anomaly-class", "thunder"])
+
+
+class TestMemoryKwargsFromArgs(unittest.TestCase):
+    """``memory_kwargs_from_args`` — the seam ``MemoryCondition``'s own docstring asks
+    for: the matrix cell is not a ``RunConfig`` field, so this is a second, separate
+    mapping from the CLI's ``--memory-*`` flags to ``run()``'s keywords."""
+
+    def _args(self, *extra):
+        return build_parser().parse_args(["--run-dir", "runs/x", *extra])
+
+    def test_the_default_is_no_keywords_at_all(self):
+        """Not `{"memory_condition": None}` -- an EMPTY dict, so `run(**kwargs)` reaches
+        `run()` exactly as a caller with no memory flags always has."""
+        self.assertEqual(memory_kwargs_from_args(self._args()), {})
+
+    def test_a_condition_with_no_store_flag_is_a_usage_error(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                memory_kwargs_from_args(
+                    self._args("--memory-condition", "heard_seen")
+                )
+
+    def test_an_unrecognised_condition_is_rejected_by_the_parser_itself(self):
+        self._reject(["--run-dir", "runs/x", "--memory-condition", "sometimes"])
+
+    def test_a_dumped_store_round_trips_into_run_kwargs(self):
+        """THE HEALTHY ARM, against a real file on disk -- the same file a prior-pass
+        driver writes and a matrix sweep reads."""
+        from earshot.task.memory_build import dump_stores
+
+        semantic = SemanticStore(entries=(
+            SemanticEntry(sound_class="alarm", room="bedroom", category="bed",
+                          embedding=[1.0, 0.0], donor_scene="donor_scene"),
+        ))
+        episodic = EpisodicStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = "{}/store.json".format(tmp)
+            dump_stores(path, semantic, episodic)
+            kwargs = memory_kwargs_from_args(
+                self._args("--memory-condition", "heard_seen", "--memory-store", path,
+                            "--memory-k", "3")
+            )
+        self.assertEqual(kwargs["memory_condition"], MemoryCondition.HEARD_SEEN)
+        self.assertEqual(kwargs["memory_k"], 3)
+        loaded_semantic, loaded_episodic = kwargs["memory_prior_stores"]
+        self.assertEqual(
+            [entry.sound_class for entry in loaded_semantic.entries], ["alarm"]
+        )
+        self.assertEqual(len(loaded_episodic), 0)
+
+    def test_memory_k_defaults_to_five(self):
+        from earshot.task.memory_build import dump_stores
+
+        semantic = SemanticStore(entries=(
+            SemanticEntry(sound_class="alarm", room="bedroom", category="bed",
+                          embedding=[1.0, 0.0], donor_scene="donor_scene"),
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = "{}/store.json".format(tmp)
+            dump_stores(path, semantic, EpisodicStore())
+            kwargs = memory_kwargs_from_args(
+                self._args("--memory-condition", "heard_seen", "--memory-store", path)
+            )
+        self.assertEqual(kwargs["memory_k"], 5)
+
+    def _reject(self, argv):
+        parser = build_parser()
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(argv)
 
 
 class TestImportingTheEntryPointDoesNotNeedTheSimulator(unittest.TestCase):
