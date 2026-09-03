@@ -104,6 +104,13 @@ python -m earshot.tools.window_report runs/<tag> \
 # nowhere exits nonzero. Read-only, no GPU, seconds
 python -m earshot.tools.placement_report runs/<tag>
 
+# WOULD A WIDER CLASS SET RAISE THAT ANCHORED FRACTION — asked BEFORE spending a night on
+# it. Runs the real `build_anomaly_episodes` over the published goals for every sounding
+# class, so it is the build a sweep would do and not a model of one. Prints the anchored
+# ceiling per class, and per scene if the sweep were free to pick the class. It reproduces
+# `abl-2`'s measured 134 of 282 as its own check. No GPU, no simulator, seconds
+python -m earshot.tools.anchor_yield
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```
