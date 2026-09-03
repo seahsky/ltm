@@ -124,9 +124,16 @@ def observation_for(
     """One reached stop's store row, or `None` when nothing is heard at that category.
 
     `None` rather than a raise: a tour legitimately walks past a `bed` when the run's class
-    is `alarm`, and `walk_tour` treats a `None` return as "nothing observed here". A
-    malformed EMBEDDING still raises, through `tour_observation` -- the two are different
-    failures and only the second is a bug.
+    is `alarm`. **The caller must filter it, not `walk_tour`**: `walk_tour` appends
+    whatever `observe` returns, unconditionally -- its own docstring says exactly that,
+    and it is the honest, simple contract for a module that must not know what a store
+    row is. Wire this in directly and a stop with nothing to hear becomes a `None` in
+    `TourRecord.observations`, which `semantic_from_tour` then indexes with `payload[...]`
+    and crashes on with a bare `TypeError` rather than its own named `MemoryBuildError`.
+    The fix belongs upstream of `walk_tour`: restrict the tour PLAN to stops whose
+    category `categories_with_a_sound` already confirms resolves under `classes`, so this
+    function is never asked about a stop it would answer `None` for. A malformed EMBEDDING
+    still raises, through `tour_observation` -- that failure is a bug regardless of layer.
     """
     name = class_at_category(stop.category, classes=classes)
     if name is None:

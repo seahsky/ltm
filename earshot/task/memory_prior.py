@@ -8,20 +8,31 @@ That is the headroom this module exists to spend.
 
 **The mechanism, and why it is this one.** ADR-0018's `unseen_heard` cell is the one whose
 mechanism has to be argued for rather than assumed: in an unseen scene `without_scene` has
-emptied the episodic store, so `points_for_room` returns `()` and a recalled ROOM points at
-no coordinate the agent can walk to. What transfers across scenes is the object CATEGORY
-the class was heard at -- an alarm heard at a stove on prior tours is an alarm to look for
-at this scene's stove -- because the scene under test has its own instances of that
-category. `SemanticEntry.category` carries it and survives `without_scene`; this module
-turns it into a place.
+emptied the episodic store, so a recalled CATEGORY has no prior-tour instance of its own to
+point at. What transfers across scenes is the object CATEGORY the class was heard at -- an
+alarm heard at a stove on prior tours is an alarm to look for at this scene's stove --
+because the scene under test has its own instances of that category. `SemanticEntry.category`
+carries it and survives `without_scene`; this module turns it into a place.
 
-**The privilege this takes, stated rather than discovered later.** The instances come from
-the scene's own ObjectNav annotations, which are ground truth. That is the same privilege
-`agent.detector.OracleDetector` already takes for the primary stop, and it is disclosed the
-same way: the prior answers "where are this scene's stoves", never "where is the source".
-The association from class to category is LEARNED, from real audio at real stops on prior
-tours, and the fenced `audio.vocabulary` placement table is unreachable from `memory/` by
-construction. A run that uses this must say so, and `RUN_DISCLOSURE` is what it says.
+**The privilege this takes, and where it stops.** `points_by_category_for_cell` prefers the
+agent's OWN recalled instance from a prior tour of the scene under test -- real navigation
+history, not a privilege -- and falls back to the scene's ObjectNav annotations only for a
+category the tour never reached, or in a scene it never toured at all. That fallback IS
+ground truth, taken the same way `agent.detector.OracleDetector` already takes it for the
+primary stop, and disclosed the same way: where recall has nothing to say, the prior answers
+"where are this scene's stoves", never "where is the source". The association from class to
+category is LEARNED, from real audio at real stops on prior tours, and the fenced
+`audio.vocabulary` placement table is unreachable from `memory/` by construction. A run that
+uses this must say so, and `RUN_DISCLOSURE` is what it says.
+
+**This is the whole mechanism the seen axis has.** The semantic store is scene-agnostic by
+design (ADR-0018: "the only store that can return anything useful in a scene the agent has
+never entered"), so `stores_for_cell` never filters it by scene -- `HEARD_SEEN` and
+`HEARD_UNSEEN` vote on the identical store and recall the identical category. Everything
+that can make the two cells diverge has to happen AFTER the vote, in how the category
+becomes a point, which is exactly what `points_by_category_for_cell` does and
+`category_points` alone does not: it is scene ground truth, constant across every cell,
+and a `MemoryContext` built from it directly cannot tell a seen scene from an unseen one.
 
 **Every failure is named, and none of them is a zero.** A prior can fail three different
 ways and they are three different facts about the method: the store answered nothing
@@ -43,7 +54,7 @@ from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from earshot.memory.store import SemanticStore
+from earshot.memory.store import EpisodicStore, SemanticStore
 from earshot.types import Xyz
 
 __all__ = [
@@ -52,6 +63,7 @@ __all__ = [
     "MemoryContext",
     "RUN_DISCLOSURE",
     "category_points",
+    "points_by_category_for_cell",
     "resolve_prior",
 ]
 
@@ -171,6 +183,41 @@ def category_points(dataset: object) -> Dict[str, Tuple[Xyz, ...]]:
         category: tuple(bucket[key] for key in sorted(bucket))
         for category, bucket in grouped.items()
     }
+
+
+def points_by_category_for_cell(
+    dataset: object, episodic: EpisodicStore, scene: str
+) -> Dict[str, Tuple[Xyz, ...]]:
+    """`category_points(dataset)`, with a scene's own prior-tour recall standing in front
+    of it wherever the tour has one.
+
+    **This is what makes the seen axis a seen axis.** `stores_for_cell` filters the
+    episodic store per `MemoryCondition` (`without_scene` empties it for the unseen
+    cells), but `resolve_prior` votes on the SEMANTIC store alone -- and the semantic
+    store is never filtered by scene, because ADR-0018 makes it scene-agnostic on
+    purpose ("the only store that can return anything useful in a scene the agent has
+    never entered"). So a `HEARD_SEEN` and a `HEARD_UNSEEN` episode recall the identical
+    category from the identical store; without this function they would also resolve it
+    through the identical `category_points(dataset)` table and be indistinguishable at
+    every layer downstream of the vote. Route the filtered episodic store's OWN recalled
+    points in here instead, and the two cells diverge exactly where the seen axis says
+    they should: at a category the prior tour actually reached.
+
+    For a category the tour visited, the returned points are the ones `EpisodicEntry`
+    recorded -- the agent's own past location, not detection. For every other category
+    (including every one when `episodic` was emptied by `without_scene`) this falls back
+    to `category_points`, which is `RUN_DISCLOSURE`'s privileged stand-in: the scene's
+    ObjectNav ground truth, disclosed because no detector produced it.
+
+    Pure: builds a new mapping, mutates neither argument.
+    """
+    merged: Dict[str, Tuple[Xyz, ...]] = dict(category_points(dataset))
+    categories = {entry.category for entry in episodic.entries if entry.scene == scene}
+    for category in categories:
+        points = episodic.points_for_category(scene, category)
+        if points:
+            merged[category] = points
+    return merged
 
 
 def resolve_prior(

@@ -361,6 +361,42 @@ class TestWithoutScene(unittest.TestCase):
             dropped.points_for_room("scene_b", "kitchen"), (self.kitchen_b.point,)
         )
 
+
+class TestPointsForCategory(unittest.TestCase):
+    """`resolve_prior` votes at the category grain, not the room's -- this is the
+    accessor a point resolver actually calls. Same fixture as `TestWithoutScene`,
+    because the two accessors answer the same question at two different grains."""
+
+    def setUp(self):
+        self.kitchen_a = _episodic("scene_a", "kitchen", "chair", (1.0, 0.0, 1.0))
+        self.kitchen_b = _episodic("scene_b", "kitchen", "chair", (2.0, 0.0, 2.0))
+        self.store = EpisodicStore(entries=(self.kitchen_a, self.kitchen_b))
+
+    def test_it_finds_the_planted_point(self):
+        self.assertEqual(
+            self.store.points_for_category("scene_a", "chair"), (self.kitchen_a.point,)
+        )
+
+    def test_it_is_an_empty_tuple_not_none_when_nothing_matches(self):
+        result = self.store.points_for_category("scene_a", "toilet")
+        self.assertEqual(result, ())
+        self.assertIsNotNone(result)
+
+    def test_it_does_not_cross_scenes(self):
+        self.assertEqual(
+            self.store.points_for_category("scene_a", "chair"), (self.kitchen_a.point,)
+        )
+        self.assertEqual(
+            self.store.points_for_category("scene_b", "chair"), (self.kitchen_b.point,)
+        )
+
+    def test_without_scene_empties_it_the_same_way_it_empties_points_for_room(self):
+        dropped = without_scene(self.store, "scene_a")
+        self.assertEqual(dropped.points_for_category("scene_a", "chair"), ())
+        self.assertEqual(
+            dropped.points_for_category("scene_b", "chair"), (self.kitchen_b.point,)
+        )
+
     def test_a_scene_absent_from_the_store_is_a_no_op(self):
         same = without_scene(self.store, "no_such_scene")
         self.assertEqual(same.entries, self.store.entries)

@@ -77,7 +77,13 @@ from earshot.audio.calibration import (
     sweep_loop_scatter,
     sweep_render_scatter,
 )
-from earshot.audio.clap import audio_embedding, heard_clip_for_clap, is_anomaly
+from earshot.audio.clap import (
+    audio_embedding,
+    classify_anomaly,
+    heard_clip_for_clap,
+    is_anomaly,
+    testimony_bank,
+)
 from earshot.audio.clips import load_anomaly_clip, render_through_ir, resolve_anomaly_clip, rms
 from earshot.audio.ir import anechoic_like
 from earshot.audio.lateral import lateral_sign
@@ -95,6 +101,7 @@ from earshot.config import (
     RunConfig,
 )
 from earshot.env_check import assert_env
+from earshot.memory.store import EpisodicStore, MemoryCondition, SemanticStore
 from earshot.metrics import (
     compute_benchmark_spl,
     compute_dtg_source_final,
@@ -116,7 +123,14 @@ from earshot.report.audit import (
 )
 from earshot.task.dataset import AnomalyEpisode, EmptyDatasetError, build_anomaly_episodes
 from earshot.task.episodes import available_scenes, find_scenes_dir, find_split_dir, load_scene
-from earshot.task.memory_prior import MemoryContext, PriorMiss, resolve_prior
+from earshot.task.memory_build import stores_for_cell
+from earshot.task.memory_prior import (
+    RUN_DISCLOSURE,
+    MemoryContext,
+    PriorMiss,
+    points_by_category_for_cell,
+    resolve_prior,
+)
 from earshot.task.prior_build import anchor_of_run_class
 from earshot.types import NoRouteError, Pose, Xyz
 
@@ -1173,17 +1187,47 @@ def run_episode(
                     waveform, sample_rate = heard_clip_for_clap(
                         heard_clip_window(tail, bed_clip=bed_clip), cfg.audio.sample_rate
                     )
-                    fired, best_class, _scores = is_anomaly(waveform, sample_rate, clap_encoder)
-                    anomaly_class = best_class
-                    verdict = is_anomalous_here(fired, best_class, room)
-                    if memory is not None:
-                        # Captured from the clip the AGENT heard, not from the source
-                        # file: the store was learned the same way, through a real IR at
-                        # a real stop, and querying it with clean audio would be asking a
-                        # different question from the one it was taught.
-                        heard_embedding = audio_embedding(
-                            waveform, sample_rate, clap_encoder
-                        )
+                    # TWO BANKS, TWO QUESTIONS, AND THEY ARE NOT THE SAME BANK.
+                    # `is_anomaly` answers "was that anything at all" and keeps
+                    # `ANOMALY_CLASSES`, because `ANOMALY_GATE_DELTA` / `_TAU` were
+                    # calibrated against exactly those prompts and HAZARD 2 forbids
+                    # quoting them for a wider one. Its `best_class` is an argmax over
+                    # three emergency names and is NOT what was heard on a run whose
+                    # source is a flush -- copying it into the report is how the agent's
+                    # testimony came to say "alarm" on a `toilet_flush` episode.
+                    # ONE forward pass of a 153.5 M-param audio encoder, shared by every
+                    # question asked about this clip. `test_task_runner` pins it: the
+                    # gate, the testimony and the memory write must be about the same
+                    # render, not three renders that agree by luck.
+                    heard_embedding = audio_embedding(
+                        waveform, sample_rate, clap_encoder
+                    )
+                    fired, gate_class, _scores = is_anomaly(
+                        waveform, sample_rate, clap_encoder, embedding=heard_embedding
+                    )
+                    # `classify_anomaly` answers "what was it, given that it was one of
+                    # these", over the bank this run's own source was drawn from. Forced
+                    # argmax, so it cannot say "normal" -- which is right here, because
+                    # the gate above already decided that.
+                    anomaly_class, _testimony = classify_anomaly(
+                        waveform,
+                        sample_rate,
+                        clap_encoder,
+                        classes=testimony_bank(cfg.anomaly_class),
+                        embedding=heard_embedding,
+                    )
+                    # The room arm reads what was HEARD, so it takes the testimony class.
+                    # A no-op today and asserted to be one: `ROOM_PRIOR`'s normal sets
+                    # name `running_water` and `appliance_hum`, which are in neither bank,
+                    # so `room_conditioned_anomaly` can only return True or abstain.
+                    # `test_audio_normality.py` fails if that stops being true, and then
+                    # this line is a decision someone has to make rather than a surprise.
+                    verdict = is_anomalous_here(fired, anomaly_class, room)
+                    # `heard_embedding` above is the memory's query too. Captured from
+                    # the clip the AGENT heard, not from the source file: the store was
+                    # learned the same way, through a real IR at a real stop, and querying
+                    # it with clean audio would be asking a different question from the
+                    # one it was taught.
                 # With no CLAP the verdict stays None, which `step_controller` reads as
                 # "nothing conditioned this, so any onset interrupts" — the smoke's case
                 # (§4.3: one sound, the anomaly by construction), and honest about it: the
@@ -1968,7 +2012,14 @@ def _pick_scene(split_dir: str, scenes_dir: str, wanted: str) -> Any:
     )
 
 
-def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> RunSummary:
+def run(
+    cfg: RunConfig,
+    *,
+    progress: Optional[Callable[[str], None]] = None,
+    memory_condition: Optional[MemoryCondition] = None,
+    memory_prior_stores: Optional[Tuple[SemanticStore, EpisodicStore]] = None,
+    memory_k: int = 5,
+) -> RunSummary:
     """Assert the environment, build the dataset, run the episodes, write the artefacts.
 
     The box-only half. Everything expensive is constructed once, before the first step:
@@ -1979,6 +2030,18 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
     environment. One artefact, two kinds of fact, and both answer the same question about
     a run directory a year from now — which is the argument ``agent/config.py`` makes for
     ``DetectorConfig`` existing at all.
+
+    **The matrix cell, not on ``RunConfig``.** ``memory.store.MemoryCondition``'s own
+    docstring gives the reason: the config layer has no edge to ``memory/`` (ADR-0013),
+    and a cell selected by a branch inside the config rather than by which stores the
+    caller built is exactly what that docstring forbids. ``memory_prior_stores`` is the
+    UNFILTERED pair a prior pass built (``memory_build.dump_stores`` / ``load_stores``);
+    ``stores_for_cell`` filters it to the one condition, once, before the episode loop --
+    the filter depends only on the scene under test and ``cfg.anomaly_class``, both fixed
+    for the whole call, so building it once and reusing it every episode is exact, not an
+    approximation. Passing a condition with no stores raises rather than silently running
+    every episode under ``MemoryCondition.NONE``, which would be a matrix cell that looks
+    populated and measures nothing.
     """
     say = progress if progress is not None else print
 
@@ -1989,6 +2052,37 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
     split_dir = find_split_dir(cfg.split, root=cfg.data_root)
     scenes_dir = find_scenes_dir(root=cfg.data_root)
     dataset = _pick_scene(split_dir, scenes_dir, cfg.scene)
+
+    memory: Optional[MemoryContext] = None
+    if memory_condition is not None:
+        if memory_prior_stores is None:
+            raise ValueError(
+                "memory_condition={!r} was given with no memory_prior_stores; the "
+                "matrix cell cannot be realised without the stores a prior pass "
+                "built (see memory_build.dump_stores / load_stores)".format(
+                    memory_condition
+                )
+            )
+        full_semantic, full_episodic = memory_prior_stores
+        cell_semantic, cell_episodic = stores_for_cell(
+            full_semantic,
+            full_episodic,
+            memory_condition,
+            sound_class=cfg.anomaly_class,
+            scene=dataset.scene_label,
+        )
+        memory = MemoryContext(
+            condition=memory_condition,
+            semantic=cell_semantic,
+            points_by_category=points_by_category_for_cell(
+                dataset, cell_episodic, dataset.scene_label
+            ),
+            k=memory_k,
+        )
+        say("memory: {} ({} semantic row(s)) -- {}".format(
+            memory_condition.value, len(memory.semantic), RUN_DISCLOSURE
+        ))
+
     try:
         build = build_anomaly_episodes(
             dataset,
@@ -2155,6 +2249,7 @@ def run(cfg: RunConfig, *, progress: Optional[Callable[[str], None]] = None) -> 
                 index=index,
                 clap_encoder=clap_encoder,
                 calibration=calibration,
+                memory=memory,
                 progress=say,
             )
             write_episode(

@@ -33,7 +33,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import sys
-from typing import Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 from earshot.audio.clips import ANOMALY_CLASSES, SOUNDING_CLASSES
 from earshot.audio.config import WindowPolicy
@@ -46,8 +46,9 @@ from earshot.config import (
     Localization,
     RunConfig,
 )
+from earshot.memory.store import MemoryCondition
 
-__all__ = ["build_parser", "config_from_args", "main"]
+__all__ = ["build_parser", "config_from_args", "memory_kwargs_from_args", "main"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -202,6 +203,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace artefacts already in --run-dir (they are refused by default)",
     )
+    parser.add_argument(
+        "--memory-condition",
+        choices=[condition.value for condition in MemoryCondition],
+        default=MemoryCondition.NONE.value,
+        help="ADR-0018's matrix cell. `none` (default) runs with no memory arm at all, "
+             "byte-identical to a build with no --memory-* flags. Any other value needs "
+             "--memory-store and --clap: the store is queried with a CLAP embedding of "
+             "the heard clip, and the recalled category is resolved through the scene "
+             "under test's own prior-tour points where the prior pass reached them, "
+             "falling back to its ObjectNav ground truth where it did not",
+    )
+    parser.add_argument(
+        "--memory-store",
+        default=None,
+        help="the JSON file a prior pass wrote (`memory_build.dump_stores`); required "
+             "when --memory-condition is not `none`",
+    )
+    parser.add_argument(
+        "--memory-k",
+        type=int,
+        default=5,
+        help="neighbours the semantic store votes over per recall (default 5); recorded "
+             "on the audit, never silently defaulted at the vote itself",
+    )
     return parser
 
 
@@ -252,6 +277,42 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
     )
 
 
+def memory_kwargs_from_args(args: argparse.Namespace) -> Dict[str, object]:
+    """The three ``run()`` memory keywords, from the CLI's three ``--memory-*`` flags.
+
+    Separate from ``config_from_args`` on purpose: ``memory.store.MemoryCondition``'s own
+    docstring is why the cell is not a ``RunConfig`` field (ADR-0013's layer graph gives
+    ``config`` no edge to ``memory/``), so this returns a plain keyword dict for ``run()``
+    rather than growing the config to carry a value it cannot act on.
+
+    ``{}`` when ``--memory-condition`` is left at its default. A bare invocation must
+    reach ``run()`` with no memory keywords at all -- not with ``memory_condition=None``
+    typed out -- so that path and every pre-matrix caller stay indistinguishable at the
+    call site, which is what ``run()``'s own byte-identical guarantee depends on.
+
+    Raises a usage error (``SystemExit``, via ``argparse``'s own convention) rather than
+    ``run()``'s ``ValueError`` for the missing-store case: this is a CLI mistake, caught
+    before the environment probe or the scene load are paid for, not a caller composing
+    ``run()`` wrong in code.
+    """
+    condition = MemoryCondition(args.memory_condition)
+    if condition is MemoryCondition.NONE:
+        return {}
+    if not args.memory_store:
+        raise SystemExit(
+            "--memory-condition {} needs --memory-store <path to a store "
+            "memory_build.dump_stores wrote>".format(condition.value)
+        )
+    from earshot.task.memory_build import load_stores
+
+    semantic, episodic, _provenance = load_stores(args.memory_store)
+    return {
+        "memory_condition": condition,
+        "memory_prior_stores": (semantic, episodic),
+        "memory_k": int(args.memory_k),
+    }
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse, build, run. Returns a process exit code.
 
@@ -262,6 +323,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     config = config_from_args(args)
+    memory_kwargs = memory_kwargs_from_args(args)
 
     from earshot.task.runner import run
 
@@ -271,7 +333,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # this deliberately starts no thread and no progress bar.
         print(message, flush=True)
 
-    run(config, progress=say)
+    run(config, progress=say, **memory_kwargs)
     return 0
 
 

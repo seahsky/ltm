@@ -12,6 +12,8 @@ an `anchor_object` row and a class without one, and a scene that can build nothi
 """
 
 import collections
+import os
+import tempfile
 import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
@@ -38,6 +40,7 @@ from earshot.tools.anchor_yield import (
     main,
     room_assignment_detail,
     rooms_by_scene,
+    write_assignment_tsv,
 )
 
 # `alarm` anchors here; `_a_class_with_no_anchor` below asserts the other arm exists.
@@ -561,6 +564,49 @@ class TestTheAssignmentTable(unittest.TestCase):
         # Same denominator, larger numerator: one assignment, two readings of it.
         self.assertIn("of 44", by_object)
         self.assertIn("of 44", by_room)
+
+
+class TestWriteAssignmentTsv(unittest.TestCase):
+    """The handoff `matrix_sweep.sh` reads: `scene<TAB>class`, nothing else, one line
+    per scene, so a bash `while read -r scene class` loop needs no parsing."""
+
+    def test_it_writes_one_line_per_scene_tab_separated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "assignment.tsv")
+            write_assignment_tsv(path, _TWO_ROOM_OBJECTS_CELLS)
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        self.assertEqual(len(lines), 6)
+        for line in lines:
+            scene, name = line.split("\t")
+            self.assertTrue(scene)
+            self.assertTrue(name)
+
+    def test_the_returned_mapping_matches_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "assignment.tsv")
+            result = write_assignment_tsv(path, _TWO_ROOM_OBJECTS_CELLS)
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        from_file = dict(line.split("\t") for line in lines)
+        self.assertEqual(sorted(from_file), sorted(result))
+        for scene, name in from_file.items():
+            self.assertEqual(result[scene][2], name)
+
+    def test_it_uses_the_room_balanced_design_not_the_greedy_one(self):
+        """The whole point of the tool: the living room does not take every scene."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "assignment.tsv")
+            result = write_assignment_tsv(path, _TWO_ROOM_OBJECTS_CELLS)
+        rooms_assigned = collections.Counter(room for room, _a, _c in result.values())
+        self.assertLess(max(rooms_assigned.values()), len(_TWO_ROOM_OBJECTS_CELLS) // 4)
+
+    def test_no_scenes_at_all_raises_rather_than_writing_an_empty_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "assignment.tsv")
+            with self.assertRaises(ValueError):
+                write_assignment_tsv(path, ())
+            self.assertFalse(os.path.exists(path))
 
 
 class TestTheExitCode(unittest.TestCase):

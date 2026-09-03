@@ -16,12 +16,13 @@ import numpy as np
 
 from _interpreter import assert_interpreter  # noqa: F401
 
-from earshot.memory.store import SemanticEntry, SemanticStore
+from earshot.memory.store import EpisodicEntry, EpisodicStore, SemanticEntry, SemanticStore
 from earshot.task.memory_prior import (
     RUN_DISCLOSURE,
     MemoryPrior,
     PriorMiss,
     category_points,
+    points_by_category_for_cell,
     resolve_prior,
 )
 from earshot.types import Xyz
@@ -35,6 +36,10 @@ def _entry(sound_class, room, category, embedding, donor_scene="donor_1"):
         embedding=np.asarray(embedding, dtype=np.float32),
         donor_scene=donor_scene,
     )
+
+
+def _episodic(scene, room, category, point):
+    return EpisodicEntry(scene=scene, room=room, category=category, point=Xyz(*point))
 
 
 class _Goal:
@@ -95,6 +100,70 @@ class TestCategoryPoints(unittest.TestCase):
 
     def test_a_scene_with_no_episodes_is_an_empty_table_not_a_raise(self):
         self.assertEqual(category_points(_Dataset([])), {})
+
+
+class TestPointsByCategoryForCell(unittest.TestCase):
+    """THE FIX: what makes `HEARD_SEEN` and `HEARD_UNSEEN` capable of disagreeing at all.
+
+    `resolve_prior` votes on the semantic store, which `stores_for_cell` never filters
+    by scene -- `HEARD_SEEN` and `HEARD_UNSEEN` recall the identical category from the
+    identical store. `category_points` alone resolves that category through the SAME
+    scene ground truth in both cells, so a `MemoryContext` built from it directly is one
+    the two cells cannot be told apart by. This class is the forced-failure arm made an
+    assertion: build the mapping without the episodic recall this function adds, and the
+    two cells collapse to one number.
+    """
+
+    def setUp(self):
+        self.ground_truth = _Dataset(
+            [_Episode("stove", [_Goal(Xyz(9.0, 0.0, 0.0))])]
+        )
+
+    def test_a_toured_categorys_own_recalled_point_wins_over_ground_truth(self):
+        episodic = EpisodicStore(entries=(
+            _episodic("scene_a", "kitchen", "stove", (1.0, 0.0, 0.0)),
+        ))
+        table = points_by_category_for_cell(self.ground_truth, episodic, "scene_a")
+        self.assertEqual(table["stove"], (Xyz(1.0, 0.0, 0.0),))
+
+    def test_an_untoured_scene_falls_back_to_ground_truth(self):
+        """The `HEARD_UNSEEN` cell: `without_scene` has already emptied `episodic` before
+        this is called, so every category falls through to `category_points`."""
+        table = points_by_category_for_cell(self.ground_truth, EpisodicStore(), "scene_a")
+        self.assertEqual(table["stove"], (Xyz(9.0, 0.0, 0.0),))
+
+    def test_a_category_the_tour_never_reached_also_falls_back(self):
+        """The tour visited a different room; this category is untouched by it."""
+        episodic = EpisodicStore(entries=(
+            _episodic("scene_a", "bathroom", "toilet", (2.0, 0.0, 0.0)),
+        ))
+        table = points_by_category_for_cell(self.ground_truth, episodic, "scene_a")
+        self.assertEqual(table["stove"], (Xyz(9.0, 0.0, 0.0),))
+
+    def test_a_recall_from_a_different_scene_does_not_leak_in(self):
+        episodic = EpisodicStore(entries=(
+            _episodic("scene_b", "kitchen", "stove", (1.0, 0.0, 0.0)),
+        ))
+        table = points_by_category_for_cell(self.ground_truth, episodic, "scene_a")
+        self.assertEqual(table["stove"], (Xyz(9.0, 0.0, 0.0),))
+
+    def test_seen_and_unseen_now_resolve_to_different_places(self):
+        """The headline: two cells, same store, same vote, different answer -- because
+        this function, not `category_points` alone, is what the driver must call."""
+        episodic = EpisodicStore(entries=(
+            _episodic("scene_a", "kitchen", "stove", (1.0, 0.0, 0.0)),
+        ))
+        seen = points_by_category_for_cell(self.ground_truth, episodic, "scene_a")
+        unseen = points_by_category_for_cell(self.ground_truth, EpisodicStore(), "scene_a")
+        self.assertNotEqual(seen["stove"], unseen["stove"])
+
+    def test_it_mutates_neither_the_dataset_nor_the_episodic_store(self):
+        episodic = EpisodicStore(entries=(
+            _episodic("scene_a", "kitchen", "stove", (1.0, 0.0, 0.0)),
+        ))
+        before = episodic.entries
+        points_by_category_for_cell(self.ground_truth, episodic, "scene_a")
+        self.assertIs(episodic.entries, before)
 
 
 class TestTheHealthyArm(unittest.TestCase):

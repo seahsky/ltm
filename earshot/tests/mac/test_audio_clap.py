@@ -21,10 +21,13 @@ from earshot.audio.clap import (
     ANOMALY_GATE_TAU,
     CLASS_TO_CLAP_PROMPT,
     NORMAL_PROMPTS,
+    SOUNDING_CLASSES,
     _CARRIED_CLAP_PROMPTS,
+    audio_embedding,
     classify_anomaly,
     heard_clip_for_clap,
     is_anomaly,
+    testimony_bank,
 )
 
 
@@ -197,6 +200,75 @@ class TestHeardClip(unittest.TestCase):
     def test_a_mono_signal_passes_through(self):
         waveform, _ = heard_clip_for_clap(np.ones(8, dtype=np.float32), 48000)
         self.assertEqual(waveform.shape, (8,))
+
+
+
+class TestTheBankAClassBelongsTo(unittest.TestCase):
+    """`testimony_bank` picks ONE bank, which is what HAZARD 1 requires of every caller."""
+
+    def test_a_carried_name_gets_the_carried_bank(self):
+        self.assertEqual(testimony_bank("alarm"), tuple(ANOMALY_CLASSES))
+
+    def test_a_sounding_name_gets_the_sounding_bank(self):
+        self.assertEqual(testimony_bank("toilet_flush"), tuple(SOUNDING_CLASSES))
+
+    def test_a_name_in_neither_bank_raises(self):
+        """Not "fall back to the emergency three" -- that IS the defect this replaces."""
+        with self.assertRaises(KeyError):
+            testimony_bank("a_sound_nobody_staged")
+
+    def test_it_never_returns_the_two_banks_mixed(self):
+        """HAZARD 1: `baby_cry` and `crying_baby` share prompt text, so an argmax over
+        the union ties and breaks on dict order."""
+        for name in tuple(ANOMALY_CLASSES) + tuple(SOUNDING_CLASSES):
+            bank = set(testimony_bank(name))
+            self.assertTrue(
+                bank.isdisjoint(ANOMALY_CLASSES) or bank.isdisjoint(SOUNDING_CLASSES),
+                name,
+            )
+
+    def test_every_shipped_class_has_a_bank_containing_it(self):
+        for name in tuple(ANOMALY_CLASSES) + tuple(SOUNDING_CLASSES):
+            self.assertIn(name, testimony_bank(name))
+
+
+class TestOneEmbeddingServesBothQuestions(unittest.TestCase):
+    """A caller asking the gate and the testimony about one clip pays for one forward
+    pass, and both answers are then about the same render."""
+
+    def setUp(self):
+        self.encoder = encoder_favouring(CLASS_TO_CLAP_PROMPT["alarm"])
+        self.waveform = np.ones(64, dtype=np.float32)
+
+    def test_classify_with_an_embedding_matches_classify_without(self):
+        want, want_scores = classify_anomaly(self.waveform, 44100, self.encoder)
+        embedding = audio_embedding(self.waveform, 44100, self.encoder)
+        got, got_scores = classify_anomaly(
+            self.waveform, 44100, self.encoder, embedding=embedding
+        )
+        self.assertEqual(got, want)
+        self.assertEqual(got_scores, want_scores)
+
+    def test_the_gate_with_an_embedding_matches_the_gate_without(self):
+        want = is_anomaly(self.waveform, 44100, self.encoder)
+        embedding = audio_embedding(self.waveform, 44100, self.encoder)
+        got = is_anomaly(self.waveform, 44100, self.encoder, embedding=embedding)
+        self.assertEqual(got, want)
+
+    def test_a_supplied_embedding_skips_the_audio_encoder_entirely(self):
+        """Measured, not proxied: `seen_rates` grows once per `encode_audio`."""
+        embedding = audio_embedding(self.waveform, 44100, self.encoder)
+        before = len(self.encoder.seen_rates)
+        classify_anomaly(self.waveform, 44100, self.encoder, embedding=embedding)
+        is_anomaly(self.waveform, 44100, self.encoder, embedding=embedding)
+        self.assertEqual(len(self.encoder.seen_rates), before)
+
+    def test_without_one_it_still_calls_the_audio_encoder(self):
+        """The other arm, so the test above cannot pass on a counter that never moves."""
+        before = len(self.encoder.seen_rates)
+        classify_anomaly(self.waveform, 44100, self.encoder)
+        self.assertGreater(len(self.encoder.seen_rates), before)
+
 
 
 if __name__ == "__main__":

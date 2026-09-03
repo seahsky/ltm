@@ -76,6 +76,14 @@ from earshot.task.runner import (
     silent_phase_tally,
     tail_is_active,
 )
+from earshot.memory.store import (
+    EpisodicEntry,
+    EpisodicStore,
+    MemoryCondition,
+    SemanticEntry,
+    SemanticStore,
+)
+from earshot.task.memory_prior import RUN_DISCLOSURE
 from earshot.types import Pose, Xyz
 
 # A short clip so the convolution is cheap; the level is `AudioConfig`'s own
@@ -2879,6 +2887,24 @@ def _encoder_favouring(prompt):
     return _SpyClapEncoder(audio_fakes.one_hot(0, scale=1.0), vectors)
 
 
+def _encoder_scoring(scales):
+    """A CLAP stand-in with a chosen cosine per prompt. `{prompt_text: scale}`.
+
+    `_encoder_favouring` is the one-prompt case. This one exists because the gate and the
+    testimony read DIFFERENT banks, so demonstrating that needs a clip scoring in both --
+    one favoured prompt cannot show two banks disagreeing.
+    """
+    from earshot.audio.clap import CLASS_TO_CLAP_PROMPT, NORMAL_PROMPTS
+
+    vectors = {
+        text: audio_fakes.one_hot(1, scale=0.0)
+        for text in tuple(CLASS_TO_CLAP_PROMPT.values()) + tuple(NORMAL_PROMPTS)
+    }
+    for text, scale in scales.items():
+        vectors[text] = audio_fakes.one_hot(0, scale=scale)
+    return _SpyClapEncoder(audio_fakes.one_hot(0, scale=1.0), vectors)
+
+
 def _clap_episode(encoder, **cfg_overrides):
     """``TestTheFullLoop``'s geometry with an encoder wired in.
 
@@ -2979,6 +3005,70 @@ class TestTheClassificationWaitsForTheReadWindowToFill(unittest.TestCase):
             self.result.audit.funnel_stage, FunnelStage.INVESTIGATE_ENTERED
         )
         self.assertEqual(self.result.audit.metrics["clap_after_offset"], 0.0)
+
+
+class TestTheTestimonyNamesTheRunsOwnBank(unittest.TestCase):
+    """The report said "alarm" on a `toilet_flush` episode, and this is both arms of it.
+
+    `is_anomaly` defaults to `ANOMALY_CLASSES` -- `alarm`, `baby_cry`, `glass_break` --
+    because `ANOMALY_GATE_DELTA` and `ANOMALY_GATE_TAU` were calibrated against exactly
+    those prompts, and `clap.py` HAZARD 2 forbids quoting them for a wider bank. The
+    runner then copied that gate's `best_class` into `report.anomaly_class`, which is an
+    argmax over three emergency names whatever the episode's source actually was.
+
+    ADR-0018's matrix runs `toilet_flush`, `snoring` and `keyboard_typing`, so under the
+    old wiring every one of those episodes would testify to a sound that was not there.
+    The gate keeps its bank; the testimony takes the run's own.
+
+    The fixture makes the two banks disagree ON PURPOSE: the alarm prompt scores 0.5 and
+    the flush prompt 1.0, so the gate fires calling it "alarm" and the testimony says
+    "toilet_flush".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from earshot.audio.clap import CLASS_TO_CLAP_PROMPT
+
+        cls.encoder = _encoder_scoring({
+            CLASS_TO_CLAP_PROMPT["alarm"]: 0.5,
+            CLASS_TO_CLAP_PROMPT["toilet_flush"]: 1.0,
+        })
+        cls.result, cls.cfg = _clap_episode(cls.encoder, anomaly_class="toilet_flush")
+
+    def test_the_report_names_the_class_that_was_heard(self):
+        self.assertEqual(self.result.report.anomaly_class, "toilet_flush")
+
+    def test_it_is_not_one_of_the_three_emergency_names(self):
+        """The defect stated as itself, not as the absence of the fix."""
+        from earshot.audio.clap import ANOMALY_CLASSES
+
+        self.assertNotIn(self.result.report.anomaly_class, ANOMALY_CLASSES)
+
+    def test_the_gate_still_fired_on_its_own_calibrated_bank(self):
+        """Unchanged, and the detour still ran -- otherwise this would be a report fix
+        that quietly disarmed the interrupt."""
+        self.assertGreaterEqual(
+            self.result.audit.funnel_stage, FunnelStage.INVESTIGATE_ENTERED
+        )
+
+    def test_one_forward_pass_serves_both_questions(self):
+        """Two banks, ONE render. The audio encoder is 153.5 M params, and a gate and a
+        testimony about different renders would agree only by luck."""
+        self.assertEqual(len(self.encoder.waveforms), 1)
+
+
+class TestTheCarriedBankStillWorks(unittest.TestCase):
+    """The healthy arm: a run whose class IS one of the three is unchanged."""
+
+    def test_an_alarm_run_still_testifies_to_alarm(self):
+        from earshot.audio.clap import CLASS_TO_CLAP_PROMPT
+
+        encoder = _encoder_scoring({
+            CLASS_TO_CLAP_PROMPT["alarm"]: 1.0,
+            CLASS_TO_CLAP_PROMPT["toilet_flush"]: 0.5,
+        })
+        result, _cfg = _clap_episode(encoder, anomaly_class="alarm")
+        self.assertEqual(result.report.anomaly_class, "alarm")
 
 
 class TestTheInterruptWaitsForTheVerdictItIsGatedOn(unittest.TestCase):
@@ -3373,13 +3463,17 @@ class _StoppedAfterThePreflight(RuntimeError):
     """
 
 
-def _run_to_the_preflight(cfg, clip, clip_path, said):
+def _run_to_the_preflight(cfg, clip, clip_path, said, **run_kwargs):
     """Drive ``run()`` as far as the accumulator's preflight, with nothing real behind it.
 
     Everything ``run()`` reaches for BEFORE the preflight is stubbed and nothing after it
     is: the point of the preflight is that a config typo costs seconds rather than a
     scene load, a CLAP load and 16 calibration renders per episode, and a test that had
     to build any of those would not be able to say so.
+
+    ``run_kwargs`` forwards straight to ``runner.run`` -- ``memory_condition`` and
+    ``memory_prior_stores`` are constructed and validated BEFORE ``build_anomaly_episodes``
+    is even called, so this same stub reaches that code too.
     """
     import earshot.task.runner as runner
 
@@ -3418,7 +3512,7 @@ def _run_to_the_preflight(cfg, clip, clip_path, said):
     for name, stub in patched.items():
         setattr(runner, name, stub)
     try:
-        runner.run(cfg, progress=said.append)
+        runner.run(cfg, progress=said.append, **run_kwargs)
     finally:
         for name, real in saved.items():
             setattr(runner, name, real)
@@ -3505,6 +3599,145 @@ class TestTheAccumulatorsOneConfigurationRefusal(unittest.TestCase):
         under = make_config(audio=AudioConfig(step_seconds=4.9))
         with self.assertRaises(_StoppedAfterThePreflight):
             _run_to_the_preflight(under, clip, self.CLIP_PATH, [])
+
+
+def _semantic_entry(sound_class, category, embedding=(1.0, 0.0)):
+    return SemanticEntry(
+        sound_class=sound_class,
+        room="bedroom",
+        category=category,
+        embedding=list(embedding),
+        donor_scene="donor",
+    )
+
+
+class TestTheMatrixCellIsBuiltBeforeTheSimulator(unittest.TestCase):
+    """``run()``'s new memory wiring, on the same seam as the preflight tests above:
+    ``memory_condition``/``memory_prior_stores`` are validated and the cell's
+    ``MemoryContext`` is built right after ``_pick_scene`` -- before
+    ``build_anomaly_episodes``, before the simulator -- so a Mac can exercise all of it.
+    """
+
+    CLIP_PATH = "/data/anomaly_audio/alarm.wav"
+
+    def _cfg_and_clip(self):
+        cfg = make_config(anomaly_class="alarm")
+        clip = synthetic_burst(cfg.audio.sample_rate, seconds=5.0)
+        return cfg, clip
+
+    def test_a_condition_with_no_stores_raises_before_anything_is_built(self):
+        """THE FORCED FAILURE. A cell selected with nothing to realise it must not run
+        silently under `MemoryCondition.NONE` -- that is a matrix cell that looks
+        populated and measures nothing, the exact shape this repo has paid for twice."""
+        cfg, clip = self._cfg_and_clip()
+        with self.assertRaises(ValueError) as caught:
+            _run_to_the_preflight(
+                cfg, clip, self.CLIP_PATH, [],
+                memory_condition=MemoryCondition.HEARD_SEEN,
+            )
+        message = str(caught.exception)
+        self.assertIn("memory_prior_stores", message)
+        self.assertIn("heard_seen", message)
+
+    def test_a_condition_with_stores_reaches_the_identical_stopping_point(self):
+        """THE HEALTHY ARM. Memory construction must not itself change where the
+        function stops -- it reaches the same preflight the no-memory tests reach."""
+        cfg, clip = self._cfg_and_clip()
+        stores = (SemanticStore(entries=(_semantic_entry("alarm", "bed"),)), EpisodicStore())
+        with self.assertRaises(_StoppedAfterThePreflight):
+            _run_to_the_preflight(
+                cfg, clip, self.CLIP_PATH, [],
+                memory_condition=MemoryCondition.HEARD_SEEN,
+                memory_prior_stores=stores,
+            )
+
+    def test_the_condition_filters_the_semantic_store_before_the_context_is_built(self):
+        """`stores_for_cell` runs INSIDE `run()`, not left to the caller: a
+        `NOT_HEARD_*` condition must not still carry the run's own class."""
+        import earshot.task.runner as runner_module
+
+        cfg, clip = self._cfg_and_clip()
+        semantic = SemanticStore(entries=(
+            _semantic_entry("alarm", "bed", (1.0, 0.0)),
+            _semantic_entry("snoring", "bed", (0.0, 1.0)),
+        ))
+        captured = {}
+        real_context = runner_module.MemoryContext
+
+        def spy_context(*args, **kwargs):
+            captured["semantic"] = kwargs.get("semantic")
+            return real_context(*args, **kwargs)
+
+        runner_module.MemoryContext = spy_context
+        try:
+            with self.assertRaises(_StoppedAfterThePreflight):
+                _run_to_the_preflight(
+                    cfg, clip, self.CLIP_PATH, [],
+                    memory_condition=MemoryCondition.NOT_HEARD_SEEN,
+                    memory_prior_stores=(semantic, EpisodicStore()),
+                )
+        finally:
+            runner_module.MemoryContext = real_context
+        self.assertEqual(
+            sorted(entry.sound_class for entry in captured["semantic"].entries),
+            ["snoring"],
+        )
+
+    def test_a_toured_categorys_own_point_reaches_the_context_over_ground_truth(self):
+        """THE SEEN AXIS ITSELF. Without `points_by_category_for_cell` this test cannot
+        distinguish `HEARD_SEEN` from `HEARD_UNSEEN` at all -- see that module's own
+        tests for the isolated claim; this asserts `run()` actually calls it."""
+        import earshot.task.runner as runner_module
+
+        cfg, clip = self._cfg_and_clip()
+        semantic = SemanticStore(entries=(_semantic_entry("alarm", "bed"),))
+        episodic = EpisodicStore(entries=(
+            EpisodicEntry(scene="FAKE", room="bedroom", category="bed",
+                          point=Xyz(1.0, 0.0, 0.0)),
+        ))
+        captured = {}
+        real_context = runner_module.MemoryContext
+
+        def spy_context(*args, **kwargs):
+            captured["points_by_category"] = kwargs.get("points_by_category")
+            return real_context(*args, **kwargs)
+
+        runner_module.MemoryContext = spy_context
+        try:
+            with self.assertRaises(_StoppedAfterThePreflight):
+                _run_to_the_preflight(
+                    cfg, clip, self.CLIP_PATH, [],
+                    memory_condition=MemoryCondition.HEARD_SEEN,
+                    memory_prior_stores=(semantic, episodic),
+                )
+        finally:
+            runner_module.MemoryContext = real_context
+        self.assertEqual(captured["points_by_category"]["bed"], (Xyz(1.0, 0.0, 0.0),))
+
+    def test_the_disclosure_is_printed_when_the_arm_is_live(self):
+        cfg, clip = self._cfg_and_clip()
+        said = []
+        stores = (SemanticStore(entries=(_semantic_entry("alarm", "bed"),)), EpisodicStore())
+        with self.assertRaises(_StoppedAfterThePreflight):
+            _run_to_the_preflight(
+                cfg, clip, self.CLIP_PATH, said,
+                memory_condition=MemoryCondition.HEARD_SEEN,
+                memory_prior_stores=stores,
+            )
+        self.assertTrue(any(RUN_DISCLOSURE in line for line in said))
+
+    def test_no_condition_at_all_is_byte_identical_to_the_pre_matrix_behaviour(self):
+        """Every non-matrix caller passes nothing at all, and that path is untouched:
+        the same `said` transcript either way."""
+        cfg, clip = self._cfg_and_clip()
+        said_bare, said_explicit_none = [], []
+        with self.assertRaises(_StoppedAfterThePreflight):
+            _run_to_the_preflight(cfg, clip, self.CLIP_PATH, said_bare)
+        with self.assertRaises(_StoppedAfterThePreflight):
+            _run_to_the_preflight(
+                cfg, clip, self.CLIP_PATH, said_explicit_none, memory_condition=None
+            )
+        self.assertEqual(said_bare, said_explicit_none)
 
 
 def _detour_episode(world=None, **cfg_overrides):

@@ -76,6 +76,7 @@ __all__ = [
     "room_assignment_detail",
     "constant_predictor_share",
     "balanced_assignment",
+    "write_assignment_tsv",
     "format_report",
     "main",
 ]
@@ -400,6 +401,42 @@ def _pct(n: int, total: int) -> str:
     return "   n/a" if total == 0 else "{:5.1f}%".format(100.0 * n / total)
 
 
+def write_assignment_tsv(path: str, cells: Sequence[CellYield]) -> Dict[str, Tuple[str, str, str]]:
+    """The room-balanced design, as `scene\\tanomaly_class` lines a driver can read.
+
+    THE decision this tool exists to hand off, in the one shape `matrix_sweep.sh`'s bash
+    loop can consume without re-deriving anything: `while read -r scene class; do ...`.
+    Returns `{scene: (room, anchor, class)}` too, so a Python caller of this module (a
+    test, or a driver that wants the room/anchor columns as well) does not have to
+    re-parse its own file back.
+
+    Raises rather than writing an empty file if the balanced design has nothing to
+    assign — a matrix sweep launched against zero scenes is worth stopping before any
+    GPU time is spent, not worth discovering from an empty TSV three steps later.
+    """
+    per_room = rooms_by_scene(cells)
+    rooms = sorted({room for scene in per_room.values() for room in scene})
+    assignment = balanced_assignment(per_room, rooms)
+    if not assignment:
+        raise ValueError(
+            "the balanced design assigns no scene at all -- {} cell(s), {} room(s) "
+            "found; check --classes and --split before writing an assignment from "
+            "this".format(len(cells), len(rooms))
+        )
+    detail = room_assignment_detail(cells, assignment)
+    missing = sorted(set(assignment) - set(detail))
+    if missing:
+        raise ValueError(
+            "the balanced design assigned {} scene(s) a room with no cell to render "
+            "it from: {}".format(len(missing), ", ".join(missing))
+        )
+    with open(path, "w", encoding="utf-8") as sink:
+        for scene in sorted(detail):
+            _room, _anchor, name, _n = detail[scene]
+            sink.write("{}\t{}\n".format(scene, name))
+    return {scene: detail[scene][:3] for scene in detail}
+
+
 def format_report(
     cells: Sequence[CellYield],
     *,
@@ -683,6 +720,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--n-episodes", type=int, default=SWEEP_N_EPISODES)
     parser.add_argument("--limit", type=int, default=0, help="cap the scene count; 0 is all")
     parser.add_argument("--out", default=None)
+    parser.add_argument(
+        "--emit-assignment", default=None,
+        help="write the balanced design as `scene<TAB>class` lines to this path -- "
+             "the decision `matrix_sweep.sh` reads, not a summary of it",
+    )
     args = parser.parse_args(None if argv is None else list(argv))
 
     if args.n_episodes < 1:
@@ -770,6 +812,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 sort_keys=True,
             )
         print("  written: {}".format(args.out))
+
+    if args.emit_assignment:
+        try:
+            assignment = write_assignment_tsv(args.emit_assignment, cells)
+        except ValueError as exc:
+            print("FATAL: {}".format(exc), file=sys.stderr)
+            return 2
+        print("  assignment written: {} ({} scene(s))".format(
+            args.emit_assignment, len(assignment)
+        ))
+        for scene in sorted(assignment):
+            room, anchor, name = assignment[scene]
+            print("    {:18s} {:13s} {:12s} {}".format(scene, room, anchor, name))
 
     # Red when NOTHING anchored anywhere. That is either a broken lookup or a scene set with
     # no anchor instances at all, and both are findings that must not exit 0.
