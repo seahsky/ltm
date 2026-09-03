@@ -131,6 +131,16 @@ nrun bash earshot/tools/prior_pass.sh --tag prior-1 \
 python -m earshot --run-dir runs/<tag> --clap --anomaly-class toilet_flush \
   --memory-condition heard_seen --memory-store runs/prior-1/store.json
 
+# THE MATRIX SWEEP: ADR-0018's four cells, carved on the assignment `anchor_yield`
+# computes fresh and the ONE prior pass that assignment needs. `heard_seen`,
+# `heard_unseen`, `not_heard_seen`, `not_heard_unseen` -- named after `MemoryCondition`'s
+# own values, so `window_report.py`/`episode_diff.py` read them with no new tool. Prints
+# both pre-registered contrasts (heard_seen vs not_heard_unseen, and the SEMANTIC-store-
+# alone co-primary heard_unseen vs not_heard_unseen) at the end, always
+nrun bash earshot/tools/matrix_sweep.sh --tag matrix-1
+python -m earshot.tools.window_report runs/matrix-1 \
+  --arms "heard_seen heard_unseen not_heard_seen not_heard_unseen"
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```
