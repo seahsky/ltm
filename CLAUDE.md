@@ -114,6 +114,23 @@ python -m earshot.tools.placement_report runs/<tag>
 # over four anchor OBJECTS is one room holding half the scenes. No GPU, no simulator, seconds
 python -m earshot.tools.anchor_yield
 
+# THE PRIOR PASS: walk the scripted tour over real scenes, render REAL audio of the given
+# classes at every reached stop, and dump `<tag>/store.json` -- what `run()`'s new
+# `--memory-store` flag reads. `--scenes`/`--classes` have no default on purpose: pass
+# `anchor_yield`'s own room-balanced assignment, not a guess. One tour per scene serves
+# every class in the bank that anchors at a room the scene has, so pass the whole bank in
+# one invocation. Continue-on-failure at the scene grain; nonzero only if every scene failed
+nrun bash earshot/tools/prior_pass.sh --tag prior-1 \
+  --scenes "sceneA sceneB sceneC" --classes "toilet_flush snoring keyboard_typing"
+
+# ONE EPISODE UNDER ONE MATRIX CELL -- reads the store the prior pass dumped and runs
+# `run_episode` with a real `MemoryContext` built for that cell. `--memory-condition none`
+# (the default) is byte-identical to no memory flags at all. Any other value needs
+# `--memory-store` and `--clap`; a condition with no store is a usage error caught before
+# the environment probe is paid for, not a silent run under `none`
+python -m earshot --run-dir runs/<tag> --clap --anomaly-class toilet_flush \
+  --memory-condition heard_seen --memory-store runs/prior-1/store.json
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```
