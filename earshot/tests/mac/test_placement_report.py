@@ -24,7 +24,6 @@ from earshot.report.audit import EpisodeAudit, FunnelStage
 from earshot.tools.placement_report import (
     ABLATION_ARMS,
     ANCHOR_METRIC,
-    UNRECORDED_SCENE,
     branch_of,
     format_arm,
     main,
@@ -32,20 +31,29 @@ from earshot.tools.placement_report import (
     read_sweep,
 )
 
+# What the runner actually writes into `scene_id`, and what the sweep names the directory.
+# They are not the same string, which is the defect `TestScenesAreKeyedByDirectory` pins.
+GLB = "hm3d/val/00835-q3zU7Yy5E5s/q3zU7Yy5E5s.basis.glb"
+
 REACHED = FunnelStage.PRIMARY_RESUMED
 ABANDONED = FunnelStage.INVESTIGATE_ENTERED
 
 DRIVER = pathlib.Path(__file__).resolve().parents[2] / "tools" / "ablation_sweep.sh"
 
 
-def write_scene(arm_dir, scene, episodes):
-    """One scene directory. `episodes` is a list of (stage, metrics) pairs."""
+def write_scene(arm_dir, scene, episodes, scene_id=None):
+    """One scene directory. `episodes` is a list of (stage, metrics) pairs.
+
+    `scene_id` defaults to something that is NOT the directory name, because on a real run
+    it never is: the sweep names the directory `q3zU7Yy5E5s` and the runner records
+    `hm3d/val/00835-q3zU7Yy5E5s/q3zU7Yy5E5s.basis.glb`.
+    """
     scene_dir = pathlib.Path(arm_dir) / scene
     scene_dir.mkdir(parents=True, exist_ok=True)
     for index, (stage, metrics) in enumerate(episodes):
         audit = EpisodeAudit(
             episode_index=index,
-            scene_id=scene,
+            scene_id=GLB if scene_id is None else scene_id,
             funnel_stage=stage,
             metrics=metrics,
         )
@@ -181,13 +189,53 @@ class TestScenesAndBarrenDirectories(unittest.TestCase):
         a failure is what made `abl-1` exit 1 over five complete arms."""
         arm = self.tmp / "full"
         write_scene(arm, "sceneA", [anchored()])
-        (arm / "barren" / "episodes").mkdir(parents=True)
+        (arm / "empty-episodes-dir" / "episodes").mkdir(parents=True)
         placement = read_arm(str(arm), arm="full")
-        self.assertEqual(placement.barren, ("barren",))
+        self.assertEqual(placement.barren, ("empty-episodes-dir",))
         self.assertEqual(placement.n, 1)
         self.assertIn("zero yield", "\n".join(format_arm(placement)))
 
-    def test_an_unrecorded_scene_id_is_its_own_row(self):
+    def test_a_scene_that_never_got_an_episodes_directory_is_still_barren(self):
+        """The sweep SKIPS a zero-yield scene, so its directory can have no `episodes/` at
+        all. `window_report.scene_dirs` filters exactly those out, which is right for a
+        reader of episodes and would drop the measurement here."""
+        arm = self.tmp / "full"
+        write_scene(arm, "sceneA", [anchored()])
+        (arm / "never-built").mkdir(parents=True)
+        placement = read_arm(str(arm), arm="full")
+        self.assertEqual(placement.barren, ("never-built",))
+
+
+class TestScenesAreKeyedByDirectory(unittest.TestCase):
+    """The defect the first draft shipped with, pinned.
+
+    The runner records `scene_id` as a full `.glb` path; the sweep names the directory after
+    the bare scene id. Grouping on the recorded value matches no directory, so every live
+    scene was reported barren AND listed again under its path, and the one truly barren
+    scene was missing.
+    """
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_a_scene_with_episodes_is_never_also_reported_barren(self):
+        arm = self.tmp / "full"
+        write_scene(arm, "q3zU7Yy5E5s", [anchored(), anchored()], scene_id=GLB)
+        placement = read_arm(str(arm), arm="full")
+        self.assertEqual([scene.scene for scene in placement.scenes], ["q3zU7Yy5E5s"])
+        self.assertEqual(placement.barren, ())
+
+    def test_the_row_is_labelled_by_the_directory_and_not_the_glb_path(self):
+        """Every other reader in this repo prints the bare id, and a column of `.glb` paths
+        is unreadable beside them."""
+        arm = self.tmp / "full"
+        write_scene(arm, "q3zU7Yy5E5s", [anchored()], scene_id=GLB)
+        text = "\n".join(format_arm(read_arm(str(arm), arm="full")))
+        self.assertIn("q3zU7Yy5E5s", text)
+        self.assertNotIn(".basis.glb", text)
+
+    def test_an_audit_with_no_scene_id_at_all_still_lands_in_its_directory(self):
         arm = self.tmp / "full"
         scene_dir = arm / "sceneA"
         scene_dir.mkdir(parents=True)
@@ -196,7 +244,8 @@ class TestScenesAndBarrenDirectories(unittest.TestCase):
             EpisodeAudit(episode_index=0, metrics={ANCHOR_METRIC: 1.0}),
         )
         placement = read_arm(str(arm), arm="full")
-        self.assertEqual([scene.scene for scene in placement.scenes], [UNRECORDED_SCENE])
+        self.assertEqual([scene.scene for scene in placement.scenes], ["sceneA"])
+        self.assertEqual(placement.n_anchored, 1)
 
 
 class TestReadSweep(unittest.TestCase):

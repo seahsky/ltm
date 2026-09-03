@@ -14,8 +14,9 @@ its SRs moved. THAT MOVEMENT IS NOT EVIDENCE THE CHANGE TOOK: a re-run of the sa
 too, by 3.0 points on byte-identical bytes (`repeat-1`). The only record that says which
 branch an episode took is `source_at_class_anchor`, and nothing in `tools/` read it, so a
 sweep could re-measure the old task with new dice and print a clean table. Asking the
-question with a shell heredoc is how `pilot-1` lost 42 minutes of V100 time to a filename;
-the enumeration here is `window_report.load_arm_audits` and is not a second glob.
+question with a shell heredoc is how `pilot-1` lost 42 minutes of V100 time to a filename, so
+the episode enumeration here is `smoke.episode_indices` and `artifacts.episode_paths` called,
+never a second glob written.
 
 **MISSING IS NOT FALSE.** The field arrived with ADR-0022. An episode whose audit does not
 carry it was written by a runner that could not have anchored anything, so it gets its own
@@ -34,8 +35,10 @@ geometrically in every scene by construction — `glass_break` is one — so the
 run's anomaly class as the thing to read out of `provenance.txt` before calling it a defect.
 
 "Reached" is `funnel_stage >= SOURCE_REACHED`, which is `window_report`'s definition and not a
-second one. Scenes are grouped by the audit's own recorded `scene_id`; a record written before
-that field existed is reported under its own label rather than silently merged into a scene.
+second one. Scenes are keyed by DIRECTORY NAME, because the runner records `scene_id` as a full
+`.glb` path while the sweep names the directory after the bare id: grouping on the recorded
+value matches no directory at all, and the first draft of this file reported all nineteen live
+scenes as barren while missing the one that truly was.
 """
 
 from __future__ import annotations
@@ -43,15 +46,16 @@ from __future__ import annotations
 import argparse
 import pathlib
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
+from earshot.report.artifacts import episode_paths, read_audit
 from earshot.report.audit import EpisodeAudit, FunnelStage
-from earshot.tools.window_report import load_arm_audits, scene_dirs
+from earshot.task.smoke import episode_indices
+from earshot.tools.window_report import scene_dirs
 
 __all__ = [
     "ABLATION_ARMS",
     "ANCHOR_METRIC",
-    "UNRECORDED_SCENE",
     "ScenePlacement",
     "ArmPlacement",
     "branch_of",
@@ -70,10 +74,6 @@ ANCHOR_METRIC = "source_at_class_anchor"
 # driver's own `ARM_NAMES`, because two lists of arm names that drift apart is a reader that
 # silently skips an arm and reports a complete sweep.
 ABLATION_ARMS = ("full", "no-climb", "no-cue", "scan-only", "anechoic")
-
-# The label for an episode whose audit carries no `scene_id`. Not a scene, and not folded
-# into one.
-UNRECORDED_SCENE = "(scene_id NOT RECORDED)"
 
 
 @dataclass(frozen=True)
@@ -159,34 +159,53 @@ def _reached(audit: EpisodeAudit) -> bool:
 
 
 def read_arm(arm_dir: str, *, arm: str) -> ArmPlacement:
-    """Read one arm directory. The only function here that touches the disk."""
-    scene_names, audits = load_arm_audits(arm_dir)
+    """Read one arm directory. The only function here that touches the disk.
 
-    counts: Dict[str, List[int]] = {}
-    for audit in audits:
-        scene = audit.scene_id or UNRECORDED_SCENE
-        row = counts.setdefault(scene, [0, 0, 0, 0, 0, 0])
-        branch = branch_of(audit)
-        column = 0 if branch is True else (1 if branch is False else 2)
-        row[column] += 1
-        if _reached(audit):
-            row[column + 3] += 1
+    Scenes are keyed by DIRECTORY NAME and never by the audit's ``scene_id``. The runner
+    records the scene as its full ``.glb`` path and the sweep names the directory after the
+    bare id, so a reader that grouped on the recorded value cannot match a directory to the
+    episodes inside it: the first draft did exactly that and reported all nineteen live
+    scenes as barren while missing the one that truly was.
 
-    scenes = tuple(
-        ScenePlacement(
-            scene=scene,
-            n_anchored=row[0],
-            n_geometric=row[1],
-            n_missing=row[2],
-            n_reached_anchored=row[3],
-            n_reached_geometric=row[4],
-            n_reached_missing=row[5],
+    ``episode_indices`` and ``episode_paths`` are called rather than copied. What
+    ``window_report``'s header forbids is a second implementation of the FILENAME, and that
+    knowledge stays in ``report/artifacts.py`` where it belongs.
+
+    Every child directory is walked, not only the ones holding an ``episodes/`` directory.
+    ``window_report.scene_dirs`` requires that directory, which is right for a reader of
+    episodes and wrong here: a scene that built nothing may never have had one made, and
+    that scene is the measurement this column exists to carry.
+    """
+    scenes: List[ScenePlacement] = []
+    barren: List[str] = []
+    root = pathlib.Path(arm_dir)
+    children = sorted(root.iterdir()) if root.is_dir() else []
+    for scene_dir in (child for child in children if child.is_dir()):
+        row = [0, 0, 0, 0, 0, 0]
+        indices = episode_indices(str(scene_dir))
+        if not indices:
+            barren.append(scene_dir.name)
+            continue
+        for index in indices:
+            _agent_path, audit_path = episode_paths(str(scene_dir), index)
+            audit = read_audit(audit_path)
+            branch = branch_of(audit)
+            column = 0 if branch is True else (1 if branch is False else 2)
+            row[column] += 1
+            if _reached(audit):
+                row[column + 3] += 1
+        scenes.append(
+            ScenePlacement(
+                scene=scene_dir.name,
+                n_anchored=row[0],
+                n_geometric=row[1],
+                n_missing=row[2],
+                n_reached_anchored=row[3],
+                n_reached_geometric=row[4],
+                n_reached_missing=row[5],
+            )
         )
-        for scene, row in sorted(counts.items())
-    )
-    seen = {scene.scene for scene in scenes}
-    barren = tuple(name for name in scene_names if name not in seen)
-    return ArmPlacement(arm=arm, scenes=scenes, barren=barren)
+    return ArmPlacement(arm=arm, scenes=tuple(scenes), barren=tuple(barren))
 
 
 def read_sweep(
