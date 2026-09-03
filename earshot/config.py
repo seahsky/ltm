@@ -232,10 +232,17 @@ class RunConfig:
     ir_policy: IrPolicy = IrPolicy.FULL
 
     # -- the anomaly ----------------------------------------------------
-    # provenance: source — one of `audio.clips.ANOMALY_CLASSES`. It selects the ESC-50
-    # recording staged at `<AudioConfig.clip_dir>/<class>.wav`; `anomaly_clip` overrides
-    # the path outright. There is no synthetic fallback (ticket 22): a run whose staging
-    # failed raises rather than classifying CLAP against a noise burst.
+    # provenance: source — one of `audio.clips.ANOMALY_CLASSES` (the three emergency
+    # names) or `audio.clips.SOUNDING_CLASSES` (ADR-0018's bank of record), which is what
+    # the CLI already accepts. It selects the ESC-50 recording staged at
+    # `<AudioConfig.clip_dir>/<class>.wav`; `anomaly_clip` overrides the path outright.
+    # There is no synthetic fallback (ticket 22): a run whose staging failed raises
+    # rather than classifying CLAP against a noise burst.
+    #
+    # THE TWO BANKS ARE NOT INTERCHANGEABLE AT RUN TIME. `clap.is_anomaly` keeps
+    # `ANOMALY_CLASSES` whatever this says, because its calibrated thresholds were
+    # measured against those prompts alone; only the report's `anomaly_class` follows
+    # this field, via `clap.testimony_bank`. A class in neither bank raises there.
     anomaly_class: str = "alarm"
     anomaly_clip: Optional[str] = None
 

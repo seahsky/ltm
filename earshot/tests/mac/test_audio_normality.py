@@ -11,6 +11,7 @@ import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
 
+from earshot.audio.clap import ANOMALY_CLASSES, SOUNDING_CLASSES
 from earshot.audio.normality import (
     ROOM_KEYWORDS,
     ROOM_PRIOR,
@@ -35,6 +36,43 @@ class StubCaptioner:
         if self.raises:
             raise RuntimeError("the VLM fell over")
         return self.caption_text
+
+
+class TestTheRoomArmCanOnlySayTrueOrAbstain(unittest.TestCase):
+    """A standing fact about the wiring, asserted so it becomes a decision when it ends.
+
+    `runner.py` hands `is_anomalous_here` the TESTIMONY class -- what was heard -- which
+    is the right input for "is that sound unexpected here". Today it changes nothing:
+    `ROOM_PRIOR`'s normal sets name `running_water` and `appliance_hum`, and neither is
+    in `ANOMALY_CLASSES` or in `SOUNDING_CLASSES`. So for every class a run can actually
+    place, `room_conditioned_anomaly` returns True or abstains, and the room arm can
+    never veto an interrupt.
+
+    That is worth pinning rather than assuming. If a sounding class is ever added to a
+    room's normal set, this fails, and the runner line stops being a no-op -- which is
+    the moment someone has to decide whether a `pouring_water` in a bathroom should
+    still divert the agent.
+    """
+
+    def test_no_class_a_run_can_place_is_normal_in_any_room(self):
+        placeable = set(ANOMALY_CLASSES) | set(SOUNDING_CLASSES)
+        normal_anywhere = set().union(*ROOM_PRIOR.values())
+        self.assertEqual(
+            placeable & normal_anywhere,
+            set(),
+            "a placeable class became normal somewhere; the runner's room arm is no "
+            "longer a no-op and the wiring is now a decision",
+        )
+
+    def test_so_the_verdict_is_true_wherever_the_room_is_known(self):
+        for name in sorted(set(ANOMALY_CLASSES) | set(SOUNDING_CLASSES)):
+            for room in ROOM_PRIOR:
+                self.assertTrue(room_conditioned_anomaly(name, room), (name, room))
+
+    def test_and_the_prior_does_hold_a_normal_sound_so_this_is_not_vacuous(self):
+        """The other arm: the table CAN say normal, just not about a placeable class."""
+        self.assertTrue(any(ROOM_PRIOR.values()))
+        self.assertFalse(room_conditioned_anomaly("running_water", "bathroom"))
 
 
 class TestTaxonomy(unittest.TestCase):

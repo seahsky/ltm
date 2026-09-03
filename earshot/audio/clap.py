@@ -27,16 +27,18 @@ alternative is a seam that ships with one side.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-from earshot.audio.clips import ANOMALY_CLASSES
+from earshot.audio.clips import ANOMALY_CLASSES, SOUNDING_CLASSES
 from earshot.audio.vocabulary import prompts as _vocabulary_prompts
 
 __all__ = [
     "ANOMALY_CLASSES",
+    "SOUNDING_CLASSES",
     "AMBIGUOUS_CLASSES",
+    "testimony_bank",
     "CLASS_TO_CLAP_PROMPT",
     "NORMAL_PROMPTS",
     "ANOMALY_GATE_DELTA",
@@ -134,23 +136,71 @@ def audio_embedding(waveform: Any, sample_rate: int, encoder: Any) -> np.ndarray
     return _unit(encoder.encode_audio(waveform, sample_rate))
 
 
+def testimony_bank(anomaly_class: str) -> Tuple[str, ...]:
+    """The prompt bank a run's own class belongs to, for naming what was heard.
+
+    **HAZARD 1 in one function.** The two banks share prompt TEXT (`baby_cry` and
+    `crying_baby` are both "a baby crying") so an argmax over their union ties and breaks
+    on dict order. A caller picks one bank, and the bank a run should be scored against is
+    the one its own source was drawn from.
+
+    This exists because the runner reported the wrong one. `is_anomaly` defaults to
+    ``ANOMALY_CLASSES`` -- three emergency names that all sit at `bed` or at nothing -- and
+    the runner copied its ``best_class`` straight into the report's ``anomaly_class``. On a
+    `toilet_flush` episode the agent's testimony therefore said "alarm". The GATE keeps
+    that bank, because ``ANOMALY_GATE_DELTA`` and ``ANOMALY_GATE_TAU`` were calibrated
+    against it and HAZARD 2 forbids quoting them for any other; the TESTIMONY takes this
+    one.
+
+    Raises on a class in neither bank, rather than defaulting to the emergency three and
+    reproducing the defect under a new name.
+    """
+    if anomaly_class in ANOMALY_CLASSES:
+        return tuple(ANOMALY_CLASSES)
+    if anomaly_class in SOUNDING_CLASSES:
+        return tuple(SOUNDING_CLASSES)
+    raise KeyError(
+        "{!r} is in neither prompt bank; ANOMALY_CLASSES={} SOUNDING_CLASSES={}".format(
+            anomaly_class, list(ANOMALY_CLASSES), list(SOUNDING_CLASSES)
+        )
+    )
+
+
+def _bank_cosines(
+    audio: np.ndarray, encoder: Any, classes: Sequence[str]
+) -> Dict[str, float]:
+    """Cosine of one audio embedding against one bank's prompts. Pure but for the encoder."""
+    return {
+        name: float(np.dot(audio, _unit(encoder.encode_text(CLASS_TO_CLAP_PROMPT[name]))))
+        for name in classes
+    }
+
+
 def classify_anomaly(
     waveform: Any,
     sample_rate: int,
     encoder: Any,
     classes: Sequence[str] = ANOMALY_CLASSES,
+    *,
+    embedding: Optional[Any] = None,
 ) -> Tuple[str, Dict[str, float]]:
     """Forced ``argmax`` over the anomaly prompts. Returns ``(class, {class: cosine})``.
 
     Can never say "normal" — it picks the closest of the classes it is given. That is
     the right shape for "what was it, given that it was one of these", and the wrong
     shape for "was it anything at all", which is ``is_anomaly``.
+
+    ``embedding`` is the unit audio vector when the caller already has it. The audio
+    encoder is 153.5 M params, and a caller that asks two questions about ONE heard clip
+    must not pay for it twice — nor hand the two questions different renders, which is
+    what ``test_task_runner`` means by "the whole read window exactly once".
     """
-    audio = audio_embedding(waveform, sample_rate, encoder)
-    scores = {
-        name: float(np.dot(audio, _unit(encoder.encode_text(CLASS_TO_CLAP_PROMPT[name]))))
-        for name in classes
-    }
+    audio = (
+        audio_embedding(waveform, sample_rate, encoder)
+        if embedding is None
+        else _unit(embedding)
+    )
+    scores = _bank_cosines(audio, encoder, classes)
     return max(scores, key=lambda name: scores[name]), scores
 
 
@@ -163,6 +213,7 @@ def is_anomaly(
     normal_prompts: Sequence[str] = NORMAL_PROMPTS,
     delta: float = ANOMALY_GATE_DELTA,
     tau_abs: float = ANOMALY_GATE_TAU,
+    embedding: Optional[Any] = None,
 ) -> Tuple[bool, str, Dict[str, float]]:
     """The open-set gate: does this sound like an anomaly at all?
 
@@ -173,18 +224,25 @@ def is_anomaly(
     regardless of the verdict, so a caller can log what it *would* have classified —
     which is what made the convolved-audio recalibration diagnosable.
 
+    ``embedding`` is the unit audio vector when the caller already has it; see
+    ``classify_anomaly``. Same clip, one forward pass, two questions.
+
     ``scores`` carries every per-class cosine plus ``s_anom`` / ``s_norm`` / ``margin``.
     The defaults are the calibrated pair, not ``(0.0, 0.0)``: the old signature defaulted
     to "the anomaly side wins outright" and left the calibrated values to a caller that
     had to remember them, which is how the plain path needed two extra flags to get a
     working gate.
     """
-    audio = audio_embedding(waveform, sample_rate, encoder)
+    audio = (
+        audio_embedding(waveform, sample_rate, encoder)
+        if embedding is None
+        else _unit(embedding)
+    )
 
     def cosine(text: str) -> float:
         return float(np.dot(audio, _unit(encoder.encode_text(text))))
 
-    anomaly_scores = {name: cosine(CLASS_TO_CLAP_PROMPT[name]) for name in classes}
+    anomaly_scores = _bank_cosines(audio, encoder, classes)
     if not anomaly_scores:
         raise ValueError("no anomaly classes to score against")
     best_class = max(anomaly_scores, key=lambda name: anomaly_scores[name])

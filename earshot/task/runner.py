@@ -77,7 +77,13 @@ from earshot.audio.calibration import (
     sweep_loop_scatter,
     sweep_render_scatter,
 )
-from earshot.audio.clap import audio_embedding, heard_clip_for_clap, is_anomaly
+from earshot.audio.clap import (
+    audio_embedding,
+    classify_anomaly,
+    heard_clip_for_clap,
+    is_anomaly,
+    testimony_bank,
+)
 from earshot.audio.clips import load_anomaly_clip, render_through_ir, resolve_anomaly_clip, rms
 from earshot.audio.ir import anechoic_like
 from earshot.audio.lateral import lateral_sign
@@ -1173,17 +1179,47 @@ def run_episode(
                     waveform, sample_rate = heard_clip_for_clap(
                         heard_clip_window(tail, bed_clip=bed_clip), cfg.audio.sample_rate
                     )
-                    fired, best_class, _scores = is_anomaly(waveform, sample_rate, clap_encoder)
-                    anomaly_class = best_class
-                    verdict = is_anomalous_here(fired, best_class, room)
-                    if memory is not None:
-                        # Captured from the clip the AGENT heard, not from the source
-                        # file: the store was learned the same way, through a real IR at
-                        # a real stop, and querying it with clean audio would be asking a
-                        # different question from the one it was taught.
-                        heard_embedding = audio_embedding(
-                            waveform, sample_rate, clap_encoder
-                        )
+                    # TWO BANKS, TWO QUESTIONS, AND THEY ARE NOT THE SAME BANK.
+                    # `is_anomaly` answers "was that anything at all" and keeps
+                    # `ANOMALY_CLASSES`, because `ANOMALY_GATE_DELTA` / `_TAU` were
+                    # calibrated against exactly those prompts and HAZARD 2 forbids
+                    # quoting them for a wider one. Its `best_class` is an argmax over
+                    # three emergency names and is NOT what was heard on a run whose
+                    # source is a flush -- copying it into the report is how the agent's
+                    # testimony came to say "alarm" on a `toilet_flush` episode.
+                    # ONE forward pass of a 153.5 M-param audio encoder, shared by every
+                    # question asked about this clip. `test_task_runner` pins it: the
+                    # gate, the testimony and the memory write must be about the same
+                    # render, not three renders that agree by luck.
+                    heard_embedding = audio_embedding(
+                        waveform, sample_rate, clap_encoder
+                    )
+                    fired, gate_class, _scores = is_anomaly(
+                        waveform, sample_rate, clap_encoder, embedding=heard_embedding
+                    )
+                    # `classify_anomaly` answers "what was it, given that it was one of
+                    # these", over the bank this run's own source was drawn from. Forced
+                    # argmax, so it cannot say "normal" -- which is right here, because
+                    # the gate above already decided that.
+                    anomaly_class, _testimony = classify_anomaly(
+                        waveform,
+                        sample_rate,
+                        clap_encoder,
+                        classes=testimony_bank(cfg.anomaly_class),
+                        embedding=heard_embedding,
+                    )
+                    # The room arm reads what was HEARD, so it takes the testimony class.
+                    # A no-op today and asserted to be one: `ROOM_PRIOR`'s normal sets
+                    # name `running_water` and `appliance_hum`, which are in neither bank,
+                    # so `room_conditioned_anomaly` can only return True or abstain.
+                    # `test_audio_normality.py` fails if that stops being true, and then
+                    # this line is a decision someone has to make rather than a surprise.
+                    verdict = is_anomalous_here(fired, anomaly_class, room)
+                    # `heard_embedding` above is the memory's query too. Captured from
+                    # the clip the AGENT heard, not from the source file: the store was
+                    # learned the same way, through a real IR at a real stop, and querying
+                    # it with clean audio would be asking a different question from the
+                    # one it was taught.
                 # With no CLAP the verdict stays None, which `step_controller` reads as
                 # "nothing conditioned this, so any onset interrupts" — the smoke's case
                 # (§4.3: one sound, the anomaly by construction), and honest about it: the

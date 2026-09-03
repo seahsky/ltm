@@ -2879,6 +2879,24 @@ def _encoder_favouring(prompt):
     return _SpyClapEncoder(audio_fakes.one_hot(0, scale=1.0), vectors)
 
 
+def _encoder_scoring(scales):
+    """A CLAP stand-in with a chosen cosine per prompt. `{prompt_text: scale}`.
+
+    `_encoder_favouring` is the one-prompt case. This one exists because the gate and the
+    testimony read DIFFERENT banks, so demonstrating that needs a clip scoring in both --
+    one favoured prompt cannot show two banks disagreeing.
+    """
+    from earshot.audio.clap import CLASS_TO_CLAP_PROMPT, NORMAL_PROMPTS
+
+    vectors = {
+        text: audio_fakes.one_hot(1, scale=0.0)
+        for text in tuple(CLASS_TO_CLAP_PROMPT.values()) + tuple(NORMAL_PROMPTS)
+    }
+    for text, scale in scales.items():
+        vectors[text] = audio_fakes.one_hot(0, scale=scale)
+    return _SpyClapEncoder(audio_fakes.one_hot(0, scale=1.0), vectors)
+
+
 def _clap_episode(encoder, **cfg_overrides):
     """``TestTheFullLoop``'s geometry with an encoder wired in.
 
@@ -2979,6 +2997,70 @@ class TestTheClassificationWaitsForTheReadWindowToFill(unittest.TestCase):
             self.result.audit.funnel_stage, FunnelStage.INVESTIGATE_ENTERED
         )
         self.assertEqual(self.result.audit.metrics["clap_after_offset"], 0.0)
+
+
+class TestTheTestimonyNamesTheRunsOwnBank(unittest.TestCase):
+    """The report said "alarm" on a `toilet_flush` episode, and this is both arms of it.
+
+    `is_anomaly` defaults to `ANOMALY_CLASSES` -- `alarm`, `baby_cry`, `glass_break` --
+    because `ANOMALY_GATE_DELTA` and `ANOMALY_GATE_TAU` were calibrated against exactly
+    those prompts, and `clap.py` HAZARD 2 forbids quoting them for a wider bank. The
+    runner then copied that gate's `best_class` into `report.anomaly_class`, which is an
+    argmax over three emergency names whatever the episode's source actually was.
+
+    ADR-0018's matrix runs `toilet_flush`, `snoring` and `keyboard_typing`, so under the
+    old wiring every one of those episodes would testify to a sound that was not there.
+    The gate keeps its bank; the testimony takes the run's own.
+
+    The fixture makes the two banks disagree ON PURPOSE: the alarm prompt scores 0.5 and
+    the flush prompt 1.0, so the gate fires calling it "alarm" and the testimony says
+    "toilet_flush".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from earshot.audio.clap import CLASS_TO_CLAP_PROMPT
+
+        cls.encoder = _encoder_scoring({
+            CLASS_TO_CLAP_PROMPT["alarm"]: 0.5,
+            CLASS_TO_CLAP_PROMPT["toilet_flush"]: 1.0,
+        })
+        cls.result, cls.cfg = _clap_episode(cls.encoder, anomaly_class="toilet_flush")
+
+    def test_the_report_names_the_class_that_was_heard(self):
+        self.assertEqual(self.result.report.anomaly_class, "toilet_flush")
+
+    def test_it_is_not_one_of_the_three_emergency_names(self):
+        """The defect stated as itself, not as the absence of the fix."""
+        from earshot.audio.clap import ANOMALY_CLASSES
+
+        self.assertNotIn(self.result.report.anomaly_class, ANOMALY_CLASSES)
+
+    def test_the_gate_still_fired_on_its_own_calibrated_bank(self):
+        """Unchanged, and the detour still ran -- otherwise this would be a report fix
+        that quietly disarmed the interrupt."""
+        self.assertGreaterEqual(
+            self.result.audit.funnel_stage, FunnelStage.INVESTIGATE_ENTERED
+        )
+
+    def test_one_forward_pass_serves_both_questions(self):
+        """Two banks, ONE render. The audio encoder is 153.5 M params, and a gate and a
+        testimony about different renders would agree only by luck."""
+        self.assertEqual(len(self.encoder.waveforms), 1)
+
+
+class TestTheCarriedBankStillWorks(unittest.TestCase):
+    """The healthy arm: a run whose class IS one of the three is unchanged."""
+
+    def test_an_alarm_run_still_testifies_to_alarm(self):
+        from earshot.audio.clap import CLASS_TO_CLAP_PROMPT
+
+        encoder = _encoder_scoring({
+            CLASS_TO_CLAP_PROMPT["alarm"]: 1.0,
+            CLASS_TO_CLAP_PROMPT["toilet_flush"]: 0.5,
+        })
+        result, _cfg = _clap_episode(encoder, anomaly_class="alarm")
+        self.assertEqual(result.report.anomaly_class, "alarm")
 
 
 class TestTheInterruptWaitsForTheVerdictItIsGatedOn(unittest.TestCase):
