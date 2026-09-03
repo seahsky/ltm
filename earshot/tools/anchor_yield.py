@@ -44,7 +44,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from earshot.audio.clips import ANOMALY_CLASSES, SOUNDING_CLASSES
 from earshot.task.dataset import (
@@ -69,6 +69,9 @@ __all__ = [
     "cell_yield",
     "fold_by_class",
     "best_class_per_scene",
+    "anchors_by_scene",
+    "constant_predictor_share",
+    "balanced_assignment",
     "format_report",
     "main",
 ]
@@ -222,6 +225,99 @@ def best_class_per_scene(cells: Sequence[CellYield]) -> Dict[str, CellYield]:
     return best
 
 
+def anchors_by_scene(cells: Sequence[CellYield]) -> Dict[str, Dict[str, int]]:
+    """`{scene: {anchor_category: n_anchored}}`, with the classes collapsed onto anchors.
+
+    Collapsing is sound because placement reads NOTHING but the anchor category: every class
+    at one anchor produces a byte-identical build. `test_anchor_yield` asserts that rather
+    than assuming it, and the consequence is load-bearing for ADR-0018 — the class WITHIN an
+    anchor is free, so the heard/not-heard axis can vary the class while holding the task
+    fixed, and the delta is the association and not a different episode.
+    """
+    grouped: Dict[str, Dict[str, int]] = {}
+    for cell in cells:
+        if cell.anchor_category is None:
+            continue
+        bucket = grouped.setdefault(cell.scene, {})
+        bucket[cell.anchor_category] = max(
+            bucket.get(cell.anchor_category, 0), cell.n_anchored
+        )
+    return grouped
+
+
+def constant_predictor_share(assignment: Mapping[str, Tuple[str, int]]) -> Tuple[str, int, int]:
+    """`(anchor, its anchored episodes, all anchored episodes)` for the commonest anchor.
+
+    **The number the memory has to beat, and the reason a greedy assignment is a trap.** A
+    prior that recalls a category is scored on whether it names the right one. If one anchor
+    carries most of the anchored episodes, a predictor that has learned nothing and always
+    answers that anchor scores that share — so a design maximising anchored episodes can
+    hand the null hypothesis 91% and call it a strong cell.
+    """
+    totals: Dict[str, int] = {}
+    for anchor, anchored in assignment.values():
+        totals[anchor] = totals.get(anchor, 0) + anchored
+    overall = sum(totals.values())
+    if not totals:
+        return ("", 0, 0)
+    best = max(sorted(totals), key=lambda name: totals[name])
+    return (best, totals[best], overall)
+
+
+def balanced_assignment(
+    per_scene: Mapping[str, Mapping[str, int]], anchors: Sequence[str]
+) -> Dict[str, Tuple[str, int]]:
+    """Assign one anchor to each scene, with the scene counts as even as they can be.
+
+    Exact, by dynamic programming over the per-anchor counts: with four anchors and twenty
+    scenes the state space is a few tens of thousands, so there is no reason to approximate
+    and then argue about how close it got. Among assignments whose scene counts all fall in
+    `[floor(n/k), ceil(n/k)]` it returns one of maximum anchored episodes; ties resolve on
+    anchor order, which makes the answer stable between invocations.
+
+    **Balance is the objective, not a constraint on a better one.** The point of the heard
+    axis is that the store must DISCRIMINATE between categories. An assignment that maximises
+    anchored episodes concentrates them on whichever anchor HM3D annotates most, and then the
+    constant predictor above wins. Fewer anchored episodes spread over four answers is a
+    better experiment than more episodes over one.
+    """
+    scenes = sorted(scene for scene in per_scene if any(per_scene[scene].values()))
+    n_anchors = len(anchors)
+    if not scenes or n_anchors == 0:
+        return {}
+    low, high = divmod(len(scenes), n_anchors)
+    quota_max = low + (1 if high else 0)
+
+    # state: counts assigned per anchor so far -> (total anchored, path)
+    best: Dict[Tuple[int, ...], Tuple[int, Tuple[int, ...]]] = {(0,) * n_anchors: (0, ())}
+    for scene in scenes:
+        nxt: Dict[Tuple[int, ...], Tuple[int, Tuple[int, ...]]] = {}
+        for counts, (total, path) in best.items():
+            for index, anchor in enumerate(anchors):
+                if counts[index] >= quota_max:
+                    continue
+                moved = list(counts)
+                moved[index] += 1
+                key = tuple(moved)
+                gain = total + int(per_scene[scene].get(anchor, 0))
+                current = nxt.get(key)
+                if current is None or gain > current[0]:
+                    nxt[key] = (gain, path + (index,))
+        best = nxt
+    feasible = [
+        (total, path)
+        for counts, (total, path) in best.items()
+        if all(count >= low for count in counts)
+    ]
+    if not feasible:
+        return {}
+    _total, path = max(feasible, key=lambda item: item[0])
+    return {
+        scene: (anchors[index], int(per_scene[scene].get(anchors[index], 0)))
+        for scene, index in zip(scenes, path)
+    }
+
+
 def _pct(n: int, total: int) -> str:
     return "   n/a" if total == 0 else "{:5.1f}%".format(100.0 * n / total)
 
@@ -288,6 +384,7 @@ def format_report(
         "TOTAL", "", "", total_built, total_anchored, _pct(total_anchored, total_built)
     ))
 
+    lines.extend(_discrimination_lines(cells, best))
     lines.extend(_reproduction_lines(by_class, n_episodes, split))
 
     lines.append("")
@@ -296,6 +393,72 @@ def format_report(
     lines.append("  source is `ablation_sweep.sh`'s question and costs a GPU and a night.")
     lines.append("")
     return "\n".join(lines)
+
+
+def _assignment_lines(
+    title: str,
+    assignment: Mapping[str, Tuple[str, int]],
+    *,
+    note: str,
+) -> List[str]:
+    anchor, share, overall = constant_predictor_share(assignment)
+    counts: Dict[str, int] = {}
+    for value, _anchored in assignment.values():
+        counts[value] = counts.get(value, 0) + 1
+    lines = ["", "  {}".format(title)]
+    lines.append("    anchored episodes      {}".format(overall))
+    lines.append("    scenes per anchor      {}".format(
+        ", ".join("{} {}".format(name, counts[name]) for name in sorted(counts)) or "none"
+    ))
+    lines.append("    ALWAYS-{:<12s}  {} of {} = {}   <- what a memory that learned "
+                 "NOTHING scores".format(
+                     (anchor or "?").upper(), share, overall, _pct(share, overall)
+                 ))
+    lines.append("    {}".format(note))
+    return lines
+
+
+def _discrimination_lines(
+    cells: Sequence[CellYield], best: Mapping[str, CellYield]
+) -> List[str]:
+    """The two assignments side by side, each with the score its null hypothesis gets.
+
+    Printed together on purpose. The greedy assignment reads as the better design until its
+    constant-predictor share is beside it, and that share is the whole reason the matrix
+    cannot simply maximise anchored episodes.
+    """
+    per_scene = anchors_by_scene(cells)
+    anchors = sorted({
+        cell.anchor_category for cell in cells if cell.anchor_category is not None
+    })
+    if not per_scene or not anchors:
+        return []
+
+    greedy = {
+        scene: (cell.anchor_category, cell.n_anchored)
+        for scene, cell in best.items()
+        if cell.anchor_category is not None and cell.n_anchored
+    }
+    balanced = balanced_assignment(per_scene, anchors)
+
+    lines = ["", "=== what the null hypothesis scores under each assignment ==="]
+    lines.extend(_assignment_lines(
+        "GREEDY — every scene takes the class it anchors most",
+        greedy,
+        note="maximises episodes and concentrates them; the cell is large and cheap to win",
+    ))
+    lines.extend(_assignment_lines(
+        "BALANCED — scene counts as even as {} anchors allow".format(len(anchors)),
+        balanced,
+        note="fewer episodes over more answers; the memory has to discriminate to beat it",
+    ))
+    lines.append("")
+    lines.append("  READ THE ALWAYS- ROWS, NOT THE TOTALS. ADR-0018's heard axis claims the")
+    lines.append("  store learned WHERE a class sounds, and a prior is scored on naming the")
+    lines.append("  right category. An assignment that piles the anchored episodes onto one")
+    lines.append("  category hands that score to a predictor that learned nothing, so more")
+    lines.append("  anchored episodes can buy a strictly weaker experiment.")
+    return lines
 
 
 def _reproduction_lines(
