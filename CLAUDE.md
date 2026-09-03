@@ -97,6 +97,13 @@ nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag> \
   --arms "full no-climb no-cue scan-only anechoic"
 
+# DID ADR-0022's PLACEMENT CHANGE ACTUALLY REACH THIS SWEEP — the question a moved SR
+# cannot answer, because a re-run of the SAME task moves by 3.0 points on identical bytes.
+# Splits every arm into anchored / geometric / MISSING and gives each branch its own
+# reached-rate; MISSING is never folded into geometric, and an arm that recorded the field
+# nowhere exits nonzero. Read-only, no GPU, seconds
+python -m earshot.tools.placement_report runs/<tag>
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```
