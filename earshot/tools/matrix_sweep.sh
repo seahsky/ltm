@@ -218,6 +218,19 @@ STORE="$OUT_DIR/prior/store.json"
   exit 1
 }
 
+# THE COVERAGE GATE (matrix-1 review, D3). The store EXISTING is not the store COVERING
+# the assignment: a scene whose tour left one leg unreached is excluded from the merge,
+# and before `pass_provenance` recorded incompletes it landed in NO provenance list — the
+# sweep then ran that scene's seen cells byte-identical to its unseen cells with no error
+# anywhere. NOT_RUN is never green: an incomplete assignment stops the sweep here, before
+# any cell is paid for. Fix the tour (raise --leg-budget) or drop the scene from the
+# assignment; --force does not bypass this, because the cells it would run are not the
+# experiment the assignment names.
+python -m earshot.tools.matrix_audit --store "$STORE" --gate-scenes "$SCENES" || {
+  echo "FATAL: the prior pass does not cover the assignment — the gate's lines above name the scenes"
+  exit 1
+}
+
 # shellcheck disable=SC2206
 CONDITION_LIST=($CONDITIONS)
 N_CONDITIONS="${#CONDITION_LIST[@]}"

@@ -316,12 +316,13 @@ class MemoryCondition(Enum):
     on. The cell is therefore selected by the sweep driver rather than typed on
     `RunConfig`, so the audit record is the only place it can be witnessed.
 
-    **`EpisodeAudit.memory_condition` DOES NOT EXIST YET, deliberately.** Nothing in
-    `task/` builds a store, so a typed field here would be `None` on every record ever
-    written while its `None` documented two different facts ("predates the field" and
-    "ran outside the matrix") — the shape of this repo's two absence incidents. It lands
-    with its writer, as a typed field and not a metric, because a string cannot live in
-    a `Mapping[str, float]`.
+    **`EpisodeAudit.memory_condition` exists and is written by the runner** (a typed
+    field, not a metric, because a string cannot live in a `Mapping[str, float]`). It
+    landed together with its writer, so its `None` means exactly one thing — the record
+    predates the field — and never "ran outside the matrix", which is what the `"none"`
+    value is for. An earlier revision of this docstring said the field did not exist yet;
+    that was true when written and stale the commit after, and the staleness misled a
+    review — which is why this paragraph now describes the field instead of its absence.
     """
 
     NONE = "none"

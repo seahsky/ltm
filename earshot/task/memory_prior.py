@@ -81,8 +81,15 @@ class PriorMiss(Enum):
     """Why a prior named no place. Each value is a different fact about the method."""
 
     NO_PREDICTION = "no_prediction"
-    """The store answered nothing: it is empty, or the query vector is degenerate. This is
-    the `not_heard` cells' expected value and must never read as a wrong prediction."""
+    """The store answered nothing: it is empty, or the query vector is degenerate.
+
+    NOT the `not_heard` cells' expected value, although an earlier revision said so and
+    matrix-1's review caught it: `without_class` strips only the run's own class, so a
+    multi-class store still votes and a `not_heard` episode receives a confident
+    WRONG-class prediction — `predict_category` has no abstain. Under the matrix bank
+    this value fires only for an empty store (a `NONE` cell, or a cell whose whole bank
+    is one class) or a degenerate query. The heard-vs-not-heard contrast is therefore
+    right-prior vs wrong-prior until a `NONE` arm runs beside them."""
 
     CATEGORY_ABSENT = "category_absent"
     """A category was predicted and this scene has no instance of it. The memory answered;

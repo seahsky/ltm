@@ -141,6 +141,22 @@ nrun bash earshot/tools/matrix_sweep.sh --tag matrix-1
 python -m earshot.tools.window_report runs/matrix-1 \
   --arms "heard_seen heard_unseen not_heard_seen not_heard_unseen"
 
+# THE MATRIX-1 REVIEW'S FOUR READ-ONLY QUESTIONS, off a finished sweep's own artefacts:
+# A. store coverage -- which assigned scenes the prior pass completed, and the SILENT
+#    drops a pre-`pass_provenance` store hides (a scene in no provenance list at all ran
+#    its seen cells byte-identical to its unseen cells with no error anywhere);
+# B. seen-axis liveness -- `memory_prior_instances` differing at a SHARED voted category
+#    is the episodic store actually narrowing something; a category flip is render noise;
+# C. what the not_heard cells were told -- a confident WRONG category, almost never
+#    `no_prediction`, because `without_class` strips one class and `_vote` has no abstain:
+#    heard-vs-not-heard is right-prior vs wrong-prior until a NONE arm runs beside them;
+# D. determinism for free -- zero-episodic-row scenes ran seen==unseen on identical
+#    inputs, so every discordant pair there is the apparatus flipping on its own, the
+#    number repeat-1 bought with a full re-run.
+# The same module is the sweep's own coverage gate (`--gate-scenes`, exit 2 on a missing
+# scene), wired between the prior pass and the cells. No GPU, seconds
+python -m earshot.tools.matrix_audit runs/matrix-1
+
 # the box test suite (a few minutes, read-only, installs nothing)
 bash earshot/tools/box_gate.sh
 ```

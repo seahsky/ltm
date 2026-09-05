@@ -607,7 +607,7 @@ def build_anomaly_episodes(
     wanted = len(candidates) if n_episodes is None else max(0, int(n_episodes))
     built: List[AnomalyEpisode] = []
     skipped: List[Tuple[str, str]] = []
-    for episode in candidates:
+    for position, episode in enumerate(candidates):
         if len(built) >= wanted:
             break
         try:
@@ -623,7 +623,12 @@ def build_anomaly_episodes(
                 min_start_sep_m=min_start_sep_m,
             )
         except PlacementError as exc:
-            skipped.append((episode.episode_id, str(exc)))
+            # The candidate's POSITION leads the label: HM3D authors `episode_id` as
+            # "0" on every episode of a scene, and matrix-1 wrote 65 skip rows for one
+            # scene that were indistinguishable for exactly that reason.
+            skipped.append((
+                "cand{:04d} id={}".format(position, episode.episode_id), str(exc),
+            ))
             continue
         built.append(
             AnomalyEpisode(
