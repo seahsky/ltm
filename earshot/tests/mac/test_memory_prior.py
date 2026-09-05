@@ -16,7 +16,14 @@ import numpy as np
 
 from _interpreter import assert_interpreter  # noqa: F401
 
-from earshot.memory.store import EpisodicEntry, EpisodicStore, SemanticEntry, SemanticStore
+from earshot.memory.store import (
+    EpisodicEntry,
+    EpisodicStore,
+    MemoryCondition,
+    SemanticEntry,
+    SemanticStore,
+)
+from earshot.task.memory_build import stores_for_cell
 from earshot.task.memory_prior import (
     RUN_DISCLOSURE,
     MemoryPrior,
@@ -335,6 +342,80 @@ class TestTheAuditSurface(unittest.TestCase):
         # §8's rule: a run that takes a privilege says so in words a reader cannot miss.
         self.assertIn("ObjectNav annotations", RUN_DISCLOSURE)
         self.assertIn("learned", RUN_DISCLOSURE)
+
+
+class TestTheNotHeardCellsReceiveAWrongPrior(unittest.TestCase):
+    """The matrix-1 review's D2, pinned: heard-vs-not-heard is right-prior vs
+    WRONG-prior, not memory vs none.
+
+    `without_class` strips only the run's own class and `predict_category` has no
+    abstain, so under a multi-class bank a `not_heard` episode still gets a confident
+    prediction -- of a class it never heard, resolved to a category and walked toward.
+    `NO_PREDICTION` fires only when the stripped store is EMPTY, which under the matrix
+    bank never happens. Both arms per ADR-0014: the wrong-prior path the matrix actually
+    ran, and the single-class bank where the strip really does empty the store.
+
+    If a change makes this test fail by returning `NO_PREDICTION` from the multi-class
+    arm, that is the abstain-threshold design decision landing -- rewrite this test
+    against the new contract rather than reverting the change.
+    """
+
+    @staticmethod
+    def _three_class_store():
+        return SemanticStore(entries=(
+            _entry("toilet_flush", "bathroom", "toilet", [1.0, 0.0, 0.0]),
+            _entry("snoring", "bedroom", "bed", [0.0, 1.0, 0.0]),
+            _entry("keyboard_typing", "living_room", "chair", [0.0, 0.0, 1.0]),
+        ))
+
+    def test_a_multi_class_store_votes_a_confident_wrong_category(self):
+        semantic, _episodic = stores_for_cell(
+            self._three_class_store(),
+            EpisodicStore(),
+            MemoryCondition.NOT_HEARD_UNSEEN,
+            sound_class="toilet_flush",
+            scene="S",
+        )
+        # The run's own heard audio: nearest the stripped class's direction, so any
+        # winner is a class the agent never heard before this run.
+        query = np.asarray([0.9, 0.3, 0.1], dtype=np.float32)
+        prior, miss = resolve_prior(
+            semantic,
+            query,
+            k=3,
+            points_by_category={
+                "bed": [Xyz(1.0, 0.0, 0.0)],
+                "chair": [Xyz(2.0, 0.0, 0.0)],
+                "toilet": [Xyz(3.0, 0.0, 0.0)],
+            },
+            distance_to=lambda point: float(point.x),
+        )
+        self.assertIsNone(miss)
+        self.assertIsNotNone(prior)
+        self.assertNotEqual(prior.category, "toilet")
+        self.assertIn(prior.category, ("bed", "chair"))
+
+    def test_a_single_class_bank_is_the_one_case_no_prediction_fires(self):
+        single = SemanticStore(entries=(
+            _entry("toilet_flush", "bathroom", "toilet", [1.0, 0.0, 0.0]),
+        ))
+        semantic, _episodic = stores_for_cell(
+            single,
+            EpisodicStore(),
+            MemoryCondition.NOT_HEARD_UNSEEN,
+            sound_class="toilet_flush",
+            scene="S",
+        )
+        self.assertEqual(len(semantic), 0)
+        prior, miss = resolve_prior(
+            semantic,
+            np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+            k=3,
+            points_by_category={"toilet": [Xyz(3.0, 0.0, 0.0)]},
+            distance_to=lambda point: float(point.x),
+        )
+        self.assertIsNone(prior)
+        self.assertIs(miss, PriorMiss.NO_PREDICTION)
 
 
 if __name__ == "__main__":  # pragma: no cover

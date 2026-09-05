@@ -1407,9 +1407,11 @@ def run_episode(
                         )
                     else:
                         # An empty store or a scene with no annotated object cannot name a
-                        # place. That is `NO_PREDICTION` -- the `not_heard` cells' expected
-                        # value -- and it is recorded rather than left blank, because a
-                        # blank would mean "never consulted", which is a different fact.
+                        # place. That is `NO_PREDICTION`, recorded rather than left blank
+                        # because a blank would mean "never consulted". It is NOT the
+                        # `not_heard` cells' usual path: their store keeps the bank's other
+                        # classes and votes a confident wrong category (`PriorMiss`'s own
+                        # docstring has the full account).
                         memory_prior, memory_miss = (None, PriorMiss.NO_PREDICTION)
                     say("  step {}: the window has closed — memory says {}".format(
                         step,

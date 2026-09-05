@@ -16,10 +16,11 @@ from earshot.audio.vocabulary import ROOM_OF_ANCHOR
 from earshot.task.prior_driver import (
     SceneTourOutcome,
     merge_scene_records,
+    pass_provenance,
     plan_scene_tour,
     walk_scene,
 )
-from earshot.task.prior_pass import TourRecord
+from earshot.task.prior_pass import LegOutcome, TourRecord, TourStop
 from earshot.types import Pose, Xyz
 
 # The matrix's own room-balanced assignment (PR #77's measured result), reused rather than
@@ -207,6 +208,75 @@ class TestMergeSceneRecords(unittest.TestCase):
             ["snoring", "toilet_flush"],
         )
         self.assertEqual(len(episodic), 0)
+
+
+class TestPassProvenance(unittest.TestCase):
+    """Every requested scene lands in exactly one of THREE provenance lists.
+
+    The matrix-1 review's D3: the original provenance block had only `scenes_complete`
+    and `scenes_failed`, so a scene that LOADED but whose tour left a leg unreached was
+    in neither -- excluded from the merge, invisible on the record, and a sweep gating
+    on the store file's existence ran its seen cells byte-identical to its unseen cells
+    with no error anywhere. Both arms below, per ADR-0014: the healthy pass, and the
+    incomplete tour that used to vanish.
+    """
+
+    @staticmethod
+    def _observation():
+        return {
+            "sound_class": "snoring", "room": "bedroom", "category": "bed",
+            "embedding": [1.0, 0.0],
+        }
+
+    @staticmethod
+    def _leg(reached):
+        return LegOutcome(
+            stop=TourStop(room="bedroom", category="bed", point=Xyz(0.0, 0.0, 0.0)),
+            reached=reached,
+            steps=3,
+            final_gap_m=None if reached else 4.0,
+            reason="reached" if reached else "budget",
+        )
+
+    def test_a_complete_tour_and_a_failed_load_land_in_their_own_lists(self):
+        complete = TourRecord(
+            scene="A", legs=(self._leg(True),), observations=(self._observation(),)
+        )
+        outcomes = [
+            SceneTourOutcome(scene="A", record=complete),
+            SceneTourOutcome(scene="B", record=None, error="no mesh"),
+        ]
+        provenance = pass_provenance(
+            outcomes, split="val", classes=["snoring"], seed=7, scenes=["A", "B"]
+        )
+        self.assertEqual(provenance["scenes_complete"], ["A"])
+        self.assertEqual(provenance["scenes_incomplete"], [])
+        self.assertEqual([f["scene"] for f in provenance["scenes_failed"]], ["B"])
+
+    def test_an_incomplete_tour_is_on_the_record_not_silently_absent(self):
+        """The forced-failure arm: a loaded scene with one unreached leg must appear in
+        `scenes_incomplete` -- and NOT in `scenes_complete` -- so that every requested
+        scene is accounted for somewhere."""
+        partial = TourRecord(
+            scene="C",
+            legs=(self._leg(True), self._leg(False)),
+            observations=(self._observation(),),
+        )
+        outcomes = [SceneTourOutcome(scene="C", record=partial)]
+        provenance = pass_provenance(
+            outcomes, split="val", classes=["snoring"], seed=7, scenes=["C"]
+        )
+        self.assertEqual(provenance["scenes_complete"], [])
+        self.assertEqual(
+            [entry["scene"] for entry in provenance["scenes_incomplete"]], ["C"]
+        )
+        self.assertFalse(provenance["scenes_incomplete"][0]["complete"])
+        accounted = (
+            set(provenance["scenes_complete"])
+            | {entry["scene"] for entry in provenance["scenes_incomplete"]}
+            | {entry["scene"] for entry in provenance["scenes_failed"]}
+        )
+        self.assertEqual(accounted, set(provenance["scenes_requested"]))
 
 
 class TestSceneTourOutcome(unittest.TestCase):

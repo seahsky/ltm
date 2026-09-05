@@ -191,7 +191,10 @@ class TestTheFloorRuleCoversTheStartToo(unittest.TestCase):
         build = build_anomaly_episodes(
             dataset([upstairs, flat]), anomaly_class="alarm", t_anom=30
         )
-        self.assertIn("cross", [episode_id for episode_id, _ in build.skipped])
+        # The label leads with the candidate's build position: HM3D authors
+        # `episode_id` as "0" on every episode, and matrix-1 wrote 65 skip rows for
+        # one scene that were indistinguishable for exactly that reason.
+        self.assertIn("cand0000 id=cross", [episode_id for episode_id, _ in build.skipped])
         self.assertNotIn(
             "cross", [built.episode.episode_id for built in build.episodes]
         )
@@ -557,7 +560,9 @@ class TestBuild(unittest.TestCase):
         scene = dataset([buildable, stranded])
         build = build_anomaly_episodes(scene, anomaly_class="alarm", t_anom=30)
         self.assertEqual([e.episode.episode_id for e in build.episodes], ["ok"])
-        self.assertEqual([episode_id for episode_id, _ in build.skipped], ["stranded"])
+        self.assertEqual(
+            [episode_id for episode_id, _ in build.skipped], ["cand0001 id=stranded"]
+        )
         self.assertIn("stranded", build.summary())
 
     def test_a_scene_that_builds_nothing_raises(self):

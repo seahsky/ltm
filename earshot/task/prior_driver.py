@@ -67,6 +67,7 @@ __all__ = [
     "plan_scene_tour",
     "walk_scene",
     "merge_scene_records",
+    "pass_provenance",
     "render_embedding_at_stop",
     "tour_one_scene",
     "run_prior_pass",
@@ -182,6 +183,40 @@ class SceneTourOutcome:
             "n_observations": None if self.record is None else len(self.record.observations),
             "error": self.error,
         }
+
+
+def pass_provenance(
+    outcomes: Sequence[SceneTourOutcome],
+    *,
+    split: str,
+    classes: Sequence[str],
+    seed: int,
+    scenes: Sequence[str],
+) -> Dict[str, Any]:
+    """The provenance block `dump_stores` writes, with every requested scene in exactly
+    one of THREE lists: `scenes_complete`, `scenes_incomplete`, or `scenes_failed`.
+
+    Three, not two — the matrix-1 review found the original block had only complete and
+    failed, so a scene that LOADED but whose tour left a leg unreached appeared in
+    neither list: excluded from the merge (correctly), invisible in the provenance
+    (`SceneTourOutcome`'s own docstring says the reason has to be on the record), and a
+    sweep gating on the store file's existence ran that scene's seen cells byte-identical
+    to its unseen cells with no error anywhere. `matrix_audit.py --gate-scenes` consumes
+    `scenes_complete` and refuses exactly that run.
+
+    Pure: reads `outcomes`, builds a new dict, mutates nothing.
+    """
+    return {
+        "split": split,
+        "classes": list(classes),
+        "seed": seed,
+        "scenes_requested": list(scenes),
+        "scenes_complete": [o.scene for o in outcomes if o.ok and o.record.complete],
+        "scenes_incomplete": [
+            o.as_dict() for o in outcomes if o.ok and not o.record.complete
+        ],
+        "scenes_failed": [o.as_dict() for o in outcomes if not o.ok],
+    }
 
 
 def render_embedding_at_stop(
@@ -460,14 +495,9 @@ def run_prior_pass(
         str(store_path),
         semantic,
         episodic,
-        provenance={
-            "split": split,
-            "classes": list(classes),
-            "seed": seed,
-            "scenes_requested": list(scenes),
-            "scenes_complete": [o.scene for o in outcomes if o.ok and o.record.complete],
-            "scenes_failed": [o.as_dict() for o in outcomes if not o.ok],
-        },
+        provenance=pass_provenance(
+            outcomes, split=split, classes=classes, seed=seed, scenes=scenes
+        ),
     )
     say("wrote {}".format(store_path))
     return store_path
