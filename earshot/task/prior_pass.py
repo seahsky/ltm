@@ -118,6 +118,14 @@ class TourRecord:
     scene: str
     legs: Tuple[LegOutcome, ...]
     observations: Tuple[Mapping[str, object], ...]
+    # The plan's dropped candidates, carried onto the record. `TourPlan.unreachable`'s own
+    # docstring says a dropped stop is a first-class field with a reason attached -- and
+    # then the record threw it away, so a tour that planned NOTHING (`qyAac8rV8Zk`, 0 of 0
+    # legs) could not say whether the scene had no candidates or no routes to them. Those
+    # are different findings: the first means the assignment and the tour disagree about
+    # which scenes are tourable, the second is the navmesh-island fact this tree already
+    # counts elsewhere.
+    unreachable: Tuple[Tuple[TourStop, str], ...] = ()
 
     @property
     def rooms_reached(self) -> Tuple[str, ...]:
@@ -150,6 +158,10 @@ class TourRecord:
                 for leg in self.legs
             ],
             "n_observations": len(self.observations),
+            "unreachable": [
+                {"room": stop.room, "category": stop.category, "reason": reason}
+                for stop, reason in self.unreachable
+            ],
         }
 
 
@@ -303,4 +315,9 @@ def walk_tour(
         if reached and observe is not None:
             observations.append(observe(stop))
 
-    return TourRecord(scene=scene, legs=tuple(legs), observations=tuple(observations))
+    return TourRecord(
+        scene=scene,
+        legs=tuple(legs),
+        observations=tuple(observations),
+        unreachable=tuple(plan.unreachable),
+    )

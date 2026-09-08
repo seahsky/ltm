@@ -221,6 +221,29 @@ class TestWalkTour(unittest.TestCase):
         record = walk_tour(FakeWorld({}), plan_tour((), START, euclidean), scene="S")
         self.assertFalse(record.complete)
 
+    def test_an_empty_plan_says_whether_there_were_candidates_at_all(self):
+        """`qyAac8rV8Zk` toured 0 of 0 legs and the record could not say why. A plan with
+        NO candidates and a plan whose every candidate was unroutable both produce zero
+        legs, and they are different findings: the first means the assignment and the
+        tour disagree about what is tourable, the second is a navmesh island."""
+        no_candidates = walk_tour(
+            FakeWorld({}), plan_tour((), START, euclidean), scene="S"
+        )
+        self.assertEqual(no_candidates.unreachable, ())
+
+        # Every candidate unroutable: `plan_tour` drops them all, so the plan is empty
+        # for the OTHER reason and the record now carries the difference.
+        stops = candidate_stops({"toilet": [Xyz(3.0, 0.0, 0.0)]}, ROOMS)
+        plan = plan_tour(stops, START, lambda a, b: None)
+        record = walk_tour(FakeWorld({}), plan, scene="S")
+        self.assertEqual(record.legs, ())
+        self.assertFalse(record.complete)
+        self.assertEqual(len(record.unreachable), 1)
+        self.assertEqual(record.unreachable[0][0].room, "bathroom")
+        self.assertEqual(
+            record.as_dict()["unreachable"][0]["room"], "bathroom"
+        )
+
     def test_the_record_round_trips_to_a_dict(self):
         plan = self._plan()
         world = FakeWorld({stop.point.as_tuple(): 1 for stop in plan.stops})

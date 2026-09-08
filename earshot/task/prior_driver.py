@@ -181,6 +181,17 @@ class SceneTourOutcome:
                 None if self.record is None else list(self.record.rooms_reached)
             ),
             "n_observations": None if self.record is None else len(self.record.observations),
+            # Why a tour planned nothing. A record with 0 of 0 legs and an EMPTY list here
+            # means the scene offered no candidate stop at all, which is the assignment and
+            # the tour disagreeing about what is tourable; a non-empty list means the
+            # candidates existed and the navmesh routed to none of them.
+            "unreachable": (
+                None if self.record is None
+                else [
+                    {"room": stop.room, "category": stop.category, "reason": reason}
+                    for stop, reason in self.record.unreachable
+                ]
+            ),
             "error": self.error,
         }
 
