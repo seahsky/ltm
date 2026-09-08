@@ -153,6 +153,14 @@ python -m earshot.tools.window_report runs/matrix-1 \
 # D. determinism for free -- zero-episodic-row scenes ran seen==unseen on identical
 #    inputs, so every discordant pair there is the apparatus flipping on its own, the
 #    number repeat-1 bought with a full re-run.
+# E. CAN THE VOTE ABSTAIN -- the question C leaves open, decided off data already on
+#    disk. Grades every recall against the sweep's own `assignment.tsv` (correct = the
+#    voted category IS the anchor object of the class that scene ran) and reports the
+#    largest confidence floor that loses NO correct recall, plus the max-J operating
+#    point. Separable means `_vote` can decline and `not_heard` becomes an arm with no
+#    prior; overlap means only a NONE arm controls for a wrong one (ADR-0023). Blind to
+#    every miss: confidence reaches the audit only on a RESOLVED prior, and the section
+#    prints how many episodes that is.
 # The same module is the sweep's own coverage gate (`--gate-scenes`, exit 2 on a missing
 # scene), wired between the prior pass and the cells. No GPU, seconds
 python -m earshot.tools.matrix_audit runs/matrix-1

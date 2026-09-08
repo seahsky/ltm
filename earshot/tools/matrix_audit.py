@@ -27,6 +27,17 @@ seen and unseen cells of one semantic condition ran byte-identical inputs. Every
 discordant SOURCE_REACHED pair in such a scene is therefore apparatus noise, measured
 without spending a run on it — the check `repeat-1` cost a full re-run to make.
 
+**E. WHETHER AN ABSTAIN THRESHOLD EXISTS.** The question D2 leaves open. The vote
+carries its own mean cosine (`memory_prior_confidence`), so if a wrong recall scores
+lower than a right one, `_vote` can decline to answer and a `not_heard` cell becomes an
+arm with NO prior rather than an arm with a confidently wrong one. If the two
+distributions overlap, no single floor does that, and only a `NONE` arm controls for it.
+The grading key is the sweep's own `assignment.tsv`: a recall is CORRECT when the voted
+category is the anchor object of the class that scene actually ran. Confidence reaches
+the audit only on a RESOLVED prior, so every miss is outside this section by
+construction — including the `unreachable` sub-arm — and the section prints how many
+episodes that leaves it blind to.
+
 `--gate-scenes` is the enforcement half, for `matrix_sweep.sh`: exit 2 unless every
 assigned scene is in the store's `scenes_complete`. A prior pass that silently dropped a
 scene must stop the sweep before the cells run, because "NOT_RUN is never green".
@@ -49,6 +60,10 @@ __all__ = [
     "seen_axis_divergence",
     "prior_distribution",
     "discordance_where_identical",
+    "load_assignment",
+    "anchors_by_scene",
+    "graded_confidences",
+    "abstain_table",
     "main",
 ]
 
@@ -164,6 +179,11 @@ def load_memory_rows(arm_dir: str) -> Dict[str, Dict[int, Dict[str, Any]]]:
                 "miss": audit.memory_prior_miss,
                 "instances": metrics.get("memory_prior_instances"),
                 "distance_m": metrics.get("memory_prior_distance_m"),
+                # Present only on a RESOLVED prior: `MemoryPrior.as_metrics` is what
+                # writes it, and a miss builds no `MemoryPrior`. So a `None` here means
+                # "the vote's score was never recorded", NOT "the vote scored zero" --
+                # `test_task_memory_arm` holds that distinction on the writing side.
+                "confidence": metrics.get("memory_prior_confidence"),
             }
         out[scene_dir.name] = rows
     return out
@@ -288,6 +308,146 @@ def discordance_where_identical(
     return {"zero_row_scenes": zero, "scenes_with_rows": with_rows}
 
 
+def load_assignment(path: str) -> Dict[str, str]:
+    """`{scene: anomaly_class}` off the sweep's own `assignment.tsv`.
+
+    Section E's grading key, and it is the sweep's DECISION rather than a reconstruction
+    of it: `anchor_yield --emit-assignment` wrote this file and `matrix_sweep.sh`'s cell
+    loop read the same two columns back, so a scene graded here ran the class it is
+    graded against. A malformed line raises rather than being skipped — a grading key
+    that silently loses a scene grades that scene's episodes against nothing.
+    """
+    out: Dict[str, str] = {}
+    with open(path, "r", encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            parts = text.split()
+            if len(parts) != 2:
+                raise ValueError(
+                    "{}:{}: expected `scene<TAB>class`, got {!r}".format(
+                        path, number, text
+                    )
+                )
+            out[parts[0]] = parts[1]
+    return out
+
+
+def anchors_by_scene(assignment: Mapping[str, str]) -> Dict[str, Optional[str]]:
+    """`{scene: the category a CORRECT recall names}` — each class's anchor object.
+
+    `None` for a class that anchors nowhere (`glass_break`). That is not the same fact as
+    an absent scene: an episode of such a class has no right answer to be graded against,
+    so it is excluded from section E rather than counted as a wrong recall.
+    """
+    from earshot.task.prior_build import anchor_of_run_class
+
+    return {scene: anchor_of_run_class(name) for scene, name in assignment.items()}
+
+
+def graded_confidences(
+    arm: Mapping[str, Mapping[int, Mapping[str, Any]]],
+    anchors: Mapping[str, Optional[str]],
+) -> Dict[str, Any]:
+    """This arm's recall confidences, split into the ones that named the right category
+    and the ones that did not. Both lists come back SORTED, for `abstain_table`. Pure.
+
+    `ungraded` is the section's own blind spot, counted rather than dropped:
+    `no_confidence` is every episode whose prior missed or was never consulted, and
+    `unknown_anchor` is every episode of a class with no anchor at all.
+    """
+    correct: List[float] = []
+    wrong: List[float] = []
+    ungraded = {"no_confidence": 0, "unknown_anchor": 0}
+    for scene, rows in arm.items():
+        anchor = anchors.get(scene)
+        for row in rows.values():
+            if row.get("category") is None or row.get("confidence") is None:
+                ungraded["no_confidence"] += 1
+                continue
+            if anchor is None:
+                ungraded["unknown_anchor"] += 1
+                continue
+            bucket = correct if row["category"] == anchor else wrong
+            bucket.append(float(row["confidence"]))
+    return {"correct": sorted(correct), "wrong": sorted(wrong), "ungraded": ungraded}
+
+
+def _quantile(values: Sequence[float], q: float) -> Optional[float]:
+    """The q-quantile of an ALREADY SORTED sequence, by nearest rank. Pure."""
+    if not values:
+        return None
+    index = min(len(values) - 1, max(0, int(round(q * (len(values) - 1)))))
+    return float(values[index])
+
+
+def abstain_table(
+    correct: Sequence[float], wrong: Sequence[float]
+) -> Dict[str, Any]:
+    """Whether a confidence floor can drop wrong recalls without dropping right ones.
+
+    Both sequences must already be sorted. A threshold abstains on every vote scoring
+    strictly BELOW it, so:
+
+    - `free` is the largest threshold that loses no correct recall at all — `min(correct)`
+      — and what it drops is the number of wrong priors an abstain rule buys for nothing.
+    - `best` maximises (wrong dropped rate) − (correct lost rate), which is Youden's J,
+      the standard single-threshold summary. Ties go to the LOWER threshold, so the
+      reported operating point is the least aggressive one that achieves it. The ranking
+      is done on the INTEGER `dropped * n_correct - lost * n_wrong`, which J is that
+      number over a constant: computing J in floating point first made `1 - 2/3` exceed
+      `2/3 - 1/3` by one ulp and handed the tie to the most aggressive threshold instead
+      of the least.
+    - `separable` is the strong claim: every wrong recall scored below every right one.
+
+    Pure. Returns `None` rows when either side is empty, because a rate over zero
+    episodes is not a rate and printing 0.0 for one would read as a measured floor.
+    """
+    n_correct, n_wrong = len(correct), len(wrong)
+    summary: Dict[str, Any] = {
+        "n_correct": n_correct,
+        "n_wrong": n_wrong,
+        "correct_q": [_quantile(correct, q) for q in (0.0, 0.25, 0.5, 0.75, 1.0)],
+        "wrong_q": [_quantile(wrong, q) for q in (0.0, 0.25, 0.5, 0.75, 1.0)],
+        "free": None,
+        "best": None,
+        "separable": None,
+    }
+    if not n_correct or not n_wrong:
+        return summary
+
+    def _row(threshold: float) -> Dict[str, float]:
+        dropped = sum(1 for value in wrong if value < threshold)
+        lost = sum(1 for value in correct if value < threshold)
+        return {
+            "threshold": float(threshold),
+            "wrong_dropped": dropped,
+            "wrong_rate": dropped / n_wrong,
+            "correct_lost": lost,
+            "correct_rate": lost / n_correct,
+            "j": dropped / n_wrong - lost / n_correct,
+            # J's numerator over the common denominator `n_wrong * n_correct`. Integer,
+            # so the ranking below is exact and the tie-break is the one documented.
+            "rank": dropped * n_correct - lost * n_wrong,
+        }
+
+    candidates = sorted(set(correct) | set(wrong))
+    summary["free"] = _row(correct[0])
+    summary["best"] = max(
+        (_row(value) for value in candidates),
+        key=lambda row: (row["rank"], -row["threshold"]),
+    )
+    summary["separable"] = wrong[-1] < correct[0]
+    return summary
+
+
+def _fmt_quantiles(quantiles: Sequence[Optional[float]]) -> str:
+    return "min/p25/median/p75/max " + "/".join(
+        "-" if value is None else "{:.4f}".format(value) for value in quantiles
+    )
+
+
 def _print_coverage(coverage: Mapping[str, Any], say: Any) -> None:
     say("A. THE STORE")
     say("  assigned {} scene(s): complete {}, incomplete {}, failed {}".format(
@@ -331,6 +491,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--store", default=None,
         help="path to the prior pass's store.json (default: <run_dir>/prior/store.json)",
+    )
+    parser.add_argument(
+        "--assignment", default=None,
+        help="path to the sweep's assignment.tsv (default: <run_dir>/assignment.tsv). "
+             "Section E's grading key: which class each scene actually ran",
     )
     parser.add_argument(
         "--gate-scenes", default=None,
@@ -435,6 +600,68 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif zero["pairs"]:
             say("    -> no flips on identical inputs — consistent with a deterministic "
                 "run path")
+
+    say("")
+    say("E. CAN THE VOTE ABSTAIN (a CORRECT recall's confidence against a WRONG one's)")
+    assignment_path = args.assignment or str(
+        pathlib.Path(args.run_dir) / "assignment.tsv"
+    )
+    if not pathlib.Path(assignment_path).is_file():
+        say("  SKIPPED: no grading key at {}".format(assignment_path))
+        say("  Section E needs the sweep's own assignment.tsv to know which category a")
+        say("  correct recall would have named. Pass --assignment to point at it.")
+        return 0
+
+    anchors = anchors_by_scene(load_assignment(assignment_path))
+    say("  graded on {}".format(assignment_path))
+    pooled_correct: List[float] = []
+    pooled_wrong: List[float] = []
+    for arm in args.arms.split():
+        if arm not in arms:
+            continue
+        graded = graded_confidences(arms[arm], anchors)
+        pooled_correct.extend(graded["correct"])
+        pooled_wrong.extend(graded["wrong"])
+        say("  {}: {} correct, {} wrong, {} with no confidence recorded{}".format(
+            arm,
+            len(graded["correct"]),
+            len(graded["wrong"]),
+            graded["ungraded"]["no_confidence"],
+            "" if not graded["ungraded"]["unknown_anchor"] else
+            ", {} of a class that anchors nowhere".format(
+                graded["ungraded"]["unknown_anchor"]
+            ),
+        ))
+
+    pooled_correct.sort()
+    pooled_wrong.sort()
+    table = abstain_table(pooled_correct, pooled_wrong)
+    say("  pooled CORRECT n={:<4} {}".format(
+        table["n_correct"], _fmt_quantiles(table["correct_q"])))
+    say("  pooled WRONG   n={:<4} {}".format(
+        table["n_wrong"], _fmt_quantiles(table["wrong_q"])))
+    if table["free"] is None:
+        say("  -> one side is empty, so no floor is measurable from this sweep. A "
+            "threshold needs both a right recall and a wrong one to sit between.")
+        return 0
+
+    free, best = table["free"], table["best"]
+    say("  free floor {:.4f} (the largest that loses NO correct recall): drops {} of {} "
+        "wrong ({:.1f}%)".format(
+            free["threshold"], free["wrong_dropped"], table["n_wrong"],
+            100.0 * free["wrong_rate"]))
+    say("  best floor {:.4f} (max J): drops {}/{} wrong ({:.1f}%), loses {}/{} correct "
+        "({:.1f}%), J={:.3f}".format(
+            best["threshold"], best["wrong_dropped"], table["n_wrong"],
+            100.0 * best["wrong_rate"], best["correct_lost"], table["n_correct"],
+            100.0 * best["correct_rate"], best["j"]))
+    if table["separable"]:
+        say("  -> SEPARABLE: every wrong recall scored below every right one. An abstain "
+            "floor is a real rule, and `not_heard` can be made an arm with no prior.")
+    else:
+        say("  -> the distributions OVERLAP: no single floor separates them. An abstain "
+            "rule buys the free drop above and then trades right recalls for wrong ones, "
+            "so a NONE arm stays the only clean control for a wrong prior.")
 
     return 0
 
