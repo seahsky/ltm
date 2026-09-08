@@ -4,6 +4,11 @@
 **Depends on ADR-0017.** Without the sounding window none of this is measurable.
 **Reopens the audio axis** that `CONTEXT.md` had recorded as a closed negative, and carries the reason for the reopening rather than the fact of it.
 
+> **Read ADR-0023 before reading the table below.** `matrix-1` ran this matrix and neither axis measured the memory named here.
+> The bottom-right cell is labelled *"neither — the baseline"* and is not one: `without_class` leaves the bank's other classes and `_vote` has no abstain, so that cell receives a confident **wrong** prior rather than no prior (zero `no_prediction` in 1128 episodes).
+> The seen row is not a memory either: the episodic entry's point is drawn from the same ObjectNav table the unseen cell reads, so a seen cell narrows a candidate list and adds no location.
+> The 2×2's **shape** stands. What its cells **mean** does not, and ADR-0023 names the three changes that would make them mean it.
+
 The experiment is a 2×2 over two generalization axes, and the point of the factorial is that the two axes test **two different memories**.
 
 |  | heard sound | not-heard sound |

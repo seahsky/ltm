@@ -7,6 +7,8 @@ decidable without a finished sweep on disk. The gate is exercised through its re
 the healthy pass, and the red exit a silently-dropped scene must produce.
 """
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,10 +16,17 @@ from pathlib import Path
 from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.memory.store import EpisodicEntry, EpisodicStore, SemanticStore
+from earshot.report.agent import AgentReport
+from earshot.report.artifacts import write_episode
+from earshot.report.audit import EpisodeAudit, FunnelStage
 from earshot.task.memory_build import dump_stores
 from earshot.tools.matrix_audit import (
+    abstain_table,
+    anchors_by_scene,
     discordance_where_identical,
     gate_missing,
+    graded_confidences,
+    load_assignment,
     main,
     prior_distribution,
     scene_of,
@@ -34,6 +43,7 @@ def _row(
     miss=None,
     instances=None,
     distance=None,
+    confidence=None,
 ):
     return {
         "reached": reached,
@@ -43,6 +53,7 @@ def _row(
         "miss": miss,
         "instances": instances,
         "distance_m": distance,
+        "confidence": confidence,
     }
 
 
@@ -179,6 +190,102 @@ class TestDiscordanceWhereIdentical(unittest.TestCase):
         self.assertEqual(split["scenes_with_rows"]["discordant"], 1)
 
 
+class TestTheGradingKey(unittest.TestCase):
+    def test_the_assignment_tsv_is_read_back_as_scene_to_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "assignment.tsv"
+            path.write_text("sceneA\ttoilet_flush\n\nsceneB\tsnoring\n", encoding="utf-8")
+            self.assertEqual(
+                load_assignment(str(path)),
+                {"sceneA": "toilet_flush", "sceneB": "snoring"},
+            )
+
+    def test_a_malformed_line_raises_rather_than_being_skipped(self):
+        """A grading key that silently drops a scene grades that scene against nothing,
+        and every episode in it would fall into `no_confidence` looking innocent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "assignment.tsv"
+            path.write_text("sceneA\ttoilet_flush\nsceneB\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_assignment(str(path))
+
+    def test_the_anchor_is_the_category_a_correct_recall_names(self):
+        anchors = anchors_by_scene(
+            {"A": "toilet_flush", "B": "snoring", "C": "keyboard_typing"}
+        )
+        self.assertEqual(anchors, {"A": "toilet", "B": "bed", "C": "chair"})
+
+    def test_a_class_that_anchors_nowhere_has_no_right_answer(self):
+        self.assertEqual(anchors_by_scene({"A": "glass_break"}), {"A": None})
+
+
+class TestGradedConfidences(unittest.TestCase):
+    def test_the_voted_category_is_graded_against_the_scenes_own_class(self):
+        arm = {
+            "A": {
+                0: _row(category="toilet", confidence=0.9),
+                1: _row(category="bed", confidence=0.4),
+            }
+        }
+        graded = graded_confidences(arm, {"A": "toilet"})
+        self.assertEqual(graded["correct"], [0.9])
+        self.assertEqual(graded["wrong"], [0.4])
+
+    def test_a_miss_carries_no_confidence_and_is_counted_not_dropped(self):
+        """The section's blind spot, and the reason it is printed: `unreachable` is a
+        real recall the audit records no score for, so no threshold can be tried on it."""
+        arm = {"A": {0: _row(miss="unreachable"), 1: _row()}}
+        graded = graded_confidences(arm, {"A": "toilet"})
+        self.assertEqual(graded["correct"], [])
+        self.assertEqual(graded["wrong"], [])
+        self.assertEqual(graded["ungraded"]["no_confidence"], 2)
+
+    def test_an_unanchored_class_is_excluded_rather_than_counted_wrong(self):
+        arm = {"A": {0: _row(category="chair", confidence=0.7)}}
+        graded = graded_confidences(arm, {"A": None})
+        self.assertEqual(graded["wrong"], [])
+        self.assertEqual(graded["ungraded"]["unknown_anchor"], 1)
+
+
+class TestAbstainTable(unittest.TestCase):
+    def test_a_separable_pair_buys_every_wrong_recall_for_free(self):
+        table = abstain_table(correct=[0.8, 0.9], wrong=[0.1, 0.2])
+        self.assertTrue(table["separable"])
+        self.assertEqual(table["free"]["threshold"], 0.8)
+        self.assertEqual(table["free"]["wrong_dropped"], 2)
+        self.assertEqual(table["free"]["correct_lost"], 0)
+        self.assertAlmostEqual(table["best"]["j"], 1.0)
+
+    def test_an_overlapping_pair_trades_one_for_the_other(self):
+        """The forced-failure arm of the same question: interleaved scores, so the free
+        floor buys one wrong recall and nothing above it is free."""
+        table = abstain_table(correct=[0.2, 0.6, 0.8], wrong=[0.1, 0.5, 0.7])
+        self.assertFalse(table["separable"])
+        self.assertEqual(table["free"]["threshold"], 0.2)
+        self.assertEqual(table["free"]["wrong_dropped"], 1)
+        self.assertEqual(table["free"]["correct_lost"], 0)
+        self.assertAlmostEqual(table["best"]["j"], 1.0 / 3.0)
+
+    def test_the_tie_break_takes_the_least_aggressive_floor(self):
+        """Three thresholds reach J = 1/3 on this pair (0.2, 0.6, 0.8) and the reported
+        one must be 0.2, which loses nothing. Computing J in floating point put
+        `1 - 2/3` one ulp above `2/3 - 1/3` and handed the tie to 0.8 instead, so the
+        tool recommended discarding two correct recalls to buy the same J."""
+        table = abstain_table(correct=[0.2, 0.6, 0.8], wrong=[0.1, 0.5, 0.7])
+        self.assertEqual(table["best"]["threshold"], 0.2)
+        self.assertEqual(table["best"]["correct_lost"], 0)
+
+    def test_one_empty_side_reports_no_floor_rather_than_a_zero(self):
+        """Every `not_heard` cell of a three-class bank is wrong by construction, so an
+        arm read alone can have an empty correct side. A 0.0 there would read as a
+        measured floor."""
+        table = abstain_table(correct=[], wrong=[0.3, 0.4])
+        self.assertIsNone(table["free"])
+        self.assertIsNone(table["best"])
+        self.assertIsNone(table["separable"])
+        self.assertEqual(table["n_wrong"], 2)
+
+
 class TestTheCoverageGateCli(unittest.TestCase):
     """The gate through its real CLI against a real `dump_stores` file — the enforcement
     `matrix_sweep.sh` calls between the prior pass and the cells."""
@@ -218,6 +325,91 @@ class TestTheCoverageGateCli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(tmp, complete=["A"])
             self.assertEqual(main(["--store", store, "--gate-scenes", "A B"]), 2)
+
+
+class TestSectionEThroughTheCli(unittest.TestCase):
+    """Section E over a real sweep layout, written by the real writer and read back by
+    the real loader — the grading key, the confidence off `metrics`, and the verdict
+    line. ADR-0014: the capability is exercised, not proxied by calling the pure
+    functions with hand-built dicts.
+    """
+
+    SCENE = "sceneA"
+
+    @classmethod
+    def _sweep(cls, tmp, *, with_assignment):
+        root = Path(tmp)
+        dump_stores(
+            str(root / "prior" / "store.json"),
+            SemanticStore(),
+            EpisodicStore(entries=(EpisodicEntry(
+                scene=cls.SCENE, room="bathroom", category="toilet",
+                point=Xyz(0.0, 0.0, 0.0),
+            ),)),
+            provenance={
+                "scenes_requested": [cls.SCENE],
+                "scenes_complete": [cls.SCENE],
+                "scenes_incomplete": [],
+                "scenes_failed": [],
+            },
+        )
+        scene_dir = root / "heard_seen" / cls.SCENE
+        # `toilet_flush` anchors at `toilet`, so episode 0 recalled right and episode 1
+        # recalled wrong — and the wrong one scored lower, which is the separable case.
+        for index, (category, confidence) in enumerate(
+            (("toilet", 0.91), ("bed", 0.42))
+        ):
+            write_episode(
+                str(scene_dir), index, AgentReport(),
+                EpisodeAudit(
+                    episode_index=index,
+                    scene_id=cls.SCENE,
+                    memory_condition="heard_seen",
+                    memory_prior_category=category,
+                    source_xyz=Xyz(2.0, 0.1, -4.0),
+                    funnel_stage=FunnelStage.SOURCE_REACHED,
+                    metrics={"memory_prior_confidence": confidence},
+                ),
+            )
+        # A third episode whose prior missed: no confidence recorded, so section E must
+        # count it as a blind spot rather than grade it.
+        write_episode(
+            str(scene_dir), 2, AgentReport(),
+            EpisodeAudit(
+                episode_index=2, scene_id=cls.SCENE, memory_condition="heard_seen",
+                memory_prior_miss="unreachable", source_xyz=Xyz(2.0, 0.1, -4.0),
+                funnel_stage=FunnelStage.SOURCE_REACHED,
+            ),
+        )
+        if with_assignment:
+            (root / "assignment.tsv").write_text(
+                "{}\ttoilet_flush\n".format(cls.SCENE), encoding="utf-8"
+            )
+        return str(root)
+
+    def _run(self, run_dir):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main([run_dir, "--arms", "heard_seen"])
+        return code, buffer.getvalue()
+
+    def test_the_grading_key_turns_the_audits_into_a_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self._run(self._sweep(tmp, with_assignment=True))
+        self.assertEqual(code, 0)
+        self.assertIn("heard_seen: 1 correct, 1 wrong, 1 with no confidence", out)
+        self.assertIn("free floor 0.9100", out)
+        self.assertIn("SEPARABLE", out)
+
+    def test_without_the_key_the_section_says_so_rather_than_guessing(self):
+        """The forced-failure arm. A sweep with no assignment.tsv cannot know which
+        category a correct recall would have named, and inventing one would grade every
+        episode against the wrong answer while printing a confident floor."""
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self._run(self._sweep(tmp, with_assignment=False))
+        self.assertEqual(code, 0)
+        self.assertIn("SKIPPED: no grading key", out)
+        self.assertNotIn("free floor", out)
 
 
 if __name__ == "__main__":
