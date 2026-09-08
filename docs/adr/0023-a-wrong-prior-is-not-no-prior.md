@@ -1,6 +1,7 @@
 # A wrong prior is not no prior, and a narrowed list is not a memory
 
 **Status:** proposed (2026-09-08), on the 2026-09-05 review of `matrix-1` and the four read-only answers `tools/matrix_audit.py` returned from it.
+**Section E has since run on `matrix-1` and its pre-registered branch fired: SEPARABLE, at the maximum possible margin — every wrong recall below every right one, 194 of 194 dropped for zero correct recalls lost.** The measurement and the one condition that limits what it may claim are recorded under change 2 below. Nothing else in this ADR is decided by it.
 Nothing here is implemented beyond section E of that reader.
 Two of the four changes cost a night of box time and the third changes what a published number is allowed to say, so they are Sky's to accept, not mine to land.
 
@@ -99,6 +100,39 @@ If a floor is adopted, `resolve_prior` must also record the vote's score on `CAT
 
 `test_memory_prior.TestTheNotHeardCellsReceiveAWrongPrior` is annotated to be **rewritten, not reverted**, when a floor lands.
 
+#### Measured on `matrix-1`, 2026-09-08
+
+```
+  pooled CORRECT n=272  min/p25/median/p75/max 0.7842/0.9060/0.9370/0.9548/0.9755
+  pooled WRONG   n=194  min/p25/median/p75/max 0.1466/0.2291/0.2811/0.3921/0.4467
+  free floor 0.7842 (the largest that loses NO correct recall): drops 194 of 194 wrong (100.0%)
+  -> SEPARABLE
+```
+
+The two distributions do not touch: a gap of **0.3375** between the highest wrong recall and the lowest right one, over 466 graded episodes.
+The separable branch fires, and it fires at the ceiling.
+
+**What the two sets actually are, which is narrower than "right recalls against wrong ones".**
+Every one of the 272 correct recalls came from a `heard` arm and every one of the 194 wrong ones from a `not_heard` arm.
+The heard arms never once voted a wrong category — 136 resolved priors in each, 136 correct in each — so `matrix-1` contains **zero** cases of a full store erring, and section E cannot say what such a case would score.
+What is demonstrated is exactly the rule the abstain floor needs: **when the class is absent from the store, the vote scores low, without exception.**
+What is not demonstrated is a general is-this-recall-right detector.
+
+**The condition that limits it: both sides render the same recording.**
+`resolve_anomaly_clip` returns `<clip_dir>/<class>.wav`, one file per class, and `fetch_esc50_clips` stages exactly one ESC-50 recording per class.
+`prior_driver.py:379` and `runner.py:2135` both resolve it, `matrix_sweep.sh` overrides the clip directory nowhere, so the store entry and the episode's query are **the same waveform through two different impulse responses**.
+A median cosine of 0.937 is consistent with that and not with class-level generalization.
+
+So the floor is calibrated on same-clip novelty: absent class versus present recording.
+It will hold in a sweep built the way `matrix-1` was built, which is what adopting it requires.
+It is **not** evidence that the floor survives graded novelty — a class heard once, heard in another room, or acoustically near a stored one — and the same caveat lands on the heard axis itself, whose 14.2 and 16.0 points were earned under the same condition.
+The machinery for the harder test already exists and is unused here: `clips.stage_corpus` writes `<class>/<NN>.wav` and `clips.clips_for_class` reads them back, so a prior pass touring held-out clip indices against episodes rendering the staged one is a staging change, not a new capability.
+
+**Consequences of adopting the floor, stated before it is adopted.**
+The 194 wrong priors abstain, and the 68 + 49 `unreachable` recalls very likely abstain with them — *inferred*, not measured, because a miss records no score, which is the same blind spot named above.
+That empties most of what steered the `not_heard` arms, so the heard-versus-not-heard effect should **shrink**: today's 14.2 and 16.0 points are `benefit(right prior) + harm(wrong prior)`, and the floor removes the second term.
+Adopting the floor is therefore not a free improvement. It is the test that could deflate the headline, and that is the reason to run it.
+
 ### 3. The episodic entry carries what the tour saw, not what the annotation says
 
 A requirement, not an implementation: an entry must hold something `category_points(dataset)` does not.
@@ -139,5 +173,6 @@ The episodic redesign adds no arm; it changes what the seen cells mean, and unti
 ## What this ADR does not decide
 
 - **Which** non-GT quantity the episodic entry carries. That needs the tour's own record inspected first, and the answer changes what a seen cell claims.
+- Whether the prior pass tours **held-out clips**. Section E's measurement above makes this the cheapest open question in the ADR — one staging change, no new capability — and it is the difference between "the memory learned the class" and "the memory recognized the recording" for the heard axis as a whole, not only for the floor.
 - Whether the assignment keeps `p53SfW6mjZe` and `qyAac8rV8Zk`. The new coverage gate will refuse the sweep until their tours complete or they are dropped **on purpose**, which is the point of the gate.
 - ADR-0018 amendment (c), the oracle view-point widening, still unimplemented at `runner.py:766`. It confounded nothing in `matrix-1` because it was absent from every cell, but a pre-registered item is silently missing and that is its own finding.
