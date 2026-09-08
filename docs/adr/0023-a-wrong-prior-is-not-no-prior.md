@@ -118,15 +118,27 @@ The heard arms never once voted a wrong category — 136 resolved priors in each
 What is demonstrated is exactly the rule the abstain floor needs: **when the class is absent from the store, the vote scores low, without exception.**
 What is not demonstrated is a general is-this-recall-right detector.
 
-**The condition that limits it: both sides render the same recording.**
+**The condition that limits it: both sides render the same recording — and that is ADR-0018's deliberate control, not an oversight.**
 `resolve_anomaly_clip` returns `<clip_dir>/<class>.wav`, one file per class, and `fetch_esc50_clips` stages exactly one ESC-50 recording per class.
 `prior_driver.py:379` and `runner.py:2135` both resolve it, `matrix_sweep.sh` overrides the clip directory nowhere, so the store entry and the episode's query are **the same waveform through two different impulse responses**.
-A median cosine of 0.937 is consistent with that and not with class-level generalization.
+A median cosine of 0.937 is consistent with that.
 
-So the floor is calibrated on same-clip novelty: absent class versus present recording.
-It will hold in a sweep built the way `matrix-1` was built, which is what adopting it requires.
-It is **not** evidence that the floor survives graded novelty — a class heard once, heard in another room, or acoustically near a stored one — and the same caveat lands on the heard axis itself, whose 14.2 and 16.0 points were earned under the same condition.
-The machinery for the harder test already exists and is unused here: `clips.stage_corpus` writes `<class>/<NN>.wav` and `clips.clips_for_class` reads them back, so a prior pass touring held-out clip indices against episodes rendering the staged one is a staging change, not a new capability.
+ADR-0018's amendment of 2026-08-21 chose this, and gave the reason:
+
+> The heard/not-heard split must control it: the same recordings on both sides, differing only in whether a prior visit stored them.
+
+The reason is measured, not stylistic. Recording difficulty swings enormously inside one class — `water_drops` scored 0.998 anchor recall on ESC-50 clips 0-7 and **0.449** on clips 8-15 — so a heard column drawing different clips from the not-heard column would confound memory with which recordings each side happened to draw.
+Holding the recording fixed removes that confound and is the right call.
+
+What it costs is the scope of the claim, and the ADR should say so plainly: **the heard axis measures retrieval of a stored recording, not generalization to a new one.**
+That is a real result and it is narrower than "the memory learned the class".
+The floor inherits exactly the same scope.
+
+The class-generalization experiment is a **different, never-run** one, and ADR-0018 already promoted it in the same amendment ("the recording-level axis is promoted") and named what a fresh headline needs: `--clip-start 16`.
+There is prior evidence it would survive: all three of the matrix's classes — `toilet_flush`, `snoring`, `keyboard_typing` — are in ADR-0018's bank of record, each cleared on two disjoint recording sets, aggregate anchor top-1 0.880 on clips 0-7 against 0.867 on clips 8-15.
+So CLAP carries class-level structure for these three; what is unmeasured is whether the *store's* recall and this floor survive it.
+The machinery is already there and unused: `clips.stage_corpus` writes `<class>/<NN>.wav`, `clips.clips_for_class` reads them back, and `clips.py --index N` stages a single held-out recording per class into any directory.
+The only code missing is a `--clip-dir` on `prior_driver` and a passthrough in `matrix_sweep.sh`.
 
 **Consequences of adopting the floor, stated before it is adopted.**
 The 194 wrong priors abstain, and the 68 + 49 `unreachable` recalls very likely abstain with them — *inferred*, not measured, because a miss records no score, which is the same blind spot named above.
@@ -173,6 +185,7 @@ The episodic redesign adds no arm; it changes what the seen cells mean, and unti
 ## What this ADR does not decide
 
 - **Which** non-GT quantity the episodic entry carries. That needs the tour's own record inspected first, and the answer changes what a seen cell claims.
-- Whether the prior pass tours **held-out clips**. Section E's measurement above makes this the cheapest open question in the ADR — one staging change, no new capability — and it is the difference between "the memory learned the class" and "the memory recognized the recording" for the heard axis as a whole, not only for the floor.
+- Whether the prior pass tours **held-out clips**. This is ADR-0018's own promoted recording-level axis, and it needs a `--clip-dir` on `prior_driver` plus a passthrough in `matrix_sweep.sh` — the staging (`clips.py --index 16`) already works. It is the difference between "retrieval of a stored recording" and "generalization to a new one" for the heard axis as a whole, not only for the floor.
+- **The exact repeat of `matrix-1` is no longer runnable, and that is correct.** PR #83's coverage gate refuses an assignment the prior pass did not complete, and `--force` does not bypass it, so reproducing `matrix-1` byte for byte would mean reproducing the two mislabelled scenes. Any repeat arm is therefore a repeat of a **corrected** configuration, which does not exist yet — the store changes the moment those two scenes complete, and a changed store changes the vote in all 19. The single-run rule (change 4) applies to whatever configuration is established next, not retroactively to `matrix-1`.
 - Whether the assignment keeps `p53SfW6mjZe` and `qyAac8rV8Zk`. The new coverage gate will refuse the sweep until their tours complete or they are dropped **on purpose**, which is the point of the gate.
 - ADR-0018 amendment (c), the oracle view-point widening, still unimplemented at `runner.py:766`. It confounded nothing in `matrix-1` because it was absent from every cell, but a pre-registered item is silently missing and that is its own finding.
