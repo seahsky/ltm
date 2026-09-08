@@ -118,12 +118,23 @@ def store_coverage(
     requested = [scene_of(e) for e in provenance.get("scenes_requested", [])]
     scenes = list(assigned) if assigned is not None else requested
 
+    # The recorded REASON, kept beside the name. `scenes_incomplete` exists precisely so
+    # a scene that did not tour says why, and a coverage report that prints only the name
+    # sends the reader back to the log for the one fact the store already holds.
+    detail: Dict[str, Dict[str, Any]] = {}
+    for entry in list(provenance.get("scenes_incomplete", ())) + list(
+        provenance.get("scenes_failed", ())
+    ):
+        if isinstance(entry, Mapping):
+            detail[scene_of(entry)] = dict(entry)
+
     accounted = set(complete) | set(incomplete) | set(failed)
     return {
         "assigned": scenes,
         "complete": complete,
         "incomplete": incomplete,
         "failed": failed,
+        "detail": detail,
         "unaccounted": sorted(set(scenes) - accounted),
         "records_incomplete": "scenes_incomplete" in provenance,
         "complete_without_rows": sorted(
@@ -448,6 +459,31 @@ def _fmt_quantiles(quantiles: Sequence[Optional[float]]) -> str:
     )
 
 
+def _why(row: Optional[Mapping[str, Any]]) -> str:
+    """The recorded reason a scene did not tour, as a trailing clause. Pure.
+
+    `SceneTourOutcome.as_dict`'s three informative fields, in the order that answers the
+    question: how far the tour got, how much it stored, and the load error if there was
+    one. An empty string when the store recorded nothing — a pre-`pass_provenance` store,
+    where the absence IS the finding and a fabricated reason would hide it.
+    """
+    if not row:
+        return ""
+    parts: List[str] = []
+    reached = row.get("rooms_reached")
+    if reached is not None:
+        # A LIST of room names, not a count -- which rooms the tour got to is the fact
+        # that names the missing legs, and a count would throw it away.
+        parts.append("rooms reached: {}".format(
+            ", ".join(str(room) for room in reached) or "<none>"
+        ))
+    if row.get("n_observations") is not None:
+        parts.append("{} observation(s) stored".format(row["n_observations"]))
+    if row.get("error"):
+        parts.append("error: {}".format(row["error"]))
+    return " -- {}".format(", ".join(parts)) if parts else ""
+
+
 def _print_coverage(coverage: Mapping[str, Any], say: Any) -> None:
     say("A. THE STORE")
     say("  assigned {} scene(s): complete {}, incomplete {}, failed {}".format(
@@ -461,7 +497,9 @@ def _print_coverage(coverage: Mapping[str, Any], say: Any) -> None:
         say("        shows only in the unaccounted list below")
     for name in ("incomplete", "failed"):
         for scene in coverage[name]:
-            say("  {}: {}".format(name.upper(), scene))
+            say("  {}: {}{}".format(
+                name.upper(), scene, _why(coverage.get("detail", {}).get(scene)),
+            ))
     for scene in coverage["unaccounted"]:
         say("  UNACCOUNTED (in no list — the D3 silent case): {}".format(scene))
     for scene in coverage["complete_without_rows"]:
@@ -535,6 +573,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     say = print
     coverage = store_coverage(provenance, rows_by_scene)
     _print_coverage(coverage, say)
+
+    if args.run_dir is None:
+        # `--store` on its own is a complete question -- "what did the prior pass
+        # cover?" -- and is how a store is read BEFORE any cell has run over it. It used
+        # to print section A and then die on `Path(None)`, which made the tool look
+        # broken at exactly the moment it had just answered.
+        say("")
+        say("(no run_dir given, so sections B-E are not run: they read the sweep's own "
+            "arm directories, which do not exist until the cells have)")
+        return 0
 
     arms = {}
     for arm in args.arms.split():
