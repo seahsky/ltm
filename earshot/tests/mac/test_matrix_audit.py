@@ -84,6 +84,30 @@ class TestStoreCoverage(unittest.TestCase):
         self.assertFalse(coverage["records_incomplete"])
         self.assertEqual(coverage["unaccounted"], ["B"])
 
+    def test_the_recorded_reason_travels_with_the_scene_name(self):
+        """`scenes_incomplete` exists so a scene that did not tour says why. A coverage
+        report holding only the name sends the reader to the log for a fact the store
+        already has -- which is what `prior-2` cost."""
+        provenance = {
+            "scenes_requested": ["A", "B"],
+            "scenes_complete": [],
+            "scenes_incomplete": [
+                {"scene": "A", "ok": True, "complete": False,
+                 "rooms_reached": ["bathroom"], "n_observations": 1, "error": None},
+            ],
+            "scenes_failed": [{"scene": "B", "ok": False, "error": "no mesh"}],
+        }
+        coverage = store_coverage(provenance, {"A": 1})
+        self.assertEqual(coverage["detail"]["A"]["rooms_reached"], ["bathroom"])
+        self.assertEqual(coverage["detail"]["B"]["error"], "no mesh")
+
+    def test_a_legacy_store_has_no_detail_and_fabricates_none(self):
+        coverage = store_coverage(
+            {"scenes_requested": ["A"], "scenes_complete": [], "scenes_failed": []},
+            {},
+        )
+        self.assertEqual(coverage["detail"], {})
+
     def test_a_complete_scene_with_no_rows_is_a_named_disagreement(self):
         provenance = {
             "scenes_requested": ["A"],
@@ -318,6 +342,19 @@ class TestTheCoverageGateCli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(tmp, complete=["A", "B"])
             self.assertEqual(main(["--store", store, "--gate-scenes", "A B"]), 0)
+
+    def test_a_store_on_its_own_reports_coverage_and_exits_clean(self):
+        """`--store` with no run_dir is how a prior pass is read BEFORE any cell has run
+        over it, which is the whole point of the gate. It printed section A and then died
+        on `Path(None)`, so the tool looked broken right after it had answered."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp, complete=["A"])
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = main(["--store", store])
+        self.assertEqual(code, 0)
+        self.assertIn("A. THE STORE", buffer.getvalue())
+        self.assertIn("sections B-E are not run", buffer.getvalue())
 
     def test_a_missing_scene_exits_two(self):
         """The forced-failure arm: the sweep must stop before the cells, because a cell
