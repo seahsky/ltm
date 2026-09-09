@@ -479,6 +479,10 @@ def _why(row: Optional[Mapping[str, Any]]) -> str:
         ))
     if row.get("n_observations") is not None:
         parts.append("{} observation(s) stored".format(row["n_observations"]))
+    attempts = row.get("start_attempts")
+    if attempts is not None and int(attempts) > 1:
+        # Only when it retried: a 1 here is the default single draw and says nothing.
+        parts.append("{} start(s) drawn".format(int(attempts)))
     dropped = row.get("unreachable")
     if dropped is not None:
         # The line that tells a 0-of-0 tour apart from a partial one: no candidates at all
