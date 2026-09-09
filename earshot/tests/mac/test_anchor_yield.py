@@ -12,9 +12,12 @@ an `anchor_object` row and a class without one, and a scene that can build nothi
 """
 
 import collections
+import contextlib
+import io
 import os
 import tempfile
 import unittest
+import weakref
 
 from _interpreter import assert_interpreter  # noqa: F401
 from _task_fakes import make_episode, make_goal
@@ -607,6 +610,127 @@ class TestWriteAssignmentTsv(unittest.TestCase):
             with self.assertRaises(ValueError):
                 write_assignment_tsv(path, ())
             self.assertFalse(os.path.exists(path))
+
+
+class TestTheScanLoop(unittest.TestCase):
+    """`--split train` hung the box, and the CLI loop was never exercised.
+
+    It parsed every scene's content file into a `datasets` dict and built the cells
+    afterwards. Twenty val scenes fit; eighty train scenes did not, and `--limit` was
+    applied AFTER that loop, so the documented escape hatch loaded everything before
+    capping anything and could not be used to get out of it.
+
+    Both properties are asserted on the real `main`, over a real split directory, with
+    only `load_scene` replaced -- so the discovery, the cap and the mesh branch are the
+    shipped ones.
+    """
+
+    def _split(self, tmp, labels):
+        """A real ObjectNav layout: `available_scenes` reads this directory listing."""
+        content = os.path.join(
+            tmp, "data", "hm3d", "datasets", "objectnav", "hm3d", "v1", "trainish",
+            "content",
+        )
+        os.makedirs(content)
+        os.makedirs(os.path.join(tmp, "data", "hm3d", "scene_datasets"))
+        for label in labels:
+            open(os.path.join(content, label + ".json.gz"), "wb").close()
+        return content
+
+    def _run(self, tmp, argv, loader):
+        from earshot.tools import anchor_yield as module
+
+        original = module.load_scene
+        module.load_scene = loader
+        try:
+            return main(["--split", "trainish", "--root", tmp,
+                         "--classes", "snoring"] + argv)
+        finally:
+            module.load_scene = original
+
+    def test_limit_bounds_the_scenes_it_reads_not_the_ones_it_keeps(self):
+        """The property that makes a probe cheap. A cap on the scenes KEPT can still read
+        a whole split to fill it, which is what left `--limit` useless on train."""
+        calls = []
+
+        def loader(_split_dir, label, **_kwargs):
+            calls.append(label)
+            return a_scene_with_a_bed()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._split(tmp, ["s1", "s2", "s3", "s4", "s5"])
+            with open(os.devnull, "w") as sink:
+                with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                    code = self._run(tmp, ["--limit", "2", "--no-require-mesh"], loader)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["s1", "s2"])
+
+    def test_it_holds_one_scene_at_a_time(self):
+        """The hang itself. At the moment scene k is read, every earlier scene's dataset
+        must already be unreferenced -- CPython frees on the last reference, so a
+        surviving `datasets` dict would show up here as a live earlier scene."""
+        live = []
+        seen_live_counts = []
+
+        def loader(_split_dir, _label, **_kwargs):
+            seen_live_counts.append(sum(1 for ref in live if ref() is not None))
+            dataset = a_scene_with_a_bed()
+            live.append(weakref.ref(dataset))
+            return dataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._split(tmp, ["s1", "s2", "s3", "s4"])
+            with open(os.devnull, "w") as sink:
+                with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                    code = self._run(tmp, ["--no-require-mesh"], loader)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen_live_counts, [0, 0, 0, 0])
+
+    def test_a_missing_mesh_is_skipped_by_default(self):
+        """The default arm, kept: for a SWEEP, a scene with no mesh here and a scene that
+        cannot pose the task are different facts, and the fixture's path never exists."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._split(tmp, ["s1", "s2"])
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = self._run(
+                    tmp, [], lambda *_a, **_k: a_scene_with_a_bed())
+        self.assertEqual(code, 2)
+
+    def test_no_require_mesh_counts_the_same_scene_and_says_so(self):
+        """The other arm, and the reason it exists: a split's EPISODES arrive with the
+        ObjectNav zip and its MESHES come separately, so the ceiling has to be answerable
+        before a download that the answer is supposed to justify."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._split(tmp, ["s1", "s2"])
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = self._run(
+                    tmp, ["--no-require-mesh"], lambda *_a, **_k: a_scene_with_a_bed())
+        out = buffer.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("2 scene(s) counted WITHOUT checking for a mesh", out)
+        self.assertIn("no sweep can run over a scene whose mesh is not on this box", out)
+
+    def test_the_default_report_does_not_carry_the_no_mesh_caveat(self):
+        """A report from a real sweepable split must not warn about meshes it checked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            content = self._split(tmp, ["s1"])
+            mesh = os.path.join(tmp, "mesh.glb")
+            open(mesh, "wb").close()
+            dataset = EpisodeDataset(
+                scene_label="s1", scene_path=mesh,
+                episodes=a_scene_with_a_bed().episodes,
+            )
+            self.assertTrue(os.path.isdir(content))
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = self._run(tmp, [], lambda *_a, **_k: dataset)
+        self.assertEqual(code, 0)
+        self.assertNotIn("WITHOUT checking for a mesh", buffer.getvalue())
 
 
 class TestTheExitCode(unittest.TestCase):
