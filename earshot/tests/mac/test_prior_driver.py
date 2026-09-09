@@ -284,6 +284,30 @@ class TestPassProvenance(unittest.TestCase):
         )
         self.assertEqual(accounted, set(provenance["scenes_requested"]))
 
+    def test_a_complete_scene_records_the_rooms_its_tour_dropped(self):
+        """`prior-7` completed three scenes, two of them short a room, and the provenance
+        kept only their names. `scenes_complete` still does -- every reader of it is
+        untouched -- and `scenes_toured` is where the dropped candidate now lives."""
+        dropped = TourStop(room="bedroom", category="bed", point=Xyz(0.0, 3.4, 0.0))
+        shortened = TourRecord(
+            scene="A",
+            legs=(self._leg(True),),
+            observations=(self._observation(),),
+            unreachable=((dropped, "on another floor (2.24 m of height from the start)"),),
+        )
+        provenance = pass_provenance(
+            [SceneTourOutcome(scene="A", record=shortened)],
+            split="val", classes=["snoring"], seed=7, scenes=["A"],
+        )
+        self.assertEqual(provenance["scenes_complete"], ["A"])
+        toured = provenance["scenes_toured"]
+        self.assertEqual([entry["scene"] for entry in toured], ["A"])
+        self.assertTrue(toured[0]["complete"])
+        self.assertEqual(
+            [item["room"] for item in toured[0]["unreachable"]], ["bedroom"]
+        )
+        self.assertIn("another floor", toured[0]["unreachable"][0]["reason"])
+
 
 class TestPlanUntilNonEmpty(unittest.TestCase):
     """`qyAac8rV8Zk` planned 0 stops with 11 candidates unroutable across all three

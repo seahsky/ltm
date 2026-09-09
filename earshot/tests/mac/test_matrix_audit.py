@@ -135,6 +135,80 @@ class TestStoreCoverage(unittest.TestCase):
         self.assertIn("1 candidate(s) unroutable (bathroom)", out)
         self.assertIn("no candidate stop offered", out)
 
+    def test_a_complete_tour_that_dropped_a_room_says_which_room(self):
+        """`prior-7`: the floor test took a room out of two scenes, both reached every
+        leg they still had, and both went green. A report that prints only failures said
+        nothing at all -- so the one fact distinguishing a scene with two rooms from a
+        scene whose third was dropped never reached disk."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_coverage(
+                store_coverage(
+                    {
+                        "scenes_requested": ["shortened"],
+                        "scenes_complete": ["shortened"],
+                        "scenes_incomplete": [],
+                        "scenes_failed": [],
+                        "scenes_toured": [
+                            {"scene": "shortened", "ok": True, "complete": True,
+                             "rooms_reached": ["bathroom", "living room"],
+                             "n_observations": 2, "abandoned": [], "error": None,
+                             "unreachable": [
+                                 {"room": "bedroom", "category": "bed",
+                                  "reason": "on another floor (2.24 m of height "
+                                            "from the start)"},
+                             ]},
+                        ],
+                    },
+                    {"shortened": 2},
+                ),
+                print,
+            )
+        out = buffer.getvalue()
+        self.assertIn("COMPLETE, SHORT A ROOM: shortened", out)
+        self.assertIn("1 candidate(s) unroutable (bedroom)", out)
+        self.assertIn("on another floor", out)
+
+    def test_a_complete_tour_that_dropped_nothing_is_not_reported(self):
+        """The other arm, and the reason the line is conditional: a tour that kept every
+        candidate the scene offered must print no drop line, or the section cries wolf on
+        every green scene in a 19-scene pass and the real one stops being visible."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_coverage(
+                store_coverage(
+                    {
+                        "scenes_requested": ["whole"],
+                        "scenes_complete": ["whole"],
+                        "scenes_incomplete": [],
+                        "scenes_failed": [],
+                        "scenes_toured": [
+                            {"scene": "whole", "ok": True, "complete": True,
+                             "rooms_reached": ["bathroom"], "n_observations": 1,
+                             "unreachable": [], "abandoned": [], "error": None},
+                        ],
+                    },
+                    {"whole": 1},
+                ),
+                print,
+            )
+        self.assertNotIn("SHORT A ROOM", buffer.getvalue())
+
+    def test_a_store_without_scenes_toured_still_reads_its_failures(self):
+        """`scenes_toured` is additive: every store written before it keeps reporting
+        exactly what it did, and claims no drop it cannot see."""
+        coverage = store_coverage(
+            {
+                "scenes_requested": ["A", "B"],
+                "scenes_complete": ["A"],
+                "scenes_incomplete": [{"scene": "B", "rooms_reached": ["den"]}],
+                "scenes_failed": [],
+            },
+            {"A": 3},
+        )
+        self.assertEqual(coverage["complete_with_drops"], [])
+        self.assertEqual(coverage["detail"]["B"]["rooms_reached"], ["den"])
+
     def test_an_abandoned_leg_says_where_it_stalled_and_why(self):
         """`prior-5` moved both scenes into the same bucket -- a leg that WAS planned and
         that the follower never arrived at -- and the store could say it was missed but
