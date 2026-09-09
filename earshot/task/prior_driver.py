@@ -74,6 +74,7 @@ __all__ = [
     "render_embedding_at_stop",
     "tour_one_scene",
     "run_prior_pass",
+    "build_parser",
     "main",
 ]
 
@@ -654,7 +655,13 @@ def run_prior_pass(
     )
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, as its own function so a test can ASK it what it accepts.
+
+    `matrix_sweep.sh` builds this invocation by hand, and a flag name that drifts between
+    the two is a failure the box discovers an hour into a run. A parser that can be
+    imported is a parser a Mac test can hold the driver scripts to.
+    """
     parser = argparse.ArgumentParser(
         description="Walk the scripted prior pass over real HM3D scenes and dump the "
                      "store a matrix sweep will consume."
@@ -688,7 +695,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "screened on 1.0; the tour never did. Default None = the old behaviour",
     )
     parser.add_argument("--overwrite", action="store_true")
-    args = parser.parse_args(None if argv is None else list(argv))
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(None if argv is None else list(argv))
 
     try:
         run_prior_pass(
