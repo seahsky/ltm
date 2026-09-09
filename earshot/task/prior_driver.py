@@ -84,6 +84,7 @@ def plan_scene_tour(
     classes: Sequence[str],
     start: Xyz,
     geodesic: Callable[[Xyz, Xyz], Optional[float]],
+    max_dy_m: Optional[float] = None,
 ) -> TourPlan:
     """The room-level route for one scene, restricted to categories `classes` can sound
     from. Pure — no simulator, no encoder, decidable on a machine with no habitat-sim.
@@ -98,7 +99,7 @@ def plan_scene_tour(
     heard = categories_with_a_sound(all_points.keys(), classes=classes)
     restricted = {category: all_points[category] for category in heard}
     candidates = candidate_stops(restricted, room_of_category)
-    return plan_tour(candidates, start, geodesic)
+    return plan_tour(candidates, start, geodesic, max_dy_m=max_dy_m)
 
 
 def plan_until_non_empty(
@@ -429,6 +430,7 @@ def tour_one_scene(
     leg_budget: int = DEFAULT_LEG_BUDGET,
     goal_radius: float = 1.0,
     start_draws: int = 1,
+    max_dy_m: Optional[float] = None,
 ) -> TourRecord:
     """Plan and walk one scene's prior pass, rendering real audio at every reached stop.
 
@@ -448,7 +450,7 @@ def tour_one_scene(
     start, plan, start_attempts = plan_until_non_empty(
         world.random_navigable_point,
         lambda point: plan_scene_tour(
-            dataset, room_of_category, classes, point, geodesic
+            dataset, room_of_category, classes, point, geodesic, max_dy_m=max_dy_m
         ),
         attempts=start_draws,
     )
@@ -492,6 +494,7 @@ def run_prior_pass(
     leg_budget: int = DEFAULT_LEG_BUDGET,
     goal_radius: float = 1.0,
     start_draws: int = 1,
+    max_dy_m: Optional[float] = None,
     overwrite: bool = False,
     progress: Optional[Callable[[str], None]] = None,
 ) -> pathlib.Path:
@@ -607,6 +610,7 @@ def run_prior_pass(
                     leg_budget=leg_budget,
                     goal_radius=goal_radius,
                     start_draws=start_draws,
+                    max_dy_m=max_dy_m,
                 )
             except Exception as exc:  # noqa: BLE001
                 say("  WARN: {} tour failed ({}) -- continuing".format(label, exc))
@@ -668,6 +672,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "scene whose first draw plans anything keeps that start, so raising "
              "this cannot move a scene that already tours",
     )
+    parser.add_argument(
+        "--max-tour-dy", type=float, default=None,
+        help="ADR-0010's floor test, applied to TOUR candidates: drop any stop more "
+             "than this many metres in y from the start. The episode builder always "
+             "screened on 1.0; the tour never did. Default None = the old behaviour",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(None if argv is None else list(argv))
 
@@ -682,6 +692,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             leg_budget=args.leg_budget,
             goal_radius=args.goal_radius,
             start_draws=args.start_draws,
+            max_dy_m=args.max_tour_dy,
             overwrite=args.overwrite,
         )
     except EmptyPassError as exc:
