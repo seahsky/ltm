@@ -8,7 +8,10 @@ four cells wrote. This tool asks them, in the review's own order:
 incomplete, which failed to load — and, for a store written before `pass_provenance`
 recorded incompletes, which scenes are in NO list at all, which is the silent case the
 review named D3: a scene the sweep ran with its seen cells byte-identical to its unseen
-cells and no error anywhere.
+cells and no error anywhere. It also names the completed tours that are SHORT A ROOM: a
+scene whose planner dropped a candidate and then reached every leg it kept is green on
+the gate and thinner in the store, and `prior-7` had two of them with nothing on disk
+saying which room went or why.
 
 **B. THE SEEN AXIS, PER PAIR.** For each (seen, unseen) arm pair sharing a semantic
 condition, how often the recalled prior actually differed. The clean signature of a live
@@ -121,9 +124,17 @@ def store_coverage(
     # The recorded REASON, kept beside the name. `scenes_incomplete` exists precisely so
     # a scene that did not tour says why, and a coverage report that prints only the name
     # sends the reader back to the log for the one fact the store already holds.
+    #
+    # `scenes_toured` first and the two failure lists over the top of it: a store written
+    # before `scenes_toured` existed still gets its incomplete and failed detail, and a
+    # store that has both cannot disagree with itself, because the failure lists win.
+    # Reading `scenes_toured` is what gives a COMPLETE scene any detail at all -- the
+    # rooms its tour dropped are recorded nowhere else.
     detail: Dict[str, Dict[str, Any]] = {}
-    for entry in list(provenance.get("scenes_incomplete", ())) + list(
-        provenance.get("scenes_failed", ())
+    for entry in (
+        list(provenance.get("scenes_toured", ()))
+        + list(provenance.get("scenes_incomplete", ()))
+        + list(provenance.get("scenes_failed", ()))
     ):
         if isinstance(entry, Mapping):
             detail[scene_of(entry)] = dict(entry)
@@ -139,6 +150,12 @@ def store_coverage(
         "records_incomplete": "scenes_incomplete" in provenance,
         "complete_without_rows": sorted(
             scene for scene in complete if int(rows_by_scene.get(scene, 0)) == 0
+        ),
+        # A tour that reached every leg it PLANNED, having planned fewer than the scene
+        # offered. Green on the gate and short a room in the store, which is the one
+        # combination a coverage report that prints only failures cannot show.
+        "complete_with_drops": sorted(
+            scene for scene in complete if detail.get(scene, {}).get("unreachable")
         ),
         "rows_by_scene": {scene: int(rows_by_scene.get(scene, 0)) for scene in scenes},
     }
@@ -460,12 +477,17 @@ def _fmt_quantiles(quantiles: Sequence[Optional[float]]) -> str:
 
 
 def _why(row: Optional[Mapping[str, Any]]) -> str:
-    """The recorded reason a scene did not tour, as a trailing clause. Pure.
+    """What a scene's tour actually did, as a trailing clause. Pure.
 
-    `SceneTourOutcome.as_dict`'s three informative fields, in the order that answers the
-    question: how far the tour got, how much it stored, and the load error if there was
-    one. An empty string when the store recorded nothing — a pre-`pass_provenance` store,
-    where the absence IS the finding and a fabricated reason would hide it.
+    `SceneTourOutcome.as_dict`'s informative fields, in the order that answers the
+    question: how far the tour got, how much it stored, what it dropped, and the load
+    error if there was one. An empty string when the store recorded nothing — a
+    pre-`pass_provenance` store, where the absence IS the finding and a fabricated reason
+    would hide it.
+
+    Written for the scenes that failed, and reused unchanged for a complete tour that
+    dropped a room: the same fields answer both, and the dropped-candidate clause is the
+    one a green scene needs.
     """
     if not row:
         return ""
@@ -494,6 +516,15 @@ def _why(row: Optional[Mapping[str, Any]]) -> str:
                 ", ".join(sorted({str(item.get("room")) for item in dropped})),
             )
         )
+        # The DISTINCT reasons, beside the rooms rather than folded into them. A stop the
+        # navmesh could not route to and a stop on another storey are two different
+        # findings -- `prior-6` needed both -- and a clause naming only the room reads
+        # the same either way. Deduped, so a pass that dropped nine rooms for one reason
+        # prints that reason once.
+        reasons = sorted({str(item.get("reason")) for item in dropped or ()
+                          if item.get("reason")})
+        if reasons:
+            parts.append("dropped because: {}".format("; ".join(reasons)))
     for leg in row.get("abandoned") or ():
         # The gap is what tells the three faults apart: a leg stalled just outside the
         # goal radius is an arrival-threshold problem, one stalled far away is a
@@ -525,6 +556,12 @@ def _print_coverage(coverage: Mapping[str, Any], say: Any) -> None:
             say("  {}: {}{}".format(
                 name.upper(), scene, _why(coverage.get("detail", {}).get(scene)),
             ))
+    # Printed only when a room was actually dropped, so silence here means the tour kept
+    # every candidate the scene offered. A complete scene is not otherwise reported.
+    for scene in coverage.get("complete_with_drops", ()):
+        say("  COMPLETE, SHORT A ROOM: {}{}".format(
+            scene, _why(coverage.get("detail", {}).get(scene)),
+        ))
     for scene in coverage["unaccounted"]:
         say("  UNACCOUNTED (in no list — the D3 silent case): {}".format(scene))
     for scene in coverage["complete_without_rows"]:

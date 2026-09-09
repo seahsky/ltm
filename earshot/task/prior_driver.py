@@ -346,6 +346,14 @@ def pass_provenance(
     to its unseen cells with no error anywhere. `matrix_audit.py --gate-scenes` consumes
     `scenes_complete` and refuses exactly that run.
 
+    `scenes_toured` carries EVERY outcome's dict, complete ones included, because the
+    same silence has a second floor. A completed tour can still have dropped a room --
+    `plan_tour` records each one in `unreachable` -- and a provenance that keeps only the
+    NAME of a complete scene throws that away. `prior-7` is the case: the floor test took
+    a room out of two scenes, both went green, and nothing on disk said which room or
+    why. The three lists above stay exactly as they are, so `gate_missing` and every
+    reader of `scenes_complete` are untouched; this one is additive.
+
     Pure: reads `outcomes`, builds a new dict, mutates nothing.
     """
     return {
@@ -358,6 +366,7 @@ def pass_provenance(
             o.as_dict() for o in outcomes if o.ok and not o.record.complete
         ],
         "scenes_failed": [o.as_dict() for o in outcomes if not o.ok],
+        "scenes_toured": [o.as_dict() for o in outcomes],
     }
 
 
