@@ -21,8 +21,10 @@ from earshot.report.artifacts import write_episode
 from earshot.report.audit import EpisodeAudit, FunnelStage
 from earshot.task.memory_build import dump_stores
 from earshot.tools.matrix_audit import (
+    _print_anchor_room_coverage,
     _print_coverage,
     abstain_table,
+    anchor_room_coverage,
     anchors_by_scene,
     discordance_where_identical,
     gate_missing,
@@ -292,6 +294,92 @@ class TestStoreCoverage(unittest.TestCase):
         self.assertEqual(scene_of({"scene": "B", "error": "x"}), "B")
 
 
+class _Row(object):
+    """The two `EpisodicEntry` fields section F reads."""
+
+    def __init__(self, scene, category):
+        self.scene = scene
+        self.category = category
+
+
+class TestAnchorRoomCoverage(unittest.TestCase):
+    """`prior-8`: 38 rows, `living_room` in 19 scenes, `bathroom` in 14, `bedroom` in 4.
+    `snoring` anchors at `bed`, so a snoring scene toured downstairs runs a seen cell
+    that resolves the same candidates as its unseen cell.
+    """
+
+    def test_a_scene_without_its_own_anchor_is_blind(self):
+        report = anchor_room_coverage(
+            [_Row("upstairs", "chair"), _Row("upstairs", "toilet")],
+            {"upstairs": "snoring"},
+        )
+        self.assertEqual(report["sighted"], [])
+        self.assertEqual(len(report["blind"]), 1)
+        self.assertEqual(report["blind"][0]["anchor"], "bed")
+        self.assertEqual(report["blind"][0]["room"], "bedroom")
+        self.assertEqual(report["blind"][0]["stored"], "chair, toilet")
+        self.assertEqual(report["blind_fraction"], 1.0)
+
+    def test_a_scene_holding_its_own_anchor_is_not(self):
+        """The arm that keeps the check from calling everything blind: the same store
+        shape, with the row that matters present."""
+        report = anchor_room_coverage(
+            [_Row("whole", "bed"), _Row("whole", "chair")],
+            {"whole": "snoring"},
+        )
+        self.assertEqual(report["sighted"], ["whole"])
+        self.assertEqual(report["blind"], [])
+        self.assertEqual(report["blind_fraction"], 0.0)
+
+    def test_the_anchor_is_the_class_the_scene_runs_not_any_class(self):
+        """One tour serves the whole bank, so a store with three rooms is not the
+        question -- whether it holds THIS scene's class's room is."""
+        entries = [_Row("s", "chair"), _Row("s", "toilet")]
+        self.assertEqual(
+            anchor_room_coverage(entries, {"s": "toilet_flush"})["sighted"], ["s"])
+        self.assertEqual(
+            anchor_room_coverage(entries, {"s": "keyboard_typing"})["sighted"], ["s"])
+        self.assertEqual(
+            [row["scene"] for row in
+             anchor_room_coverage(entries, {"s": "snoring"})["blind"]], ["s"])
+
+    def test_a_class_that_anchors_nowhere_is_ungraded_not_blind(self):
+        report = anchor_room_coverage([_Row("s", "chair")], {"s": "glass_break"})
+        self.assertEqual(report["unknown_anchor"], ["s"])
+        self.assertEqual(report["blind"], [])
+        self.assertEqual(report["graded"], 0)
+        self.assertIsNone(report["blind_fraction"])
+
+    def test_the_printed_section_names_the_class_the_room_and_what_was_stored(self):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_anchor_room_coverage(
+                anchor_room_coverage(
+                    [_Row("a", "chair"), _Row("b", "bed")],
+                    {"a": "snoring", "b": "snoring"},
+                ),
+                print,
+            )
+        out = buffer.getvalue()
+        self.assertIn("1 of 2 scene(s) hold their own anchor", out)
+        self.assertIn("BLIND: a runs snoring (anchors at bed in the bedroom)", out)
+        self.assertIn("store holds chair", out)
+        self.assertNotIn("BLIND: b", out)
+
+    def test_a_store_that_sees_everything_prints_no_blind_line(self):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_anchor_room_coverage(
+                anchor_room_coverage([_Row("a", "bed")], {"a": "snoring"}), print)
+        out = buffer.getvalue()
+        self.assertIn("1 of 1 scene(s) hold their own anchor", out)
+        self.assertIn("0 are BLIND", out)
+        # The per-scene lines and the warning, not the count -- the summary says 0 either
+        # way, and a store with nothing wrong must not print the caveat.
+        self.assertNotIn("BLIND:", out)
+        self.assertNotIn("nothing to see", out)
+
+
 class TestGateMissing(unittest.TestCase):
     def test_full_coverage_is_green(self):
         coverage = store_coverage(
@@ -524,6 +612,26 @@ class TestTheCoverageGateCli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("A. THE STORE", buffer.getvalue())
         self.assertIn("sections B-E are not run", buffer.getvalue())
+        self.assertIn("section F needs --assignment", buffer.getvalue())
+
+    def test_section_f_runs_off_a_store_and_an_assignment_alone(self):
+        """The pre-flight invocation, wired end to end: no run_dir, no cell, no GPU. The
+        fixture store holds `bed` in every scene, so the snoring scene sees its own
+        anchor and the toilet_flush scene does not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp, complete=["A", "B"])
+            assignment = Path(tmp) / "assignment.tsv"
+            assignment.write_text("A\tsnoring\nB\ttoilet_flush\n", encoding="utf-8")
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = main(["--store", store, "--assignment", str(assignment)])
+        out = buffer.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("F. WHAT THE SEEN AXIS CAN SEE", out)
+        self.assertIn("1 of 2 scene(s) hold their own anchor", out)
+        self.assertIn("BLIND: B runs toilet_flush (anchors at toilet in the bathroom)",
+                      out)
+        self.assertNotIn("section F needs --assignment", out)
 
     def test_a_missing_scene_exits_two(self):
         """The forced-failure arm: the sweep must stop before the cells, because a cell
