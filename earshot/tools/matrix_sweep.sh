@@ -52,7 +52,13 @@
 #        SCENE PER CONDITION), --max-steps M (default 250), --sounding-steps N (default
 #        60), --limit N (scene cap on the assignment, default 0 = no limit), --seed N,
 #        --conditions "a b" (default all four), --leg-budget N (prior pass, default 200),
-#        --goal-radius M (prior pass, default 1.0), --out-dir DIR, --no-pull, --force.
+#        --goal-radius M (prior pass, default 1.0), --start-draws N (prior pass, default
+#        20), --max-tour-dy M (prior pass, default 1.0), --prior-only (stop after the
+#        coverage gate), --out-dir DIR, --no-pull, --force.
+#
+# --prior-only IS THE DRY RUN. Steps 1-4 are the assignment, the tour and the gate, and
+# they cost under two minutes; the cells cost a night. Run it first on a fresh tag, read
+# `matrix_audit --store` on what it wrote, and only then spend the night.
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then :; else
   echo "ERROR: execute this script, don't source it — its exit calls would kill your shell." >&2
@@ -75,6 +81,23 @@ LIMIT=0
 CONDITIONS="heard_seen heard_unseen not_heard_seen not_heard_unseen"
 LEG_BUDGET=200
 GOAL_RADIUS=1.0
+# THE TWO TOUR FIXES prior-5 and prior-7 MEASURED, defaulted ON, because the values that
+# reproduce today's behaviour are the values that fail this script's own coverage gate.
+#
+# --start-draws 20: `plan_until_non_empty` redraws ONLY while the plan has no stop, so
+# raising it cannot re-roll a scene that already plans one. `prior-5` measured exactly
+# that -- qyAac8rV8Zk 0 of 0 -> 1 of 2, and the ziup5kvtCCR control unmoved.
+#
+# --max-tour-dy 1.0: not a new number. `build_anomaly_episodes` has screened placements at
+# `max_dy_m=1.0` since ADR-0010 (dataset.py), so a tour without it stores stops NO EPISODE
+# can put a source at -- qyAac8rV8Zk's bathroom was 2.24 m of height from its start. The
+# default makes the two halves of one experiment agree about what is placeable.
+#
+# Both were unreachable from here until now: this script calls `prior_driver` directly and
+# never grew the flags, so every matrix sweep would have hit prior-2's red gate.
+START_DRAWS=20
+MAX_TOUR_DY=1.0
+PRIOR_ONLY=0
 OUT_DIR=""
 NO_PULL=0
 FORCE=0
@@ -93,10 +116,13 @@ while [ $# -gt 0 ]; do
     --conditions)     need_value $# "$1"; CONDITIONS="$2";     shift 2 ;;
     --leg-budget)     need_value $# "$1"; LEG_BUDGET="$2";     shift 2 ;;
     --goal-radius)    need_value $# "$1"; GOAL_RADIUS="$2";    shift 2 ;;
+    --start-draws)    need_value $# "$1"; START_DRAWS="$2";    shift 2 ;;
+    --max-tour-dy)    need_value $# "$1"; MAX_TOUR_DY="$2";    shift 2 ;;
+    --prior-only)     PRIOR_ONLY=1;                             shift ;;
     --out-dir)        need_value $# "$1"; OUT_DIR="$2";        shift 2 ;;
     --no-pull)        NO_PULL=1;                                shift ;;
     --force)          FORCE=1;                                  shift ;;
-    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,61p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -131,10 +157,14 @@ if [ "$NO_PULL" = 0 ]; then
     export _REEXEC=1
     _force_flag=""
     [ "$FORCE" = 1 ] && _force_flag="--force"
+    _prior_only_flag=""
+    [ "$PRIOR_ONLY" = 1 ] && _prior_only_flag="--prior-only"
     exec bash "$0" --tag "$TAG" --classes "$CLASSES" --n-episodes "$N_EPISODES" \
          --max-steps "$MAX_STEPS" --sounding-steps "$SOUNDING_STEPS" --seed "$SEED" \
          --limit "$LIMIT" --conditions "$CONDITIONS" --leg-budget "$LEG_BUDGET" \
-         --goal-radius "$GOAL_RADIUS" --out-dir "$OUT_DIR" ${_force_flag:+--force}
+         --goal-radius "$GOAL_RADIUS" --start-draws "$START_DRAWS" \
+         --max-tour-dy "$MAX_TOUR_DY" --out-dir "$OUT_DIR" \
+         ${_prior_only_flag:+--prior-only} ${_force_flag:+--force}
   fi
 else
   banner "[1/6] git pull SKIPPED (--no-pull)"
@@ -210,6 +240,8 @@ python -m earshot.task.prior_driver \
   --seed "$SEED" \
   --leg-budget "$LEG_BUDGET" \
   --goal-radius "$GOAL_RADIUS" \
+  --start-draws "$START_DRAWS" \
+  ${MAX_TOUR_DY:+--max-tour-dy "$MAX_TOUR_DY"} \
   2>&1 | tee "$OUT_DIR/prior_pass.log"
 PRIOR_STATUS=${PIPESTATUS[0]}
 STORE="$OUT_DIR/prior/store.json"
@@ -230,6 +262,34 @@ python -m earshot.tools.matrix_audit --store "$STORE" --gate-scenes "$SCENES" ||
   echo "FATAL: the prior pass does not cover the assignment — the gate's lines above name the scenes"
   exit 1
 }
+
+# --prior-only: everything above, nothing below. The first four steps are the sweep's own
+# first half -- the same assignment, the same tour flags, the same gate -- and they cost
+# under two minutes against the cells' several hours (`prior-2` measured the pass at
+# 1m 40s over 19 scenes). So the question "does this assignment tour cleanly, and what did
+# the tour drop" is answerable BEFORE a night is committed, by the code that will run it
+# rather than by a hand-assembled approximation of it.
+if [ "$PRIOR_ONLY" = 1 ]; then
+  # Its own provenance: the full block below never runs on this path, and a store whose
+  # tour parameters are not on disk beside it cannot be compared with the next one.
+  {
+    echo "tag:            $TAG (--prior-only: assignment, tour and gate; no cells)"
+    echo "commit:         $COMMIT"
+    echo "args:           $ORIGINAL_ARGS"
+    echo "classes:        $CLASSES"
+    echo "scenes:         ${SCENE_LIST[*]}"
+    echo "seed:           $SEED"
+    echo "store:          $STORE"
+    echo "tour:           leg_budget=$LEG_BUDGET goal_radius=$GOAL_RADIUS start_draws=$START_DRAWS max_tour_dy=${MAX_TOUR_DY:-<unset>}"
+    echo "finished:       $(date -Is)"
+  } > "$OUT_DIR/provenance.txt"
+  banner "--prior-only: stopping after the gate"
+  echo "  store:      $STORE"
+  echo "  assignment: $ASSIGNMENT ($N_SCENES scene(s))"
+  echo "  read it:    python -m earshot.tools.matrix_audit --store $STORE"
+  echo "  the COMPLETE, SHORT A ROOM lines are the rooms the tour dropped and why."
+  exit 0
+fi
 
 # shellcheck disable=SC2206
 CONDITION_LIST=($CONDITIONS)
@@ -253,6 +313,7 @@ echo "  estimated wall clock: ${EST_HOURS} h at ablation_sweep.sh's measured 24.
   echo "sounding_steps: $SOUNDING_STEPS (fixed_steps, ADR-0017)"
   echo "seed:           $SEED"
   echo "store:          $STORE"
+  echo "tour:           leg_budget=$LEG_BUDGET goal_radius=$GOAL_RADIUS start_draws=$START_DRAWS max_tour_dy=${MAX_TOUR_DY:-<unset>}"
   echo "started:        $(date -Is)"
 } > "$OUT_DIR/provenance.txt"
 
