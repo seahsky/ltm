@@ -194,8 +194,17 @@ def plan_tour(
     candidates: Sequence[TourStop],
     start: Xyz,
     geodesic: Callable[[Xyz, Xyz], Optional[float]],
+    max_dy_m: Optional[float] = None,
 ) -> TourPlan:
     """One stop per room, ordered nearest-first by geodesic distance from the walk so far.
+
+    `max_dy_m` is ADR-0010's floor test, which the TOUR did not have and the EPISODE
+    BUILDER always did (`build_anomaly_episodes(max_dy_m=1.0)` screens every candidate
+    against both anchors). The two halves of the same experiment therefore disagreed
+    about what counts as placeable: `qyAac8rV8Zk`'s bathroom stop sits **2.24 m** above
+    the pose the agent walked from, the follower refused it for want of a navmesh route,
+    and no episode would ever have put a source there. `None` keeps the old behaviour so
+    nothing moves until the flag is raised.
 
     Greedy rather than optimal on purpose. Tour length is not the object of study, and an
     exact solver would be a second thing that can be wrong for no gain. Greedy is
@@ -211,6 +220,13 @@ def plan_tour(
     unreachable: List[Tuple[TourStop, str]] = []
     reachable: List[Tuple[TourStop, float]] = []
     for stop in candidates:
+        if max_dy_m is not None:
+            gap = abs(stop.point.height_difference_to(start))
+            if gap > float(max_dy_m):
+                unreachable.append(
+                    (stop, "on another floor ({:.2f} m of height from the start)".format(gap))
+                )
+                continue
         distance = geodesic(start, stop.point)
         if distance is None:
             unreachable.append((stop, "no navmesh route from the tour start"))

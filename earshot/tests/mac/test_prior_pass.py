@@ -152,6 +152,46 @@ class FakeWorld:
         return self._gap
 
 
+class TestTheFloorTest(unittest.TestCase):
+    """ADR-0010's floor test, which the episode builder always had and the tour never did.
+
+    `qyAac8rV8Zk`'s bathroom stop sits 2.24 m above the pose the agent walked from; the
+    follower refused it for want of a navmesh route, and `build_anomaly_episodes`
+    (`max_dy_m=1.0`) would never have placed a source there. Both arms: the stop that is
+    dropped with its height on the record, and the default that changes nothing.
+    """
+
+    UPSTAIRS = Xyz(3.0, 2.4, 0.0)
+
+    def _candidates(self):
+        return candidate_stops(
+            {"toilet": [self.UPSTAIRS], "bed": [Xyz(1.0, 0.0, 0.0)]}, ROOMS
+        )
+
+    def test_a_stop_on_another_floor_is_dropped_and_says_its_height(self):
+        plan = plan_tour(self._candidates(), START, euclidean, max_dy_m=1.0)
+        self.assertEqual([stop.room for stop in plan.stops], ["bedroom"])
+        reasons = {stop.category: reason for stop, reason in plan.unreachable}
+        self.assertIn("toilet", reasons)
+        self.assertIn("another floor", reasons["toilet"])
+        self.assertIn("2.40 m", reasons["toilet"])
+
+    def test_the_default_applies_no_floor_test_at_all(self):
+        """The forced-failure arm for a silent re-baseline: unset must keep every stop
+        the old planner kept, so a store built without the flag is unchanged."""
+        plan = plan_tour(self._candidates(), START, euclidean)
+        self.assertEqual(
+            sorted(stop.room for stop in plan.stops), ["bathroom", "bedroom"]
+        )
+
+    def test_a_stop_within_the_gap_survives(self):
+        plan = plan_tour(
+            candidate_stops({"toilet": [Xyz(3.0, 0.4, 0.0)]}, ROOMS),
+            START, euclidean, max_dy_m=1.0,
+        )
+        self.assertEqual([stop.room for stop in plan.stops], ["bathroom"])
+
+
 class TestWalkTour(unittest.TestCase):
     def _plan(self):
         return plan_tour(

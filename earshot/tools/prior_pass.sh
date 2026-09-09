@@ -40,7 +40,9 @@
 # Flags: --tag T (required), --scenes "a b c" (required), --classes "a b c" (required),
 #        --split S (default val), --data-root D (default .), --seed N (default 20260821),
 #        --leg-budget N (default 200), --goal-radius M (default 1.0), --start-draws N
-#        (default 1; retries the start ONLY while the plan is empty), --no-pull,
+#        (default 1; retries the start ONLY while the plan is empty),
+#        --max-tour-dy M (ADR-0010's floor test on tour stops; unset = old
+#        behaviour), --no-pull,
 #        --overwrite.
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then :; else
@@ -59,6 +61,7 @@ SEED=20260821
 LEG_BUDGET=200
 GOAL_RADIUS=1.0
 START_DRAWS=1
+MAX_TOUR_DY=""
 PULL=1
 OVERWRITE=0
 
@@ -75,6 +78,7 @@ while [ "$#" -gt 0 ]; do
     --leg-budget)  need_value $# "$1"; LEG_BUDGET="$2";  shift 2 ;;
     --goal-radius) need_value $# "$1"; GOAL_RADIUS="$2"; shift 2 ;;
     --start-draws) need_value $# "$1"; START_DRAWS="$2"; shift 2 ;;
+    --max-tour-dy) need_value $# "$1"; MAX_TOUR_DY="$2"; shift 2 ;;
     --no-pull)     PULL=0; shift ;;
     --overwrite)   OVERWRITE=1; shift ;;
     *) echo "FATAL: unknown flag $1" >&2; exit 2 ;;
@@ -136,6 +140,7 @@ python -m earshot.task.prior_driver \
   --leg-budget "$LEG_BUDGET" \
   --goal-radius "$GOAL_RADIUS" \
   --start-draws "$START_DRAWS" \
+  ${MAX_TOUR_DY:+--max-tour-dy "$MAX_TOUR_DY"} \
   $([ "$OVERWRITE" -eq 1 ] && echo --overwrite) \
   2>&1 | tee "$OUT_DIR/prior_pass.log"
 PASS_STATUS=${PIPESTATUS[0]}
