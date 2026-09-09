@@ -479,6 +479,17 @@ def _why(row: Optional[Mapping[str, Any]]) -> str:
         ))
     if row.get("n_observations") is not None:
         parts.append("{} observation(s) stored".format(row["n_observations"]))
+    dropped = row.get("unreachable")
+    if dropped is not None:
+        # The line that tells a 0-of-0 tour apart from a partial one: no candidates at all
+        # (the assignment and the tour disagree) versus candidates the navmesh refused.
+        parts.append(
+            "no candidate stop offered" if not dropped
+            else "{} candidate(s) unroutable ({})".format(
+                len(dropped),
+                ", ".join(sorted({str(item.get("room")) for item in dropped})),
+            )
+        )
     if row.get("error"):
         parts.append("error: {}".format(row["error"]))
     return " -- {}".format(", ".join(parts)) if parts else ""

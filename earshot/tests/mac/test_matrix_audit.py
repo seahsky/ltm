@@ -21,6 +21,7 @@ from earshot.report.artifacts import write_episode
 from earshot.report.audit import EpisodeAudit, FunnelStage
 from earshot.task.memory_build import dump_stores
 from earshot.tools.matrix_audit import (
+    _print_coverage,
     abstain_table,
     anchors_by_scene,
     discordance_where_identical,
@@ -100,6 +101,39 @@ class TestStoreCoverage(unittest.TestCase):
         coverage = store_coverage(provenance, {"A": 1})
         self.assertEqual(coverage["detail"]["A"]["rooms_reached"], ["bathroom"])
         self.assertEqual(coverage["detail"]["B"]["error"], "no mesh")
+
+    def test_a_zero_leg_tour_is_told_apart_from_a_partial_one(self):
+        """The two ways `prior-2` lost a scene, which read identically before this: a
+        partial tour (`p53SfW6mjZe`, 2 of 3) against a tour that planned nothing
+        (`qyAac8rV8Zk`, 0 of 0). And within the second, no candidates at all against
+        candidates the navmesh refused."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_coverage(
+                store_coverage(
+                    {
+                        "scenes_requested": ["partial", "islanded", "barren"],
+                        "scenes_complete": [],
+                        "scenes_incomplete": [
+                            {"scene": "partial", "rooms_reached": ["bathroom", "bedroom"],
+                             "n_observations": 2, "unreachable": [], "error": None},
+                            {"scene": "islanded", "rooms_reached": [],
+                             "n_observations": 0, "error": None,
+                             "unreachable": [{"room": "bathroom", "category": "toilet",
+                                              "reason": "no route"}]},
+                            {"scene": "barren", "rooms_reached": [],
+                             "n_observations": 0, "unreachable": [], "error": None},
+                        ],
+                        "scenes_failed": [],
+                    },
+                    {},
+                ),
+                print,
+            )
+        out = buffer.getvalue()
+        self.assertIn("rooms reached: bathroom, bedroom", out)
+        self.assertIn("1 candidate(s) unroutable (bathroom)", out)
+        self.assertIn("no candidate stop offered", out)
 
     def test_a_legacy_store_has_no_detail_and_fabricates_none(self):
         coverage = store_coverage(
