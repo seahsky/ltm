@@ -39,7 +39,9 @@
 #
 # Flags: --tag T (required), --scenes "a b c" (required), --classes "a b c" (required),
 #        --split S (default val), --data-root D (default .), --seed N (default 20260821),
-#        --leg-budget N (default 200), --goal-radius M (default 1.0), --no-pull, --overwrite.
+#        --leg-budget N (default 200), --goal-radius M (default 1.0), --start-draws N
+#        (default 1; retries the start ONLY while the plan is empty), --no-pull,
+#        --overwrite.
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then :; else
   echo "ERROR: execute this script, don't source it — its exit calls would kill your shell." >&2
@@ -56,6 +58,7 @@ DATA_ROOT="."
 SEED=20260821
 LEG_BUDGET=200
 GOAL_RADIUS=1.0
+START_DRAWS=1
 PULL=1
 OVERWRITE=0
 
@@ -71,6 +74,7 @@ while [ "$#" -gt 0 ]; do
     --seed)        need_value $# "$1"; SEED="$2";        shift 2 ;;
     --leg-budget)  need_value $# "$1"; LEG_BUDGET="$2";  shift 2 ;;
     --goal-radius) need_value $# "$1"; GOAL_RADIUS="$2"; shift 2 ;;
+    --start-draws) need_value $# "$1"; START_DRAWS="$2"; shift 2 ;;
     --no-pull)     PULL=0; shift ;;
     --overwrite)   OVERWRITE=1; shift ;;
     *) echo "FATAL: unknown flag $1" >&2; exit 2 ;;
@@ -108,7 +112,7 @@ fi
   echo "split=$SPLIT data_root=$DATA_ROOT"
   echo "scenes=$SCENES"
   echo "classes=$CLASSES"
-  echo "seed=$SEED leg_budget=$LEG_BUDGET goal_radius=$GOAL_RADIUS"
+  echo "seed=$SEED leg_budget=$LEG_BUDGET goal_radius=$GOAL_RADIUS start_draws=$START_DRAWS"
   echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$OUT_DIR/provenance.txt"
 cat "$OUT_DIR/provenance.txt"
@@ -131,6 +135,7 @@ python -m earshot.task.prior_driver \
   --seed "$SEED" \
   --leg-budget "$LEG_BUDGET" \
   --goal-radius "$GOAL_RADIUS" \
+  --start-draws "$START_DRAWS" \
   $([ "$OVERWRITE" -eq 1 ] && echo --overwrite) \
   2>&1 | tee "$OUT_DIR/prior_pass.log"
 PASS_STATUS=${PIPESTATUS[0]}

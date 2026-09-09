@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -67,6 +67,7 @@ __all__ = [
     "write_pass_store",
     "SceneTourOutcome",
     "plan_scene_tour",
+    "plan_until_non_empty",
     "walk_scene",
     "merge_scene_records",
     "pass_provenance",
@@ -98,6 +99,40 @@ def plan_scene_tour(
     restricted = {category: all_points[category] for category in heard}
     candidates = candidate_stops(restricted, room_of_category)
     return plan_tour(candidates, start, geodesic)
+
+
+def plan_until_non_empty(
+    draw_start: Callable[[], Xyz],
+    plan_from: Callable[[Xyz], TourPlan],
+    *,
+    attempts: int,
+) -> Tuple[Xyz, TourPlan, int]:
+    """Draw a start, plan from it, and redraw while the plan has NO stop. Pure over its
+    two callables, so it is decidable with no simulator.
+
+    `qyAac8rV8Zk` planned 0 stops with **11 candidates unroutable across all three
+    rooms** -- the scene has anchor instances everywhere and the navmesh routed to none
+    of them from the one start the tour drew. A single blind draw therefore decides
+    whether a scene enters the store at all, which is a coin flip standing where a design
+    decision should be.
+
+    The retry fires ONLY on an empty plan. A scene whose first draw plans anything keeps
+    the start it already had, so `attempts > 1` cannot move the 17 scenes that work --
+    which is the property that lets this land without re-baselining them.
+
+    Returns the LAST start and plan tried when every attempt is empty, so the caller
+    still records a real (empty) plan and its unroutable candidates rather than nothing.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1, got {}".format(attempts))
+    start = draw_start()
+    plan = plan_from(start)
+    used = 1
+    while not plan.stops and used < attempts:
+        start = draw_start()
+        plan = plan_from(start)
+        used += 1
+    return start, plan, used
 
 
 def walk_scene(
@@ -255,6 +290,9 @@ class SceneTourOutcome:
                 None if self.record is None else list(self.record.rooms_reached)
             ),
             "n_observations": None if self.record is None else len(self.record.observations),
+            "start_attempts": (
+                None if self.record is None else int(self.record.start_attempts)
+            ),
             # Why a tour planned nothing. A record with 0 of 0 legs and an EMPTY list here
             # means the scene offered no candidate stop at all, which is the assignment and
             # the tour disagreeing about what is tourable; a non-empty list means the
@@ -372,21 +410,31 @@ def tour_one_scene(
     seed: int,
     leg_budget: int = DEFAULT_LEG_BUDGET,
     goal_radius: float = 1.0,
+    start_draws: int = 1,
 ) -> TourRecord:
     """Plan and walk one scene's prior pass, rendering real audio at every reached stop.
 
     `world.seed_navmesh(seed)` before picking a start: the same navmesh-agnostic seed
     every other sweep in this tree uses, so a start point is reproducible from the seed
     alone rather than from whichever point the engine's own RNG state happened to be at.
+
+    `start_draws` defaults to **1**, which is byte-identical to the single blind draw
+    every pass before it made. Above 1 it redraws only while the plan is EMPTY -- see
+    `plan_until_non_empty` for why that leaves a working scene's start untouched.
     """
     world.seed_navmesh(seed)
-    start = world.random_navigable_point()
-    world.set_pose(start)
 
     def geodesic(a: Xyz, b: Xyz) -> Optional[float]:
         return world.geodesic_distance(a, [b])
 
-    plan = plan_scene_tour(dataset, room_of_category, classes, start, geodesic)
+    start, plan, start_attempts = plan_until_non_empty(
+        world.random_navigable_point,
+        lambda point: plan_scene_tour(
+            dataset, room_of_category, classes, point, geodesic
+        ),
+        attempts=start_draws,
+    )
+    world.set_pose(start)
 
     def embed(stop: TourStop) -> np.ndarray:
         return render_embedding_at_stop(
@@ -399,7 +447,11 @@ def tour_one_scene(
             sample_rate=sample_rate,
         )
 
-    return walk_scene(
+    # `replace` rather than a `walk_tour` parameter: how many starts were drawn is a fact
+    # about PLANNING, and `prior_pass.walk_tour` deliberately knows nothing about where a
+    # start came from. The record carries it because a scene rescued on the 9th draw and
+    # one that worked first time are different findings about the same store.
+    return replace(walk_scene(
         world,
         plan,
         scene=scene,
@@ -407,7 +459,7 @@ def tour_one_scene(
         embed=embed,
         leg_budget=leg_budget,
         goal_radius=goal_radius,
-    )
+    ), start_attempts=start_attempts)
 
 
 def run_prior_pass(
@@ -421,6 +473,7 @@ def run_prior_pass(
     seed: int = 20260821,
     leg_budget: int = DEFAULT_LEG_BUDGET,
     goal_radius: float = 1.0,
+    start_draws: int = 1,
     overwrite: bool = False,
     progress: Optional[Callable[[str], None]] = None,
 ) -> pathlib.Path:
@@ -535,6 +588,7 @@ def run_prior_pass(
                     seed=seed,
                     leg_budget=leg_budget,
                     goal_radius=goal_radius,
+                    start_draws=start_draws,
                 )
             except Exception as exc:  # noqa: BLE001
                 say("  WARN: {} tour failed ({}) -- continuing".format(label, exc))
@@ -589,6 +643,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--seed", type=int, default=20260821)
     parser.add_argument("--leg-budget", type=int, default=DEFAULT_LEG_BUDGET)
     parser.add_argument("--goal-radius", type=float, default=1.0)
+    parser.add_argument(
+        "--start-draws", type=int, default=1,
+        help="how many navigable starts to try while the plan comes back EMPTY "
+             "(default 1 = the single blind draw every pass before this made). A "
+             "scene whose first draw plans anything keeps that start, so raising "
+             "this cannot move a scene that already tours",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(None if argv is None else list(argv))
 
@@ -602,6 +663,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             seed=args.seed,
             leg_budget=args.leg_budget,
             goal_radius=args.goal_radius,
+            start_draws=args.start_draws,
             overwrite=args.overwrite,
         )
     except EmptyPassError as exc:

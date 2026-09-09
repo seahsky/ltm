@@ -22,10 +22,11 @@ from earshot.task.prior_driver import (
     merge_scene_records,
     pass_provenance,
     plan_scene_tour,
+    plan_until_non_empty,
     walk_scene,
     write_pass_store,
 )
-from earshot.task.prior_pass import LegOutcome, TourRecord, TourStop
+from earshot.task.prior_pass import LegOutcome, TourPlan, TourRecord, TourStop
 from earshot.types import Pose, Xyz
 
 # The matrix's own room-balanced assignment (PR #77's measured result), reused rather than
@@ -282,6 +283,70 @@ class TestPassProvenance(unittest.TestCase):
             | {entry["scene"] for entry in provenance["scenes_failed"]}
         )
         self.assertEqual(accounted, set(provenance["scenes_requested"]))
+
+
+class TestPlanUntilNonEmpty(unittest.TestCase):
+    """`qyAac8rV8Zk` planned 0 stops with 11 candidates unroutable across all three
+    rooms, so one blind draw decided whether a scene entered the store. Both arms: the
+    redraw that rescues an empty plan, and the invariant that a plan which already has a
+    stop is never redrawn -- the property that lets this land without moving the 17
+    scenes that work.
+    """
+
+    STOP = TourStop(room="bedroom", category="bed", point=Xyz(0.0, 0.0, 0.0))
+
+    def _draws(self, points):
+        drawn = list(points)
+
+        def draw():
+            return drawn.pop(0)
+
+        return draw
+
+    def test_an_empty_plan_is_redrawn_until_one_has_a_stop(self):
+        plans = {
+            0.0: TourPlan(stops=(), unreachable=((self.STOP, "no route"),)),
+            1.0: TourPlan(stops=(), unreachable=((self.STOP, "no route"),)),
+            2.0: TourPlan(stops=(self.STOP,), unreachable=()),
+        }
+        start, plan, used = plan_until_non_empty(
+            self._draws([Xyz(x, 0.0, 0.0) for x in (0.0, 1.0, 2.0)]),
+            lambda point: plans[point.x],
+            attempts=5,
+        )
+        self.assertEqual(start.x, 2.0)
+        self.assertEqual(plan.stops, (self.STOP,))
+        self.assertEqual(used, 3)
+
+    def test_a_plan_with_a_stop_is_never_redrawn(self):
+        """The forced-failure arm for the re-baselining risk: if this drew twice, every
+        working scene's start would move and the 17 would need re-measuring."""
+        start, plan, used = plan_until_non_empty(
+            self._draws([Xyz(0.0, 0.0, 0.0)]),
+            lambda _point: TourPlan(stops=(self.STOP,), unreachable=()),
+            attempts=50,
+        )
+        self.assertEqual(start.x, 0.0)
+        self.assertEqual(used, 1)
+        self.assertEqual(plan.stops, (self.STOP,))
+
+    def test_exhausting_the_draws_returns_the_last_empty_plan_not_nothing(self):
+        empty = TourPlan(stops=(), unreachable=((self.STOP, "no route"),))
+        _start, plan, used = plan_until_non_empty(
+            self._draws([Xyz(float(i), 0.0, 0.0) for i in range(3)]),
+            lambda _point: empty,
+            attempts=3,
+        )
+        self.assertEqual(used, 3)
+        self.assertEqual(plan.unreachable, empty.unreachable)
+
+    def test_zero_attempts_is_a_usage_error(self):
+        with self.assertRaises(ValueError):
+            plan_until_non_empty(
+                self._draws([Xyz(0.0, 0.0, 0.0)]),
+                lambda _point: TourPlan(stops=(), unreachable=()),
+                attempts=0,
+            )
 
 
 class TestWritePassStore(unittest.TestCase):

@@ -126,6 +126,10 @@ class TourRecord:
     # which scenes are tourable, the second is the navmesh-island fact this tree already
     # counts elsewhere.
     unreachable: Tuple[Tuple[TourStop, str], ...] = ()
+    # How many starts were drawn before the plan had a stop. 1 is the single blind
+    # draw every pass before `plan_until_non_empty` made; above 1 means the scene was
+    # RESCUED from an empty plan, which is a fact about the store worth keeping.
+    start_attempts: int = 1
 
     @property
     def rooms_reached(self) -> Tuple[str, ...]:
@@ -158,6 +162,7 @@ class TourRecord:
                 for leg in self.legs
             ],
             "n_observations": len(self.observations),
+            "start_attempts": int(self.start_attempts),
             "unreachable": [
                 {"room": stop.room, "category": stop.category, "reason": reason}
                 for stop, reason in self.unreachable
