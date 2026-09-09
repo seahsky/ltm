@@ -304,6 +304,24 @@ class SceneTourOutcome:
                     for stop, reason in self.record.unreachable
                 ]
             ),
+            # The legs that were PLANNED (so routable when the plan was built) and that
+            # the follower did not arrive at. `walk_tour` already records the gap it
+            # stalled at and whether the budget ran out or the follower refused the
+            # target -- three different faults -- and none of it reached this artefact,
+            # so `prior-5` could say a leg was missed and not why.
+            "abandoned": (
+                None if self.record is None
+                else [
+                    {
+                        "room": leg.stop.room,
+                        "category": leg.stop.category,
+                        "final_gap_m": leg.final_gap_m,
+                        "steps": leg.steps,
+                        "reason": leg.reason,
+                    }
+                    for leg in self.record.legs if not leg.reached
+                ]
+            ),
             "error": self.error,
         }
 
