@@ -8,17 +8,22 @@ can sound from, so `walk_scene` never asks `observation_for` a question it answe
 to. The box half (`render_embedding_at_stop`, `run_prior_pass`) needs `tests/box`.
 """
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.audio.vocabulary import ROOM_OF_ANCHOR
 from earshot.task.prior_driver import (
+    EmptyPassError,
     SceneTourOutcome,
     merge_scene_records,
     pass_provenance,
     plan_scene_tour,
     walk_scene,
+    write_pass_store,
 )
 from earshot.task.prior_pass import LegOutcome, TourRecord, TourStop
 from earshot.types import Pose, Xyz
@@ -277,6 +282,65 @@ class TestPassProvenance(unittest.TestCase):
             | {entry["scene"] for entry in provenance["scenes_failed"]}
         )
         self.assertEqual(accounted, set(provenance["scenes_requested"]))
+
+
+class TestWritePassStore(unittest.TestCase):
+    """The store is written even when nothing completed, and the raise comes after.
+
+    `prior-3` toured only the two scenes known to fail -- which is how a failure gets
+    diagnosed -- and the emptiness check ran BEFORE the write, so it raised and left no
+    artefact saying why either of them failed. 21 seconds of GPU time, nothing to read.
+    Both arms: the healthy pass returns a path, the empty pass still writes one and then
+    raises with it attached.
+    """
+
+    @staticmethod
+    def _record(scene, reached):
+        stop = TourStop(room="bedroom", category="bed", point=Xyz(0.0, 0.0, 0.0))
+        leg = LegOutcome(
+            stop=stop, reached=reached, steps=3,
+            final_gap_m=None if reached else 4.0,
+            reason="reached" if reached else "budget",
+        )
+        observations = (
+            {"sound_class": "snoring", "room": "bedroom", "category": "bed",
+             "embedding": [1.0, 0.0]},
+        ) if reached else ()
+        return TourRecord(scene=scene, legs=(leg,), observations=observations)
+
+    def _write(self, tmp, outcomes, scenes):
+        return write_pass_store(
+            str(Path(tmp) / "run"), outcomes,
+            split="val", classes=["snoring"], seed=7, scenes=scenes,
+            say=lambda _line: None,
+        )
+
+    def test_a_pass_with_a_completed_scene_writes_and_returns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(
+                tmp, [SceneTourOutcome(scene="A", record=self._record("A", True))], ["A"]
+            )
+            self.assertTrue(path.is_file())
+
+    def test_a_pass_that_completed_nothing_still_writes_the_reasons_then_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outcomes = [
+                SceneTourOutcome(scene="A", record=self._record("A", False)),
+                SceneTourOutcome(scene="B", record=None, error="no mesh"),
+            ]
+            with self.assertRaises(EmptyPassError) as caught:
+                self._write(tmp, outcomes, ["A", "B"])
+            store_path = caught.exception.store_path
+            self.assertTrue(store_path.is_file())
+            payload = json.loads(store_path.read_text(encoding="utf-8"))
+            provenance = payload["provenance"]
+            self.assertEqual(
+                [entry["scene"] for entry in provenance["scenes_incomplete"]], ["A"]
+            )
+            self.assertEqual(
+                [entry["scene"] for entry in provenance["scenes_failed"]], ["B"]
+            )
+            self.assertEqual(provenance["scenes_complete"], [])
 
 
 class TestSceneTourOutcome(unittest.TestCase):

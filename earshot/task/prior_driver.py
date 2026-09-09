@@ -63,6 +63,8 @@ from earshot.task.prior_pass import (
 from earshot.types import Xyz
 
 __all__ = [
+    "EmptyPassError",
+    "write_pass_store",
     "SceneTourOutcome",
     "plan_scene_tour",
     "walk_scene",
@@ -141,6 +143,78 @@ def walk_scene(
         leg_budget=leg_budget,
         goal_radius=goal_radius,
     )
+
+
+class EmptyPassError(RuntimeError):
+    """No scene completed its tour, so the merged store is empty.
+
+    Carries `store_path` because the store was WRITTEN before this was raised: a pass
+    over only the scenes that fail is how a failure gets diagnosed, and the provenance is
+    that run's entire product. Raising before the write destroyed it in exactly that
+    case.
+    """
+
+    def __init__(self, message: str, *, store_path: pathlib.Path) -> None:
+        super().__init__(message)
+        self.store_path = store_path
+
+
+def write_pass_store(
+    run_dir: str,
+    outcomes: Sequence["SceneTourOutcome"],
+    *,
+    split: str,
+    classes: Sequence[str],
+    seed: int,
+    scenes: Sequence[str],
+    overwrite: bool = False,
+    say: Callable[[str], None] = print,
+) -> pathlib.Path:
+    """Merge what completed, write the store and its provenance, THEN raise if nothing
+    completed. Needs no simulator, which is why it is a function and not four lines
+    inside `run_prior_pass`.
+
+    The order is the point. The write used to come after the emptiness check, so a pass
+    over only the scenes that fail -- which is how a failure gets diagnosed -- raised
+    "every scene's tour was incomplete" and left no artefact saying WHY any of them did.
+    `prior-3` was exactly that run, and it produced 21 seconds of GPU time and nothing to
+    read. The exit stays nonzero because a pass that stored nothing is not a success;
+    what changes is that the reasons survive it.
+    """
+    complete_records = [
+        outcome.record for outcome in outcomes
+        if outcome.record is not None and outcome.record.complete
+    ]
+    semantic, episodic = merge_scene_records(complete_records)
+    say("merged: {} semantic row(s), {} episodic row(s), {} of {} scene(s) complete".format(
+        len(semantic), len(episodic), len(complete_records), len(scenes)
+    ))
+
+    run_path = pathlib.Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    store_path = run_path / "store.json"
+    if store_path.exists() and not overwrite:
+        raise FileExistsError(
+            "{} already exists. One directory is one run: pass a fresh --run-dir, or "
+            "--overwrite if replacing it is the intent.".format(store_path)
+        )
+    dump_stores(
+        str(store_path),
+        semantic,
+        episodic,
+        provenance=pass_provenance(
+            outcomes, split=split, classes=classes, seed=seed, scenes=scenes
+        ),
+    )
+    say("wrote {}".format(store_path))
+    if not complete_records:
+        raise EmptyPassError(
+            "every scene's tour was incomplete or failed to load; the merged store is "
+            "empty. The reasons ARE recorded -- read them with `python -m "
+            "earshot.tools.matrix_audit --store {}`".format(store_path),
+            store_path=store_path,
+        )
+    return store_path
 
 
 def merge_scene_records(
@@ -483,35 +557,16 @@ def run_prior_pass(
         if record.complete:
             complete_records.append(record)
 
-    if not complete_records:
-        raise RuntimeError(
-            "every scene's tour was incomplete or failed to load; nothing to merge. "
-            "See the per-scene WARN lines above."
-        )
-
-    semantic, episodic = merge_scene_records(complete_records)
-    say("merged: {} semantic row(s), {} episodic row(s), {} of {} scene(s) complete".format(
-        len(semantic), len(episodic), len(complete_records), len(scenes)
-    ))
-
-    run_path = pathlib.Path(run_dir)
-    run_path.mkdir(parents=True, exist_ok=True)
-    store_path = run_path / "store.json"
-    if store_path.exists() and not overwrite:
-        raise FileExistsError(
-            "{} already exists. One directory is one run: pass a fresh --run-dir, or "
-            "--overwrite if replacing it is the intent.".format(store_path)
-        )
-    dump_stores(
-        str(store_path),
-        semantic,
-        episodic,
-        provenance=pass_provenance(
-            outcomes, split=split, classes=classes, seed=seed, scenes=scenes
-        ),
+    return write_pass_store(
+        run_dir,
+        outcomes,
+        split=split,
+        classes=classes,
+        seed=seed,
+        scenes=scenes,
+        overwrite=overwrite,
+        say=say,
     )
-    say("wrote {}".format(store_path))
-    return store_path
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -537,17 +592,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(None if argv is None else list(argv))
 
-    run_prior_pass(
-        run_dir=args.run_dir,
-        scenes=tuple(args.scenes.split()),
-        classes=tuple(args.classes.split()),
-        split=args.split,
-        data_root=args.data_root,
-        seed=args.seed,
-        leg_budget=args.leg_budget,
-        goal_radius=args.goal_radius,
-        overwrite=args.overwrite,
-    )
+    try:
+        run_prior_pass(
+            run_dir=args.run_dir,
+            scenes=tuple(args.scenes.split()),
+            classes=tuple(args.classes.split()),
+            split=args.split,
+            data_root=args.data_root,
+            seed=args.seed,
+            leg_budget=args.leg_budget,
+            goal_radius=args.goal_radius,
+            overwrite=args.overwrite,
+        )
+    except EmptyPassError as exc:
+        # Nonzero, because a pass that stored nothing is not a success -- but a printed
+        # line naming the artefact, not a traceback that reads as a crash and buries the
+        # fact that the reasons were saved.
+        print("EMPTY PASS: {}".format(exc))
+        return 3
     return 0
 
 
