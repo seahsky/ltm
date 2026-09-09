@@ -41,6 +41,14 @@ the audit only on a RESOLVED prior, so every miss is outside this section by
 construction — including the `unreachable` sub-arm — and the section prints how many
 episodes that leaves it blind to.
 
+**F. WHAT THE SEEN AXIS CAN SEE.** The pre-flight question, answerable off a prior pass
+no cell has touched. The seen axis manipulates whether the tour visited the room the
+source is in, so a scene whose store holds no row at the anchor of the class it RUNS
+contributes zero to the seen contrast by construction. `prior-8` is why: its 38 rows are
+`living_room` in all 19 scenes, `bathroom` in 14, and `bedroom` in FOUR — bedrooms are
+upstairs, and `snoring` anchors at `bed`. Needs `--assignment`, and says so rather than
+guessing which class a scene runs.
+
 `--gate-scenes` is the enforcement half, for `matrix_sweep.sh`: exit 2 unless every
 assigned scene is in the store's `scenes_complete`. A prior pass that silently dropped a
 scene must stop the sweep before the cells run, because "NOT_RUN is never green".
@@ -67,6 +75,7 @@ __all__ = [
     "anchors_by_scene",
     "graded_confidences",
     "abstain_table",
+    "anchor_room_coverage",
     "main",
 ]
 
@@ -336,6 +345,60 @@ def discordance_where_identical(
     return {"zero_row_scenes": zero, "scenes_with_rows": with_rows}
 
 
+def anchor_room_coverage(
+    entries: Sequence[Any],
+    assignment: Mapping[str, str],
+) -> Dict[str, Any]:
+    """Per scene: does the store hold a row at the anchor of the class that scene RUNS?
+
+    The seen axis manipulates one thing — whether the tour visited the room the source is
+    in. If the tour never reached that room, the seen cell and the unseen cell resolve the
+    same candidate set for the category that matters, and the scene contributes a
+    difference of zero to the seen contrast BY CONSTRUCTION. Not noise, not a null result:
+    an episode with nothing to see.
+
+    `prior-8` is why this exists. Its 38 rows are `living_room` in all 19 scenes,
+    `bathroom` in 14 and `bedroom` in FOUR — bedrooms are upstairs, and the floor test
+    that made the tour honest also made that visible. `snoring` anchors at `bed`, so every
+    `snoring` scene whose tour stopped downstairs is a blind cell.
+
+    Pure. `unknown_anchor` is a class that anchors nowhere and is counted, never guessed.
+    """
+    from earshot.audio.vocabulary import ROOM_OF_ANCHOR
+
+    anchors = anchors_by_scene(assignment)
+    stored: Dict[str, set] = {}
+    for entry in entries:
+        stored.setdefault(entry.scene, set()).add(entry.category)
+
+    blind: List[Dict[str, str]] = []
+    sighted: List[str] = []
+    unknown_anchor: List[str] = []
+    for scene in sorted(assignment):
+        anchor = anchors.get(scene)
+        if anchor is None:
+            unknown_anchor.append(scene)
+            continue
+        if anchor in stored.get(scene, ()):
+            sighted.append(scene)
+        else:
+            blind.append({
+                "scene": scene,
+                "sound_class": assignment[scene],
+                "anchor": anchor,
+                "room": ROOM_OF_ANCHOR.get(anchor, "<no room>"),
+                "stored": ", ".join(sorted(stored.get(scene, ()))) or "<nothing>",
+            })
+    graded = len(sighted) + len(blind)
+    return {
+        "sighted": sighted,
+        "blind": blind,
+        "unknown_anchor": unknown_anchor,
+        "graded": graded,
+        "blind_fraction": (len(blind) / graded) if graded else None,
+    }
+
+
 def load_assignment(path: str) -> Dict[str, str]:
     """`{scene: anomaly_class}` off the sweep's own `assignment.tsv`.
 
@@ -574,6 +637,29 @@ def _print_coverage(coverage: Mapping[str, Any], say: Any) -> None:
     ))
 
 
+def _print_anchor_room_coverage(report: Mapping[str, Any], say: Any) -> None:
+    say("")
+    say("F. WHAT THE SEEN AXIS CAN SEE (does the store hold the anchor of the class "
+        "each scene runs?)")
+    graded = report["graded"]
+    if not graded:
+        say("  no scene could be graded — every assigned class anchors nowhere")
+        return
+    fraction = report["blind_fraction"]
+    say("  {} of {} scene(s) hold their own anchor; {} are BLIND ({:.1%})".format(
+        len(report["sighted"]), graded, len(report["blind"]), fraction))
+    for row in report["blind"]:
+        say("  BLIND: {} runs {} (anchors at {} in the {}) — store holds {}".format(
+            row["scene"], row["sound_class"], row["anchor"], row["room"], row["stored"],
+        ))
+    for scene in report["unknown_anchor"]:
+        say("  UNGRADED: {} runs a class that anchors nowhere".format(scene))
+    if report["blind"]:
+        say("  A blind scene's seen and unseen cells resolve the SAME candidate set at "
+            "the category that matters, so it contributes zero to the seen contrast by "
+            "construction — not a null, an episode with nothing to see.")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Read a finished matrix sweep back: store coverage, seen-axis "
@@ -636,6 +722,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     coverage = store_coverage(provenance, rows_by_scene)
     _print_coverage(coverage, say)
 
+    # F reads the store and the assignment ONLY, so it runs on a prior pass that no cell
+    # has touched -- which is the invocation that can still cancel the night.
+    assignment_path = args.assignment or (
+        None if args.run_dir is None
+        else str(pathlib.Path(args.run_dir) / "assignment.tsv")
+    )
+    ran_f = False
+    if assignment_path and pathlib.Path(assignment_path).is_file():
+        _print_anchor_room_coverage(
+            anchor_room_coverage(episodic.entries, load_assignment(assignment_path)),
+            say,
+        )
+        ran_f = True
+
     if args.run_dir is None:
         # `--store` on its own is a complete question -- "what did the prior pass
         # cover?" -- and is how a store is read BEFORE any cell has run over it. It used
@@ -644,6 +744,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         say("")
         say("(no run_dir given, so sections B-E are not run: they read the sweep's own "
             "arm directories, which do not exist until the cells have)")
+        if not ran_f:
+            say("(section F needs --assignment: without the sweep's own assignment.tsv "
+                "there is no way to know which class each scene runs, and a guess would "
+                "grade the store against the wrong anchor)")
         return 0
 
     arms = {}
