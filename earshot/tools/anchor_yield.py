@@ -35,6 +35,20 @@ class whose anchor exists and never qualified.
 **This bounds the CEILING and not the cell size.** It says how many episodes COULD carry a
 learnable association. Whether the agent then reaches the source is `ablation_sweep.sh`'s
 question and needs a GPU and a night.
+
+**One scene is held at a time, and `--limit` caps the scenes EXAMINED.** Both were learned
+on `train`: this used to parse every scene's content file into a `datasets` dict and build
+the cells afterwards, which is fine across `val`'s 20 scenes and hung the box across
+`train`'s 80. `--limit` was applied after that loop, so the documented escape hatch loaded
+everything before capping anything and could not be used to get out of it either.
+
+**`--no-require-mesh` answers the yield question before a mesh download.** A split's
+EPISODES and its MESHES arrive separately: the ObjectNav zip ships every split, the meshes
+come per-split from Matterport. Placement is pure arithmetic over the published goals, so
+the ceiling is computable with no mesh at all -- and that answer is what decides whether
+the download is worth starting. The default still requires the mesh, because for a sweep
+"no mesh here" and "cannot pose the task" are different facts, and the report says which
+mode produced it.
 """
 
 from __future__ import annotations
@@ -718,7 +732,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--root", default=".")
     parser.add_argument("--classes", default=None, help="space-separated; default is all")
     parser.add_argument("--n-episodes", type=int, default=SWEEP_N_EPISODES)
-    parser.add_argument("--limit", type=int, default=0, help="cap the scene count; 0 is all")
+    parser.add_argument(
+        "--limit", type=int, default=0,
+        help="cap the scenes EXAMINED; 0 is all. A probe wants bounded work, so a "
+             "skipped scene consumes a slot",
+    )
+    parser.add_argument(
+        "--no-require-mesh", dest="require_mesh", action="store_false",
+        help="count a scene whose MESH is not on this box. Placement reads only the "
+             "published goals and is pure arithmetic, so the yield question is "
+             "answerable before a mesh download -- which is the point, since the answer "
+             "is what decides whether the download is worth it. Default is to require "
+             "the mesh, because for a sweep a missing mesh and a scene that cannot pose "
+             "the task are different facts",
+    )
+    parser.set_defaults(require_mesh=True)
     parser.add_argument("--out", default=None)
     parser.add_argument(
         "--emit-assignment", default=None,
@@ -733,46 +761,75 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     split_dir = find_split_dir(args.split, root=args.root)
     scenes_dir = find_scenes_dir(root=args.root)
+    require_mesh = bool(args.require_mesh)
 
     # The same discovery `ablation_sweep.sh` makes, and for the same reason: a content file
     # whose mesh is not on this box fails at load, which is a different fact from a scene
     # that cannot pose the task.
+    #
+    # ONE SCENE IN MEMORY AT A TIME. This used to hold every scene's parsed dataset in a
+    # `datasets` dict and build the cells afterwards, which is fine for `val`'s 20 scenes
+    # and killed the box on `train`'s 80: `load_scene`'s own docstring calls itself "lazy
+    # by scene, which is the whole reason HM3D ships per-scene content files", and keeping
+    # all of them defeated exactly that. `cell_yield` returns COUNTS, so nothing needs the
+    # dataset once its cells are built and the loop can drop it.
+    classes = _resolve_classes(args.classes)
+    labels = list(available_scenes(split_dir))
     scenes: List[str] = []
-    datasets: Dict[str, object] = {}
+    cells: List[CellYield] = []
     skipped: List[Tuple[str, str]] = []
-    for label in available_scenes(split_dir):
+    # `--limit` caps the scenes EXAMINED, not the scenes kept. A cap on the ones kept can
+    # still read a whole split to fill it, which is the opposite of what a probe wants; a
+    # cap on the ones examined always terminates in bounded work. Identical at the default
+    # of 0, and no recorded run has passed a non-zero one.
+    if args.limit > 0:
+        labels = labels[: args.limit]
+    for index, label in enumerate(labels, start=1):
+        # Progress on stderr, so `--emit-assignment` and a piped report stay clean. A
+        # silent multi-minute load is indistinguishable from a hang, and on `train` that
+        # is precisely how this looked.
+        print("  [{}/{}] {}".format(index, len(labels), label), file=sys.stderr)
         try:
             dataset = load_scene(split_dir, label, scenes_dir=scenes_dir)
         except (EpisodeDataError, OSError, ValueError) as exc:
             skipped.append((label, str(exc)))
             continue
-        if not os.path.exists(dataset.scene_path):
+        if require_mesh and not os.path.exists(dataset.scene_path):
             skipped.append((label, "no mesh on this box"))
             continue
         scenes.append(label)
-        datasets[label] = dataset
-    if args.limit > 0:
-        scenes = scenes[: args.limit]
-
-    if not scenes:
-        print("FATAL: no scene with a mesh on this box under {}".format(split_dir),
-              file=sys.stderr)
-        return 2
-
-    classes = _resolve_classes(args.classes)
-    cells: List[CellYield] = []
-    for name in classes:
-        for scene in scenes:
+        for name in classes:
             cells.append(
                 cell_yield(
-                    datasets[scene],
-                    scene=scene,
+                    dataset,
+                    scene=label,
                     anomaly_class=name,
                     n_episodes=args.n_episodes,
                 )
             )
+        del dataset
+
+    if not scenes:
+        print("FATAL: no scene {}under {}".format(
+            "with a mesh on this box " if require_mesh else "could be read ", split_dir),
+            file=sys.stderr)
+        if require_mesh and skipped:
+            print("       {} scene(s) were skipped for a missing mesh. This split's "
+                  "EPISODES are on disk and its MESHES are not, which is the normal "
+                  "state before a download. Pass --no-require-mesh to answer the yield "
+                  "question anyway: placement is pure arithmetic over the published "
+                  "goals and needs no mesh.".format(len(skipped)), file=sys.stderr)
+        return 2
 
     print(format_report(cells, scenes=scenes, n_episodes=args.n_episodes, split=args.split))
+    if not require_mesh:
+        # Said on the report itself, not only in the invocation: a yield table for scenes
+        # whose meshes are absent is a CEILING for a split that cannot be swept yet, and
+        # nothing downstream would notice the difference.
+        print("  --no-require-mesh: {} scene(s) counted WITHOUT checking for a mesh. "
+              "These counts are what the split COULD express; no sweep can run over a "
+              "scene whose mesh is not on this box.".format(len(scenes)))
+        print("")
     if skipped:
         print("  SCENES NOT COUNTED ({}) — not scenes with zero anchors:".format(len(skipped)))
         for label, reason in skipped:
