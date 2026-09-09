@@ -494,6 +494,16 @@ def _why(row: Optional[Mapping[str, Any]]) -> str:
                 ", ".join(sorted({str(item.get("room")) for item in dropped})),
             )
         )
+    for leg in row.get("abandoned") or ():
+        # The gap is what tells the three faults apart: a leg stalled just outside the
+        # goal radius is an arrival-threshold problem, one stalled far away is a
+        # navigation failure, and a refused target is neither.
+        gap = leg.get("final_gap_m")
+        parts.append("{} PLANNED but not reached ({}{})".format(
+            leg.get("room"),
+            "gap unknown" if gap is None else "stalled {:.2f} m out".format(float(gap)),
+            ", {}".format(leg.get("reason")) if leg.get("reason") else "",
+        ))
     if row.get("error"):
         parts.append("error: {}".format(row["error"]))
     return " -- {}".format(", ".join(parts)) if parts else ""

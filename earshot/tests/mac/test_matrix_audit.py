@@ -135,6 +135,67 @@ class TestStoreCoverage(unittest.TestCase):
         self.assertIn("1 candidate(s) unroutable (bathroom)", out)
         self.assertIn("no candidate stop offered", out)
 
+    def test_an_abandoned_leg_says_where_it_stalled_and_why(self):
+        """`prior-5` moved both scenes into the same bucket -- a leg that WAS planned and
+        that the follower never arrived at -- and the store could say it was missed but
+        not why. The gap tells the faults apart: stalled just outside the goal radius is
+        an arrival-threshold problem, stalled far away is a navigation failure."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_coverage(
+                store_coverage(
+                    {
+                        "scenes_requested": ["S"],
+                        "scenes_complete": [],
+                        "scenes_incomplete": [{
+                            "scene": "S", "rooms_reached": ["bathroom"],
+                            "n_observations": 1, "unreachable": [], "error": None,
+                            "abandoned": [{
+                                "room": "bedroom", "category": "bed",
+                                "final_gap_m": 1.42, "steps": 200,
+                                "reason": "budget of 200 steps exhausted",
+                            }],
+                        }],
+                        "scenes_failed": [],
+                    },
+                    {},
+                ),
+                print,
+            )
+        out = buffer.getvalue()
+        self.assertIn("bedroom PLANNED but not reached", out)
+        self.assertIn("stalled 1.42 m out", out)
+        self.assertIn("budget of 200 steps exhausted", out)
+
+    def test_an_abandoned_leg_with_no_gap_says_so_rather_than_printing_a_zero(self):
+        """`final_gap_m` is None when the navmesh could not measure it, which is not the
+        same fact as arriving -- and a 0.00 there would read as a perfect arrival."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_coverage(
+                store_coverage(
+                    {
+                        "scenes_requested": ["S"],
+                        "scenes_complete": [],
+                        "scenes_incomplete": [{
+                            "scene": "S", "rooms_reached": [], "n_observations": 0,
+                            "unreachable": [], "error": None,
+                            "abandoned": [{
+                                "room": "bedroom", "category": "bed",
+                                "final_gap_m": None, "steps": 3,
+                                "reason": "follower refused the target: NoRoute",
+                            }],
+                        }],
+                        "scenes_failed": [],
+                    },
+                    {},
+                ),
+                print,
+            )
+        out = buffer.getvalue()
+        self.assertIn("gap unknown", out)
+        self.assertNotIn("0.00 m out", out)
+
     def test_a_legacy_store_has_no_detail_and_fabricates_none(self):
         coverage = store_coverage(
             {"scenes_requested": ["A"], "scenes_complete": [], "scenes_failed": []},
