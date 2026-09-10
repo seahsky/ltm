@@ -316,6 +316,14 @@ def _parse_goal(raw: Mapping[str, Any], where: str) -> ObjectGoal:
     )
 
 
+def _parse_goals(raw_goals: Sequence[Any], where: str) -> Tuple[ObjectGoal, ...]:
+    """One goal list, parsed. Split out so the hoisted form can be parsed once."""
+    return tuple(
+        _parse_goal(goal, "{} goal[{}]".format(where, i))
+        for i, goal in enumerate(raw_goals)
+    )
+
+
 def parse_content(
     content: Mapping[str, Any],
     *,
@@ -331,6 +339,21 @@ def parse_content(
     if not raw_episodes:
         raise EpisodeDataError("{} holds no episodes".format(source))
     by_category: Dict[str, Any] = content.get("goals_by_category") or {}
+    # THE HOISTED LIST IS PARSED ONCE PER CATEGORY, NOT ONCE PER EPISODE.
+    #
+    # `dedup_goals` hoists one goal list per category precisely so it is stored once, and
+    # re-materialising it for every episode of that category undoes the hoist at load
+    # time. `ObjectGoal`, `ViewPoint` and `Xyz` are all frozen, so one tuple is safely
+    # shared by every episode that names the same category -- nothing can mutate it, and
+    # `dataset.goal_table` de-duplicates by POSITION rather than identity.
+    #
+    # It is worth this cache. HM3D's val scenes carry ~100 episodes each over a handful of
+    # categories, so the duplication was invisible; a train scene is 18x the bytes (131 MB
+    # over 80 train scenes against 1.8 MB over 20 val), and every episode of a category
+    # rebuilt that category's whole goal-and-view-point graph again. That is what made
+    # `anchor_yield --split train` slow, and -- 80 scenes at a time -- what exhausted the
+    # box's memory.
+    parsed_by_key: Dict[str, Tuple[ObjectGoal, ...]] = {}
 
     episodes: List[Episode] = []
     for index, raw in enumerate(raw_episodes):
@@ -342,14 +365,29 @@ def parse_content(
         # episode's own `goals` list and hoists one copy per category
         # (`object_nav_dataset.py:38-58`). Inline goals are the pre-dedup form, which
         # the smoke builders in the old tree also emitted, so both are accepted.
-        raw_goals = by_category.get(goals_key(scene_id, category)) or raw.get("goals")
-        if not raw_goals:
-            raise EpisodeDataError(
-                "{}: no goals for category {!r} — looked for goals_by_category[{!r}] "
-                "and an inline 'goals' list".format(
-                    where, category, goals_key(scene_id, category)
+        key = goals_key(scene_id, category)
+        hoisted = by_category.get(key)
+        if hoisted:
+            goals = parsed_by_key.get(key)
+            if goals is None:
+                # Named by the CATEGORY it was hoisted under, not by whichever episode
+                # happened to be the first to need it -- which is what it is.
+                goals = _parse_goals(hoisted, "{} goals_by_category[{!r}]".format(
+                    source, key))
+                parsed_by_key[key] = goals
+        else:
+            # Per-episode and therefore NOT shareable: the pre-dedup form gives each
+            # episode its own list, and caching one episode's list under the category
+            # would hand it to every other episode of that category.
+            inline = raw.get("goals")
+            if not inline:
+                raise EpisodeDataError(
+                    "{}: no goals for category {!r} — looked for "
+                    "goals_by_category[{!r}] and an inline 'goals' list".format(
+                        where, category, key
+                    )
                 )
-            )
+            goals = _parse_goals(inline, where)
 
         episodes.append(
             Episode(
@@ -364,10 +402,7 @@ def parse_content(
                     _require(raw, "start_position", where)
                 ),
                 start_rotation=_coeffs(_require(raw, "start_rotation", where), where),
-                goals=tuple(
-                    _parse_goal(goal, "{} goal[{}]".format(where, i))
-                    for i, goal in enumerate(raw_goals)
-                ),
+                goals=goals,
                 info=dict(raw.get("info") or {}),
             )
         )
