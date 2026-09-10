@@ -15,7 +15,13 @@ import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
 
-from earshot.task.prior_pass import candidate_stops, plan_tour, walk_tour
+from earshot.task.prior_pass import (
+    TourPlan,
+    TourStop,
+    candidate_stops,
+    plan_tour,
+    walk_tour,
+)
 from earshot.types import Pose, Xyz
 
 ROOMS = {
@@ -120,12 +126,13 @@ class TestPlanTour(unittest.TestCase):
 class FakeWorld:
     """Steps toward the target and arrives after `steps_needed`, or never."""
 
-    def __init__(self, steps_needed, *, gap=0.0, refuse=False):
+    def __init__(self, steps_needed, *, gap=0.0, refuse=False, at=(0.0, 0.0, 0.0)):
         self._needed = dict(steps_needed)
         self._taken = {}
         self._target = None
         self._gap = gap
         self._refuse = refuse
+        self._at = Xyz.from_sequence(at)
         self.actions = []
 
     def follower(self, _goal_radius):
@@ -146,10 +153,46 @@ class FakeWorld:
         return True
 
     def pose(self):
-        return Pose(position=Xyz(0.0, 0.0, 0.0), yaw_rad=0.0)
+        return Pose(position=self._at, yaw_rad=0.0)
 
     def geodesic_distance(self, _start, _ends):
         return self._gap
+
+
+class TestTheArrivalPoseIsRecorded(unittest.TestCase):
+    """`walk_tour` read the agent's pose to compute `final_gap_m` and then dropped it, so
+    the only thing a tour knows that an annotation does not never reached the store.
+
+    `episodic_from_tour` used `leg.stop.point` -- an ObjectNav goal position, the same
+    ground truth the unseen cell resolves through -- which is the matrix-1 review's D1.
+    """
+
+    def test_a_reached_leg_carries_where_the_agent_ended_up(self):
+        stop = TourStop(room="bathroom", category="toilet", point=Xyz(3.0, 0.0, 0.0))
+        stood = (2.6, 0.0, 0.4)
+        record = walk_tour(
+            FakeWorld({(3.0, 0.0, 0.0): 2}, at=stood),
+            TourPlan(stops=(stop,), unreachable=()),
+            scene="sceneA",
+            leg_budget=10,
+        )
+        self.assertTrue(record.legs[0].reached)
+        self.assertEqual(record.legs[0].arrival, Xyz.from_sequence(stood))
+        # And it is NOT the annotation, which is the entire point.
+        self.assertNotEqual(record.legs[0].arrival, stop.point)
+
+    def test_an_abandoned_leg_carries_it_too(self):
+        """Where the agent gave up is as real as where it arrived, and the audit already
+        prints the gap it stalled at -- the pose is the other half of that fact."""
+        stop = TourStop(room="bedroom", category="bed", point=Xyz(3.0, 0.0, 0.0))
+        record = walk_tour(
+            FakeWorld({(3.0, 0.0, 0.0): 99}, gap=4.2, at=(1.0, 0.0, 1.0)),
+            TourPlan(stops=(stop,), unreachable=()),
+            scene="sceneA",
+            leg_budget=2,
+        )
+        self.assertFalse(record.legs[0].reached)
+        self.assertEqual(record.legs[0].arrival, Xyz(1.0, 0.0, 1.0))
 
 
 class TestTheFloorTest(unittest.TestCase):

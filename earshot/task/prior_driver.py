@@ -320,6 +320,10 @@ class SceneTourOutcome:
                         "final_gap_m": leg.final_gap_m,
                         "steps": leg.steps,
                         "reason": leg.reason,
+                        "arrival": (
+                            None if leg.arrival is None
+                            else [leg.arrival.x, leg.arrival.y, leg.arrival.z]
+                        ),
                     }
                     for leg in self.record.legs if not leg.reached
                 ]
