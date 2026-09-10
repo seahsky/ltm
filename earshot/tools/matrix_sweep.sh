@@ -53,8 +53,15 @@
 #        60), --limit N (scene cap on the assignment, default 0 = no limit), --seed N,
 #        --conditions "a b" (default all four), --leg-budget N (prior pass, default 200),
 #        --goal-radius M (prior pass, default 1.0), --start-draws N (prior pass, default
-#        20), --max-tour-dy M (prior pass, default 1.0), --prior-only (stop after the
-#        coverage gate), --out-dir DIR, --no-pull, --force.
+#        20), --max-tour-dy M (prior pass, default 1.0), --split S (default val; `train`
+#        is the 80-scene pool), --prior-only (stop after the coverage gate), --out-dir
+#        DIR, --no-pull, --force.
+#
+# --split IS THE SCENE POOL, and val is small. ObjectNav HM3D v1 publishes 20 val scenes
+# and 80 train ones; `anchor_yield --split train` measured 73 of the 80 usable, 1068 of
+# 1200 episodes anchored (89.0%) against val's 210 of 282 (74.5%), and a LOWER null
+# (35.1% against 39.5%). Every other entry point already took a split; this one did not,
+# so no sweep could be pointed anywhere but val.
 #
 # --prior-only IS THE DRY RUN. Steps 1-4 are the assignment, the tour and the gate, and
 # they cost under two minutes; the cells cost a night. Run it first on a fresh tag, read
@@ -97,6 +104,15 @@ GOAL_RADIUS=1.0
 # never grew the flags, so every matrix sweep would have hit prior-2's red gate.
 START_DRAWS=20
 MAX_TOUR_DY=1.0
+# WHICH SCENE POOL. Every other entry point took a split and this one hardcoded `val`,
+# so a sweep could not be pointed at `train` at all.
+#
+# It is not a small pool difference. ObjectNav HM3D v1 has 20 val scenes and 80 train
+# ones, and `anchor_yield --split train` measured the train half at 73 scenes usable,
+# 1068 of 1200 episodes anchored (89.0%) against val's 210 of 282 (74.5%), with the
+# null-hypothesis score LOWER (35.1% against 39.5%) -- more episodes AND a harder
+# experiment. Balance is free there too: greedy and balanced both reach 1068.
+SPLIT="val"
 PRIOR_ONLY=0
 OUT_DIR=""
 NO_PULL=0
@@ -118,11 +134,12 @@ while [ $# -gt 0 ]; do
     --goal-radius)    need_value $# "$1"; GOAL_RADIUS="$2";    shift 2 ;;
     --start-draws)    need_value $# "$1"; START_DRAWS="$2";    shift 2 ;;
     --max-tour-dy)    need_value $# "$1"; MAX_TOUR_DY="$2";    shift 2 ;;
+    --split)          need_value $# "$1"; SPLIT="$2";          shift 2 ;;
     --prior-only)     PRIOR_ONLY=1;                             shift ;;
     --out-dir)        need_value $# "$1"; OUT_DIR="$2";        shift 2 ;;
     --no-pull)        NO_PULL=1;                                shift ;;
     --force)          FORCE=1;                                  shift ;;
-    -h|--help) sed -n '2,61p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,68p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -163,7 +180,7 @@ if [ "$NO_PULL" = 0 ]; then
          --max-steps "$MAX_STEPS" --sounding-steps "$SOUNDING_STEPS" --seed "$SEED" \
          --limit "$LIMIT" --conditions "$CONDITIONS" --leg-budget "$LEG_BUDGET" \
          --goal-radius "$GOAL_RADIUS" --start-draws "$START_DRAWS" \
-         --max-tour-dy "$MAX_TOUR_DY" --out-dir "$OUT_DIR" \
+         --max-tour-dy "$MAX_TOUR_DY" --split "$SPLIT" --out-dir "$OUT_DIR" \
          ${_prior_only_flag:+--prior-only} ${_force_flag:+--force}
   fi
 else
@@ -206,6 +223,7 @@ mkdir -p "$OUT_DIR"
 banner "[3/6] the room-balanced assignment"
 ASSIGNMENT="$OUT_DIR/assignment.tsv"
 python -m earshot.tools.anchor_yield \
+  --split "$SPLIT" \
   --classes "$CLASSES" \
   --n-episodes "$N_EPISODES" \
   --limit "$LIMIT" \
@@ -235,6 +253,7 @@ echo "  $N_SCENES scene(s) assigned"
 banner "[4/6] the prior pass"
 python -m earshot.task.prior_driver \
   --run-dir "$OUT_DIR/prior" \
+  --split "$SPLIT" \
   --scenes "$SCENES" \
   --classes "$CLASSES" \
   --seed "$SEED" \
@@ -276,6 +295,7 @@ if [ "$PRIOR_ONLY" = 1 ]; then
     echo "tag:            $TAG (--prior-only: assignment, tour and gate; no cells)"
     echo "commit:         $COMMIT"
     echo "args:           $ORIGINAL_ARGS"
+    echo "split:          $SPLIT"
     echo "classes:        $CLASSES"
     echo "scenes:         ${SCENE_LIST[*]}"
     echo "seed:           $SEED"
@@ -305,6 +325,7 @@ echo "  estimated wall clock: ${EST_HOURS} h at ablation_sweep.sh's measured 24.
   echo "tag:            $TAG"
   echo "commit:         $COMMIT"
   echo "args:           $ORIGINAL_ARGS"
+  echo "split:          $SPLIT"
   echo "classes:        $CLASSES"
   echo "scenes:         ${SCENE_LIST[*]}"
   echo "conditions:     ${CONDITION_LIST[*]}"
@@ -336,6 +357,7 @@ for condition in "${CONDITION_LIST[@]}"; do
     echo "    $condition / $scene ($anomaly_class)   ($(date +%H:%M:%S))"
     python -m earshot \
       --run-dir "$run_dir" \
+      --split "$SPLIT" \
       --scene "$scene" \
       --n-episodes "$N_EPISODES" \
       --max-steps "$MAX_STEPS" \

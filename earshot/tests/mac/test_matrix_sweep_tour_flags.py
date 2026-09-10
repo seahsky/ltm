@@ -35,7 +35,7 @@ PRIOR_PASS = TOOLS / "prior_pass.sh"
 # every flag: `--scenes` is computed by the sweep and passed by hand to the standalone
 # pass, and `--run-dir`/`--tag` name the output rather than the work.
 TOUR_FLAGS = ("--classes", "--seed", "--leg-budget", "--goal-radius",
-              "--start-draws", "--max-tour-dy")
+              "--start-draws", "--max-tour-dy", "--split")
 
 
 def case_flags(path: pathlib.Path) -> set:
@@ -93,6 +93,33 @@ class TestTheTourFlagsReachBothScripts(unittest.TestCase):
                 flag, re_exec,
                 "the re-exec drops {}, so a sweep that self-updated would build a "
                 "different store than the one asked for".format(flag),
+            )
+
+    def test_the_split_reaches_all_three_things_that_read_a_scene_pool(self):
+        """`--split` is not only a tour flag: the assignment, the tour and the CELLS each
+        resolve scenes independently, so a split that reached two of the three would run
+        one pool's episodes against another pool's store and say nothing about it.
+
+        `earshot/__main__.py`, `prior_driver` and `anchor_yield` all took a split from the
+        start; this script hardcoded val, so no sweep could be pointed at the 80-scene
+        train pool at all.
+        """
+        source = SWEEP.read_text()
+        for marker, what in (
+            ("python -m earshot.tools.anchor_yield", "the assignment"),
+            ("python -m earshot.task.prior_driver", "the prior pass"),
+            ("python -m earshot \\", "the cells"),
+        ):
+            start = source.index(marker)
+            # To the end of that backslash-continued invocation.
+            end = start
+            while source[end:].split("\n", 1)[0].rstrip().endswith("\\"):
+                end += len(source[end:].split("\n", 1)[0]) + 1
+            block = source[start:end + len(source[end:].split("\n", 1)[0])]
+            self.assertIn(
+                "--split", block,
+                "{} does not receive --split, so it would resolve scenes from a "
+                "different pool than the rest of the sweep".format(what),
             )
 
     def test_prior_only_stops_before_the_cells(self):
