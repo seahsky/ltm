@@ -55,7 +55,18 @@
 #        --goal-radius M (prior pass, default 1.0), --start-draws N (prior pass, default
 #        20), --max-tour-dy M (prior pass, default 1.0), --split S (default val; `train`
 #        is the 80-scene pool), --prior-only (stop after the coverage gate), --out-dir
-#        DIR, --no-pull, --force.
+#        DIR, --no-pull, --force, --resume.
+#
+# --resume PICKS UP A KILLED RUN. It implies --force (it reuses the directory on purpose)
+# and skips any (condition, scene) whose `summary.json` already parses. `report/` writes
+# atomically and never overwrites, so a parseable summary is a cell that finished; a crash
+# mid-write leaves no file rather than half of one. A ZERO-YIELD cell counts as finished,
+# because it wrote a real summary saying the scene placed no episode.
+#
+# It matters more at this scale than it did at 19 scenes: 73 scenes x 4 conditions is 292
+# cells over ~8 h, and without this a crash in the last hour costs the other seven. The
+# run says how many cells it skipped, on the terminal and in the provenance, because a
+# resumed directory's episodes come from more than one invocation.
 #
 # --split IS THE SCENE POOL, and val is small. ObjectNav HM3D v1 publishes 20 val scenes
 # and 80 train ones; `anchor_yield --split train` measured 73 of the 80 usable, 1068 of
@@ -114,6 +125,9 @@ MAX_TOUR_DY=1.0
 # experiment. Balance is free there too: greedy and balanced both reach 1068.
 SPLIT="val"
 PRIOR_ONLY=0
+# --resume implies --force: it reuses a non-empty directory ON PURPOSE, which is the
+# one case "one directory is one run" is not what the operator wants.
+RESUME=0
 OUT_DIR=""
 NO_PULL=0
 FORCE=0
@@ -136,10 +150,11 @@ while [ $# -gt 0 ]; do
     --max-tour-dy)    need_value $# "$1"; MAX_TOUR_DY="$2";    shift 2 ;;
     --split)          need_value $# "$1"; SPLIT="$2";          shift 2 ;;
     --prior-only)     PRIOR_ONLY=1;                             shift ;;
+    --resume)         RESUME=1; FORCE=1;                        shift ;;
     --out-dir)        need_value $# "$1"; OUT_DIR="$2";        shift 2 ;;
     --no-pull)        NO_PULL=1;                                shift ;;
     --force)          FORCE=1;                                  shift ;;
-    -h|--help) sed -n '2,68p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,80p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -150,6 +165,18 @@ banner() { printf '\n========== %s ==========\n' "$1"; }
 is_zero_yield() {
   [ -f "$1/summary.json" ] || return 1
   python -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))['n_episodes']==0 else 1)" \
+    "$1/summary.json" 2>/dev/null
+}
+
+# A cell that already finished. `report/` writes its artefacts ATOMICALLY and never
+# overwrites them, so a `summary.json` that parses is a cell that ran to the end -- a
+# crash mid-write leaves no such file rather than half of one.
+#
+# A ZERO-YIELD cell counts as finished, and must: it wrote a real summary saying the scene
+# placed no episode, which is a measured fact about HM3D and not work left to redo.
+is_finished_cell() {
+  [ -f "$1/summary.json" ] || return 1
+  python -c "import json,sys; json.load(open(sys.argv[1]))['n_episodes']; sys.exit(0)" \
     "$1/summary.json" 2>/dev/null
 }
 
@@ -176,12 +203,14 @@ if [ "$NO_PULL" = 0 ]; then
     [ "$FORCE" = 1 ] && _force_flag="--force"
     _prior_only_flag=""
     [ "$PRIOR_ONLY" = 1 ] && _prior_only_flag="--prior-only"
+    _resume_flag=""
+    [ "$RESUME" = 1 ] && _resume_flag="--resume"
     exec bash "$0" --tag "$TAG" --classes "$CLASSES" --n-episodes "$N_EPISODES" \
          --max-steps "$MAX_STEPS" --sounding-steps "$SOUNDING_STEPS" --seed "$SEED" \
          --limit "$LIMIT" --conditions "$CONDITIONS" --leg-budget "$LEG_BUDGET" \
          --goal-radius "$GOAL_RADIUS" --start-draws "$START_DRAWS" \
          --max-tour-dy "$MAX_TOUR_DY" --split "$SPLIT" --out-dir "$OUT_DIR" \
-         ${_prior_only_flag:+--prior-only} ${_force_flag:+--force}
+         ${_prior_only_flag:+--prior-only} ${_resume_flag:+--resume} ${_force_flag:+--force}
   fi
 else
   banner "[1/6] git pull SKIPPED (--no-pull)"
@@ -348,12 +377,18 @@ fi
 banner "[5/6] $N_CONDITIONS condition(s) x $N_SCENES scene(s)"
 FAILED_RUNS=0
 ZERO_YIELD=""
+RESUMED=0
 for condition in "${CONDITION_LIST[@]}"; do
   echo ""
   echo "  --- condition $condition ---"
   for scene in "${SCENE_LIST[@]}"; do
     anomaly_class="${CLASS_OF_SCENE[$scene]}"
     run_dir="$OUT_DIR/$condition/$scene"
+    if [ "$RESUME" = 1 ] && is_finished_cell "$run_dir"; then
+      RESUMED=$((RESUMED + 1))
+      echo "    $condition / $scene — already finished, skipped (--resume)"
+      continue
+    fi
     echo "    $condition / $scene ($anomaly_class)   ($(date +%H:%M:%S))"
     python -m earshot \
       --run-dir "$run_dir" \
@@ -419,9 +454,16 @@ python -m earshot.tools.episode_diff \
   echo "finished:       $(date -Is)"
   echo "failed_runs:    $FAILED_RUNS"
   echo "zero_yield:     ${ZERO_YIELD:-<none>}"
+  echo "resumed_cells:  $RESUMED"
 } >> "$OUT_DIR/provenance.txt"
 
 banner "done"
+if [ "$RESUMED" -gt 0 ]; then
+  # Said out loud, because a resumed run's numbers come from two invocations and a reader
+  # who does not know that would read one wall clock for all of them.
+  echo "  RESUMED: $RESUMED cell(s) were already finished and were not re-run."
+  echo "           This directory's episodes come from more than one invocation."
+fi
 echo "  artefacts: $OUT_DIR/{provenance.txt,assignment.tsv,prior/store.json,<condition>/<scene>/}"
 echo "  finished=$(date -Is)"
 if [ "$FAILED_RUNS" -gt 0 ]; then
