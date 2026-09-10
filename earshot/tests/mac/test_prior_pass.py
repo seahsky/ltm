@@ -16,8 +16,13 @@ import unittest
 from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.task.prior_pass import (
+    LegOutcome,
     TourPlan,
+    TourRecord,
     TourStop,
+    merge_records,
+    next_floor_target,
+    start_on_the_floor_of,
     candidate_stops,
     plan_tour,
     walk_tour,
@@ -338,3 +343,104 @@ class TestWalkTour(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _leg(room, category, point, reached=True):
+    return LegOutcome(
+        stop=TourStop(room=room, category=category, point=Xyz(*point)),
+        reached=reached, steps=4, final_gap_m=None if reached else 3.0,
+        reason="arrived" if reached else "budget",
+        arrival=Xyz(*point) if reached else None,
+    )
+
+
+class TestTheTourCanClimb(unittest.TestCase):
+    """`prior-9`: 16 of 73 scenes blind on the seen axis, 14 of them `snoring`, with the
+    drop reasons reading `on another floor`.
+
+    `plan_tour` filters every candidate against ONE start, so a scene's whole tour is
+    decided by a single random navigable point and can only ever see one storey. The
+    EPISODES never had this problem -- each has its own start and `build_anomaly_episodes`
+    screens each source against that episode's start -- so a bedroom upstairs of the
+    tour's dice roll is placeable and the tour simply never went there.
+    """
+
+    def _record(self, reached, dropped):
+        return TourRecord(
+            scene="s",
+            legs=tuple(_leg(room, cat, pt) for room, cat, pt in reached),
+            observations=(),
+            unreachable=tuple(
+                (TourStop(room=room, category=cat, point=Xyz(*pt)), reason)
+                for room, cat, pt, reason in dropped
+            ),
+        )
+
+    def test_the_next_target_is_a_floor_drop_in_a_room_not_yet_reached(self):
+        record = self._record(
+            reached=[("living_room", "chair", (0.0, 0.0, 0.0))],
+            dropped=[
+                ("living_room", "sofa", (1.0, 0.0, 0.0), "a nearer candidate covers it"),
+                ("bedroom", "bed", (2.0, 3.2, 0.0),
+                 "on another floor (3.20 m of height from the start)"),
+            ],
+        )
+        target = next_floor_target(record)
+        self.assertIsNotNone(target)
+        self.assertEqual(target.room, "bedroom")
+
+    def test_a_room_already_reached_is_not_gone_back_for(self):
+        """A second tour of a room already in the store writes a duplicate row and spends
+        the budget proving what is known."""
+        record = self._record(
+            reached=[("bedroom", "bed", (0.0, 0.0, 0.0))],
+            dropped=[("bedroom", "bed", (2.0, 3.2, 0.0), "on another floor (3.20 m)")],
+        )
+        self.assertIsNone(next_floor_target(record))
+
+    def test_a_drop_for_any_other_reason_is_not_a_floor_to_climb(self):
+        """`no navmesh route` is an island, not a storey. Going back for it would draw
+        starts forever and find nothing."""
+        record = self._record(
+            reached=[],
+            dropped=[("bedroom", "bed", (2.0, 0.0, 0.0),
+                      "no navmesh route from the tour start")],
+        )
+        self.assertIsNone(next_floor_target(record))
+
+    def test_a_start_is_drawn_on_the_targets_own_storey(self):
+        wrong = [Xyz(0.0, 0.0, 0.0), Xyz(1.0, 0.0, 1.0)]
+        right = Xyz(5.0, 3.1, 5.0)
+        drawn = list(wrong) + [right]
+        found = start_on_the_floor_of(
+            Xyz(4.0, 3.2, 4.0), lambda: drawn.pop(0), max_dy_m=1.0, attempts=5)
+        self.assertEqual(found, right)
+
+    def test_it_gives_up_rather_than_seating_the_agent_on_the_wrong_floor(self):
+        """The forced-failure arm. A scene whose other storey has no navigable point the
+        draws happen to find must return None, not the last wrong one."""
+        self.assertIsNone(start_on_the_floor_of(
+            Xyz(0.0, 9.0, 0.0), lambda: Xyz(0.0, 0.0, 0.0),
+            max_dy_m=1.0, attempts=3))
+
+    def test_merging_stops_reporting_a_room_the_second_tour_rescued(self):
+        """Otherwise the audit names a room as dropped and holds its observation at the
+        same time."""
+        first = self._record(
+            reached=[("living_room", "chair", (0.0, 0.0, 0.0))],
+            dropped=[("bedroom", "bed", (2.0, 3.2, 0.0), "on another floor (3.20 m)")],
+        )
+        second = self._record(reached=[("bedroom", "bed", (2.0, 3.2, 0.0))], dropped=[])
+        merged = merge_records(first, second)
+        self.assertEqual(set(merged.rooms_reached), {"living_room", "bedroom"})
+        self.assertEqual(merged.unreachable, ())
+        self.assertEqual(len(merged.legs), 2)
+
+    def test_merging_keeps_a_drop_neither_tour_rescued(self):
+        first = self._record(
+            reached=[("living_room", "chair", (0.0, 0.0, 0.0))],
+            dropped=[("bathroom", "toilet", (2.0, 3.2, 0.0), "on another floor (3.20 m)")],
+        )
+        second = self._record(reached=[("bedroom", "bed", (2.0, 3.2, 0.0))], dropped=[])
+        merged = merge_records(first, second)
+        self.assertEqual([s.room for s, _ in merged.unreachable], ["bathroom"])

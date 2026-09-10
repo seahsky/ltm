@@ -56,6 +56,7 @@ TAG=""
 SCENES=""
 CLASSES=""
 SPLIT="val"
+TOUR_FLOORS=1
 DATA_ROOT="."
 SEED=20260821
 LEG_BUDGET=200
@@ -78,6 +79,7 @@ while [ "$#" -gt 0 ]; do
     --leg-budget)  need_value $# "$1"; LEG_BUDGET="$2";  shift 2 ;;
     --goal-radius) need_value $# "$1"; GOAL_RADIUS="$2"; shift 2 ;;
     --start-draws) need_value $# "$1"; START_DRAWS="$2"; shift 2 ;;
+    --tour-floors) need_value $# "$1"; TOUR_FLOORS="$2";  shift 2 ;;
     --max-tour-dy) need_value $# "$1"; MAX_TOUR_DY="$2"; shift 2 ;;
     --no-pull)     PULL=0; shift ;;
     --overwrite)   OVERWRITE=1; shift ;;
@@ -141,6 +143,7 @@ python -m earshot.task.prior_driver \
   --goal-radius "$GOAL_RADIUS" \
   --start-draws "$START_DRAWS" \
   ${MAX_TOUR_DY:+--max-tour-dy "$MAX_TOUR_DY"} \
+  --tour-floors "$TOUR_FLOORS" \
   $([ "$OVERWRITE" -eq 1 ] && echo --overwrite) \
   2>&1 | tee "$OUT_DIR/prior_pass.log"
 PASS_STATUS=${PIPESTATUS[0]}

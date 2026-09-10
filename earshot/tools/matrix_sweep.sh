@@ -115,6 +115,15 @@ GOAL_RADIUS=1.0
 # never grew the flags, so every matrix sweep would have hit prior-2's red gate.
 START_DRAWS=20
 MAX_TOUR_DY=1.0
+# HOW MANY STOREYS ONE SCENE'S TOUR MAY VISIT, defaulted to 3 because 1 is measured
+# broken. `plan_tour` filters candidates against ONE random start, so a scene's whole
+# tour is decided by a single dice roll and can only ever see one floor. `prior-9`
+# measured the cost on the real 73: 16 scenes BLIND on the seen axis, 14 of them
+# `snoring` -- 58% of that arm -- with drop reasons reading `on another floor`.
+#
+# The episodes never had this problem: each has its own start and is screened against
+# it, so those bedrooms are placeable and the tour simply never went upstairs.
+TOUR_FLOORS=3
 # WHICH SCENE POOL. Every other entry point took a split and this one hardcoded `val`,
 # so a sweep could not be pointed at `train` at all.
 #
@@ -148,6 +157,7 @@ while [ $# -gt 0 ]; do
     --goal-radius)    need_value $# "$1"; GOAL_RADIUS="$2";    shift 2 ;;
     --start-draws)    need_value $# "$1"; START_DRAWS="$2";    shift 2 ;;
     --max-tour-dy)    need_value $# "$1"; MAX_TOUR_DY="$2";    shift 2 ;;
+    --tour-floors)    need_value $# "$1"; TOUR_FLOORS="$2";    shift 2 ;;
     --split)          need_value $# "$1"; SPLIT="$2";          shift 2 ;;
     --prior-only)     PRIOR_ONLY=1;                             shift ;;
     --resume)         RESUME=1; FORCE=1;                        shift ;;
@@ -209,7 +219,8 @@ if [ "$NO_PULL" = 0 ]; then
          --max-steps "$MAX_STEPS" --sounding-steps "$SOUNDING_STEPS" --seed "$SEED" \
          --limit "$LIMIT" --conditions "$CONDITIONS" --leg-budget "$LEG_BUDGET" \
          --goal-radius "$GOAL_RADIUS" --start-draws "$START_DRAWS" \
-         --max-tour-dy "$MAX_TOUR_DY" --split "$SPLIT" --out-dir "$OUT_DIR" \
+         --max-tour-dy "$MAX_TOUR_DY" --tour-floors "$TOUR_FLOORS" \
+         --split "$SPLIT" --out-dir "$OUT_DIR" \
          ${_prior_only_flag:+--prior-only} ${_resume_flag:+--resume} ${_force_flag:+--force}
   fi
 else
@@ -290,6 +301,7 @@ python -m earshot.task.prior_driver \
   --goal-radius "$GOAL_RADIUS" \
   --start-draws "$START_DRAWS" \
   ${MAX_TOUR_DY:+--max-tour-dy "$MAX_TOUR_DY"} \
+  --tour-floors "$TOUR_FLOORS" \
   2>&1 | tee "$OUT_DIR/prior_pass.log"
 PRIOR_STATUS=${PIPESTATUS[0]}
 STORE="$OUT_DIR/prior/store.json"
@@ -329,7 +341,7 @@ if [ "$PRIOR_ONLY" = 1 ]; then
     echo "scenes:         ${SCENE_LIST[*]}"
     echo "seed:           $SEED"
     echo "store:          $STORE"
-    echo "tour:           leg_budget=$LEG_BUDGET goal_radius=$GOAL_RADIUS start_draws=$START_DRAWS max_tour_dy=${MAX_TOUR_DY:-<unset>}"
+    echo "tour:           leg_budget=$LEG_BUDGET goal_radius=$GOAL_RADIUS start_draws=$START_DRAWS max_tour_dy=${MAX_TOUR_DY:-<unset>} tour_floors=$TOUR_FLOORS"
     echo "finished:       $(date -Is)"
   } > "$OUT_DIR/provenance.txt"
   banner "--prior-only: stopping after the gate"
@@ -363,7 +375,7 @@ echo "  estimated wall clock: ${EST_HOURS} h at ablation_sweep.sh's measured 24.
   echo "sounding_steps: $SOUNDING_STEPS (fixed_steps, ADR-0017)"
   echo "seed:           $SEED"
   echo "store:          $STORE"
-  echo "tour:           leg_budget=$LEG_BUDGET goal_radius=$GOAL_RADIUS start_draws=$START_DRAWS max_tour_dy=${MAX_TOUR_DY:-<unset>}"
+  echo "tour:           leg_budget=$LEG_BUDGET goal_radius=$GOAL_RADIUS start_draws=$START_DRAWS max_tour_dy=${MAX_TOUR_DY:-<unset>} tour_floors=$TOUR_FLOORS"
   echo "started:        $(date -Is)"
 } > "$OUT_DIR/provenance.txt"
 
