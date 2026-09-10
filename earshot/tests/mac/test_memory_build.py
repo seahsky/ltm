@@ -21,6 +21,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from dataclasses import replace
 
 import numpy as np
 from _interpreter import assert_interpreter  # noqa: F401
@@ -91,6 +92,25 @@ class TestEpisodicFromTour(unittest.TestCase):
     def test_a_tour_that_reached_nothing_is_an_empty_store_not_a_raise(self):
         record = _record(legs=(_leg(_stop("bathroom", "toilet"), reached=False),))
         self.assertEqual(len(episodic_from_tour(record)), 0)
+
+    def test_the_row_holds_where_the_agent_STOOD_not_the_annotation(self):
+        """The matrix-1 review's D1, closed. `stop.point` is an ObjectNav goal position --
+        the same ground truth the unseen cell falls back to -- so a store built from it
+        holds nothing the unseen cell could not derive, and the seen axis was measuring a
+        selection rule over GT points."""
+        stop = _stop("bathroom", "toilet", (1.0, 0.0, 2.0))
+        stood = Xyz(1.4, 0.0, 2.3)
+        record = _record(legs=(replace(_leg(stop), arrival=stood),))
+        self.assertEqual(episodic_from_tour(record).entries[0].point, stood)
+
+    def test_a_leg_with_no_recorded_pose_falls_back_to_the_stop(self):
+        """A record built by hand, or read back from before the field existed. The
+        fallback is for those and is not a run option -- a tour that walked always has
+        the pose."""
+        stop = _stop("bathroom", "toilet", (1.0, 0.0, 2.0))
+        record = _record(legs=(_leg(stop),))
+        self.assertIsNone(record.legs[0].arrival)
+        self.assertEqual(episodic_from_tour(record).entries[0].point, stop.point)
 
 
 class TestSemanticFromTour(unittest.TestCase):

@@ -121,6 +121,24 @@ def episodic_from_tour(record: TourRecord) -> EpisodicStore:
     navigable-to from that route. `TourRecord.complete` is what a caller checks to decide
     whether the SCENE counts as seen; this function's job is only to carry across what the
     tour actually reached.
+
+    **THE POINT IS THE AGENT'S ARRIVAL POSE, NOT THE ANNOTATION.** `leg.stop.point` is an
+    ObjectNav goal position, which is the SAME ground-truth table `points_by_category_for
+    _cell` falls back to for an unseen scene. A store built from it holds nothing an unseen
+    cell could not derive, so the seen axis measured a selection rule over GT points rather
+    than a memory -- the matrix-1 review's D1, and exactly what its section B found:
+    mechanically live (72/70 pairs resolved through different candidates), behaviourally
+    null.
+
+    `leg.arrival` is different in kind. It is where the agent's own locomotion put it, so
+    it is a pose the follower has PROVEN it can reach from that route, where an annotated
+    view point may be one it cannot (matrix-1: 49 `unreachable` recalls). That is
+    information a scene's annotations do not contain.
+
+    The fallback to `leg.stop.point` is for a record with no pose to offer -- one built by
+    hand, or read back from before the field existed. It is not a run option: a tour that
+    walked always has the pose, and a flag to prefer the annotation would let the measured
+    defect keep running silently.
     """
     return EpisodicStore(
         entries=tuple(
@@ -128,7 +146,7 @@ def episodic_from_tour(record: TourRecord) -> EpisodicStore:
                 scene=record.scene,
                 room=leg.stop.room,
                 category=leg.stop.category,
-                point=leg.stop.point,
+                point=leg.stop.point if leg.arrival is None else leg.arrival,
             )
             for leg in record.legs
             if leg.reached

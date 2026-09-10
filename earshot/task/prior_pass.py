@@ -109,6 +109,19 @@ class LegOutcome:
     steps: int
     final_gap_m: Optional[float]
     reason: str
+    # WHERE THE AGENT ACTUALLY ENDED UP, which is the one thing a tour knows that no
+    # annotation does.
+    #
+    # `stop.point` is an ObjectNav goal position -- ground truth, and the SAME table the
+    # unseen cell resolves through. A store built from it therefore holds nothing the
+    # unseen cell could not derive, which is the matrix-1 review's D1: the seen axis was
+    # measured as a selection rule over GT points, not as a memory. `walk_tour` already
+    # read this pose to compute `final_gap_m` and then dropped it.
+    #
+    # `Optional` because a record built by hand -- the tests, and any old record still in
+    # memory -- has no pose to offer, and inventing `stop.point` for it would quietly
+    # reintroduce exactly the thing this field exists to remove.
+    arrival: Optional[Xyz] = None
 
 
 @dataclass(frozen=True)
@@ -331,6 +344,9 @@ def walk_tour(
                 steps=steps,
                 final_gap_m=None if gap is None else float(gap),
                 reason=reason,
+                # Read for the gap either way; kept now, because this is the pose the
+                # agent's own locomotion confirmed it can stand at.
+                arrival=position,
             )
         )
         if reached and observe is not None:
