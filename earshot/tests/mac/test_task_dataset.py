@@ -16,7 +16,9 @@ from earshot.task.dataset import (
     FORWARD_STEP_M,
     T_ANOM_FLOOR_STEPS,
     PlacementError,
+    _primary_keep_out,
     build_anomaly_episodes,
+    candidate_separations,
     derive_t_anom,
     goal_table,
     place_anomaly_source,
@@ -516,6 +518,131 @@ class TestTheSourceIsKeptOffTheAgentToo(unittest.TestCase):
                           "skipped": [{"episode_id": "0", "reason": reason}]}])
         self.assertEqual(agg["rules"]["at_the_start"], 1)
         self.assertEqual(agg["unattributed_skips"], 0)
+
+
+class TestRule2IsPaidOncePerPrimaryGoalList(unittest.TestCase):
+    """The bar is against EVERY primary view point, and that is the whole cost.
+
+    `anchor_yield --split train` could not finish one scene of one class in 120 s; the
+    stack, dumped on the box, sat in `place_anomaly_source`'s `min(...)` over `keep_out`.
+    Measured on a train-shaped scene (3000 episodes, 6 categories, 600 goal instances,
+    10,100 keep-out points): **6.06 M distance calls per episode, 12.8 s for the 15
+    episodes a build keeps.** Caching per primary goal list took it to 5.3 s and stopping
+    a rejected scan early took it to 3.8 s -- 3.4x, with the bar itself unchanged.
+
+    Neither change may move a placement, which is what this class holds.
+    """
+
+    def test_the_precomputed_bar_places_exactly_what_computing_it_would(self):
+        """The equivalence that licenses the cache. Same episode, same table, one call
+        with the separations handed in and one without."""
+        episode = make_episode(
+            category="chair",
+            goals=[make_goal(Xyz(0.0, 0.0, -9.0)), make_goal(Xyz(1.0, 0.0, -9.0))],
+        )
+        goals = table(
+            chair=[Xyz(0.0, 0.0, -9.0), Xyz(3.5, 0.0, -9.0)],
+            sofa=[Xyz(8.0, 0.0, -9.0), Xyz(14.0, 0.0, -9.0)],
+            bed=[Xyz(20.0, 0.0, -9.0)],
+        )
+        fresh = place_anomaly_source(episode, goals, anchor_category="bed")
+        handed = place_anomaly_source(
+            episode, goals, anchor_category="bed",
+            separations=candidate_separations(
+                goals, _primary_keep_out(episode), min_sep_m=3.0),
+        )
+        self.assertEqual(fresh, handed)
+
+    def test_a_qualifying_candidate_keeps_its_exact_distance(self):
+        """The early exit must not blunt the sort key: rule 4 ranks qualifiers
+        nearest-first, so a candidate that CLEARS the bar needs its true minimum."""
+        keep_out = [Xyz(0.0, 0.0, 0.0), Xyz(100.0, 0.0, 0.0)]
+        goals = table(sofa=[Xyz(5.0, 0.0, 0.0)])
+        exact = candidate_separations(goals, keep_out)[("sofa", 0)]
+        capped = candidate_separations(goals, keep_out, min_sep_m=3.0)[("sofa", 0)]
+        self.assertAlmostEqual(exact, 5.0)
+        self.assertEqual(exact, capped)
+
+    def test_a_rejected_candidate_is_only_promised_to_be_below_the_bar(self):
+        """The early exit's own contract, stated rather than assumed: a candidate the bar
+        rejects gets A value below the floor, not necessarily its true minimum -- and no
+        caller reads it, because `place_anomaly_source` only counts such candidates."""
+        keep_out = [Xyz(1.0, 0.0, 0.0), Xyz(0.1, 0.0, 0.0)]
+        goals = table(sofa=[Xyz(0.0, 0.0, 0.0)])
+        capped = candidate_separations(goals, keep_out, min_sep_m=3.0)[("sofa", 0)]
+        self.assertLess(capped, 3.0)
+        self.assertEqual(candidate_separations(goals, keep_out)[("sofa", 0)], 0.1)
+
+    def test_a_goal_with_no_view_point_stays_its_own_rejection_reason(self):
+        """`None`, not a sentinel distance -- `n_no_view_point` is counted apart from
+        `n_too_near` so a yield report names the right rule to revisit."""
+        goal = make_goal(Xyz(5.0, 0.0, 0.0))
+        blind = type(goal)(position=goal.position, view_points=(), object_id="x",
+                           object_category="sofa")
+        seps = candidate_separations({"sofa": (blind,)}, [Xyz(0.0, 0.0, 0.0)],
+                                     min_sep_m=3.0)
+        self.assertIsNone(seps[("sofa", 0)])
+
+    def test_the_bar_is_paid_once_per_goal_list_not_once_per_episode(self):
+        """The speedup itself, counted. Eleven episodes over TWO shared goal tuples --
+        which is the shape `parse_content` produces -- must compute rule 2 twice.
+
+        Two tuples rather than one because the keep-out set IS the episode's own goals:
+        with a single shared list every candidate in the table is inside it and nothing
+        can ever be placed, which is a property of the bar and not of the cache.
+        """
+        from earshot.task import dataset as module
+
+        chairs = (make_goal(Xyz(0.0, 0.0, -9.0)),)
+        sofas = (make_goal(Xyz(20.0, 0.0, 0.0), category="sofa"),)
+        episodes = [make_episode(episode_id="sofa", category="sofa", goals=sofas)] + [
+            make_episode(episode_id=str(i), category="chair", goals=chairs)
+            for i in range(10)
+        ]
+        calls = []
+        original = module.candidate_separations
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        module.candidate_separations = counting
+        try:
+            build = build_anomaly_episodes(
+                dataset(episodes), anomaly_class="snoring", n_episodes=11)
+        finally:
+            module.candidate_separations = original
+        self.assertEqual(len(build.episodes), 11)
+        self.assertEqual(len(calls), 2)
+
+    def test_episodes_with_different_goal_lists_do_not_share_a_bar(self):
+        """The cache's correctness arm, and the reason it keys on the goal tuple's
+        IDENTITY rather than on the category.
+
+        `parse_content` gives every episode of a category one shared goal list, so
+        identity is exactly the right equivalence there. A dataset assembled by hand --
+        as these tests do, and as any future builder might -- can give two episodes of one
+        category DIFFERENT primary goals, and a category-keyed cache would hand the first
+        episode's keep-out zone to the second.
+
+        Asserted as an equivalence against the uncached call, on the SAME goal table --
+        building an episode alone would change the table too, and that is a different
+        question.
+        """
+        first = make_episode(
+            episode_id="a", category="chair", goals=[make_goal(Xyz(8.0, 0.0, 0.0))])
+        second = make_episode(
+            episode_id="b", category="chair", goals=[make_goal(Xyz(60.0, 0.0, 0.0))])
+        scene = dataset([first, second])
+        goals = goal_table(scene)
+
+        build = build_anomaly_episodes(scene, anomaly_class="snoring", n_episodes=2)
+        self.assertEqual(len(build.episodes), 2)
+        for entry in build.episodes:
+            self.assertEqual(entry.source, place_anomaly_source(entry.episode, goals))
+        # And the bar really is per-episode here, or this proves nothing.
+        self.assertNotEqual(
+            build.episodes[0].source.position, build.episodes[1].source.position)
 
 
 class TestTheConfigAndTheBuilderAgree(unittest.TestCase):
