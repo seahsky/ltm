@@ -84,13 +84,30 @@ pinned_version_for() {
 #
 # `sort -V` puts the newest tree last and `chosen_version_for` takes the LAST match, which
 # is the documented "newest that has it" rule, in one place.
+#
+# A SPLIT IS A DIRECTORY OF SCENES, not any directory. `resolve_scene_path` builds
+# `<scenes_dir>/hm3d/<split>/<NNNNN-SCENE>/<SCENE>.basis.glb`, so a candidate is a split
+# exactly when it holds at least one `NNNNN-` scene directory.
+#
+# Measured the hard way: the first version of this linked every child, and the box's own
+# `hm3d-0.2/hm3d/` holds `datasets/`, `scene_datasets/` and `versioned_data/` left by an
+# earlier copy. It duly created `scene_datasets/hm3d/versioned_data -> .../hm3d/
+# versioned_data` and a `scene_datasets/hm3d/scene_datasets`, which the loader ignores --
+# it asks for splits by name -- and which anything walking the tree does not.
 PAIRS=""
+SKIPPED=""
 for tree in $(ls -1 "$VERSIONED" 2>/dev/null | sort -V); do
   [ -d "$VERSIONED/$tree/hm3d" ] || continue
   for split_dir in "$VERSIONED/$tree/hm3d"/*/; do
     [ -d "$split_dir" ] || continue
-    PAIRS="$PAIRS
-$(basename "$split_dir") $tree"
+    split="$(basename "$split_dir")"
+    if ls -1d "$split_dir"[0-9][0-9][0-9][0-9][0-9]-*/ >/dev/null 2>&1; then
+      PAIRS="$PAIRS
+$split $tree"
+    else
+      SKIPPED="$SKIPPED
+$split $tree"
+    fi
   done
 done
 
@@ -130,6 +147,10 @@ for split in $SPLITS; do
   fi
   echo "  $split <- $version$note"
 done
+if [ -n "$(printf '%s\n' "$SKIPPED" | awk 'NF')" ]; then
+  echo "not splits (no NNNNN- scene directory inside), left alone:"
+  printf '%s\n' "$SKIPPED" | awk 'NF{print "  " $1 "  (" $2 ")"}' | sort -u
+fi
 
 if [ "$CHECK_ONLY" = 1 ]; then
   status=0
@@ -160,6 +181,25 @@ if [ -L "$TARGET" ]; then
   rm "$TARGET"
 fi
 mkdir -p "$TARGET"
+
+# Clear links this script would no longer make. Only symlinks INTO ../../versioned_data/
+# are touched: those are ours to own, and anything else someone put here is theirs. This
+# is what un-does the stray `versioned_data` and `scene_datasets` links the first version
+# created before it knew what a split was -- a fix that only stopped making them would
+# have left the box exactly as it found it.
+for existing in "$TARGET"/*; do
+  [ -L "$existing" ] || continue
+  name="$(basename "$existing")"
+  case "$(readlink "$existing")" in
+    ../../versioned_data/*) ;;
+    *) continue ;;
+  esac
+  [ "$name" = "hm3d_basis.scene_dataset_config.json" ] && continue
+  if ! printf '%s\n' $SPLITS | grep -qx "$name"; then
+    echo "  removing $existing — not a split"
+    rm "$existing"
+  fi
+done
 
 for split in $SPLITS; do
   version="$(version_for "$split")" || { echo "$version"; exit 2; }
