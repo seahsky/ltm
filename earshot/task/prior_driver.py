@@ -57,7 +57,10 @@ from earshot.task.prior_pass import (
     TourRecord,
     TourStop,
     candidate_stops,
+    merge_records,
+    next_floor_target,
     plan_tour,
+    start_on_the_floor_of,
     walk_tour,
 )
 from earshot.types import Xyz
@@ -445,6 +448,7 @@ def tour_one_scene(
     goal_radius: float = 1.0,
     start_draws: int = 1,
     max_dy_m: Optional[float] = None,
+    tour_floors: int = 1,
 ) -> TourRecord:
     """Plan and walk one scene's prior pass, rendering real audio at every reached stop.
 
@@ -485,7 +489,7 @@ def tour_one_scene(
     # about PLANNING, and `prior_pass.walk_tour` deliberately knows nothing about where a
     # start came from. The record carries it because a scene rescued on the 9th draw and
     # one that worked first time are different findings about the same store.
-    return replace(walk_scene(
+    record = replace(walk_scene(
         world,
         plan,
         scene=scene,
@@ -494,6 +498,49 @@ def tour_one_scene(
         leg_budget=leg_budget,
         goal_radius=goal_radius,
     ), start_attempts=start_attempts)
+
+    # MORE THAN ONE STOREY. The loop above plans against ONE start, so a scene's whole
+    # tour is decided by a single random navigable point -- `prior-9` measured 16 of 73
+    # scenes blind on the seen axis, 14 of them `snoring`, with the drop reasons reading
+    # `on another floor`. The episodes each have their own start and are screened against
+    # it, so those bedrooms are placeable; the tour simply never went upstairs.
+    #
+    # `tour_floors=1` is the old behaviour exactly: the loop does not execute.
+    floors = 1
+    while floors < int(tour_floors) and max_dy_m is not None:
+        target = next_floor_target(record)
+        if target is None:
+            break
+        upstairs = start_on_the_floor_of(
+            target.point, world.random_navigable_point,
+            max_dy_m=max_dy_m, attempts=max(1, int(start_draws)),
+        )
+        if upstairs is None:
+            break
+        next_plan = plan_scene_tour(
+            dataset, room_of_category, classes, upstairs, geodesic, max_dy_m=max_dy_m
+        )
+        # Only the rooms still missing. A second tour that re-walked the living room
+        # would write a duplicate row and spend the budget proving what is already known.
+        wanted = tuple(
+            stop for stop in next_plan.stops
+            if stop.room not in set(record.rooms_reached)
+        )
+        if not wanted:
+            break
+        world.set_pose(upstairs)
+        record = merge_records(record, walk_scene(
+            world,
+            TourPlan(stops=wanted, unreachable=next_plan.unreachable),
+            scene=scene,
+            classes=classes,
+            embed=embed,
+            leg_budget=leg_budget,
+            goal_radius=goal_radius,
+        ))
+        floors += 1
+
+    return record
 
 
 def run_prior_pass(
@@ -509,6 +556,7 @@ def run_prior_pass(
     goal_radius: float = 1.0,
     start_draws: int = 1,
     max_dy_m: Optional[float] = None,
+    tour_floors: int = 1,
     overwrite: bool = False,
     progress: Optional[Callable[[str], None]] = None,
 ) -> pathlib.Path:
@@ -625,6 +673,7 @@ def run_prior_pass(
                     goal_radius=goal_radius,
                     start_draws=start_draws,
                     max_dy_m=max_dy_m,
+                    tour_floors=tour_floors,
                 )
             except Exception as exc:  # noqa: BLE001
                 say("  WARN: {} tour failed ({}) -- continuing".format(label, exc))
@@ -698,6 +747,14 @@ def build_parser() -> argparse.ArgumentParser:
              "than this many metres in y from the start. The episode builder always "
              "screened on 1.0; the tour never did. Default None = the old behaviour",
     )
+    parser.add_argument(
+        "--tour-floors", type=int, default=1,
+        help="how many STOREYS one scene's tour may visit (default 1 = the single "
+             "start every pass before this made). Above 1, a room the floor test "
+             "dropped is toured from a fresh navigable start on ITS storey. Needs "
+             "--max-tour-dy, since without a floor test nothing is dropped for a "
+             "floor reason and there is nothing to go back for",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -717,6 +774,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             goal_radius=args.goal_radius,
             start_draws=args.start_draws,
             max_dy_m=args.max_tour_dy,
+            tour_floors=args.tour_floors,
             overwrite=args.overwrite,
         )
     except EmptyPassError as exc:

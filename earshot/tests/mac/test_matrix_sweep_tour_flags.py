@@ -35,7 +35,8 @@ PRIOR_PASS = TOOLS / "prior_pass.sh"
 # every flag: `--scenes` is computed by the sweep and passed by hand to the standalone
 # pass, and `--run-dir`/`--tag` name the output rather than the work.
 TOUR_FLAGS = ("--classes", "--seed", "--leg-budget", "--goal-radius",
-              "--start-draws", "--max-tour-dy", "--split")
+              "--start-draws", "--max-tour-dy", "--split",
+              "--tour-floors")
 
 
 def case_flags(path: pathlib.Path) -> set:

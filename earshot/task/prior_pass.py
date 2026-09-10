@@ -49,12 +49,91 @@ __all__ = [
     "candidate_stops",
     "plan_tour",
     "walk_tour",
+    "ANOTHER_FLOOR",
+    "next_floor_target",
+    "start_on_the_floor_of",
+    "merge_records",
 ]
 
 # A leg that has not arrived in this many steps is ABANDONED and said so. Without a budget a
 # follower that oscillates between two navmesh polygons hangs the whole sweep, and the run
 # reports nothing rather than reporting a bad tour.
 DEFAULT_LEG_BUDGET = 200
+
+# The prefix `plan_tour` writes when the floor test drops a candidate. Matched rather than
+# re-derived, so the reason string and the thing that reads it cannot drift apart.
+ANOTHER_FLOOR = "on another floor"
+
+
+def next_floor_target(record: "TourRecord") -> Optional["TourStop"]:
+    """The first floor-dropped candidate whose room this tour never reached. Pure.
+
+    THE TOUR SEES ONE STOREY, and that is an artefact of its own design rather than a
+    fact about the house. `plan_tour` filters every candidate against ONE start, so a
+    scene's whole tour is decided by a single random navigable point; `prior-9` measured
+    the cost as 16 of 73 scenes blind, 14 of them `snoring`, with drop reasons reading
+    `on another floor (2.4 / 3.1 / 3.6 m of height from the start)`.
+
+    The episodes do not work that way. Each has its OWN start, spread across the house,
+    and `build_anomaly_episodes` screens each source against that episode's start. A
+    bedroom upstairs of the tour's dice roll is still placeable for an episode that
+    begins upstairs, so the store was missing rooms the task can and does use.
+
+    Returns the stop to go to next, or `None` when every dropped room is already covered
+    or nothing was dropped for a floor reason.
+    """
+    reached = set(record.rooms_reached)
+    for stop, reason in record.unreachable:
+        if stop.room not in reached and reason.startswith(ANOTHER_FLOOR):
+            return stop
+    return None
+
+
+def start_on_the_floor_of(
+    target: Xyz,
+    draw: Callable[[], Xyz],
+    *,
+    max_dy_m: float,
+    attempts: int,
+) -> Optional[Xyz]:
+    """A navigable point within `max_dy_m` in y of `target`, or `None`. Pure over `draw`.
+
+    Drawn rather than taken from the target itself: a `TourStop.point` is an ObjectNav
+    goal POSITION, which is the object, and seating the agent there can put it inside the
+    furniture. A random navigable point on the same storey is somewhere the agent can
+    actually stand, and it is the same accessor the first start already comes from.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1, got {}".format(attempts))
+    for _ in range(attempts):
+        point = draw()
+        if abs(point.height_difference_to(target)) <= float(max_dy_m):
+            return point
+    return None
+
+
+def merge_records(first: "TourRecord", second: "TourRecord") -> "TourRecord":
+    """Two tours of one scene as one record. Pure.
+
+    `unreachable` keeps only what is STILL unreached after both, so a room the second
+    tour rescued stops being reported as a drop -- otherwise the audit would name a room
+    as missing and hold its observation at the same time.
+
+    `start_attempts` is the FIRST tour's: it counts how many draws the scene needed to
+    plan anything at all, which is a different question from how many storeys it took.
+    """
+    reached = set(first.rooms_reached) | set(second.rooms_reached)
+    return TourRecord(
+        scene=first.scene,
+        legs=first.legs + second.legs,
+        observations=first.observations + second.observations,
+        unreachable=tuple(
+            (stop, reason)
+            for stop, reason in first.unreachable + second.unreachable
+            if stop.room not in reached
+        ),
+        start_attempts=first.start_attempts,
+    )
 
 
 @dataclass(frozen=True)
