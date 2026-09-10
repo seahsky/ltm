@@ -1089,6 +1089,10 @@ def run_episode(
     # the navmesh queries per step for an answer that cannot change.
     memory_prior = None
     memory_miss: Optional[PriorMiss] = None
+    # The raw vote, kept even when the prior missed -- ADR-0023's condition on adopting
+    # an abstain floor: a floor cannot be re-measured from a record that dropped the
+    # scores of every recall that did not resolve.
+    memory_vote: Optional[Tuple[str, float]] = None
     memory_consulted = False
     # The step the onset FIRED, which is the classification step only when the buffer was
     # already full. The two apart is the deferral; the first set with the second still
@@ -1395,7 +1399,7 @@ def run_episode(
                 if not memory_consulted:
                     memory_consulted = True
                     if memory.is_live and heard_embedding is not None:
-                        memory_prior, memory_miss = resolve_prior(
+                        memory_prior, memory_miss, memory_vote = resolve_prior(
                             memory.semantic,
                             heard_embedding,
                             k=int(memory.k),
@@ -1404,6 +1408,7 @@ def run_episode(
                             # is not nearer than one down the hall, and a point with no
                             # route is excluded rather than ranked at some large number.
                             distance_to=lambda point: geodesic(pose.position, point),
+                            min_confidence=memory.min_confidence,
                         )
                     else:
                         # An empty store or a scene with no annotated object cannot name a
@@ -1412,7 +1417,8 @@ def run_episode(
                         # `not_heard` cells' usual path: their store keeps the bank's other
                         # classes and votes a confident wrong category (`PriorMiss`'s own
                         # docstring has the full account).
-                        memory_prior, memory_miss = (None, PriorMiss.NO_PREDICTION)
+                        memory_prior, memory_miss, memory_vote = (
+                            None, PriorMiss.NO_PREDICTION, None)
                     say("  step {}: the window has closed — memory says {}".format(
                         step,
                         "{} at {:.1f} m".format(
@@ -1830,6 +1836,13 @@ def run_episode(
         # field above -- `metrics` is `Mapping[str, float]` and every reader does
         # `float(value)` on it.
         metrics.update(memory_prior.as_metrics())
+    if memory_vote is not None:
+        # The vote's own score, on EVERY outcome the store answered -- including the three
+        # misses, where `as_metrics` above never runs. ADR-0023: a floor computed from a
+        # sweep that kept scores only for recalls that resolved is blind to exactly the
+        # episodes a floor would act on, and `matrix_prior_confidence` alone cannot tell
+        # a re-measurement what the declined ones scored.
+        metrics["memory_vote_confidence"] = float(memory_vote[1])
 
     audit = EpisodeAudit(
         episode_index=int(index),
@@ -2021,6 +2034,7 @@ def run(
     memory_condition: Optional[MemoryCondition] = None,
     memory_prior_stores: Optional[Tuple[SemanticStore, EpisodicStore]] = None,
     memory_k: int = 5,
+    memory_min_confidence: Optional[float] = None,
 ) -> RunSummary:
     """Assert the environment, build the dataset, run the episodes, write the artefacts.
 
@@ -2080,6 +2094,7 @@ def run(
                 dataset, cell_episodic, dataset.scene_label
             ),
             k=memory_k,
+            min_confidence=memory_min_confidence,
         )
         say("memory: {} ({} semantic row(s)) -- {}".format(
             memory_condition.value, len(memory.semantic), RUN_DISCLOSURE

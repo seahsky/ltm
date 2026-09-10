@@ -200,7 +200,7 @@ class TestTheHealthyArm(unittest.TestCase):
         )
 
     def test_it_names_the_nearest_instance_of_the_recalled_category(self):
-        prior, miss = self._resolve([1.0, 0.0, 0.0])
+        prior, miss, _vote = self._resolve([1.0, 0.0, 0.0])
         self.assertIsNone(miss)
         print(
             "\n  [prior] recalled {!r} at cosine {:.4f}, {} instance(s), nearest at "
@@ -217,18 +217,18 @@ class TestTheHealthyArm(unittest.TestCase):
     def test_a_different_class_lands_on_a_different_object(self):
         # The forced arm of the recall itself: if the vote returned a constant, this passes
         # only by accident.
-        prior, miss = self._resolve([0.0, 1.0, 0.0], k=1)
+        prior, miss, _vote = self._resolve([0.0, 1.0, 0.0], k=1)
         self.assertIsNone(miss)
         self.assertEqual(prior.category, "toilet")
         self.assertEqual(prior.target, Xyz(0.0, 0.0, 20.0))
 
     def test_the_nearest_is_by_the_callers_metric_not_by_list_order(self):
         # Stand at the far stove: the answer must move to it.
-        prior, _ = self._resolve([1.0, 0.0, 0.0], origin=Xyz(11.0, 0.0, 0.0))
+        prior, _miss, _vote = self._resolve([1.0, 0.0, 0.0], origin=Xyz(11.0, 0.0, 0.0))
         self.assertEqual(prior.target, Xyz(12.0, 0.0, 0.0))
 
     def test_the_confidence_is_the_votes_own_cosine(self):
-        prior, _ = self._resolve([1.0, 0.0, 0.0])
+        prior, _miss, _vote = self._resolve([1.0, 0.0, 0.0])
         expected_second = 0.9 / float(np.linalg.norm([0.9, 0.1, 0.0]))
         self.assertAlmostEqual(prior.confidence, (1.0 + expected_second) / 2.0, places=6)
 
@@ -242,8 +242,12 @@ class TestTheHealthyArm(unittest.TestCase):
         self.assertEqual(before_scene, {k: tuple(v) for k, v in self.scene.items()})
 
 
-class TestTheThreeMissesAreThreeDifferentFacts(unittest.TestCase):
-    """Collapsing these into one `None` is the absence bug this repo has paid for twice."""
+class TestTheFourMissesAreFourDifferentFacts(unittest.TestCase):
+    """Collapsing these into one `None` is the absence bug this repo has paid for twice.
+
+    Four since the abstain floor: `LOW_CONFIDENCE` is the store answering and the
+    caller declining to believe it, which is a different fact from the store having
+    nothing to say, and it is the one that says whether a floor is doing anything."""
 
     def setUp(self):
         self.store = SemanticStore(
@@ -262,12 +266,12 @@ class TestTheThreeMissesAreThreeDifferentFacts(unittest.TestCase):
 
     def test_an_empty_store_is_no_prediction(self):
         # The `not_heard` cells' expected value. It must not read as a wrong recall.
-        prior, miss = self._resolve(SemanticStore(), {"stove": (Xyz(1.0, 0.0, 0.0),)})
+        prior, miss, _vote = self._resolve(SemanticStore(), {"stove": (Xyz(1.0, 0.0, 0.0),)})
         self.assertIsNone(prior)
         self.assertIs(miss, PriorMiss.NO_PREDICTION)
 
     def test_a_degenerate_query_is_no_prediction_not_a_low_score(self):
-        prior, miss = resolve_prior(
+        prior, miss, _vote = resolve_prior(
             self.store,
             np.zeros(3, dtype=np.float32),
             k=1,
@@ -280,17 +284,17 @@ class TestTheThreeMissesAreThreeDifferentFacts(unittest.TestCase):
     def test_a_house_with_no_such_object_is_category_absent(self):
         # The memory answered. The scene did not have the thing. A generalization failure
         # of a different kind from a wrong recall.
-        prior, miss = self._resolve(self.store, {"toilet": (Xyz(1.0, 0.0, 0.0),)})
+        prior, miss, _vote = self._resolve(self.store, {"toilet": (Xyz(1.0, 0.0, 0.0),)})
         self.assertIsNone(prior)
         self.assertIs(miss, PriorMiss.CATEGORY_ABSENT)
 
     def test_an_empty_scene_table_is_category_absent(self):
-        prior, miss = self._resolve(self.store, {})
+        prior, miss, _vote = self._resolve(self.store, {})
         self.assertIsNone(prior)
         self.assertIs(miss, PriorMiss.CATEGORY_ABSENT)
 
     def test_instances_with_no_route_are_unreachable_not_absent(self):
-        prior, miss = self._resolve(
+        prior, miss, _vote = self._resolve(
             self.store, {"stove": (Xyz(1.0, 0.0, 0.0),)}, distance_to=lambda _p: None
         )
         self.assertIsNone(prior)
@@ -300,7 +304,7 @@ class TestTheThreeMissesAreThreeDifferentFacts(unittest.TestCase):
         # The forced arm of UNREACHABLE: excluding a routeless point must not exclude the
         # whole category.
         reachable = Xyz(7.0, 0.0, 0.0)
-        prior, miss = self._resolve(
+        prior, miss, _vote = self._resolve(
             self.store,
             {"stove": (Xyz(1.0, 0.0, 0.0), reachable)},
             distance_to=lambda point: None if point != reachable else 7.0,
@@ -314,7 +318,78 @@ class TestTheThreeMissesAreThreeDifferentFacts(unittest.TestCase):
     def test_every_miss_has_a_distinct_value(self):
         values = [m.value for m in PriorMiss]
         self.assertEqual(len(values), len(set(values)))
-        self.assertEqual(len(values), 3)
+        self.assertEqual(len(values), 4)
+
+    def test_the_votes_score_survives_every_miss_the_store_could_answer(self):
+        """ADR-0023's condition on adopting a floor. The vote HAPPENED on a
+        `CATEGORY_ABSENT` or `UNREACHABLE` episode and only its score was dropped, so a
+        floor computed from such a sweep is blind to exactly the episodes it would act
+        on -- matrix-1 had 68 and 49 of them."""
+        absent = resolve_prior(
+            self.store, self.query, k=1,
+            points_by_category={"sofa": (Xyz(1.0, 0.0, 0.0),)},
+            distance_to=_euclidean(Xyz(0.0, 0.0, 0.0)),
+        )
+        self.assertIs(absent[1], PriorMiss.CATEGORY_ABSENT)
+        self.assertEqual(absent[2][0], "stove")
+        self.assertGreater(absent[2][1], 0.9)
+
+        unreachable = resolve_prior(
+            self.store, self.query, k=1,
+            points_by_category={"stove": (Xyz(1.0, 0.0, 0.0),)},
+            distance_to=lambda point: None,
+        )
+        self.assertIs(unreachable[1], PriorMiss.UNREACHABLE)
+        self.assertEqual(unreachable[2][0], "stove")
+
+    def test_a_store_that_could_not_answer_reports_no_vote(self):
+        """The other arm: `NO_PREDICTION` has no score to record, and inventing one would
+        put a number where the honest answer is that no vote happened."""
+        nothing = resolve_prior(
+            SemanticStore(), self.query, k=1,
+            points_by_category={"stove": (Xyz(1.0, 0.0, 0.0),)},
+            distance_to=_euclidean(Xyz(0.0, 0.0, 0.0)),
+        )
+        self.assertIs(nothing[1], PriorMiss.NO_PREDICTION)
+        self.assertIsNone(nothing[2])
+
+    def test_a_winner_below_the_floor_is_declined_and_named(self):
+        """The abstain. A store that CAN answer, a caller that will not believe it."""
+        prior, miss, _vote = resolve_prior(
+            self.store, self.query, k=1,
+            points_by_category={"stove": (Xyz(1.0, 0.0, 0.0),)},
+            distance_to=_euclidean(Xyz(0.0, 0.0, 0.0)),
+            min_confidence=1.5,   # above any cosine
+        )
+        self.assertIsNone(prior)
+        self.assertIs(miss, PriorMiss.LOW_CONFIDENCE)
+        self.assertIsNot(miss, PriorMiss.NO_PREDICTION)
+
+    def test_a_winner_above_the_floor_is_believed(self):
+        """The other arm, and the one that keeps the floor from swallowing everything."""
+        prior, miss, _vote = resolve_prior(
+            self.store, self.query, k=1,
+            points_by_category={"stove": (Xyz(1.0, 0.0, 0.0),)},
+            distance_to=_euclidean(Xyz(0.0, 0.0, 0.0)),
+            min_confidence=0.5,
+        )
+        self.assertIsNone(miss)
+        self.assertEqual(prior.category, "stove")
+
+    def test_no_floor_is_the_vote_that_always_answers(self):
+        """Byte-identical to every result measured before the flag existed."""
+        floored = resolve_prior(
+            self.store, self.query, k=1,
+            points_by_category={"stove": (Xyz(1.0, 0.0, 0.0),)},
+            distance_to=_euclidean(Xyz(0.0, 0.0, 0.0)),
+            min_confidence=None,
+        )
+        bare = resolve_prior(
+            self.store, self.query, k=1,
+            points_by_category={"stove": (Xyz(1.0, 0.0, 0.0),)},
+            distance_to=_euclidean(Xyz(0.0, 0.0, 0.0)),
+        )
+        self.assertEqual(floored, bare)
 
 
 class TestTheAuditSurface(unittest.TestCase):
@@ -379,7 +454,7 @@ class TestTheNotHeardCellsReceiveAWrongPrior(unittest.TestCase):
         # The run's own heard audio: nearest the stripped class's direction, so any
         # winner is a class the agent never heard before this run.
         query = np.asarray([0.9, 0.3, 0.1], dtype=np.float32)
-        prior, miss = resolve_prior(
+        prior, miss, _vote = resolve_prior(
             semantic,
             query,
             k=3,
@@ -407,7 +482,7 @@ class TestTheNotHeardCellsReceiveAWrongPrior(unittest.TestCase):
             scene="S",
         )
         self.assertEqual(len(semantic), 0)
-        prior, miss = resolve_prior(
+        prior, miss, _vote = resolve_prior(
             semantic,
             np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
             k=3,

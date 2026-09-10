@@ -780,6 +780,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     say("")
     say("C. WHAT EACH ARM'S PRIOR SAID (D2: not_heard should be a wrong CATEGORY, "
         "almost never no_prediction)")
+    say("   `low_confidence` is the abstain floor firing -- a store that COULD answer "
+        "and a caller that declined. Zero of it under a run with no floor set.")
     for arm in args.arms.split():
         if arm not in arms:
             continue

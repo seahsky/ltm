@@ -91,6 +91,18 @@ class PriorMiss(Enum):
     is one class) or a degenerate query. The heard-vs-not-heard contrast is therefore
     right-prior vs wrong-prior until a `NONE` arm runs beside them."""
 
+    LOW_CONFIDENCE = "low_confidence"
+    """The vote had a winner and it scored below the caller's abstain floor.
+
+    Counted apart from `NO_PREDICTION` on purpose. That one means the store could not
+    answer at all — empty, or a degenerate query — and this one means it COULD and the
+    caller declined to believe it. Folding them together would make the one number that
+    says whether an abstain floor is doing anything unreadable, and matrix-1's finding was
+    precisely that `no_prediction` never fired.
+
+    This is the value that turns a `not_heard` cell into an arm with NO prior rather than
+    an arm with a confidently wrong one."""
+
     CATEGORY_ABSENT = "category_absent"
     """A category was predicted and this scene has no instance of it. The memory answered;
     the house did not have the thing. A generalization failure of a different kind from a
@@ -150,6 +162,10 @@ class MemoryContext:
     semantic: SemanticStore
     points_by_category: Mapping[str, Sequence[Xyz]]
     k: int = 5
+    # The abstain floor, here for the same reason `k` is: it is a property of HOW the
+    # caller questions the store, not of the run. `None` -- the default -- is the vote
+    # that always answers, which is every result measured before this existed.
+    min_confidence: Optional[float] = None
 
     def __post_init__(self) -> None:
         if int(self.k) < 1:
@@ -234,7 +250,8 @@ def resolve_prior(
     k: int,
     points_by_category: Mapping[str, Sequence[Xyz]],
     distance_to: Callable[[Xyz], Optional[float]],
-) -> Tuple[Optional[MemoryPrior], Optional[PriorMiss]]:
+    min_confidence: Optional[float] = None,
+) -> Tuple[Optional[MemoryPrior], Optional[PriorMiss], Optional[Tuple[str, float]]]:
     """The recalled category's nearest reachable instance, or the named reason there is none.
 
     Exactly one of the two returned values is ever set. `k` has no default for the same
@@ -246,17 +263,31 @@ def resolve_prior(
     excludes every instance the answer is `UNREACHABLE`, which is not the same fact as the
     scene having no such object.
 
+    THE THIRD RETURN IS THE RAW VOTE, and it is present on every outcome the store could
+    answer at all -- including the three misses. ADR-0023 attaches this to adopting an
+    abstain floor: the vote HAPPENED on a `CATEGORY_ABSENT` or `UNREACHABLE` episode and
+    only its score was dropped, so a floor computed from a sweep's audits was blind to
+    exactly those episodes (matrix-1: 68 and 49 of them, plus ~46% never consulted). A
+    floor has to be re-measured per store, and it cannot be measured from a record that
+    only kept the scores of the recalls that happened to resolve.
+
     Pure: reads `store` and `points_by_category`, mutates neither, and calls `distance_to`
     once per candidate instance.
     """
+    # THE FLOOR IS APPLIED HERE, NOT INSIDE THE VOTE. `predict_category` returning `None`
+    # for a low score would collapse two different facts into one: "the store could not
+    # answer" and "the store answered and was not believed". Only this layer has a name
+    # for each, so only this layer should decide.
     predicted = store.predict_category(embedding, k=k)
     if predicted is None:
-        return (None, PriorMiss.NO_PREDICTION)
+        return (None, PriorMiss.NO_PREDICTION, None)
+    if min_confidence is not None and float(predicted[1]) < float(min_confidence):
+        return (None, PriorMiss.LOW_CONFIDENCE, predicted)
     category, confidence = predicted
 
     instances = tuple(points_by_category.get(category, ()))
     if not instances:
-        return (None, PriorMiss.CATEGORY_ABSENT)
+        return (None, PriorMiss.CATEGORY_ABSENT, predicted)
 
     routed = [
         (distance, point)
@@ -264,7 +295,7 @@ def resolve_prior(
         if distance is not None
     ]
     if not routed:
-        return (None, PriorMiss.UNREACHABLE)
+        return (None, PriorMiss.UNREACHABLE, predicted)
 
     # Ties broken by coordinate so the choice is reproducible from the audit rather than
     # from whichever order the annotations happened to be written in.
@@ -279,4 +310,5 @@ def resolve_prior(
             n_instances=len(instances),
         ),
         None,
+        predicted,
     )
