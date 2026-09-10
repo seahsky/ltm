@@ -252,6 +252,121 @@ class TestParse(unittest.TestCase):
         )
 
 
+class TestTheHoistedGoalsAreParsedOncePerCategory(unittest.TestCase):
+    """`dedup_goals` hoists one goal list per category so it is STORED once; parsing it
+    again for every episode of that category undid the hoist at load time.
+
+    Invisible on val, where a scene carries ~100 episodes: `anchor_yield --split train`
+    is what surfaced it, first as 80 scenes exhausting the box's memory and then as a
+    command that took minutes to answer. Measured on a train-shaped content dict (2000
+    episodes, 6 categories, 20 goals x 30 view points): **2.383 s of goal parsing became
+    0.015 s, and 2000 goal tuples became 6.** The factor is episodes-per-category, so it
+    grows with exactly the split this was slow on.
+
+    Safe because `ObjectGoal`, `ViewPoint` and `Xyz` are all frozen: no holder can mutate
+    a shared tuple, and `dataset.goal_table` de-duplicates instances by POSITION rather
+    than by identity.
+    """
+
+    @staticmethod
+    def _episode(episode_id, category, goals=None):
+        raw = {
+            "episode_id": episode_id,
+            "scene_id": SCENE_ID,
+            "start_position": [1.0, 0.1, 2.0],
+            "start_rotation": list(ROTATION),
+            "object_category": category,
+            "goals": [] if goals is None else goals,
+        }
+        return raw
+
+    def test_two_episodes_of_one_category_share_the_same_tuple(self):
+        episodes = parse_content(
+            _content(episodes=[
+                self._episode("a", "chair"),
+                self._episode("b", "chair"),
+                self._episode("c", "tv_monitor"),
+            ]),
+            scenes_dir="/scenes",
+        )
+        self.assertIs(episodes[0].goals, episodes[1].goals)
+        self.assertIsNot(episodes[0].goals, episodes[2].goals)
+        # Shared, and still correct: the values are the ones the hoisted list carries.
+        self.assertEqual(episodes[0].goals[0].position, Xyz(5.0, 0.2, 6.0))
+        self.assertEqual(episodes[2].goals[0].position, Xyz(9.0, 1.2, 1.0))
+
+    def test_each_goal_is_built_once_per_category_not_once_per_episode(self):
+        """The cost itself, counted. Ten episodes over two categories must build two
+        goal lists, which is the whole speedup -- the forced-failure arm is that the
+        pre-fix loop makes ten."""
+        from earshot.task import episodes as module
+
+        built = []
+        original = module._parse_goal
+
+        def counting(raw, where):
+            built.append(where)
+            return original(raw, where)
+
+        module._parse_goal = counting
+        try:
+            parse_content(
+                _content(episodes=[
+                    self._episode(str(i), "chair" if i % 2 else "tv_monitor")
+                    for i in range(10)
+                ]),
+                scenes_dir="/scenes",
+            )
+        finally:
+            module._parse_goal = original
+        # One goal in each category's hoisted list, so two builds for ten episodes.
+        self.assertEqual(len(built), 2)
+        self.assertTrue(all("goals_by_category" in where for where in built), built)
+
+    def test_inline_pre_dedup_goals_are_never_shared(self):
+        """The other arm, and the one that would be a silent data bug: the pre-dedup form
+        gives each episode its OWN list, so caching one under the category name would
+        hand episode a's goals to episode b."""
+        here = [{
+            "position": [1.0, 0.0, 1.0], "object_id": "1",
+            "object_category": "chair",
+            "view_points": [_view_point(1.5, 0.0, 1.0)],
+        }]
+        there = [{
+            "position": [40.0, 0.0, 40.0], "object_id": "2",
+            "object_category": "chair",
+            "view_points": [_view_point(40.5, 0.0, 40.0)],
+        }]
+        episodes = parse_content(
+            _content(
+                episodes=[
+                    self._episode("a", "chair", goals=here),
+                    self._episode("b", "chair", goals=there),
+                ],
+                goals_by_category={},
+            ),
+            scenes_dir="/scenes",
+        )
+        self.assertIsNot(episodes[0].goals, episodes[1].goals)
+        self.assertEqual(episodes[0].goals[0].position, Xyz(1.0, 0.0, 1.0))
+        self.assertEqual(episodes[1].goals[0].position, Xyz(40.0, 0.0, 40.0))
+
+    def test_a_hoisted_list_still_wins_over_a_stale_inline_one(self):
+        """The precedence `test_goals_by_category_wins_over_a_stale_inline_list` fixes,
+        held again through the cached path -- a cache that changed which list wins would
+        be a different loader, not a faster one."""
+        stale = [{
+            "position": [99.0, 0.0, 99.0], "object_id": "stale",
+            "object_category": "chair",
+            "view_points": [_view_point(99.0, 0.0, 99.0)],
+        }]
+        episodes = parse_content(
+            _content(episodes=[self._episode("a", "chair", goals=stale)]),
+            scenes_dir="/scenes",
+        )
+        self.assertEqual(episodes[0].goals[0].position, Xyz(5.0, 0.2, 6.0))
+
+
 class TestParseRejectsBrokenData(unittest.TestCase):
     """Every field read here steers the agent, so a default is a silent wrong answer."""
 
