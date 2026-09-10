@@ -150,6 +150,48 @@ class TestLinkSplits(unittest.TestCase):
             self.assertEqual(after.returncode, 0, after.stdout)
             self.assertNotIn("DEAD", after.stdout)
 
+    def test_a_directory_with_no_scenes_in_it_is_not_a_split(self):
+        """The box's own `hm3d-0.2/hm3d/` holds `datasets/`, `scene_datasets/` and
+        `versioned_data/` from an earlier copy. The first version of this script linked
+        all three, producing a `scene_datasets/hm3d/scene_datasets` and a
+        `scene_datasets/hm3d/versioned_data` that point back into the tree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = _Tree(tmp, [("hm3d-0.2", "val")])
+            # A directory beside the split, holding no NNNNN- scene.
+            stray = tree.data / "versioned_data" / "hm3d-0.2" / "hm3d" / "versioned_data"
+            (stray / "junk").mkdir(parents=True)
+
+            done = self._run(tree)
+            self.assertEqual(done.returncode, 0, done.stdout)
+            self.assertTrue((tree.target / "val").is_symlink())
+            self.assertFalse((tree.target / "versioned_data").exists())
+            self.assertIn("not splits", done.stdout)
+            self.assertIn("versioned_data", done.stdout)
+
+    def test_a_stray_link_from_an_earlier_run_is_removed(self):
+        """A fix that only stopped MAKING them would leave the box as it found it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = _Tree(tmp, [("hm3d-0.2", "val")])
+            tree.target.mkdir(parents=True, exist_ok=True)
+            os.symlink("../../versioned_data/hm3d-0.2/hm3d/versioned_data",
+                       str(tree.target / "versioned_data"))
+
+            done = self._run(tree)
+            self.assertFalse((tree.target / "versioned_data").is_symlink(), done.stdout)
+            self.assertIn("not a split", done.stdout)
+            self.assertTrue((tree.target / "val").is_symlink())
+
+    def test_a_link_someone_else_put_there_is_left_alone(self):
+        """Only symlinks into ../../versioned_data/ are this script's to own."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = _Tree(tmp, [("hm3d-0.2", "val")])
+            tree.target.mkdir(parents=True, exist_ok=True)
+            os.symlink("/somewhere/else", str(tree.target / "mine"))
+
+            self._run(tree)
+            self.assertTrue((tree.target / "mine").is_symlink())
+            self.assertEqual(os.readlink(str(tree.target / "mine")), "/somewhere/else")
+
     def test_an_empty_versioned_directory_is_a_named_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = pathlib.Path(tmp) / "data" / "hm3d"
