@@ -227,6 +227,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="neighbours the semantic store votes over per recall (default 5); recorded "
              "on the audit, never silently defaulted at the vote itself",
     )
+    parser.add_argument(
+        "--memory-abstain-below",
+        type=float,
+        default=None,
+        help="decline a recall whose vote scores below this mean cosine, recording "
+             "`low_confidence` instead of a place. Default None = the vote always "
+             "answers, which is every result measured before this flag existed. THE "
+             "VALUE IS PER STORE: matrix-1's own distributions separated fully at "
+             "0.7842, but that is a fact about that run's confidences and has to be "
+             "re-measured (`matrix_audit` section E) rather than carried over",
+    )
     return parser
 
 
@@ -310,6 +321,10 @@ def memory_kwargs_from_args(args: argparse.Namespace) -> Dict[str, object]:
         "memory_condition": condition,
         "memory_prior_stores": (semantic, episodic),
         "memory_k": int(args.memory_k),
+        "memory_min_confidence": (
+            None if args.memory_abstain_below is None
+            else float(args.memory_abstain_below)
+        ),
     }
 
 
