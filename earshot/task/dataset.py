@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from earshot.task.episodes import Episode, EpisodeDataset, ObjectGoal
 from earshot.types import Xyz
@@ -64,6 +64,7 @@ __all__ = [
     "goal_table",
     "primary_anchor",
     "derive_t_anom",
+    "candidate_separations",
     "place_anomaly_source",
     "build_anomaly_episodes",
     "MIN_SOURCE_START_SEP_M",
@@ -371,10 +372,79 @@ def _primary_keep_out(episode: Episode) -> Tuple[Xyz, ...]:
     return tuple(points)
 
 
+def _separation_or_rejection(
+    position: Xyz, keep_out: Sequence[Xyz], floor: float
+) -> float:
+    """The min xz distance from ``position`` to ``keep_out``, or ANY value below ``floor``.
+
+    The exact minimum matters only for a candidate that CLEARS the bar: rule 2 uses it as
+    the nearest-first sort key. A candidate with any keep-out point closer than
+    ``min_sep_m`` is rejected and counted, and its distance is never read again — so the
+    scan can stop at the first point that decides it.
+
+    That is what makes the bar cheap. `keep_out` is every primary view point and object
+    position, ~10,000 points on a train scene, and a candidate sitting beside a primary
+    goal used to be proven so 10,000 times over.
+    """
+    best = float("inf")
+    for point in keep_out:
+        distance = position.horizontal_distance_to(point)
+        if distance < best:
+            best = distance
+            if best < floor:
+                # Already rejected. Any smaller point cannot change that, and no caller
+                # reads the value of a rejected candidate.
+                return best
+    return best
+
+
+def candidate_separations(
+    table: Mapping[str, Tuple[ObjectGoal, ...]],
+    keep_out: Sequence[Xyz],
+    *,
+    min_sep_m: Optional[float] = None,
+) -> Dict[Tuple[str, int], Optional[float]]:
+    """``{(category, index): min xz distance to keep_out}``, or ``None`` with no view point.
+
+    Rule 2's whole cost, and the reason it is separable: the candidate positions come from
+    the scene's goal ``table`` and ``keep_out`` comes from the episode's PRIMARY goals, so
+    the answer depends on the pair (goal table, primary goal list) and not on the episode.
+    Every episode of a category shares one primary goal list, so this is computed once per
+    such list rather than once per episode.
+
+    Measured on a train-shaped scene (3000 episodes, 6 categories, 600 goal instances,
+    10,100 keep-out points): 6.06 M distance calls PER EPISODE, 12.8 s for the 15 episodes
+    a build keeps, ~38 s per scene across three classes. `anchor_yield --split train` did
+    not finish one scene of one class in 120 s. The count is unchanged; how many times it
+    is paid is what moves.
+
+    Pure. ``None`` rather than a sentinel distance, so "no view point" stays the distinct
+    rejection reason `place_anomaly_source` already counts it as.
+    """
+    out: Dict[Tuple[str, int], Optional[float]] = {}
+    for category in sorted(table):
+        for index, goal in enumerate(table[category]):
+            position = _first_view_point(goal)
+            if position is None:
+                out[(category, index)] = None
+            elif min_sep_m is None:
+                # No floor given: every value is exact, which is what a caller reading
+                # these distances for their own sake must get.
+                out[(category, index)] = min(
+                    position.horizontal_distance_to(point) for point in keep_out
+                )
+            else:
+                out[(category, index)] = _separation_or_rejection(
+                    position, keep_out, float(min_sep_m)
+                )
+    return out
+
+
 def place_anomaly_source(
     episode: Episode,
     table: Dict[str, Tuple[ObjectGoal, ...]],
     *,
+    separations: Optional[Mapping[Tuple[str, int], Optional[float]]] = None,
     anchor_category: Optional[str] = None,
     min_sep_m: float = 3.0,
     max_dy_m: float = 1.0,
@@ -452,21 +522,24 @@ def place_anomaly_source(
     """
     anchor = primary_anchor(episode)
     start = episode.start_position
-    keep_out = _primary_keep_out(episode)
+    # `separations` is rule 2 precomputed by the caller. Absent, it is computed here from
+    # this episode's own primary goals, which is byte-for-byte what this function always
+    # did -- so a direct caller that knows nothing about the cache is unaffected.
+    if separations is None:
+        separations = candidate_separations(
+            table, _primary_keep_out(episode), min_sep_m=min_sep_m)
     primary_category = episode.object_category
 
     # (separation, same_category, category, position, object_id, at_class_anchor)
     qualifying: List[Tuple[float, bool, str, Xyz, Optional[str], bool]] = []
     n_too_near = n_wrong_floor = n_no_view_point = n_at_the_start = 0
     for category in sorted(table):
-        for goal in table[category]:
+        for index, goal in enumerate(table[category]):
             position = _first_view_point(goal)
-            if position is None:
+            separation = separations[(category, index)]
+            if position is None or separation is None:
                 n_no_view_point += 1
                 continue
-            separation = min(
-                position.horizontal_distance_to(point) for point in keep_out
-            )
             if separation < float(min_sep_m):
                 n_too_near += 1
                 continue
@@ -607,12 +680,33 @@ def build_anomaly_episodes(
     wanted = len(candidates) if n_episodes is None else max(0, int(n_episodes))
     built: List[AnomalyEpisode] = []
     skipped: List[Tuple[str, str]] = []
+    # RULE 2, ONCE PER PRIMARY GOAL LIST INSTEAD OF ONCE PER EPISODE.
+    #
+    # Keyed on the IDENTITY of `episode.goals`, not on the category. Every episode of a
+    # category shares one goal tuple as `parse_content` builds them, so identity is the
+    # exact equivalence this needs -- and a dataset assembled by hand, as the tests do,
+    # can legitimately give two episodes of one category DIFFERENT goal lists, where a
+    # category key would hand the first episode's keep-out zone to the second and place
+    # sources that rule 2 forbids. The tuple is stored beside its entry so the id cannot
+    # be recycled onto a different object while the cache is alive.
+    separations_cache: Dict[
+        int, Tuple[Tuple[ObjectGoal, ...], Mapping[Tuple[str, int], Optional[float]]]
+    ] = {}
     for position, episode in enumerate(candidates):
         if len(built) >= wanted:
             break
+        cached = separations_cache.get(id(episode.goals))
+        if cached is None or cached[0] is not episode.goals:
+            cached = (
+                episode.goals,
+                candidate_separations(
+                    table, _primary_keep_out(episode), min_sep_m=min_sep_m),
+            )
+            separations_cache[id(episode.goals)] = cached
         try:
             placement = place_anomaly_source(
                 episode, table,
+                separations=cached[1],
                 # THE RUN'S OWN CLASS DECIDES WHERE ITS SOURCE GOES. Passing it here is
                 # what makes the class-to-category association a fact about the world
                 # rather than a fiction the prior pass teaches. Every episode of a build
