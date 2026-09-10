@@ -304,7 +304,7 @@ data/hm3d/datasets/objectnav/hm3d/v1/{train,val,val_mini,minival}/
 Coverage: `val` holds 100 `.basis.glb` / 36 `.semantic.glb` at 9.3 G; `minival` 10 / 4 at 1.1 G.
 ObjectNav val mesh coverage is **20/20**, which retires the long-standing "only 2 of 20 meshes" constraint that forced earlier work onto `val_mini` and grew a mesh preflight into the scale-up driver.
 
-### Two symlink traps
+### Three symlink traps
 
 1. **`val` -> `minival`.**
    ObjectNav v1 episode JSONs hardcode scene paths as `val/<scene>/...`, but the `hm3d_minival_full` download group lays meshes under `minival/<scene>/...`.
@@ -316,6 +316,22 @@ ObjectNav val mesh coverage is **20/20**, which retires the long-standing "only 
    cd data/hm3d/scene_datasets && ln -sfn ../versioned_data/hm3d-0.2/hm3d hm3d
    ```
    `race-setup.sh` did this on every source, detecting the dangling case as "is a symlink, but does not exist".
+3. **One symlink cannot serve two versions, and a download springs this one by itself.**
+   habitat-sim's downloader re-points `scene_datasets/hm3d` at the versioned tree it just filled.
+   Measured 2026-09-10, straight after `--uids hm3d_train_habitat`:
+   ```
+   scene_datasets/hm3d -> versioned_data/hm3d-1.0/hm3d     # holds ONLY train
+   versioned_data/hm3d-0.2/hm3d                            # holds val, now unreachable
+   ```
+   Train resolved 73 usable scenes; val reported `no scene with a mesh on this box` for all 20, silently.
+   That breaks the box gate (nine test files), `clap_gate.sh`, `ablation_sweep.sh`, `window_pilot.sh`, and every default `RunConfig.split`.
+   The repair is that `scene_datasets/hm3d` must be a real DIRECTORY of per-split symlinks, since episodes hardcode `hm3d/<split>/<scene>/...` and the split is the level the indirection belongs at:
+   ```bash
+   bash earshot/tools/hm3d_link_splits.sh --check    # report only, nonzero if a split is orphaned
+   bash earshot/tools/hm3d_link_splits.sh            # rebuild; idempotent, re-run after every download
+   ```
+   Each split keeps the version it was measured on rather than being moved to the newest tree, because `abl-2` and `matrix-1` were rendered against 0.2 and moving val silently re-bases a published number.
+   `--pin val=hm3d-0.2` holds one against a later download.
 
 ### Downloading more HM3D
 
@@ -323,10 +339,19 @@ Requires signing the Matterport academic agreement at <https://matterport.com/ha
 Meshes come from habitat-sim's own downloader; the ObjectNav episodes do **not** (they ship as a single zip from habitat-lab's CDN):
 
 ```bash
-python -m habitat_sim.utils.datasets_download \
-  --username "$MATTERPORT_TOKEN_ID" --password "$MATTERPORT_TOKEN_SECRET" \
-  --uids hm3d_minival_full \            # or hm3d_val_full for the 36-scene val split
-  --no-replace --data-path data/hm3d
+# NOT the bare `python -m habitat_sim.utils.datasets_download` form: it imports
+# habitat_sim with no torch before it and dies with `free(): invalid pointer`, exit 134,
+# before parsing a flag. Use the wrapper, which does the import in order, always passes
+# --no-replace, and reads the token pair from .env:
+bash earshot/tools/hm3d_download.sh --list
+bash earshot/tools/hm3d_download.sh --uids hm3d_train_habitat hm3d_train_configs
+bash earshot/tools/hm3d_link_splits.sh          # ALWAYS, after any download
+
+# PICK THE `_habitat` UID, NOT `_full`. `hm3d_<split>_full` is a GROUP of six, four of
+# which this task never opens: raw `glb`, `obj+mtl`, and the two semantic packages
+# (ADR-0007 turns materials off and the semantic sensor is gone). `resolve_scene_path`
+# opens `.basis.glb`, which is what `_habitat` ships. Measured: train_habitat + configs
+# is 25.9 G in 11 minutes.
 
 curl -fL --retry 3 -o objectnav.zip \
   https://dl.fbaipublicfiles.com/habitat/data/datasets/objectnav/hm3d/v1/objectnav_hm3d_v1.zip
