@@ -68,6 +68,12 @@
 # run says how many cells it skipped, on the terminal and in the provenance, because a
 # resumed directory's episodes come from more than one invocation.
 #
+# IT ALSO REUSES THE PRIOR STORE RATHER THAN REBUILDING IT. `matrix-2`'s recovery run
+# re-toured all 73 scenes for 10m 34s and then died writing a store.json that was already
+# there, so the cell it existed to re-run never started. `--overwrite` is not the fix: it
+# would replace the artefact the finished cells consumed with one nothing has checked.
+# The coverage gate still runs on the reused store.
+#
 # --split IS THE SCENE POOL, and val is small. ObjectNav HM3D v1 publishes 20 val scenes
 # and 80 train ones; `anchor_yield --split train` measured 73 of the 80 usable, 1068 of
 # 1200 episodes anchored (89.0%) against val's 210 of 282 (74.5%), and a LOWER null
@@ -291,20 +297,41 @@ echo "  $N_SCENES scene(s) assigned"
 # pair `run()` filters four ways per cell via `stores_for_cell`, so this step runs once,
 # not once per condition.
 banner "[4/6] the prior pass"
-python -m earshot.task.prior_driver \
-  --run-dir "$OUT_DIR/prior" \
-  --split "$SPLIT" \
-  --scenes "$SCENES" \
-  --classes "$CLASSES" \
-  --seed "$SEED" \
-  --leg-budget "$LEG_BUDGET" \
-  --goal-radius "$GOAL_RADIUS" \
-  --start-draws "$START_DRAWS" \
-  ${MAX_TOUR_DY:+--max-tour-dy "$MAX_TOUR_DY"} \
-  --tour-floors "$TOUR_FLOORS" \
-  2>&1 | tee "$OUT_DIR/prior_pass.log"
-PRIOR_STATUS=${PIPESTATUS[0]}
 STORE="$OUT_DIR/prior/store.json"
+# A RESUME REUSES THE STORE, IT DOES NOT REBUILD IT. `matrix-2`'s recovery run spent
+# 10m 34s re-touring all 73 scenes, reported `73 of 73 scene(s) complete`, and then died
+# in `write_pass_store` on the store it had just been told not to overwrite -- so the one
+# crashed cell it existed to re-run never started.
+#
+# The fix is to skip the tour, not to pass `--overwrite`. `--overwrite` would destroy the
+# artefact the finished cells actually consumed and replace it with one nothing has
+# checked. A same-seed rebuild is LIKELY identical -- `prior_driver` calls
+# `world.seed_navmesh(seed)` before every draw -- but likely is not the standard here:
+# step 1 git-pulls and re-execs, so the code rebuilding the store is by construction not
+# guaranteed to be the code that built it, and the climb loop's early exits decide how
+# many draws the seeded sequence even consumes. Reuse is provable, rebuild is hope.
+#
+# The gate below still runs on the reused store. A store is checked, never trusted.
+if [ "$RESUME" = 1 ] && [ -s "$STORE" ]; then
+  echo "  --resume: reusing the store already on disk, NOT re-touring."
+  echo "    $STORE"
+  echo "  It is the store the finished cells consumed. The coverage gate below still runs."
+  PRIOR_STATUS=0
+else
+  python -m earshot.task.prior_driver \
+    --run-dir "$OUT_DIR/prior" \
+    --split "$SPLIT" \
+    --scenes "$SCENES" \
+    --classes "$CLASSES" \
+    --seed "$SEED" \
+    --leg-budget "$LEG_BUDGET" \
+    --goal-radius "$GOAL_RADIUS" \
+    --start-draws "$START_DRAWS" \
+    ${MAX_TOUR_DY:+--max-tour-dy "$MAX_TOUR_DY"} \
+    --tour-floors "$TOUR_FLOORS" \
+    2>&1 | tee "$OUT_DIR/prior_pass.log"
+  PRIOR_STATUS=${PIPESTATUS[0]}
+fi
 [ "$PRIOR_STATUS" -eq 0 ] && [ -f "$STORE" ] || {
   echo "FATAL: the prior pass did not produce $STORE"
   exit 1
