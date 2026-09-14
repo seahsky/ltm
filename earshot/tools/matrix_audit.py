@@ -320,6 +320,73 @@ def prior_distribution(
     }
 
 
+def _rate(part: int, whole: int) -> float:
+    """A rate, or 0.0 for an empty bucket. An empty bucket is not a zero rate and the
+    caller prints `n` beside it, so the reader can tell which they are looking at."""
+    return 0.0 if whole == 0 else float(part) / float(whole)
+
+
+def where_the_episode_was_lost(
+    arm: Mapping[str, Mapping[int, Mapping[str, Any]]],
+) -> Dict[str, Any]:
+    """Reach rate split by WHAT THE MEMORY MANAGED TO DO, for one arm. Pure.
+
+    Section C says what each arm was told. It does not say whether being told helped, and
+    that is the question a moved SR cannot answer: `matrix-2`'s `heard_unseen` resolved 157
+    correct priors and reached 105 episodes, and those two numbers have no arithmetic
+    relation until someone crosses them per episode.
+
+    Three exhaustive buckets, in the order an episode falls through them:
+
+      * NEVER CONSULTED -- `runner` asks the memory only while `is_diverting(mode) and not
+        sounding`, so an episode that ended before ADR-0017's offset step, or never
+        diverted, never reached the question. The memory could not have mattered. The
+        reach rate here is THE BASELINE: it is this apparatus with the memory switched off
+        by the regime rather than by a flag, and it is the closest thing the matrix has to
+        a NONE arm until one is run (ADR-0023).
+      * MISSED -- consulted, and could not name a routable place. Broken out by
+        `PriorMiss`, because `unreachable` (the store named a point with no navmesh route
+        from here) and `no_prediction` (nothing to name) are different faults with
+        different fixes.
+      * RESOLVED -- consulted, and named a place the agent could walk to. THE CONVERSION
+        RATE OF THIS BUCKET IS THE CONTROLLER'S SCORE, not the memory's: the prior did its
+        job, and whatever fraction still failed is navigation, stopping, or the ring.
+
+    A correct-and-routable prior that converts at the same rate as no prior at all would
+    mean the memory is inert and the SR difference came from somewhere else. A high
+    conversion with a small RESOLVED bucket means the memory works and rarely gets to
+    speak -- a plumbing problem, not a model one.
+    """
+    buckets: Dict[str, Dict[str, int]] = {
+        "never_consulted": {"n": 0, "reached": 0},
+        "missed": {"n": 0, "reached": 0},
+        "resolved": {"n": 0, "reached": 0},
+    }
+    by_miss: Dict[str, Dict[str, int]] = {}
+    for rows in arm.values():
+        for row in rows.values():
+            reached = 1 if row["reached"] else 0
+            if row["category"] is not None:
+                key = "resolved"
+            elif row["miss"] is not None:
+                key = "missed"
+                seen = by_miss.setdefault(row["miss"], {"n": 0, "reached": 0})
+                seen["n"] += 1
+                seen["reached"] += reached
+            else:
+                key = "never_consulted"
+            buckets[key]["n"] += 1
+            buckets[key]["reached"] += reached
+    total = sum(b["n"] for b in buckets.values())
+    reached = sum(b["reached"] for b in buckets.values())
+    return {
+        "episodes": total,
+        "reached": reached,
+        "buckets": buckets,
+        "by_miss": dict(sorted(by_miss.items())),
+    }
+
+
 def discordance_where_identical(
     seen: Mapping[str, Mapping[int, Mapping[str, Any]]],
     unseen: Mapping[str, Mapping[int, Mapping[str, Any]]],
@@ -878,6 +945,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         say("  -> the distributions OVERLAP: no single floor separates them. An abstain "
             "rule buys the free drop above and then trades right recalls for wrong ones, "
             "so a NONE arm stays the only clean control for a wrong prior.")
+
+    say("")
+    say("G. WHERE THE EPISODE WAS LOST (reach rate by what the memory managed to do)")
+    say("   NEVER CONSULTED is the regime baseline -- `runner` asks the memory only while "
+        "diverting AND after the offset step, so these episodes ran with the memory off.")
+    say("   RESOLVED converts at the CONTROLLER's rate: the prior named a routable place "
+        "and the rest is navigation, stopping and the arrival ring.")
+    for arm in args.arms.split():
+        if arm not in arms:
+            continue
+        lost = where_the_episode_was_lost(arms[arm])
+        say("  {}: {} of {} reached ({:.1f}%)".format(
+            arm, lost["reached"], lost["episodes"],
+            100.0 * _rate(lost["reached"], lost["episodes"]),
+        ))
+        for key, label in (
+            ("never_consulted", "never consulted"),
+            ("missed", "prior MISSED   "),
+            ("resolved", "prior RESOLVED "),
+        ):
+            bucket = lost["buckets"][key]
+            say("      {}  n={:<4} reached {:<4} = {:.1f}%".format(
+                label, bucket["n"], bucket["reached"],
+                100.0 * _rate(bucket["reached"], bucket["n"]),
+            ))
+            if key == "missed":
+                for miss, counts in lost["by_miss"].items():
+                    say("        {:<16} n={:<4} reached {:<4} = {:.1f}%".format(
+                        miss, counts["n"], counts["reached"],
+                        100.0 * _rate(counts["reached"], counts["n"]),
+                    ))
 
     return 0
 

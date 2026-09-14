@@ -35,6 +35,7 @@ from earshot.tools.matrix_audit import (
     scene_of,
     seen_axis_divergence,
     store_coverage,
+    where_the_episode_was_lost,
 )
 from earshot.types import Xyz
 
@@ -453,6 +454,86 @@ class TestPriorDistribution(unittest.TestCase):
         self.assertEqual(dist["never_consulted"], 1)
 
 
+class TestWhereTheEpisodeWasLost(unittest.TestCase):
+    """Section C says what an arm was TOLD. This says whether being told helped.
+
+    `matrix-2` is why it exists. `heard_unseen` resolved 157 correct priors and reached
+    105 episodes; those two numbers have no arithmetic relation until someone crosses
+    them per episode, and the question "is the memory failing or is the controller"
+    cannot be answered from an SR that moved.
+    """
+
+    def test_the_three_buckets_are_exhaustive_and_carry_their_own_reach_rate(self):
+        arm = {
+            "S": {
+                0: _row(category="bed", reached=True),
+                1: _row(category="bed", reached=False),
+                2: _row(miss="unreachable", reached=False),
+                3: _row(reached=True),
+                4: _row(reached=False),
+            }
+        }
+        lost = where_the_episode_was_lost(arm)
+        self.assertEqual(lost["episodes"], 5)
+        self.assertEqual(lost["reached"], 2)
+        self.assertEqual(
+            sum(b["n"] for b in lost["buckets"].values()), lost["episodes"],
+            "the buckets must partition the arm, or a reader subtracts to a wrong residual",
+        )
+        self.assertEqual(lost["buckets"]["resolved"], {"n": 2, "reached": 1})
+        self.assertEqual(lost["buckets"]["missed"], {"n": 1, "reached": 0})
+        self.assertEqual(lost["buckets"]["never_consulted"], {"n": 2, "reached": 1})
+
+    def test_a_resolved_prior_is_never_counted_as_a_miss(self):
+        """The forced-failure arm for the bucket order. A row carrying BOTH a category and
+        a miss is a resolved prior -- `resolve_prior` returns the vote on every outcome the
+        store could answer, so a miss field alongside a category does not un-resolve it.
+        Counting it as a miss would move reaches out of the bucket whose conversion rate is
+        the controller's score."""
+        arm = {"S": {0: _row(category="toilet", miss="low_confidence", reached=True)}}
+        lost = where_the_episode_was_lost(arm)
+        self.assertEqual(lost["buckets"]["resolved"], {"n": 1, "reached": 1})
+        self.assertEqual(lost["buckets"]["missed"]["n"], 0)
+        self.assertEqual(lost["by_miss"], {})
+
+    def test_misses_are_broken_out_by_reason(self):
+        """`unreachable` (the store named a point with no route) and `no_prediction`
+        (nothing to name) are different faults with different fixes, and pooling them
+        hides which one a run is paying."""
+        arm = {
+            "S": {
+                0: _row(miss="unreachable", reached=False),
+                1: _row(miss="unreachable", reached=True),
+                2: _row(miss="no_prediction", reached=False),
+            }
+        }
+        lost = where_the_episode_was_lost(arm)
+        self.assertEqual(lost["by_miss"]["unreachable"], {"n": 2, "reached": 1})
+        self.assertEqual(lost["by_miss"]["no_prediction"], {"n": 1, "reached": 0})
+
+    def test_an_empty_bucket_reports_zero_n_rather_than_vanishing(self):
+        """NOT_RUN is never green. A bucket nothing landed in must print `n=0`, not be
+        absent -- an absent bucket reads as "did not happen" when it means "not measured"."""
+        arm = {"S": {0: _row(category="bed", reached=True)}}
+        lost = where_the_episode_was_lost(arm)
+        for key in ("never_consulted", "missed", "resolved"):
+            self.assertIn(key, lost["buckets"])
+        self.assertEqual(lost["buckets"]["never_consulted"]["n"], 0)
+
+    def test_an_empty_arm_is_zeros_and_not_a_division_by_zero(self):
+        lost = where_the_episode_was_lost({})
+        self.assertEqual(lost["episodes"], 0)
+        self.assertEqual(lost["reached"], 0)
+
+    def test_it_counts_across_scenes(self):
+        arm = {
+            "A": {0: _row(category="bed", reached=True)},
+            "B": {0: _row(category="bed", reached=False)},
+        }
+        lost = where_the_episode_was_lost(arm)
+        self.assertEqual(lost["buckets"]["resolved"], {"n": 2, "reached": 1})
+
+
 class TestDiscordanceWhereIdentical(unittest.TestCase):
     def test_zero_row_scenes_measure_the_apparatus_and_others_do_not(self):
         seen = {
@@ -714,6 +795,21 @@ class TestSectionEThroughTheCli(unittest.TestCase):
         self.assertIn("heard_seen: 1 correct, 1 wrong, 1 with no confidence", out)
         self.assertIn("free floor 0.9100", out)
         self.assertIn("SEPARABLE", out)
+
+    def test_section_g_prints_every_bucket_including_the_empty_one(self):
+        """The printer, not the pure function -- `_rate` divides by a bucket size and the
+        empty bucket is the one that would raise. All three episodes reached, two through
+        a resolved prior and one through an `unreachable` miss, and NOTHING was never
+        consulted, so `n=0` has to print rather than the row vanishing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self._run(self._sweep(tmp, with_assignment=True))
+        self.assertEqual(code, 0)
+        self.assertIn("G. WHERE THE EPISODE WAS LOST", out)
+        self.assertIn("heard_seen: 3 of 3 reached (100.0%)", out)
+        self.assertIn("never consulted  n=0    reached 0    = 0.0%", out)
+        self.assertIn("prior MISSED     n=1    reached 1    = 100.0%", out)
+        self.assertIn("unreachable      n=1    reached 1    = 100.0%", out)
+        self.assertIn("prior RESOLVED   n=2    reached 2    = 100.0%", out)
 
     def test_without_the_key_the_section_says_so_rather_than_guessing(self):
         """The forced-failure arm. A sweep with no assignment.tsv cannot know which
