@@ -74,6 +74,10 @@
 # would replace the artefact the finished cells consumed with one nothing has checked.
 # The coverage gate still runs on the reused store.
 #
+# AND IT CLEARS A CELL DIRECTORY BEFORE RE-RUNNING IT. A cell only reaches the run step
+# when it did not finish, so what is in its directory is a crashed attempt's debris and
+# `report/`'s no-overwrite rule would otherwise stop the retry dead.
+#
 # --split IS THE SCENE POOL, and val is small. ObjectNav HM3D v1 publishes 20 val scenes
 # and 80 train ones; `anchor_yield --split train` measured 73 of the 80 usable, 1068 of
 # 1200 episodes anchored (89.0%) against val's 210 of 282 (74.5%), and a LOWER null
@@ -194,6 +198,46 @@ is_finished_cell() {
   [ -f "$1/summary.json" ] || return 1
   python -c "import json,sys; json.load(open(sys.argv[1]))['n_episodes']; sys.exit(0)" \
     "$1/summary.json" 2>/dev/null
+}
+
+# A CELL ABOUT TO RUN OWNS ITS DIRECTORY, so whatever is in it belongs to an attempt that
+# did not finish. `matrix-2`'s recovery found this the level below the store: with the
+# tour correctly skipped, the one unfinished cell still died before its first episode --
+#
+#     ArtifactExistsError: runs/matrix-2/not_heard_seen/LcAd9dhvVwh/env_report.json
+#     already exists. Re-using a run tag mixes two runs into one directory with nothing
+#     on disk saying so
+#
+# -- because its first attempt got as far as writing `env_report.json` and then crashed.
+# `report/` refuses to overwrite, and that refusal is right: it answers a real incident,
+# committed run directories holding a different run's data.
+#
+# PASSING `--overwrite` WOULD BE THE WRONG FIX, and for the reason the refusal exists. A
+# cell that died at episode 3 of 4 leaves episodes 0-2 on disk; an overwriting re-run
+# replaces them, but any episode file the new build does NOT write survives and the
+# readout counts it as this run's. That is two invocations in one directory with nothing
+# saying so -- exactly what the error is guarding.
+#
+# Clearing is the honest version of the same intent. A cell reaches here only when it is
+# about to be run, which under --resume means `is_finished_cell` said no. The directory is
+# then a crashed attempt's debris, not a record of anything, and the invariant holds
+# exactly afterwards: one cell directory, one invocation.
+#
+# The path is checked before anything is removed. `$OUT_DIR` is operator-supplied via
+# --out-dir, and an `rm -rf` built from a variable deserves the belt and the braces.
+clear_cell_dir() {
+  [ -n "$1" ] || { echo "FATAL: clear_cell_dir got an empty path"; exit 1; }
+  case "$1" in
+    *..*) echo "FATAL: refusing to clear '$1' — it contains '..'"; exit 1 ;;
+  esac
+  case "$1" in
+    "$OUT_DIR"/*/*) ;;
+    *) echo "FATAL: refusing to clear '$1' — not a <condition>/<scene> under $OUT_DIR"
+       exit 1 ;;
+  esac
+  [ -d "$1" ] || return 0
+  echo "      clearing $(find "$1" -type f | wc -l | tr -d ' ') file(s) left by an attempt that did not finish"
+  rm -rf "${1:?}"
 }
 
 # --- ONE DIRECTORY IS ONE RUN, before anything expensive ------------------
@@ -429,6 +473,7 @@ for condition in "${CONDITION_LIST[@]}"; do
       continue
     fi
     echo "    $condition / $scene ($anomaly_class)   ($(date +%H:%M:%S))"
+    clear_cell_dir "$run_dir"
     python -m earshot \
       --run-dir "$run_dir" \
       --split "$SPLIT" \
