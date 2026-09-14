@@ -38,6 +38,12 @@ __all__ = [
     "resample_ratio",
     "resolve_clap_source",
     "stage_clap_safetensors",
+    "ClipEncoder",
+    "load_clip_encoder",
+    "CLIP_MODEL_ID",
+    "CLIP_LOCAL_DIR",
+    "resolve_clip_source",
+    "stage_clip_safetensors",
 ]
 
 # provenance: box — ticket 13's known-good checkpoint, the one `env_check`'s
@@ -61,6 +67,26 @@ STAGED_MARKER = "PROVENANCE.json"
 # provenance: box -- `ClapFeatureExtractor.sampling_rate` on this checkpoint. The extractor
 # REFUSES any other rate; it does not resample. See `resample_ratio`.
 CLAP_SAMPLE_RATE = 48000
+
+# DREAM's `f_v` (eq. 6). ViT-B/32 for three reasons, in order of how much they matter:
+#
+#   * its image embedding is 512-d, the SAME width as `laion/clap-htsat-unfused`'s audio
+#     embedding, so `f_fuse`'s concatenation (eq. 7) is balanced rather than three
+#     quarters visual. An unbalanced fuse makes `q_t` a visual query wearing an audio
+#     hat, and the `omega_t` shift the paper's central hypothesis is about would be
+#     measuring the fuse rather than the memory;
+#   * 88 M params beside CLAP's 153.5 M, and ticket 15 measured 0.713 GiB of CLAP against
+#     26.45 GiB of margin on the V100. DREAM encodes EVERY step, unlike CLAP which fires
+#     once per onset, so the per-step cost lands directly inside criterion 7's 0.5 s
+#     ceiling -- `matrix-2` ran at 0.3278-0.3356 s worst-step, so the headroom is real but
+#     it is not large, and `tools/clip_gate.sh` measures it rather than assuming it;
+#   * it is the checkpoint this tree has already used. `step4-coarse-affordance` built a
+#     CLIP zero-shot room classifier on it and measured real cosines (~0.30), so the
+#     staging path and the failure modes are known rather than new.
+CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
+
+# provenance: box -- where `stage_clip_safetensors` writes the checkpoint, beside CLAP's.
+CLIP_LOCAL_DIR = "models/clip-vit-base-patch32"
 
 
 def resample_ratio(from_rate: int, to_rate: int = CLAP_SAMPLE_RATE):
@@ -108,6 +134,17 @@ def resolve_clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOC
     writes it, and the marker is part of the completeness check, so an older staged copy is
     simply re-staged on the next run rather than trusted on faith.
     """
+    return _staged_source(model_id, local_dir)
+
+
+def _staged_source(model_id: str, local_dir: str) -> str:
+    """The identity-and-completeness check both resolvers run. Pure over the filesystem.
+
+    Extracted when CLIP arrived rather than copied: the identity half is incident-driven
+    (`resolve_clap_source`'s docstring has the account -- a probe asking for
+    `earshot/definitely-not-a-model` got the real checkpoint and reported PASS), and a
+    second copy of it is a second place for that arm to go vacuous.
+    """
     import json
     import os
 
@@ -126,6 +163,15 @@ def resolve_clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOC
     except (ValueError, OSError):
         return model_id
     return local_dir if staged == model_id else model_id
+
+
+def resolve_clip_source(model_id: str = CLIP_MODEL_ID, local_dir: str = CLIP_LOCAL_DIR) -> str:
+    """The staged local copy when it is complete AND says it holds `model_id`, else the Hub id.
+
+    Same contract and same guards as `resolve_clap_source`, including the identity check
+    that keeps `env_check`'s forced-failure arm from being vacuous.
+    """
+    return _staged_source(model_id, local_dir)
 
 
 def stage_clap_safetensors(model_id: str = CLAP_MODEL_ID, out_dir: str = CLAP_LOCAL_DIR) -> str:
@@ -199,17 +245,185 @@ def stage_clap_safetensors(model_id: str = CLAP_MODEL_ID, out_dir: str = CLAP_LO
     return out_dir
 
 
+def stage_clip_safetensors(model_id: str = CLIP_MODEL_ID, out_dir: str = CLIP_LOCAL_DIR) -> str:
+    """Stage the CLIP checkpoint under `out_dir` as safetensors. Idempotent. Returns the dir.
+
+    **It does not assume which format the Hub ships, and that is the difference from
+    `stage_clap_safetensors`.** CLAP's stager can say flatly that `laion/clap-htsat-unfused`
+    ships only `pytorch_model.bin`, because that was checked on the box and the docstring
+    records it. Nobody has checked this repo for `openai/clip-vit-base-patch32`, so the
+    snapshot is ASKED rather than predicted: a `model.safetensors` already there is copied,
+    and only a `.bin`-only snapshot is converted. Writing "CLIP ships safetensors" here
+    without having run it would be exactly the fabrication the tree keeps catching.
+
+    The conversion branch calls `torch.load` directly for the reason CLAP's does: the CVE
+    guard is transformers' policy about untrusted checkpoints, and this is the checkpoint
+    `CLIP_MODEL_ID` names.
+    """
+    import json
+    import os
+    import shutil
+
+    from huggingface_hub import snapshot_download
+
+    if resolve_clip_source(model_id, out_dir) == out_dir:
+        print("  CLIP already staged at {} - nothing to do".format(out_dir))
+        return out_dir
+
+    source = snapshot_download(model_id)
+    os.makedirs(out_dir, exist_ok=True)
+    shipped = os.path.join(source, "model.safetensors")
+    if os.path.isfile(shipped):
+        shutil.copyfile(shipped, os.path.join(out_dir, "model.safetensors"))
+        n_tensors = None
+        converted_from = shipped
+        how = "copied the safetensors the Hub already ships"
+    else:
+        import torch
+        from safetensors.torch import save_file
+
+        converted_from = os.path.join(source, "pytorch_model.bin")
+        if not os.path.isfile(converted_from):
+            raise FileNotFoundError(
+                "{} has neither model.safetensors nor pytorch_model.bin at {}. Nothing "
+                "here can stage it, and `resolve_clip_source` will keep returning the Hub "
+                "id -- which transformers will then refuse below torch 2.6 "
+                "(CVE-2025-32434).".format(model_id, source)
+            )
+        state = torch.load(converted_from, map_location="cpu", weights_only=True)
+        tensors = {
+            key: value.contiguous().clone()
+            for key, value in state.items()
+            if isinstance(value, torch.Tensor)
+        }
+        dropped = sorted(set(state) - set(tensors))
+        if dropped:
+            # Printed, never swallowed: a dropped key is a weight the model would
+            # initialise randomly, which is the silent-fabrication class this repo keeps
+            # finding.
+            print("  WARNING: {} non-tensor key(s) not carried: {}".format(
+                len(dropped), dropped))
+        save_file(
+            tensors, os.path.join(out_dir, "model.safetensors"), metadata={"format": "pt"}
+        )
+        n_tensors = len(tensors)
+        how = "converted pytorch_model.bin"
+
+    for name in sorted(os.listdir(source)):
+        if name.endswith((".json", ".txt")):
+            shutil.copyfile(os.path.join(source, name), os.path.join(out_dir, name))
+
+    with open(os.path.join(out_dir, STAGED_MARKER), "w", encoding="utf-8") as sink:
+        json.dump(
+            {
+                "model_id": model_id,
+                "converted_from": converted_from,
+                "n_tensors": n_tensors,
+                "how": how,
+                "why": (
+                    "DREAM eq. 6 needs f_v and the tree had no visual encoder; staged "
+                    "locally for the same CVE-2025-32434 reason as CLAP"
+                ),
+            },
+            sink,
+            indent=2,
+            sort_keys=True,
+        )
+    print("  CLIP staged ({}) -> {}/model.safetensors".format(how, out_dir))
+    return out_dir
+
+
+class ClipEncoder:
+    """A connector: ``openai/clip-vit-base-patch32`` behind the one call `vlm/encode.py` needs.
+
+    A class in a tree that is otherwise functions, on the rule this repo states for it --
+    classes are for connectors to external systems, and this owns a loaded model with a
+    lifecycle and a device. The deliberate twin of `ClapEncoder`.
+
+    **It runs under `torch.no_grad()` and `eval()`, and that is a cost decision rather
+    than a correctness one.** DREAM encodes EVERY step (eq. 5), not once per onset the way
+    CLAP does, so this sits inside criterion 7's 0.5 s per-step ceiling on every one of a
+    run's ~180 steps. `matrix-2` measured a worst step of 0.3278-0.3356 s, so there is
+    headroom and it is not generous.
+    """
+
+    def __init__(self, model_id: str = CLIP_MODEL_ID, device: Optional[str] = None) -> None:
+        import torch
+        from transformers import CLIPModel, CLIPProcessor
+
+        self._torch = torch
+        self.model_id = str(model_id)
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # The staged safetensors copy when present, else the Hub id -- and the identity
+        # check in `_staged_source` is what stops a wrong `model_id` silently resolving to
+        # whatever happens to be on disk.
+        self.source = resolve_clip_source(self.model_id)
+        self._processor = CLIPProcessor.from_pretrained(self.source)
+        self._model = CLIPModel.from_pretrained(self.source).to(self.device)
+        self._model.eval()
+
+    def encode_image(self, frame: Any) -> Any:
+        """The image embedding for one RGB frame, as the processor's own preprocessing wants it.
+
+        The frame arrives as habitat-sim renders it: HxWx3 or HxWx4 `uint8`. The alpha
+        channel is dropped here rather than at the call site, because a caller that forgot
+        would hand CLIP a 4-channel array and get a resize error several frames into an
+        episode instead of a shape error on the first.
+        """
+        import numpy as np
+
+        values = np.asarray(frame)
+        if values.ndim == 3 and values.shape[-1] == 4:
+            values = values[..., :3]
+        inputs = self._processor(images=values, return_tensors="pt").to(self.device)
+        with self._torch.no_grad():
+            features = self._model.get_image_features(**inputs)
+        return features.squeeze(0).float().cpu().numpy()
+
+
+def load_clip_encoder(model_id: str = CLIP_MODEL_ID) -> ClipEncoder:
+    """Construct the encoder, or raise with the same diagnosis `load_clap_encoder` pays for.
+
+    The failure named is not "transformers is missing": it is ``transformers`` gating its
+    torch backend on ``torch >= 2.1`` and substituting a ``DummyObject`` that **imports
+    cleanly and raises only when constructed**.
+    """
+    try:
+        return ClipEncoder(model_id)
+    except Exception as exc:
+        raise RuntimeError(
+            "could not construct CLIP ({}): {}. transformers disables its torch backend "
+            "below torch 2.1 and substitutes a DummyObject that imports fine and raises "
+            "on construction -- check the torch/transformers pair, not just that both are "
+            "installed (ticket 13).".format(model_id, exc)
+        ) from exc
+
+
 def _main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Stage the CLAP checkpoint locally as safetensors (run once on the box)."
+        description=(
+            "Stage the CLAP and CLIP checkpoints locally as safetensors (run once on the "
+            "box). Both, because DREAM needs f_u AND f_v and a sweep that staged one of "
+            "them fails halfway through its first episode."
+        )
     )
     parser.add_argument("--model-id", default=CLAP_MODEL_ID)
     parser.add_argument("--out-dir", default=CLAP_LOCAL_DIR)
+    parser.add_argument("--clip-model-id", default=CLIP_MODEL_ID)
+    parser.add_argument("--clip-out-dir", default=CLIP_LOCAL_DIR)
+    parser.add_argument(
+        "--clap-only", action="store_true",
+        help="stage CLAP and skip CLIP (what every caller predating DREAM's f_v wanted)",
+    )
     args = parser.parse_args(None if argv is None else list(argv))
     stage_clap_safetensors(args.model_id, args.out_dir)
     print("  resolve_clap_source now returns: {}".format(resolve_clap_source(args.model_id, args.out_dir)))
+    if not args.clap_only:
+        stage_clip_safetensors(args.clip_model_id, args.clip_out_dir)
+        print("  resolve_clip_source now returns: {}".format(
+            resolve_clip_source(args.clip_model_id, args.clip_out_dir)))
     return 0
 
 
