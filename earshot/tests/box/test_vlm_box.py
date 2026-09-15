@@ -87,10 +87,16 @@ class TestClipEncoderOnTheBox(unittest.TestCase):
         )
         self.assertAlmostEqual(float(np.linalg.norm(out)), 1.0, places=5)
 
-    def test_two_different_frames_give_two_different_embeddings(self):
-        """The arm that proves the model is doing something. A frozen or mis-loaded
-        checkpoint returns the same vector for everything, which would make every `M^E`
-        row identical and every retrieval a tie -- and nothing downstream would say so."""
+    def test_the_encoder_does_not_return_one_constant_vector(self):
+        """A WEAK CHECK, AND IT SAYS SO. It compares two NOISE frames, which CLIP maps to
+        nearly the same place because "noise texture" is one region of embedding space --
+        it measured 0.9945 on the box, and a randomly-INITIALISED model would score about
+        the same. So this catches a literally constant output and nothing more.
+
+        PR #108's body claimed it caught a mis-loaded checkpoint. It does not, and that
+        claim was wrong. The real arm needs the simulator and lives in
+        `test_agent_stm_box.py`: frames RENDERED from different poses, plus the zero-shot
+        text separation that only exists if the weights loaded."""
         from earshot.vlm.encode import visual_embedding
 
         a = visual_embedding(_frame(1), self.encoder)
