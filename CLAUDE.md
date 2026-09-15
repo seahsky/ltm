@@ -97,6 +97,19 @@ nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag> \
   --arms "full no-climb no-cue scan-only anechoic"
 
+# WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
+# see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
+# it, so the run's own central quantity reached nobody.
+# Four sections, in the order that decides what to run next: (A) did `omega_t` MOVE, the
+# spread and never the mean, because a mean of 0.5 is what a live omega and a dead one
+# both report; (B) how degenerate `M^E`'s keys are, BANDED BY MEMORY SIZE, because
+# "the keys are the same key" and "the memory had two rows" are different findings;
+# (C) whether `eta` retained or refused anything; (D) how large a memory the sweep ever
+# built — it names a per-scene reset, which is what the sweep's one-runner-per-scene loop
+# produces. Read-only, no GPU, seconds. Exits 2 if the arm recorded omega nowhere:
+# unreadable is not flat
+python -m earshot.tools.dream_report runs/<tag>          # --arm NAME for a non-`dream` arm
+
 # DID ADR-0022's PLACEMENT CHANGE ACTUALLY REACH THIS SWEEP — the question a moved SR
 # cannot answer, because a re-run of the SAME task moves by 3.0 points on identical bytes.
 # Splits every arm into anchored / geometric / MISSING and gives each branch its own
