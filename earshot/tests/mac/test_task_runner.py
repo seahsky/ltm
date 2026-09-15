@@ -3499,7 +3499,7 @@ def _run_to_the_preflight(cfg, clip, clip_path, said, **run_kwargs):
         raise _StoppedAfterThePreflight("the preflight is behind us")
 
     patched = {
-        "assert_env": lambda clap=False: _Env(),
+        "assert_env": lambda clap=False, clip=False: _Env(),
         "find_split_dir": lambda split, root=None: "/nonexistent/split",
         "find_scenes_dir": lambda root=None: "/nonexistent/scenes",
         "_pick_scene": lambda split_dir, scenes_dir, scene: _Dataset(),

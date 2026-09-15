@@ -67,6 +67,7 @@ from earshot.agent.detector import GoalDetector, OracleDetector
 from earshot.agent.proposers import SOURCE_INVESTIGATE, Candidate, FrontierProposer
 from earshot.agent.reachability import assert_pool, reachable_pool
 from earshot.agent.scorer import pick_waypoint
+from earshot.task.plan import PlanWeights, pick_plan
 from earshot.audio.bed import bed_signal
 from earshot.audio.calibration import (
     CalibrationError,
@@ -124,6 +125,16 @@ from earshot.report.audit import (
 from earshot.task.dataset import AnomalyEpisode, EmptyDatasetError, build_anomaly_episodes
 from earshot.task.episodes import available_scenes, find_scenes_dir, find_split_dir, load_scene
 from earshot.task.memory_build import stores_for_cell
+from earshot.memory.longterm import LongTermMemory
+from earshot.memory.retrieve import RetrievedContext
+from earshot.task.dream import (
+    DreamContext,
+    DreamKnobs,
+    begin_episode as dream_begin_episode,
+    consolidate_episode as dream_consolidate_episode,
+    empty_memory,
+    observe as dream_observe,
+)
 from earshot.task.memory_prior import (
     RUN_DISCLOSURE,
     MemoryContext,
@@ -194,6 +205,11 @@ class EpisodeResult:
 
     report: AgentReport
     audit: EpisodeAudit
+    # `M^L` AFTER this episode's consolidation, or `None` on a run with no DREAM context.
+    # Returned rather than mutated in place so `run()` rebinds the context between
+    # episodes and the audit holds the memory as it stood at the START of each one --
+    # the only state a retrieval can be reproduced against afterwards.
+    dream_memory: Optional[LongTermMemory] = None
 
 
 class TailNotActiveError(RuntimeError):
@@ -830,6 +846,7 @@ def _choose_waypoint(
     geodesic: Callable[[Xyz, Xyz], Optional[float]],
     planner: PlannerConfig,
     divert: Optional[Candidate] = None,
+    plan: Optional[Tuple[RetrievedContext, PlanWeights]] = None,
 ) -> Tuple[Xyz, str, Dict[str, int]]:
     """Propose, filter on the navmesh, and pick one. Returns ``(waypoint, source, counters)``.
 
@@ -855,7 +872,16 @@ def _choose_waypoint(
         )
         kept = assert_pool(report, stage="compass fan after the frontier pool emptied")
         counters = report.counters()
-    scored = pick_waypoint(kept)
+    if plan is None:
+        scored = pick_waypoint(kept)
+    else:
+        # DREAM's eq. 27 in place of ADR-0008's pick. NOT a second ranking bolted on top:
+        # `plan.pick_plan` keeps `agent.scorer`'s structural divert override AND reduces
+        # to `pick_waypoint` exactly when memory is empty (PR #113), so a DREAM run's
+        # first episode -- and every step of a run whose `M^L` never fills -- picks what
+        # the pre-DREAM agent picks, by construction rather than by a branch here.
+        retrieved, weights = plan
+        scored = pick_plan(kept, retrieved, weights=weights)
     return scored.candidate.position, scored.candidate.source, counters
 
 
@@ -877,6 +903,7 @@ def run_episode(
     clap_encoder: Optional[Any] = None,
     calibration: Optional[CalibrationResult] = None,
     memory: Optional[MemoryContext] = None,
+    dream: Optional[DreamContext] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> EpisodeResult:
     """One mission: the primary find-task, the interrupt, the detour, the resume.
@@ -934,6 +961,22 @@ def run_episode(
             "a memory arm was passed ({}) but no CLAP encoder; the semantic store is "
             "queried with an audio embedding and there is nothing here to make one, so "
             "the prior would silently never fire".format(memory.condition)
+        )
+
+    if dream is not None and clap_encoder is None:
+        # The same wiring mistake as the one above, one equation earlier. `z^u_t` (eq. 6)
+        # is a CLAP embedding of the heard signal, and without an encoder every `M^S`
+        # entry would be half a vector -- or, worse, a constant one, which would make
+        # every `h^av` in `M^E` differ only in its visual half and `omega_t` a function of
+        # the camera alone. Refused here rather than discovered in a readout.
+        raise ValueError(
+            "a DREAM context was passed but no CLAP encoder; f_u (eq. 6) has nothing to "
+            "encode the heard signal with, so every z^av would be half a vector"
+        )
+    if dream is not None and not dream.is_live:
+        raise ValueError(
+            "a DREAM context was passed with no CLIP encoder; f_v (eq. 6) is the other "
+            "half of z^av and there is nothing here to make one"
         )
 
     goal_positions = [view_point.position for view_point in episode.view_points()]
@@ -1101,6 +1144,13 @@ def run_episode(
     stopped = False
     collided = False  # no action has been taken yet, so nothing has been hit
     wall_clock_0 = time.perf_counter()
+    # `M^S` is reset per episode (the paper's one structural guarantee for it), so the
+    # state is built here and nowhere else. `None` when no DREAM context was passed, and
+    # every `dream is None` branch below is byte-identical to the pre-DREAM run.
+    dream_state = dream_begin_episode(dream) if dream is not None else None
+    dream_seconds: List[float] = []
+    dream_retrieved: Optional[RetrievedContext] = None
+    prev_action: Optional[str] = None
 
     for step in range(int(cfg.max_steps)):
         audio_t0 = time.perf_counter()
@@ -1380,6 +1430,36 @@ def run_episode(
         # way the oracle arm names the source, and the follower routes to it.
         # `realizable_action` survives on the decision as the diagnostic of what the cue
         # said, and is no longer the thing that moves the agent.
+        if dream_state is not None and dream is not None:
+            # THE ORDER IS FORCED. `q_t` (eq. 19) is built from `M^S_t`, which includes
+            # THIS step, so the push has to precede the query; and the belief `U_j` reads
+            # is the controller's, which is only known once `decision` exists. That puts
+            # this block exactly between the controller and the steering, and nowhere
+            # else in the step would satisfy both.
+            #
+            # `decision.investigate_waypoint or investigate_probe` and NOT the
+            # memory-overridden target below: see `task/dream.py`'s docstring -- the
+            # override fires once per episode, so feeding it to `U_j` would put a single
+            # large revision in whichever segment held it, in every memory-arm episode.
+            dream_belief = decision.investigate_waypoint or decision.investigate_probe
+            dream_step = dream_observe(
+                dream_state,
+                dream,
+                frame=observation.get("rgb"),
+                # The SAME `audio_embedding` path the semantic store is written and
+                # queried through, over THIS step's heard signal rather than the onset
+                # clip. One path, for the reason that function's docstring gives.
+                audio=audio_embedding(
+                    *heard_clip_for_clap(cue, cfg.audio.sample_rate), clap_encoder
+                ),
+                pose=pose,
+                prev_action=prev_action,
+                belief=dream_belief,
+            )
+            dream_state = dream_step.episode
+            dream_retrieved = dream_step.context
+            dream_seconds.append(float(dream_step.seconds))
+
         action: Optional[str] = None
         if decision.mode is NavMode.COMPLETE:
             # The primary STOP, which is a task decision and never reaches the simulator
@@ -1438,6 +1518,11 @@ def run_episode(
                 geodesic=geodesic,
                 planner=cfg.planner,
                 divert=divert,
+                plan=(
+                    None
+                    if dream is None or dream_retrieved is None
+                    else (dream_retrieved, dream.knobs.plan_weights)
+                ),
             )
             for key, value in step_counters.items():
                 counters[key] = counters.get(key, 0) + int(value)
@@ -1493,6 +1578,11 @@ def run_episode(
                 realizable_action=decision.realizable_action,
             )
         )
+        # `a_{t-1}` for the NEXT step's `e_t` (eq. 5). Set here rather than beside the
+        # action so it is the action actually RECORDED -- `_steer` can return `None`, and
+        # a step that took no action must carry `None` forward rather than repeating the
+        # last one it managed.
+        prev_action = action
 
         if state.mode is NavMode.COMPLETE:
             stopped = True
@@ -1844,6 +1934,55 @@ def run_episode(
         # a re-measurement what the declined ones scored.
         metrics["memory_vote_confidence"] = float(memory_vote[1])
 
+    grown_memory: Optional[LongTermMemory] = None
+    if dream is not None and dream_state is not None:
+        # THE COST NOTHING ELSE MEASURES. Criterion 7 audits `audio_render_s`, and `f_v`
+        # and `f_u` sit outside that bracket -- so without these three numbers a DREAM run
+        # could double its per-step cost with every criterion green. Written whenever a
+        # DREAM context ran, including when it retained nothing.
+        if dream_seconds:
+            metrics["dream_step_s_mean"] = float(
+                sum(dream_seconds) / len(dream_seconds)
+            )
+            metrics["dream_step_s_worst"] = float(max(dream_seconds))
+            metrics["dream_step_s_total"] = float(sum(dream_seconds))
+        # `final_gap_m` prefers the geodesic and falls back to the straight line, which
+        # always exists. The geodesic is ABSENT exactly when the final pose has no route
+        # to the source, and "no route" is not "distance zero" -- writing 0.0 there would
+        # tell `M^E` the agent arrived.
+        if dtg_source_final is not None:
+            final_gap = float(dtg_source_final)
+        elif math.isfinite(min_d2source):
+            final_gap = float(min_d2source)
+        else:
+            final_gap = float(final_pose.position.horizontal_distance_to(source))
+        grown_memory, importance_scores = dream_consolidate_episode(
+            dream_state,
+            dream,
+            sound_concept=str(anomaly_episode.anomaly_class),
+            target_concept=str(anomaly_episode.source.anomaly_object),
+            # `None`, and it would be `None` anyway: the labeller these runs use is
+            # `NullRoomLabeler`, which always abstains (`ExperienceEntry.room_concept`
+            # has the account). Wiring a labeller that answers is a separate change, and
+            # until one exists this axis of `G` is VISIBLY rather than quietly flat.
+            room_concept=None,
+            reached=source_reached_step is not None,
+            final_gap_m=final_gap,
+        )
+        metrics["dream_tau_steps"] = float(len(dream_state))
+        metrics["dream_segments_scored"] = float(len(importance_scores))
+        if importance_scores:
+            metrics["dream_importance_max"] = float(max(importance_scores))
+            metrics["dream_importance_min"] = float(min(importance_scores))
+        metrics["dream_experience_rows"] = float(len(grown_memory.experience))
+        metrics["dream_pattern_rows"] = float(len(grown_memory.pattern))
+        # How many rows THIS episode added, which is the number that says whether `eta`
+        # is doing anything -- a run where it is always 0 retained nothing all night.
+        metrics["dream_rows_added"] = float(
+            len(grown_memory.experience) - len(dream.memory.experience)
+        )
+        metrics.update({name: value for name, value in dream.knobs.as_metrics()})
+
     audit = EpisodeAudit(
         episode_index=int(index),
         scene_id=episode.scene_id,
@@ -1908,7 +2047,7 @@ def run_episode(
         steps=tuple(steps),
         metrics=metrics,
     )
-    return EpisodeResult(report=report, audit=audit)
+    return EpisodeResult(report=report, audit=audit, dream_memory=grown_memory)
 
 
 def _steer(
@@ -1921,6 +2060,7 @@ def _steer(
     geodesic: Callable[[Xyz, Xyz], Optional[float]],
     planner: PlannerConfig,
     divert: Optional[Candidate],
+    plan: Optional[Tuple[RetrievedContext, PlanWeights]] = None,
 ) -> Tuple[Optional[Xyz], Optional[str], Dict[str, int]]:
     """The next action toward a waypoint, re-proposing once if the current one is spent.
 
@@ -1945,6 +2085,7 @@ def _steer(
                 geodesic=geodesic,
                 planner=planner,
                 divert=divert,
+                plan=plan,
             )
         try:
             action = follow(waypoint)
@@ -2035,6 +2176,7 @@ def run(
     memory_prior_stores: Optional[Tuple[SemanticStore, EpisodicStore]] = None,
     memory_k: int = 5,
     memory_min_confidence: Optional[float] = None,
+    dream_knobs: Optional[DreamKnobs] = None,
 ) -> RunSummary:
     """Assert the environment, build the dataset, run the episodes, write the artefacts.
 
@@ -2061,8 +2203,12 @@ def run(
     """
     say = progress if progress is not None else print
 
-    say("env_check: probing (clap={})".format(cfg.clap))
-    env = assert_env(clap=cfg.clap)
+    # A DREAM run needs BOTH encoders, so it needs both probes. `--clip` was built in
+    # PR #114 and this is its first caller: a staged model nothing probes is the shape
+    # ticket 13 is about, and so is a probe nothing calls.
+    want_clip = dream_knobs is not None
+    say("env_check: probing (clap={}, clip={})".format(cfg.clap, want_clip))
+    env = assert_env(clap=cfg.clap, clip=want_clip)
     say(env.summary())
 
     split_dir = find_split_dir(cfg.split, root=cfg.data_root)
@@ -2203,6 +2349,29 @@ def run(
         clap_encoder = load_clap_encoder()
         say("CLAP: loaded")
 
+    dream: Optional[DreamContext] = None
+    if dream_knobs is not None:
+        if not cfg.clap:
+            # Refused here rather than inside the episode, for the reason `env_check`
+            # runs before the first step at all: a run that cannot encode `z^u` would
+            # produce a whole night of episodes whose `M^S` entries are half a vector,
+            # and the readout would look like a result.
+            raise ValueError(
+                "a DREAM run needs --clap: f_u (eq. 6) is the CLAP embedding of the "
+                "heard signal, and without it every z^av would be half a vector"
+            )
+        from earshot.task.models import load_clip_encoder
+
+        # `M^L` starts EMPTY and is never seeded from a prior pass. That is the design:
+        # DREAM's claim is that an agent accumulates its own experience across episodes,
+        # so a memory handed to it at step zero would be measuring the prior pass instead.
+        # `M^K` -- the one level a prior pass could fill -- stays empty here too, and
+        # wiring the matrix's `SemanticStore` into it is a separate, arguable change.
+        dream = DreamContext(
+            knobs=dream_knobs, memory=empty_memory(), clip_encoder=load_clip_encoder()
+        )
+        say("CLIP: loaded — DREAM is on, M^L starts empty")
+
     write_env_report(
         cfg.run_dir,
         dict(env.as_dict(), run_config=cfg.as_dict(), scene=dataset.scene_label),
@@ -2267,8 +2436,20 @@ def run(
                 clap_encoder=clap_encoder,
                 calibration=calibration,
                 memory=memory,
+                dream=dream,
                 progress=say,
             )
+            if dream is not None and result.dream_memory is not None:
+                # THE MEMORY GROWS HERE AND NOWHERE ELSE. `run_episode` returns the new
+                # `M^L` rather than mutating one, so the context each episode was handed
+                # is exactly the memory that episode's retrievals were made against --
+                # which is the only state those retrievals can be reproduced against
+                # afterwards. Rebinding here is what makes the run LIFELONG rather than
+                # a sequence of independent episodes.
+                dream = dream.with_memory(result.dream_memory)
+                say("  M^L: {} experience row(s), {} pattern(s)".format(
+                    len(dream.memory.experience), len(dream.memory.pattern)
+                ))
             write_episode(
                 cfg.run_dir,
                 index,
