@@ -79,6 +79,7 @@ __all__ = [
     "observe",
     "consolidate_episode",
     "empty_memory",
+    "key_spread",
 ]
 
 
@@ -140,6 +141,34 @@ class DreamKnobs:
             ("dream_lambda_memory", float(self.plan_weights.memory)),
             ("dream_lambda_feasibility", float(self.plan_weights.feasibility)),
         )
+
+
+def key_spread(memory: LongTermMemory) -> Optional[Tuple[float, float, float]]:
+    """`(min, mean, max)` pairwise cosine over `M^E`'s keys, or `None` below two rows.
+
+    **THE PRECONDITION `omega_t` NEEDS, AND THE BOX SAID IT MAY NOT HOLD.** The first real
+    measurement put ten `M^E` keys from one walk at 0.909-0.989 cosine of each other, and
+    `omega^E` was flat at 0.4775-0.5055 as a direct consequence: a retrieval cannot
+    discriminate between keys that are all the same key. `memory/retrieve.py`'s
+    `test_a_pattern_over_near_identical_experiences_carries_no_information` predicted
+    exactly that shape, and this is the number that says whether a real sweep escapes it.
+
+    Lives here rather than in `runner.py` because that module imports no numpy on purpose
+    (its own comment at the `Any` annotations says so), and a pairwise cosine is not worth
+    changing that for.
+
+    `None` below two rows: one key has no pairwise anything, and reporting 1.0 for it
+    would read as maximal degeneracy rather than as no measurement.
+    """
+    keys = memory.experience.keys
+    if len(keys) < 2:
+        return None
+    cosines = [
+        float(np.dot(keys[a], keys[b]))
+        for a in range(len(keys))
+        for b in range(a + 1, len(keys))
+    ]
+    return (min(cosines), sum(cosines) / len(cosines), max(cosines))
 
 
 def empty_memory() -> LongTermMemory:

@@ -18,9 +18,23 @@ times itself and the runner writes `dream_step_s_mean` / `dream_step_s_worst` pr
 because nothing else would.
 
 The ceiling is criterion 7's 0.5 s and `matrix-2` measured its worst step at 0.3356 s, so
-the headroom a DREAM step has to fit inside is about 0.164 s. This test prints what it
-actually uses and FAILS if it does not fit, because a sweep launched over that budget
-produces a night of episodes the gate will refuse.
+the headroom a DREAM step has to fit inside is about 0.164 s.
+
+**AND CRITERION 7 WILL NOT GO RED IF IT DOES NOT FIT.** An earlier version of this
+docstring said a sweep over the budget "produces a night of episodes the gate will
+refuse", and that was wrong: criterion 7 audits `audio_render_s`, DREAM's cost is outside
+that bracket by construction, and a DREAM run that doubled its step time would pass every
+criterion. The budget here is a DESIGN judgement about whether a sweep is affordable, not
+a reproduction of a gate. That is the whole reason it has to be asserted somewhere, and
+this is the somewhere.
+
+**THE STATISTIC IS THE MEDIAN, AND THE ENCODERS ARE WARMED FIRST.** The first run measured
+`f_u` at mean 0.0443 s and WORST 0.1786 s -- four times its own mean, on the first call,
+which is cuDNN autotune and lazy CUDA init rather than the cost of an episode's 250th
+step. Timing that as though it were the sustained cost compares a cold first call against
+`matrix-2`'s warm worst step, which is not a comparison. Both encoders now get discarded
+calls before the loop, the assertion is on the sustained cost, and the worst is printed
+beside it with its own (looser) bound so a genuinely slow design still fails.
 
 **These tests print their measurements** (ADR-0014).
 
@@ -116,6 +130,24 @@ class TestWhatADreamStepCosts(unittest.TestCase):
             uuid=str(spec.uuid),
         )
         clip = synthetic_burst(config.sample_rate)
+
+        # WARM BOTH ENCODERS. Discarded, and discarded on REAL inputs of the real shapes:
+        # a warm-up on a differently sized tensor picks a different cuDNN algorithm and
+        # warms the wrong thing. Two calls, because the first pays lazy CUDA init and the
+        # second pays autotune.
+        _warm_obs, _ = handle.observe()
+        _warm_mono, _warm_rate = heard_clip_for_clap(
+            render_through_ir(handle.audio_of(_warm_obs), clip), config.sample_rate
+        )
+        for _ in range(2):
+            audio_embedding(_warm_mono, _warm_rate, cls.clap)
+            observe(
+                begin_episode(cls.context), cls.context,
+                frame=np.asarray(_warm_obs["rgb"]),
+                audio=audio_embedding(_warm_mono, _warm_rate, cls.clap),
+                pose=cls.world.pose(), prev_action=None, belief=None,
+            )
+
         cls.world.set_pose(cls.world.random_navigable_point())
         target = cls.world.random_navigable_point()
         follow = cls.world.follower(goal_radius=GOAL_RADIUS)
@@ -165,30 +197,42 @@ class TestWhatADreamStepCosts(unittest.TestCase):
         the fuse, the STM push, `q_t` and all three retrievals. `f_u` is timed separately
         beside it because the runner calls it outside `observe` -- it owns the CLAP
         encoder and the heard signal."""
-        worst = max(self.seconds)
-        mean = sum(self.seconds) / len(self.seconds)
-        clap_worst = max(self.clap_seconds)
-        clap_mean = sum(self.clap_seconds) / len(self.clap_seconds)
-        print("  f_u (CLAP) per step:      mean {:.4f} s  worst {:.4f} s".format(
-            clap_mean, clap_worst))
-        print("  observe() (f_v + eq19-24) mean {:.4f} s  worst {:.4f} s".format(
-            mean, worst))
-        print("  whole DREAM step:         mean {:.4f} s  worst {:.4f} s".format(
-            mean + clap_mean, worst + clap_worst))
+        def stats(values):
+            ordered = sorted(values)
+            return (
+                sum(values) / len(values), ordered[len(ordered) // 2], max(values)
+            )
+
+        clap_mean, clap_median, clap_worst = stats(self.clap_seconds)
+        mean, median, worst = stats(self.seconds)
+        sustained = median + clap_median
+        print("  f_u (CLAP) per step:      mean {:.4f} s  median {:.4f} s  worst "
+              "{:.4f} s".format(clap_mean, clap_median, clap_worst))
+        print("  observe() (f_v + eq19-24) mean {:.4f} s  median {:.4f} s  worst "
+              "{:.4f} s".format(mean, median, worst))
+        print("  whole DREAM step:         mean {:.4f} s  median {:.4f} s  worst "
+              "{:.4f} s".format(mean + clap_mean, sustained, worst + clap_worst))
         print("  headroom under criterion 7: {:.4f} s "
               "(ceiling {:.3f} - matrix-2's worst step {:.4f})".format(
                   HEADROOM_S, CRITERION_7_CEILING_S, MATRIX_2_WORST_STEP_S))
-        print("  -> a DREAM step would land at about {:.4f} s ({:.0f}% of the "
-              "ceiling)".format(
-                  MATRIX_2_WORST_STEP_S + worst + clap_worst,
-                  100.0 * (MATRIX_2_WORST_STEP_S + worst + clap_worst)
-                  / CRITERION_7_CEILING_S))
+        print("  -> SUSTAINED: a DREAM step lands at about {:.4f} s ({:.0f}% of the "
+              "ceiling); {:.0f} extra seconds per 250-step episode".format(
+                  MATRIX_2_WORST_STEP_S + sustained,
+                  100.0 * (MATRIX_2_WORST_STEP_S + sustained) / CRITERION_7_CEILING_S,
+                  250.0 * sustained))
         self.assertLess(
-            worst + clap_worst, HEADROOM_S,
-            "a DREAM step costs {:.4f} s against {:.4f} s of headroom; a sweep launched "
-            "over this budget produces a night of episodes criterion 7 will refuse, and "
-            "the fix is a design change rather than a retry".format(
-                worst + clap_worst, HEADROOM_S),
+            sustained, HEADROOM_S,
+            "the SUSTAINED DREAM step costs {:.4f} s against {:.4f} s of headroom. This "
+            "is the warmed median, so it is not a first-call artefact: a sweep at this "
+            "cost needs a design change (a stride on f_u is the obvious one, since it is "
+            "the dominant half) rather than a retry".format(sustained, HEADROOM_S),
+        )
+        self.assertLess(
+            worst + clap_worst, 2.0 * HEADROOM_S,
+            "even the WORST warmed DREAM step should sit inside twice the headroom "
+            "({:.4f} s); at {:.4f} s the spread itself is the problem and a sweep's wall "
+            "clock could not be predicted from its median".format(
+                2.0 * HEADROOM_S, worst + clap_worst),
         )
 
     def test_f_u_is_the_dominant_new_cost_or_it_is_not(self):

@@ -133,6 +133,7 @@ from earshot.task.dream import (
     begin_episode as dream_begin_episode,
     consolidate_episode as dream_consolidate_episode,
     empty_memory,
+    key_spread as dream_key_spread,
     observe as dream_observe,
 )
 from earshot.task.memory_prior import (
@@ -1149,6 +1150,18 @@ def run_episode(
     # every `dream is None` branch below is byte-identical to the pre-DREAM run.
     dream_state = dream_begin_episode(dream) if dream is not None else None
     dream_seconds: List[float] = []
+    # `omega_t` (eq. 23) PER STEP. The paper's central claim is about how this moves, and
+    # until now it reached no artefact at all -- the runner wrote what DREAM COST and not
+    # what it DECIDED. The box measured omega^E at 0.4775-0.5055 over a 24-step walk
+    # against a 10-row M^E whose keys were 0.909-0.989 cosine of each other, which is
+    # `test_a_pattern_over_near_identical_experiences_carries_no_information` happening
+    # for real. Whether that survives an M^E built from many episodes across many scenes
+    # is the question a sweep exists to answer, and it cannot be asked of a record that
+    # does not carry the number.
+    dream_omega_e: List[float] = []
+    dream_omega_p: List[float] = []
+    dream_omega_k: List[float] = []
+    dream_informed_steps = 0
     dream_retrieved: Optional[RetrievedContext] = None
     prev_action: Optional[str] = None
 
@@ -1459,6 +1472,11 @@ def run_episode(
             dream_state = dream_step.episode
             dream_retrieved = dream_step.context
             dream_seconds.append(float(dream_step.seconds))
+            if dream_retrieved.weights is not None:
+                dream_informed_steps += 1
+                dream_omega_e.append(float(dream_retrieved.weights.experience))
+                dream_omega_p.append(float(dream_retrieved.weights.pattern))
+                dream_omega_k.append(float(dream_retrieved.weights.knowledge))
 
         action: Optional[str] = None
         if decision.mode is NavMode.COMPLETE:
@@ -1969,11 +1987,36 @@ def run_episode(
             reached=source_reached_step is not None,
             final_gap_m=final_gap,
         )
+        # THE HYPOTHESIS'S OWN QUANTITY. `dream_informed_steps` is the denominator and
+        # is written even when it is 0 -- "omega was never defined" and "omega was flat"
+        # are different findings and a missing key cannot tell them apart.
+        metrics["dream_informed_steps"] = float(dream_informed_steps)
+        if dream_omega_e:
+            ordered = sorted(dream_omega_e)
+            metrics["dream_omega_e_mean"] = float(sum(dream_omega_e) / len(dream_omega_e))
+            metrics["dream_omega_e_min"] = float(min(dream_omega_e))
+            metrics["dream_omega_e_max"] = float(max(dream_omega_e))
+            # The SPREAD is the number that says whether the mechanism did anything. A
+            # mean of 0.5 is what a live omega and a dead one both report.
+            metrics["dream_omega_e_spread"] = float(max(dream_omega_e) - min(dream_omega_e))
+            metrics["dream_omega_e_median"] = float(ordered[len(ordered) // 2])
+            metrics["dream_omega_p_mean"] = float(sum(dream_omega_p) / len(dream_omega_p))
+            metrics["dream_omega_k_mean"] = float(sum(dream_omega_k) / len(dream_omega_k))
         metrics["dream_tau_steps"] = float(len(dream_state))
         metrics["dream_segments_scored"] = float(len(importance_scores))
         if importance_scores:
             metrics["dream_importance_max"] = float(max(importance_scores))
             metrics["dream_importance_min"] = float(min(importance_scores))
+        # HOW MUCH OF THE KEY SPACE `M^E` ACTUALLY USES. The box measured 0.909-0.989
+        # over ten rows from one walk and omega was flat as a consequence -- a retrieval
+        # cannot discriminate between keys that are all the same key. Measured on the
+        # memory as it stood at the START of this episode, which is the memory this
+        # episode's retrievals were made against.
+        _spread = dream_key_spread(dream.memory)
+        if _spread is not None:
+            metrics["dream_me_cosine_min"] = float(_spread[0])
+            metrics["dream_me_cosine_mean"] = float(_spread[1])
+            metrics["dream_me_cosine_max"] = float(_spread[2])
         metrics["dream_experience_rows"] = float(len(grown_memory.experience))
         metrics["dream_pattern_rows"] = float(len(grown_memory.pattern))
         # How many rows THIS episode added, which is the number that says whether `eta`
