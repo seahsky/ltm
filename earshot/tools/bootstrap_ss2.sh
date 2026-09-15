@@ -464,10 +464,16 @@ PYTHONPATH="$REPO_ROOT" python -m earshot.env_check --provenance \
 #
 # SS2_LOAD_CLAP adds the CLAP instantiation (153.5M params, ~0.7 GB VRAM), which is
 # requested rather than required for the same reason ticket 17 gave: it is paid only by
-# runs that use it.
+# runs that use it. SS2_LOAD_CLIP does the same for CLIP (151M params), DREAM's `f_v`.
+#
+# The two flags are SEPARATE rather than one "load the models" switch, because a run can
+# want either alone: the ADR-0018 matrix needs CLAP and no CLIP, and a vision-only probe
+# of `vlm/encode.py` needs the reverse. One flag would make a CLIP-only run pay for CLAP
+# and, worse, report green about a model it never constructed.
 banner "[8/9] env_check --strict — the runtime assertion"
 PYTHONPATH="$REPO_ROOT" python -m earshot.env_check --strict \
     ${SS2_LOAD_CLAP:+--clap} \
+    ${SS2_LOAD_CLIP:+--clip} \
     | tee "$OUT_DIR/env_check.log"
 ENV_CHECK_RC=${PIPESTATUS[0]}
 if [ "$ENV_CHECK_RC" -ne 0 ]; then

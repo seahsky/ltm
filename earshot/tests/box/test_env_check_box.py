@@ -16,7 +16,9 @@ cleanly the entire time it was a `DummyObject`. Every probe here does the thing.
 **Both arms wherever a forced failure exists** (ADR-0014). Two of the three have one:
 
 - the enum probe fails against a member name that is not there;
-- the CLAP probe fails against a model id that does not resolve.
+- the CLAP probe fails against a model id that does not resolve;
+- the CLIP probe fails the same way, and only because `_clip_source` checks
+  IDENTITY as well as completeness -- both checkpoints are staged side by side.
 
 The GPU allocation probe **has no forced-failure arm**, and that is the permanent gap
 ticket 19 disclosed rather than papered over: you cannot uninstall CUDA for one test.
@@ -37,12 +39,14 @@ import unittest
 import earshot  # noqa: F401
 from earshot.env_check import (
     CLAP_PROBE,
+    CLIP_PROBE,
     REQUIRED_PROBES,
     ProbeStatus,
     assert_env,
     expected_probes,
     judge,
     probe_clap_instantiable,
+    probe_clip_instantiable,
     probe_habitat_sim_audio_enum_member,
     probe_numpy_below_1_24,
     probe_torch_cuda_allocation,
@@ -157,6 +161,65 @@ class TestClapIsInstantiableWhenRequested(unittest.TestCase):
         print(report.summary())
         self.assertTrue(report.green)
         self.assertIn(CLAP_PROBE, {probe.name for probe in report.probes})
+
+
+class TestClipIsInstantiableWhenRequested(unittest.TestCase):
+    """DREAM's `f_v` (eq. 6) has the same shape of assertion as CLAP's `f_u`.
+
+    Requested rather than required: 151 M params, paid only by runs that use CLIP. It
+    probes the VISION tower, because `vlm/encode.py` exposes `encode_image` and
+    deliberately no text path -- probing the text side would construct the model and then
+    assert a capability nothing uses.
+
+    **What this does NOT prove:** that the checkpoint is really CLIP rather than a
+    randomly initialised model of the same shape. A zeroed pixel tensor cannot tell them
+    apart, and PR #109 corrected exactly that overclaim once already. The arm that does
+    prove it is `test_agent_stm_box.py`'s zero-shot text separation, which needs rendered
+    frames and cannot live in a probe.
+    """
+
+    def test_clip_loads_and_produces_a_finite_image_feature(self):
+        probe = _show(probe_clip_instantiable())
+        self.assertIs(probe.status, ProbeStatus.PASS, probe.detail)
+
+    def test_the_clip_probe_fires_on_a_model_that_does_not_resolve(self):
+        """The forced-failure arm. It is only meaningful because `_clip_source` checks
+        IDENTITY as well as completeness -- with CLAP's checkpoint staged right beside
+        CLIP's, a resolver that only checked for a complete directory would hand this
+        bogus id a real model and report PASS."""
+        probe = _show(probe_clip_instantiable("earshot/definitely-not-a-model"))
+        self.assertIs(probe.status, ProbeStatus.FAIL, probe.detail)
+
+    def test_a_forced_clip_failure_turns_the_whole_report_red(self):
+        probes = list(run_probes())
+        probes.append(probe_clip_instantiable("earshot/definitely-not-a-model"))
+        report = judge(probes, expected_probes(clip=True))
+        print(report.summary())
+        self.assertFalse(report.green)
+        self.assertIn(CLIP_PROBE, report.failed)
+
+    def test_assert_env_with_clip_is_green(self):
+        report = assert_env(clip=True)
+        print(report.summary())
+        self.assertTrue(report.green)
+        self.assertIn(CLIP_PROBE, {probe.name for probe in report.probes})
+
+    def test_both_models_can_be_probed_in_one_report(self):
+        """What a DREAM run will actually ask for. Prints the combined parameter count,
+        which is the VRAM this adds over a CLAP-only run."""
+        report = assert_env(clap=True, clip=True)
+        print(report.summary())
+        self.assertTrue(report.green)
+        names = {probe.name for probe in report.probes}
+        self.assertIn(CLAP_PROBE, names)
+        self.assertIn(CLIP_PROBE, names)
+        total = sum(
+            int(dict(probe.measured).get("n_params", 0))
+            for probe in report.probes
+            if probe.name in (CLAP_PROBE, CLIP_PROBE)
+        )
+        print("  CLAP + CLIP together: {:,} parameters".format(total))
+        self.assertGreater(total, 0, "neither probe reported a parameter count")
 
 
 if __name__ == "__main__":
