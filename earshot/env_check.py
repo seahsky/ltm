@@ -65,6 +65,7 @@ __all__ = [
     "EnvReport",
     "REQUIRED_PROBES",
     "CLAP_PROBE",
+    "CLIP_PROBE",
     "judge",
     "run_probes",
     "assert_green",
@@ -120,19 +121,39 @@ CLAP_MODEL_ID = "laion/clap-htsat-unfused"
 # DUPLICATED, DELIBERATELY, from `task/models.py`. ADR-0013's layer graph gives this module
 # no intra-package imports at all -- "ticket 17's assertion answers to the environment, not
 # to the tree" -- so it cannot import `resolve_clap_source`. Both sites carry this comment.
-# If one moves, the box gate's `test_clap_source_agrees` fails rather than the probe and the
-# runtime quietly loading different checkpoints.
+# If one moves, `tests/mac/test_model_sources.py` fails rather than the probe and the runtime
+# quietly loading different checkpoints. That file covers CLIP's pair on the same terms, and
+# it is a MAC test -- an earlier version of this comment called it a box test, which would
+# have sent a reader looking in the wrong suite for the thing holding the duplication safe.
 CLAP_LOCAL_DIR = "models/clap-htsat-unfused"
 CLAP_STAGED_MARKER = "PROVENANCE.json"
 
+# Requested, not required, on the same terms as CLAP. DREAM's `f_v` (eq. 6) is
+# `vlm/encode.py` over this checkpoint, and `task/models.py` stages it beside CLAP's.
+CLIP_PROBE = "clip_instantiable"
 
-def _clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOCAL_DIR) -> str:
-    """The staged safetensors copy when complete AND it names this model, else the Hub id.
+# provenance: box -- the checkpoint `task/models.CLIP_MODEL_ID` names, duplicated here for
+# the same layer reason as CLAP's and covered by the same agreement test.
+CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
+CLIP_LOCAL_DIR = "models/clip-vit-base-patch32"
 
-    Mirrors `models.resolve_clap_source`, including the identity check the first version was
-    missing. Without it this function returned the staged directory for any `model_id`, so
-    `probe_clap_instantiable("earshot/definitely-not-a-model")` loaded the real checkpoint and
-    reported PASS -- the forced-failure arm below asserting nothing at all.
+
+def _staged_source(model_id: str, local_dir: str) -> str:
+    """The identity-and-completeness check both resolvers here run. Pure over the filesystem.
+
+    Extracted when CLIP arrived rather than copied, which is the move `task/models.py` made
+    for the same reason at the same moment: the identity half is INCIDENT-DRIVEN, and a
+    second copy of it is a second place for that arm to go vacuous. The first version of
+    `_clap_source` ignored `model_id` entirely and returned the staged directory whenever it
+    was complete, so `probe_clap_instantiable("earshot/definitely-not-a-model")` loaded the
+    real checkpoint and reported PASS -- the forced-failure arm asserting nothing at all.
+    Only the box gate caught it.
+
+    This file still carries its own copy of the LOGIC rather than importing
+    `models._staged_source`: ADR-0013 gives `env_check` no intra-package imports at all
+    ("ticket 17's assertion answers to the environment, not to the tree").
+    `tests/mac/test_model_sources.py` is what keeps the two copies agreeing, for CLIP as
+    well as CLAP.
     """
     import json
     import os
@@ -152,6 +173,20 @@ def _clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOCAL_DIR)
     except (ValueError, OSError):
         return model_id
     return local_dir if staged == model_id else model_id
+
+
+def _clap_source(model_id: str = CLAP_MODEL_ID, local_dir: str = CLAP_LOCAL_DIR) -> str:
+    """The staged safetensors copy when complete AND it names this model, else the Hub id.
+
+    Mirrors `models.resolve_clap_source`. See `_staged_source` for the incident behind the
+    identity check.
+    """
+    return _staged_source(model_id, local_dir)
+
+
+def _clip_source(model_id: str = CLIP_MODEL_ID, local_dir: str = CLIP_LOCAL_DIR) -> str:
+    """CLIP's twin of `_clap_source`, mirroring `models.resolve_clip_source`."""
+    return _staged_source(model_id, local_dir)
 
 
 
@@ -529,6 +564,60 @@ def probe_clap_instantiable(model_id: str = CLAP_MODEL_ID) -> Probe:
     )
 
 
+def probe_clip_instantiable(model_id: str = CLIP_MODEL_ID) -> Probe:
+    """Instantiate CLIP and read a finite IMAGE feature. CLAP's probe, for DREAM's `f_v`.
+
+    **The VISION tower, and that is the half that matters.** `vlm/encode.py` exposes
+    `encode_image` and deliberately no text path -- nothing in DREAM queries a memory with a
+    sentence -- so probing `get_text_features` here would construct the model and then assert
+    a capability nothing uses. A zeroed pixel tensor is enough: this asserts the weights load
+    and the forward pass produces numbers, not that the numbers are good. Whether the
+    checkpoint is really CLIP rather than a randomly initialised one of the same shape is a
+    different claim and is measured by `tests/box/test_agent_stm_box.py`'s zero-shot text
+    separation, which needs rendered frames and cannot live here.
+
+    Importability proves nothing, for the same reason as CLAP: ``transformers`` substitutes a
+    ``DummyObject`` when its torch backend is disabled, and that object imports cleanly and
+    raises only when constructed. So the probe constructs.
+
+    Requested rather than required -- 151 M params, paid only by runs that use CLIP.
+    ``model_id`` is a parameter so the box suite can force the failure arm (ADR-0014: a
+    detector ships both arms) by pointing it at nothing.
+    """
+    try:
+        import torch
+        from transformers import CLIPModel
+    except Exception as exc:  # pragma: no cover - exercised on a broken env only
+        return Probe(
+            CLIP_PROBE, ProbeStatus.NOT_RUN, "transformers/torch did not import: {}".format(exc)
+        )
+    source = _clip_source(model_id)
+    try:
+        model = CLIPModel.from_pretrained(source)
+        model.eval()
+        n_params = sum(int(p.numel()) for p in model.parameters())
+        size = int(model.config.vision_config.image_size)
+        with torch.no_grad():
+            features = model.get_image_features(
+                pixel_values=torch.zeros((1, 3, size, size), dtype=torch.float32)
+            )
+        finite = bool(torch.isfinite(features).all().item())
+    except Exception as exc:
+        return Probe(
+            CLIP_PROBE,
+            ProbeStatus.FAIL,
+            "CLIPModel could not be instantiated or produced no logit: {}".format(exc),
+        )
+    return Probe(
+        CLIP_PROBE,
+        ProbeStatus.PASS if finite else ProbeStatus.FAIL,
+        "CLIPModel {} produced a {}finite image feature vector".format(
+            model_id, "" if finite else "NON-"
+        ),
+        _measured(model=model_id, n_params=n_params, shape=tuple(features.shape), finite=finite),
+    )
+
+
 def probe_pinned_versions() -> Probe:
     """Is this the `ss2` env at all, or merely *an* env that can import the same names?
 
@@ -609,8 +698,8 @@ def probe_pinned_versions() -> Probe:
     )
 
 
-def run_probes(*, clap: bool = False) -> List[Probe]:
-    """Every required probe, plus CLAP when requested. The box half of the split."""
+def run_probes(*, clap: bool = False, clip: bool = False) -> List[Probe]:
+    """Every required probe, plus CLAP and CLIP when requested. The box half of the split."""
     probes = [
         probe_numpy_below_1_24(),
         probe_torch_min_version(),
@@ -620,11 +709,17 @@ def run_probes(*, clap: bool = False) -> List[Probe]:
     ]
     if clap:
         probes.append(probe_clap_instantiable())
+    if clip:
+        probes.append(probe_clip_instantiable())
     return probes
 
 
-def expected_probes(*, clap: bool = False) -> FrozenSet[str]:
-    return REQUIRED_PROBES | ({CLAP_PROBE} if clap else frozenset())
+def expected_probes(*, clap: bool = False, clip: bool = False) -> FrozenSet[str]:
+    return (
+        REQUIRED_PROBES
+        | ({CLAP_PROBE} if clap else frozenset())
+        | ({CLIP_PROBE} if clip else frozenset())
+    )
 
 
 def assert_green(report: EnvReport) -> EnvReport:
@@ -643,13 +738,18 @@ def assert_green(report: EnvReport) -> EnvReport:
     return report
 
 
-def assert_env(*, clap: bool = False) -> EnvReport:
+def assert_env(*, clap: bool = False, clip: bool = False) -> EnvReport:
     """Run the probes, judge them, raise if the env cannot run an episode.
 
     Returns the report so the caller can record it — ``task/`` writes it as
     ``env_report.json`` through ``report/artifacts.write_env_report``.
     """
-    return assert_green(judge(run_probes(clap=clap), expected_probes(clap=clap)))
+    return assert_green(
+        judge(
+            run_probes(clap=clap, clip=clip),
+            expected_probes(clap=clap, clip=clip),
+        )
+    )
 
 
 # ----------------------------------------------------------------------
@@ -783,6 +883,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="also instantiate CLAP and read a logit (153.5M params, ~0.7 GB VRAM)",
     )
+    parser.add_argument(
+        "--clip",
+        action="store_true",
+        help="also instantiate CLIP and read an image feature (151M params)",
+    )
     parser.add_argument("--json", action="store_true", help="emit the report as JSON")
     parser.add_argument(
         "--provenance",
@@ -812,7 +917,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(comparison.summary()) if args.json else comparison.summary())
         return 0 if comparison.ok or not args.strict else 1
 
-    report = judge(run_probes(clap=args.clap), expected_probes(clap=args.clap))
+    report = judge(
+        run_probes(clap=args.clap, clip=args.clip),
+        expected_probes(clap=args.clap, clip=args.clip),
+    )
     print(json.dumps(report.as_dict(), indent=2, sort_keys=True) if args.json else report.summary())
     return 0 if report.green or not args.strict else 1
 

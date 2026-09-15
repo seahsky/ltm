@@ -26,6 +26,7 @@ from _interpreter import assert_interpreter  # noqa: F401
 
 from earshot.env_check import (
     CLAP_PROBE,
+    CLIP_PROBE,
     CONSTRAINTS_PATH,
     PINNED_PROBE,
     REQUIRED_PROBES,
@@ -105,6 +106,95 @@ class TestTheJudgeIsWhereTicket13sBugWouldHaveDied(unittest.TestCase):
         report = judge(_passing(), expected_probes(clap=True))
         self.assertFalse(report.green)
         self.assertEqual(report.missing, (CLAP_PROBE,))
+
+    def test_clip_is_expected_only_when_requested(self):
+        self.assertNotIn(CLIP_PROBE, expected_probes())
+        self.assertNotIn(CLIP_PROBE, expected_probes(clap=True))
+        self.assertIn(CLIP_PROBE, expected_probes(clip=True))
+
+    def test_requesting_clip_and_not_emitting_it_is_red(self):
+        report = judge(_passing(), expected_probes(clip=True))
+        self.assertFalse(report.green)
+        self.assertEqual(report.missing, (CLIP_PROBE,))
+
+    def test_the_two_optional_probes_are_independent(self):
+        """**THE ARM A SECOND OPTIONAL PROBE MAKES POSSIBLE.** With one flag there was
+        nothing to get wrong; with two, an `expected_probes` that returned CLAP's name for
+        either flag -- or that let one flag satisfy the other's expectation -- would make a
+        `--clip`-only run green while CLIP was never probed."""
+        self.assertEqual(
+            expected_probes(clap=True, clip=True),
+            REQUIRED_PROBES | {CLAP_PROBE, CLIP_PROBE},
+        )
+        clap_only = judge(
+            _passing() + [Probe(CLAP_PROBE, ProbeStatus.PASS, "…")],
+            expected_probes(clip=True),
+        )
+        self.assertFalse(
+            clap_only.green, "a CLAP probe satisfied a request for the CLIP probe"
+        )
+        self.assertEqual(clap_only.missing, (CLIP_PROBE,))
+
+    def test_run_probes_emits_each_optional_probe_only_when_asked(self):
+        """Structural, not a live probe: neither model is on a Mac. This reads which
+        probe functions `run_probes` CALLS under each flag, which is the part that can be
+        wired to the wrong name."""
+        import ast
+        import pathlib
+
+        source = (
+            pathlib.Path(__file__).resolve().parents[2] / "env_check.py"
+        ).read_text(encoding="utf-8")
+        body = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef) and node.name == "run_probes"
+        )
+        guarded = {}
+        for node in ast.walk(body):
+            if not isinstance(node, ast.If) or not isinstance(node.test, ast.Name):
+                continue
+            guarded[node.test.id] = {
+                call.func.id
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            }
+        self.assertEqual(guarded.get("clap"), {"probe_clap_instantiable"})
+        self.assertEqual(guarded.get("clip"), {"probe_clip_instantiable"})
+
+    def test_assert_env_passes_both_model_flags_through(self):
+        """A flag that reaches `assert_env` and stops there is the "computed the right
+        answer and then did not use it" shape ticket 13 is about -- a caller would ask
+        for the CLIP probe, get a green report, and have probed nothing.
+
+        Structural because neither model is on a Mac: it reads the keywords `assert_env`
+        forwards, which is the part that can silently drop one.
+        """
+        import ast
+        import pathlib
+
+        source = (
+            pathlib.Path(__file__).resolve().parents[2] / "env_check.py"
+        ).read_text(encoding="utf-8")
+        body = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef) and node.name == "assert_env"
+        )
+        forwarded = {}
+        for call in ast.walk(body):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                continue
+            if call.func.id not in ("run_probes", "expected_probes"):
+                continue
+            forwarded[call.func.id] = {
+                keyword.arg: getattr(keyword.value, "id", None)
+                for keyword in call.keywords
+            }
+        self.assertEqual(forwarded.get("run_probes"), {"clap": "clap", "clip": "clip"})
+        self.assertEqual(
+            forwarded.get("expected_probes"), {"clap": "clap", "clip": "clip"}
+        )
 
     def test_the_summary_names_what_went_wrong(self):
         probes = _passing()[1:]
