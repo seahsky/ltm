@@ -3,13 +3,20 @@
 `store.py` holds two frozen tables, `SemanticStore` and `EpisodicStore`, and the pure
 filters (`without_class`, `without_scene`) that carve the four matrix cells out of them.
 `consolidate.py` is DREAM §III.D (eq. 8-13): it decides which segments of a finished
-episode are worth keeping, and it is what fills the hierarchical long-term memory the
-paper's eq. 14 defines.
+episode are worth keeping. `longterm.py` is §III.E (eq. 14-18): the three levels those
+retained segments go into, and the `G` that abstracts one level into the next.
 
-The two modules do not import each other, and the layer table still reads
-`"memory": ("types",)`. Eq. 12's novelty ranges over all three levels of `M^L`, whose row
-types differ, so `novelty` takes vectors rather than rows and needs nothing from
-`store.py`.
+`consolidate.py` imports neither of the others — eq. 12's novelty ranges over rows whose
+types differ, so it takes vectors. `longterm.py` imports `store.py`, because DREAM's `M^K`
+(eq. 18) IS `SemanticStore` rather than a second sound-to-object table, and that one edge
+is why `LAYER_IMPORTS["memory"]` reads `("memory", "types")` rather than `("types",)`.
+`audio` and `agent` are still absent from it, and those are the absences that do the work.
+
+**"Episodic" means two different things in here, so read the names carefully.**
+`store.EpisodicStore` is ADR-0018's matrix axis: where a category was literally seen on a
+prior tour, as coordinates. `longterm.ExperienceStore` is DREAM's episodic EXPERIENCE
+memory (eq. 15), which holds no coordinates at all by design. Nothing converts between
+them.
 
 Neither store nor filter reaches for `earshot.audio.vocabulary`: the whole point of the heard/
 unheard split is that the semantic store must LEARN a sound-room association rather than
