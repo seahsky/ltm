@@ -46,7 +46,10 @@ from earshot.config import (
     Localization,
     RunConfig,
 )
+from earshot.memory.consolidate import ImportanceWeights
 from earshot.memory.store import MemoryCondition
+from earshot.task.dream import DreamKnobs
+from earshot.task.plan import PlanWeights
 
 __all__ = ["build_parser", "config_from_args", "memory_kwargs_from_args", "main"]
 
@@ -238,7 +241,103 @@ def build_parser() -> argparse.ArgumentParser:
              "0.7842, but that is a fact about that run's confidences and has to be "
              "re-measured (`matrix_audit` section E) rather than carried over",
     )
+    parser.add_argument(
+        "--dream",
+        action="store_true",
+        help="run DREAM (ICRA2027_Memory eq. 4-27): short-term memory, end-of-episode "
+             "consolidation, a three-level long-term memory that GROWS across the "
+             "episodes of this run, and memory-weighted plan scoring. Needs --clap, and "
+             "EVERY --dream-* knob below: the paper values none of them, so a default "
+             "here would be a number nobody chose reaching an artefact nobody reads",
+    )
+    for flag, kind, equation in DREAM_KNOB_FLAGS:
+        parser.add_argument(
+            "--dream-{}".format(flag.replace("_", "-")),
+            type=kind,
+            default=None,
+            help="{} (eq. {}). Required with --dream.".format(flag, equation),
+        )
     return parser
+
+
+# The fourteen numbers `ICRA2027_Memory` names and does not value, as CLI flags. The
+# table drives both the parser and `dream_kwargs_from_args`, so a knob cannot reach one
+# and not the other -- which is the failure `config_from_args`'s own docstring describes
+# ("a CLI whose flags quietly stop reaching the config").
+DREAM_KNOB_FLAGS = (
+    ("stm_horizon", int, "4"),
+    ("stm_decay", float, "19"),
+    ("present_weight", float, "19"),
+    ("coherence", float, "9"),
+    ("min_segment", int, "9"),
+    ("max_segment", int, "9"),
+    ("alpha", float, "10"),
+    ("beta", float, "10"),
+    ("gamma", float, "10"),
+    ("eta", float, "13"),
+    ("min_support", int, "16"),
+    ("k_experience", int, "20"),
+    ("k_pattern", int, "21"),
+    ("k_knowledge", int, "22"),
+    ("temperature", float, "23"),
+    ("lambda_plan", float, "26"),
+    ("lambda_memory", float, "26"),
+    ("lambda_feasibility", float, "26"),
+)
+
+
+def dream_kwargs_from_args(args: argparse.Namespace) -> Dict[str, object]:
+    """The one ``run()`` DREAM keyword, from ``--dream`` plus its knobs.
+
+    ``{}`` when ``--dream`` is absent, for the reason ``memory_kwargs_from_args`` returns
+    ``{}`` on a bare invocation: a run with no DREAM flags must reach ``run()`` with no
+    DREAM keyword at all, so the audit records the absence rather than a `None` a reader
+    would have to interpret.
+
+    **EVERY KNOB IS REQUIRED AND THE ERROR NAMES ALL THE MISSING ONES AT ONCE.** Fourteen
+    flags is a lot to get right one `argparse` error at a time, and a sweep driver that
+    discovered them one failed launch after another would burn a box slot per knob.
+    """
+    if not getattr(args, "dream", False):
+        return {}
+    missing = [
+        flag for flag, _kind, _eq in DREAM_KNOB_FLAGS
+        if getattr(args, "dream_{}".format(flag), None) is None
+    ]
+    if missing:
+        raise SystemExit(
+            "--dream needs every knob; missing: {}. The paper values none of them, so "
+            "there is nothing to default to.".format(
+                " ".join("--dream-{}".format(name.replace("_", "-")) for name in missing)
+            )
+        )
+    value = {flag: getattr(args, "dream_{}".format(flag)) for flag, _k, _e in DREAM_KNOB_FLAGS}
+    return {
+        "dream_knobs": DreamKnobs(
+            stm_horizon=int(value["stm_horizon"]),
+            stm_decay=float(value["stm_decay"]),
+            present_weight=float(value["present_weight"]),
+            coherence=float(value["coherence"]),
+            min_segment=int(value["min_segment"]),
+            max_segment=int(value["max_segment"]),
+            importance=ImportanceWeights(
+                alpha=float(value["alpha"]),
+                beta=float(value["beta"]),
+                gamma=float(value["gamma"]),
+            ),
+            eta=float(value["eta"]),
+            min_support=int(value["min_support"]),
+            k_experience=int(value["k_experience"]),
+            k_pattern=int(value["k_pattern"]),
+            k_knowledge=int(value["k_knowledge"]),
+            temperature=float(value["temperature"]),
+            plan_weights=PlanWeights(
+                plan=float(value["lambda_plan"]),
+                memory=float(value["lambda_memory"]),
+                feasibility=float(value["lambda_feasibility"]),
+            ),
+        )
+    }
 
 
 def config_from_args(args: argparse.Namespace) -> RunConfig:
@@ -339,6 +438,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     config = config_from_args(args)
     memory_kwargs = memory_kwargs_from_args(args)
+    dream_kwargs = dream_kwargs_from_args(args)
 
     from earshot.task.runner import run
 
@@ -348,7 +448,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # this deliberately starts no thread and no progress bar.
         print(message, flush=True)
 
-    run(config, progress=say, **memory_kwargs)
+    run(config, progress=say, **memory_kwargs, **dream_kwargs)
     return 0
 
 
