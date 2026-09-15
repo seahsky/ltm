@@ -38,7 +38,7 @@ import unittest
 
 import numpy as np
 
-from earshot.task.dataset import available_scenes, find_scenes_dir, find_split_dir, load_scene
+from earshot.task.episodes import available_scenes, find_scenes_dir, find_split_dir, load_scene
 
 SPLIT = "val"
 PLACEMENT_SEED = 20260821
