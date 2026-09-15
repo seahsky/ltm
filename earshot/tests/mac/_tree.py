@@ -128,13 +128,19 @@ LAYER_IMPORTS: Dict[str, Tuple[str, ...]] = {
     # audio owns the sensor and never reaches for the simulator
     "audio": ("audio", "vlm", "types"),
     "agent": ("agent", "vlm", "types"),
-    # the memory stack (ADR-0018's matrix). A LEAF beside `metrics`: numpy plus the one
+    # the memory stack (ADR-0018's matrix, and DREAM's hierarchy). numpy plus the one
     # geometric type, and deliberately NOT `audio` — reading `audio.vocabulary` would
     # make the store an oracle over its own answer key (`test_audio_vocabulary.py`'s
     # `TestAnchorFence` is the enforcement; this edge is the structural half of it, since
-    # `audio.vocabulary` is not under this prefix). No self-reference either: the store
-    # is one module, so there is no intra-package edge to allow.
-    "memory": ("types",),
+    # `audio.vocabulary` is not under this prefix).
+    #
+    # The self-edge is new and narrow. It was added for `memory/longterm.py`, which holds
+    # a `store.SemanticStore` as DREAM's `M^K` (eq. 18) rather than forking a second
+    # sound-to-object table — and a fork would be two paths answering the same question
+    # with no symptom, which is the hazard `audio.clap.audio_embedding` exists to prevent.
+    # `memory/consolidate.py` needed no such edge and still has none. What does the work
+    # here is the two prefixes that are STILL absent: `audio` and `agent`.
+    "memory": ("memory", "types"),
     "report": ("report", "audio.guard", "types"),
     # the only wiring layers
     "task": _EVERYTHING,

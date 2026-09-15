@@ -37,6 +37,21 @@ from earshot.memory.store import (
 from earshot.types import Xyz
 
 
+def _memory_sources():
+    """EVERY `.py` under `memory/`, found by walking rather than by being listed.
+
+    This was a hand-written `("__init__", "store")` until `memory/` grew a third module,
+    and the second one — `consolidate.py`, added in PR #110 — went unfenced the whole
+    time with nothing red. An allowlist that has to be edited to keep working is the
+    exact failure direction `_tree.py`'s own docstring rejects for the structural
+    walkers, and the fence around the placement table is not a weaker claim than those.
+    """
+    root = _tree.PACKAGE_ROOT / "memory"
+    return sorted(
+        path for path in root.glob("*.py") if not path.name.startswith("_test")
+    )
+
+
 def _entry(sound_class, room, embedding, donor_scene="scene_a", category=None):
     # `category` defaults to one derived from the room so the existing room tests read
     # unchanged, and the category tests below pass it explicitly. It is a REQUIRED field
@@ -431,8 +446,7 @@ class TestTheStoreCannotSeeGroundTruth(unittest.TestCase):
         whether `earshot.memory.store` itself ever imports it. Parsing the source is
         the only check that answers the actual question.
         """
-        for name in ("__init__", "store"):
-            path = _tree.PACKAGE_ROOT / "memory" / (name + ".py")
+        for path in _memory_sources():
             tree = _tree.parse(path)
             self.assertFalse(
                 _tree.imports_module(tree, "earshot.audio.vocabulary"),
@@ -442,6 +456,17 @@ class TestTheStoreCannotSeeGroundTruth(unittest.TestCase):
                 _tree.imports_module(tree, "earshot.audio"),
                 "{} imports earshot.audio".format(path),
             )
+
+    def test_the_fence_actually_walks_every_module_in_the_package(self):
+        """The control for the two scans below. A glob that returned nothing would make
+        both of them pass over an empty loop, which is how a fence stops fencing without
+        going red — and the hand-written list they replaced had already done a weaker
+        version of that to `consolidate.py`."""
+        found = {path.name for path in _memory_sources()}
+        self.assertIn("__init__.py", found)
+        self.assertIn("store.py", found)
+        self.assertIn("consolidate.py", found)
+        self.assertIn("longterm.py", found)
 
     def test_the_layer_graph_does_not_grant_memory_an_audio_edge(self):
         allowed = _tree.LAYER_IMPORTS["memory"]
@@ -463,8 +488,7 @@ class TestTheStoreCannotSeeGroundTruth(unittest.TestCase):
         """
         forbidden = ("ROOM_OF_ANCHOR", "anchor_object", "room_of")
         offenders = []
-        for name in ("__init__", "store"):
-            path = _tree.PACKAGE_ROOT / "memory" / (name + ".py")
+        for path in _memory_sources():
             tree = _tree.parse(path)
             for lineno, value in _tree.code_string_constants(tree):
                 if value in forbidden:
