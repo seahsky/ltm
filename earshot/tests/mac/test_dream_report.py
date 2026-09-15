@@ -61,6 +61,9 @@ def dream_metrics(
     rows_added=2.0,
     cosine=(0.91, 0.95, 0.99),
     step_s=0.05,
+    omega_e=0.5,
+    omega_p=0.3,
+    omega_k=0.2,
 ):
     """One episode's DREAM metrics, in the shape the runner writes them.
 
@@ -84,11 +87,11 @@ def dream_metrics(
         metrics.update(
             {
                 "dream_omega_e_spread": spread,
-                "dream_omega_e_mean": 0.5,
-                "dream_omega_e_min": 0.5 - spread / 2.0,
-                "dream_omega_e_max": 0.5 + spread / 2.0,
-                "dream_omega_p_mean": 0.3,
-                "dream_omega_k_mean": 0.2,
+                "dream_omega_e_mean": omega_e,
+                "dream_omega_e_min": omega_e - spread / 2.0,
+                "dream_omega_e_max": omega_e + spread / 2.0,
+                "dream_omega_p_mean": omega_p,
+                "dream_omega_k_mean": omega_k,
             }
         )
     if cosine is not None:
@@ -516,3 +519,67 @@ class TestTheCommandLine(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestASingletonSoftmaxIsNotAFlatWeighting(Fixture):
+    """`dream-1`'s real shape: eq. 23 with one element in it.
+
+    `_softmax` EXCLUDES a level that retrieved nothing rather than handing it a 0.0
+    logit, so one live level returns 1.0 and its spread is exactly 0.0. Reading that as
+    "the weighting did not move" points at the retrieval; the fix is the empty levels.
+    """
+
+    def read(self, episodes, name):
+        arm = self.arm(name)
+        write_scene(arm, "sceneA", episodes)
+        return format_omega(read_rows(str(arm)))
+
+    def test_one_live_level_is_named_as_one_live_level(self):
+        text = self.read(
+            [(REACHED, dream_metrics(spread=0.0, omega_e=1.0, omega_p=0.0,
+                                     omega_k=0.0))] * 4,
+            "solo",
+        )
+        self.assertIn("exactly 1 of M^E/M^P/M^K: 4 episode(s)", text)
+        self.assertIn("HAD ONLY ONE LIVE LEVEL", text)
+        self.assertIn("The empty levels are the fix.", text)
+        print(text)
+
+    def test_three_live_levels_draw_no_such_warning(self):
+        """THE FORCED-FAILURE ARM. Same reader, a memory whose levels all answered."""
+        text = self.read(
+            [(REACHED, dream_metrics(spread=0.2, omega_e=0.5, omega_p=0.3,
+                                     omega_k=0.2))] * 4,
+            "full-stack",
+        )
+        self.assertIn("exactly 3 of M^E/M^P/M^K: 4 episode(s)", text)
+        self.assertNotIn("HAD ONLY ONE LIVE LEVEL", text)
+        self.assertNotIn("CARRIED NO WEIGHT ON ANY EPISODE", text)
+        print(text)
+
+    def test_a_level_that_never_carried_weight_is_named_with_its_cause(self):
+        text = self.read(
+            [(REACHED, dream_metrics(spread=0.1, omega_e=0.7, omega_p=0.3,
+                                     omega_k=0.0))] * 4,
+            "no-knowledge",
+        )
+        self.assertIn("M^K CARRIED NO WEIGHT ON ANY EPISODE", text)
+        self.assertIn("the semantic store was never populated", text)
+        self.assertNotIn("M^P CARRIED NO WEIGHT", text)
+        print(text)
+
+    def test_the_descriptive_split_names_its_own_confound(self):
+        """omega can only move when a second level is live, so the split selects on that.
+
+        Without the sentence the 41.0%-vs-24.7% line in `dream-1` reads as an effect.
+        """
+        text = self.read(
+            [(REACHED, dream_metrics(spread=0.0, omega_e=1.0, omega_p=0.0,
+                                     omega_k=0.0))] * 3
+            + [(REACHED, dream_metrics(spread=0.3, omega_e=0.6, omega_p=0.4,
+                                       omega_k=0.0))] * 3,
+            "confound",
+        )
+        self.assertIn("AND THE SPLIT MAY BE THE SELECTION ITSELF", text)
+        self.assertIn("already working", text)
+        print(text)

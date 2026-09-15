@@ -367,6 +367,69 @@ def format_omega(rows: Sequence[EpisodeRow]) -> str:
                 )
             )
 
+    # HOW MANY LEVELS EXISTED TO BE WEIGHTED. `_softmax` EXCLUDES a level that retrieved
+    # nothing rather than handing it a 0.0 logit, so a softmax over one live level returns
+    # 1.0 for it and eq. 24 fuses that level alone. A reader that stops at "omega^E is
+    # flat" reports a weighting that did not vary; the truth in that case is that there
+    # was nothing to vary BETWEEN, which is a different defect with a different fix.
+    #
+    # `dream-1` is why this block exists. It printed omega^E median 1.0000, omega^P median
+    # 0.0000 and omega^K max 0.0000 and left the reader to notice that eq. 23 had one
+    # element in it.
+    lives = [
+        sum(
+            1
+            for value in (row.omega_e_mean, row.omega_p_mean, row.omega_k_mean)
+            if value is not None and value > 0.0
+        )
+        for row in live
+        if row.omega_e_mean is not None
+    ]
+    if lives:
+        out.append("")
+        out.append("   LEVELS WITH ANY WEIGHT AT ALL, per episode (eq. 24 fuses these):")
+        for count in (1, 2, 3):
+            out.append(
+                "     exactly {} of M^E/M^P/M^K: {} episode(s)".format(
+                    count, sum(1 for value in lives if value == count)
+                )
+            )
+        singletons = sum(1 for value in lives if value == 1)
+        if singletons:
+            out.append("")
+            out.append(
+                "     {} of {} episode(s) HAD ONLY ONE LIVE LEVEL. Their omega is 1.0 by"
+                .format(singletons, len(lives))
+            )
+            out.append(
+                "     arithmetic and their spread is exactly 0.0 for the same reason: a"
+            )
+            out.append(
+                "     softmax over one element. Those episodes did not run a weighting"
+            )
+            out.append(
+                "     that failed to move — they ran no weighting, and reading them as"
+            )
+            out.append(
+                "     flat weights points at the wrong fix. The empty levels are the fix."
+            )
+
+    for label, key, what in (
+        ("M^P", "omega_p_mean", "abstraction (eq. 16) never produced a pattern"),
+        ("M^K", "omega_k_mean", "the semantic store was never populated"),
+    ):
+        values, _absent = present([getattr(row, key) for row in live])
+        if values and max(values) == 0.0:
+            out.append("")
+            out.append(
+                "     {} CARRIED NO WEIGHT ON ANY EPISODE — {}, so".format(label, what)
+            )
+            out.append(
+                "     eq. 22's level had nothing to retrieve on all {} of them.".format(
+                    len(values)
+                )
+            )
+
     # DESCRIPTIVE AND NOT CAUSAL, and it says so: episodes differ in scene, distance and
     # class as well as in omega, so this split is a place to look and never a finding.
     if spreads and len(spreads) > 3:
@@ -395,6 +458,14 @@ def format_omega(rows: Sequence[EpisodeRow]) -> str:
                 "     These episodes are not matched on scene, distance or class, so "
                 "this is\n     a place to look and not a comparison. The paired arm "
                 "diff is the test."
+            )
+            out.append(
+                "     AND THE SPLIT MAY BE THE SELECTION ITSELF: omega can only "
+                "move when a\n     SECOND level is live, and M^P appears only "
+                "after the scene has\n     already produced `min_support` reached "
+                "episodes at one anchor. Where\n     that is what separates the "
+                "two groups, 'omega moved' is reading out\n     which scenes were "
+                "already working."
             )
     return "\n".join(out)
 
