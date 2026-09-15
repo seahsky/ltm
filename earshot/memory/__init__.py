@@ -5,6 +5,8 @@ filters (`without_class`, `without_scene`) that carve the four matrix cells out 
 `consolidate.py` is DREAM §III.D (eq. 8-13): it decides which segments of a finished
 episode are worth keeping. `longterm.py` is §III.E (eq. 14-18): the three levels those
 retained segments go into, and the `G` that abstracts one level into the next.
+`retrieve.py` is §III.F (eq. 19-24): the query, the three per-level retrievals, and the
+`omega_t` that weighs them -- the mechanism the paper's central claim is about.
 
 `consolidate.py` imports neither of the others — eq. 12's novelty ranges over rows whose
 types differ, so it takes vectors. `longterm.py` imports `store.py`, because DREAM's `M^K`
