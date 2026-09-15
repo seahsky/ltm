@@ -69,7 +69,12 @@ ANCHOR_METRIC = "source_at_class_anchor"
 # the sweep it was written for; `test_placement_report.py` asserts this list still equals the
 # driver's own `ARM_NAMES`, because two lists of arm names that drift apart is a reader that
 # silently skips an arm and reports a complete sweep.
-ABLATION_ARMS = ("full", "no-climb", "no-cue", "scan-only", "anechoic")
+# `dream` is last because it is not an ablation: it ADDS a component rather than
+# removing one, and it is in the driver only so that it pairs by episode against
+# `full`. The placement question is the same for it either way -- an episode whose
+# source is not at its class anchor is one no recalled category could have got right,
+# and that is a property of the EPISODE rather than of the arm that ran it.
+ABLATION_ARMS = ("full", "no-climb", "no-cue", "scan-only", "anechoic", "dream")
 
 # The label for an episode whose audit carries no `scene_id`. Not a scene, and not folded
 # into one.

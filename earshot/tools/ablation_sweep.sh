@@ -79,6 +79,17 @@
 #        (default: every scene with a mesh), --limit N (default 0 = no limit),
 #        --sounding-steps N (default 60), --anomaly-class C (default alarm),
 #        --seed S, --out-dir DIR, --arms "a b" (default: all five), --no-pull, --force.
+#
+# THE `dream` ARM IS NOT IN THE DEFAULT FIVE and has to be asked for by name. It is not an
+# ablation of the anomaly-response system -- it is an ADDITION to it, so it belongs in the
+# same sweep only because it must pair by episode against `full` for the comparison to
+# mean anything. Ask for it with:
+#
+#   nrun bash earshot/tools/ablation_sweep.sh --tag dream-1 --arms "full dream"
+#
+# and read it with `tools/episode_diff.py runs/dream-1/full runs/dream-1/dream`, which is
+# an exact McNemar over the paired episodes. `repeat-1` measured a 16.2% outcome flip rate
+# on byte-identical reruns, so the unpaired difference of two arms is not a result.
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then :; else
   echo "ERROR: execute this script, don't source it — its exit calls would kill your shell." >&2
@@ -249,13 +260,43 @@ fi
 # is first. `ARM_FLAGS` is a single string per arm, word-split at the call site: every
 # entry is a literal flag and value with no spaces inside either, so the split is safe
 # and `shellcheck` is told so once, there.
-ARM_NAMES=(full no-climb no-cue scan-only anechoic)
+# DREAM's fourteen knobs, in one place. `--dream` refuses to run without every one of
+# them (the paper values none, so there is nothing to default to) and each is recorded on
+# every episode's audit by `DreamKnobs.as_metrics`, so this line and the artefact cannot
+# disagree. The values are FIRST CHOICES and this run is what prices them:
+#
+#   stm-horizon 8 / stm-decay 0.8 / present-weight 0.7 -- eq. 4 and 19. Eight steps is
+#     about 8 s of a 250-step episode at the shipped 1.0 s step.
+#   coherence 0.99 -- eq. 9, and the one number the box has actually measured. Real
+#     consecutive `z^av` sat at min 0.9256 median 0.9765 max 0.9905 over 19 pairs, so
+#     0.99 cuts near the median rather than never (a value above 0.9905 never cuts) or
+#     always (below 0.9256). min/max segment 3/12 bound it either side.
+#   alpha/beta/gamma 1 -- eq. 10, equal weight until a run says otherwise.
+#   eta 0.5 -- eq. 13. The box's real `I_j` ran 1.0000-1.2901 with an EMPTY memory (every
+#     N_j is 1.0 there), so 0.5 retains everything on episode one and starts to bite as
+#     soon as M^E has rows to be unlike. `dream_rows_added` is how the run reports it.
+#   min-support 2 -- eq. 16. A regularity that happened once is not one.
+#   k 3/2/1, temperature 0.5 -- eq. 20-23.
+#   lambda 1 / 0.5 / 0.5 -- eq. 26. S_plan keeps unit weight so the arm stays anchored to
+#     the ranking ADR-0008 froze; memory and feasibility are additions to it, not
+#     replacements for it.
+DREAM_KNOBS="--dream \
+  --dream-stm-horizon 8 --dream-stm-decay 0.8 --dream-present-weight 0.7 \
+  --dream-coherence 0.99 --dream-min-segment 3 --dream-max-segment 12 \
+  --dream-alpha 1.0 --dream-beta 1.0 --dream-gamma 1.0 --dream-eta 0.5 \
+  --dream-min-support 2 \
+  --dream-k-experience 3 --dream-k-pattern 2 --dream-k-knowledge 1 \
+  --dream-temperature 0.5 \
+  --dream-lambda-plan 1.0 --dream-lambda-memory 0.5 --dream-lambda-feasibility 0.5"
+
+ARM_NAMES=(full no-climb no-cue scan-only anechoic dream)
 ARM_FLAGS=(
   ""
   "--climb-rule off"
   "--lateral-cue off"
   "--cast-policy scan_only"
   "--ir-policy anechoic"
+  "--clap $DREAM_KNOBS"
 )
 ARM_WHY=(
   "the BASELINE: the complete system, and the row every other one is quoted against"
@@ -263,6 +304,7 @@ ARM_WHY=(
   "R2 the interaural sign is ambiguous — loudness without binaural localization"
   "R3 every dead step turns instead of walking a leg — the pre-eps-1 control"
   "R5 flat IRs at all three render sites — does the reverb tail buy any SWS"
+  "DREAM: M^S, consolidation, a three-level M^L that GROWS across this arm's episodes, and memory-weighted planning"
 )
 
 if [ -n "$WANTED_ARMS" ]; then
@@ -288,13 +330,27 @@ TOTAL_EPISODES=$((N_SCENES * N_ARMS * N_EPISODES))
 # 24.2 s/episode all-in is the MEASURED figure from `pilot-2`: 26516 s of wall clock over
 # 1095 episodes, including scene loads, calibration and the smoke gates. It is not the
 # per-step render cost and it is not an extrapolation from the anomaly-response task.
-EST_SECONDS=$(awk "BEGIN{printf \"%d\", $TOTAL_EPISODES * 24.2}")
+# DREAM's arm costs more per episode and the estimate has to say so, or a reader sizes
+# an overnight run from a number that is wrong for one arm in it. The box measured the
+# SUSTAINED extra at the median DREAM step; at 250 steps that is the per-episode addition.
+# 0.057 s/step is the first measurement (f_u 0.0443 + observe 0.0123, both means) and it
+# is an estimate rather than a promise -- `dream_step_s_mean` on every episode's audit is
+# what the run itself reports.
+_N_DREAM_ARMS=0
+for _a in "${ARM_NAMES[@]}"; do [ "$_a" = "dream" ] && _N_DREAM_ARMS=$((_N_DREAM_ARMS + 1)); done
+_DREAM_EXTRA=$(awk "BEGIN{printf \"%d\", $_N_DREAM_ARMS * $N_SCENES * $N_EPISODES * $MAX_STEPS * 0.057}")
+EST_SECONDS=$(awk "BEGIN{printf \"%d\", $TOTAL_EPISODES * 24.2 + $_DREAM_EXTRA}")
 EST_HOURS=$(awk "BEGIN{printf \"%.1f\", $EST_SECONDS / 3600.0}")
 PER_ARM=$((N_SCENES * N_EPISODES))
 echo "  $N_SCENES scene(s): ${SCENE_LIST[*]}"
 echo "  $N_ARMS arm(s): ${ARM_NAMES[*]}"
 echo "  $N_EPISODES episodes per scene per arm -> $PER_ARM per arm, $TOTAL_EPISODES total"
 echo "  estimated wall clock: ${EST_HOURS} h at the measured 24.2 s/episode"
+if [ "$_N_DREAM_ARMS" -gt 0 ]; then
+  echo "    ... of which $(awk "BEGIN{printf \"%.1f\", $_DREAM_EXTRA / 3600.0}") h is DREAM's per-step encoders"
+  echo "    (f_v + f_u run on EVERY step; criterion 7 does not audit them, so this cost"
+  echo "     appears only in the wall clock and in each episode's dream_step_s_* metrics)"
+fi
 echo ""
 echo "  what this n can resolve, at 80% power and alpha 0.05. Read the PAIRED block:"
 echo "  the arms share episodes, so the unpaired table is the wrong column for them."
