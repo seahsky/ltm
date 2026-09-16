@@ -201,6 +201,53 @@ class TestTheFlagsReachTheRunner(unittest.TestCase):
             self.fail("the driver's knob list is incomplete: {}".format(exit_))
 
 
+class TestTheControlArmDiffersInExactlyOneKnob(unittest.TestCase):
+    """`dream-nomem` is the control ADR-0024 asked for, and its whole value is that it is
+    identical to `dream` apart from `lambda_memory`.
+
+    A control that drifted in a second knob would difference two things at once, which is
+    precisely the defect it exists to remove from `dream-2`. A control that drifted in NO
+    knob is worse: `ablation_sweep.sh` builds it by substituting into `DREAM_KNOBS`, and a
+    substitution that matched nothing would run the control as a byte-identical copy of
+    the treatment and report a clean null over an arm differenced with itself.
+
+    Both are checked here, and the script checks the second at run time as well.
+    """
+
+    def setUp(self):
+        self.text = ABLATION_SWEEP.read_text()
+
+    def test_the_substitution_is_anchored_to_the_value_actually_in_the_knobs(self):
+        knobs = _pairs(_knob_block(self.text, "ablation_sweep.sh"))
+        self.assertIn("dream-lambda-memory", knobs)
+        self.assertIn(
+            "--dream-lambda-memory {}/".format(knobs["dream-lambda-memory"]),
+            self.text,
+            "the substitution that builds dream-nomem does not match the "
+            "--dream-lambda-memory value in DREAM_KNOBS, so it would be a silent no-op",
+        )
+
+    def test_a_no_op_substitution_is_refused_at_run_time(self):
+        self.assertIn("byte-identical to the treatment arm", self.text)
+
+    def test_the_control_turns_the_memory_term_OFF(self):
+        self.assertIn("--dream-lambda-memory 0.0}", self.text)
+
+    def test_both_arms_are_named_and_carry_the_same_knob_string_otherwise(self):
+        self.assertIn("dream dream-nomem)", self.text)
+        self.assertIn('"--clap $DREAM_KNOBS"', self.text)
+        self.assertIn('"--clap $DREAM_KNOBS_NOMEM"', self.text)
+
+    def test_the_priced_knobs_reach_the_sweep_as_flags_too(self):
+        """Tonight's sweep has to run at the eta `eta_pass.sh` priced, and editing a
+        driver by hand at 11pm is how a sweep runs at a value nobody recorded."""
+        knobs = _pairs(_knob_block(self.text, "ablation_sweep.sh"))
+        self.assertTrue(str(knobs["dream-eta"]).startswith("$"))
+        self.assertTrue(str(knobs["dream-max-retained"]).startswith("$"))
+        self.assertIn("--dream-eta)       need_value", self.text)
+        self.assertIn('--dream-eta "$DREAM_ETA"', self.text)
+
+
 class TestTheReadoutCanReadWhatTheRunWrote(unittest.TestCase):
     """**THE `eta-1` FAILURE, FENCED.** The run worked: 15 episodes, 7m 36s, every
     funnel stage recorded. Then step 4 printed "NO EPISODES ON DISK" and the driver

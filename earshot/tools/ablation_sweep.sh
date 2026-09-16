@@ -78,7 +78,17 @@
 #        (default 15, PER SCENE PER ARM), --max-steps M (default 250), --scenes "a b c"
 #        (default: every scene with a mesh), --limit N (default 0 = no limit),
 #        --sounding-steps N (default 60), --anomaly-class C (default alarm),
-#        --seed S, --out-dir DIR, --arms "a b" (default: all five), --no-pull, --force.
+#        --seed S, --out-dir DIR, --arms "a b" (default: all five), --no-pull, --force,
+#        --resume.
+#
+# --resume PICKS UP A KILLED SWEEP at the scene grain. It implies --force (it reuses the
+# directory on purpose). A finished scene -- one that wrote a summary.json, including a
+# zero-yield one -- is skipped; an unfinished one is CLEARED and re-run, because
+# `write_episode` refuses to overwrite and half a scene is debris rather than a record.
+# For the chained `dream` arm it refuses outright unless the memory file's own scene list
+# matches the scenes about to be skipped: a chain that silently lost a house cannot be
+# detected afterwards. The summary says how many cells were resumed, because the tag's
+# records then come from more than one invocation.
 #
 # THE `dream` ARM IS NOT IN THE DEFAULT FIVE and has to be asked for by name. It is not an
 # ablation of the anomaly-response system -- it is an ADDITION to it, so it belongs in the
@@ -114,6 +124,9 @@ OUT_DIR=""
 WANTED_ARMS=""
 NO_PULL=0
 FORCE=0
+RESUME=0
+DREAM_ETA=2.0
+DREAM_MAX_RETAINED=12
 ORIGINAL_ARGS="$*"
 
 need_value() { [ "$1" -ge 2 ] || { echo "FATAL: $2 needs a value"; exit 2; }; }
@@ -131,6 +144,9 @@ while [ $# -gt 0 ]; do
     --out-dir)         need_value $# "$1"; OUT_DIR="$2";         shift 2 ;;
     --no-pull)         NO_PULL=1;                                shift ;;
     --force)           FORCE=1;                                  shift ;;
+    --resume)          RESUME=1; FORCE=1;                        shift ;;
+    --dream-eta)       need_value $# "$1"; DREAM_ETA="$2";       shift 2 ;;
+    --dream-max-retained) need_value $# "$1"; DREAM_MAX_RETAINED="$2"; shift 2 ;;
     -h|--help) sed -n '2,79p' "$0"; exit 0 ;;
     *) echo "FATAL: unknown argument: $1"; exit 2 ;;
   esac
@@ -150,6 +166,44 @@ is_zero_yield() {
   [ -f "$1/summary.json" ] || return 1
   python -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))['n_episodes']==0 else 1)" \
     "$1/summary.json" 2>/dev/null
+}
+
+# --- RESUMING A KILLED SWEEP ----------------------------------------------
+# A nineteen-scene two-arm sweep is 4h45m in one process tree, and a box that drops it at
+# hour four has cost a night and produced nothing readable. These make the unit of loss
+# ONE SCENE rather than one sweep. The sweep was already chunked -- one `python -m earshot`
+# per (arm, scene) -- so all that was missing was the ability to not redo the finished ones.
+#
+# A scene is finished iff it wrote a `summary.json` that parses and carries `n_episodes`.
+# That is the LAST artefact `run()` writes, so its presence means the episodes and the
+# memory dump are both done. A ZERO-YIELD scene writes one too, with `n_episodes: 0`, and
+# so counts as finished -- it is a scene that cannot pose the task, not work left to do.
+is_finished_scene() {
+  [ -f "$1/summary.json" ] || return 1
+  python -c "import json,sys; json.load(open(sys.argv[1]))['n_episodes']; sys.exit(0)" \
+    "$1/summary.json" 2>/dev/null
+}
+
+# A scene that is NOT finished has debris: episodes 0..k on disk from the attempt that
+# died. `write_episode` REFUSES to overwrite, so re-running into it fails on the first
+# existing file -- and `--overwrite` would be the wrong fix for `matrix_sweep.sh`'s
+# reason: it replaces what the new run writes and leaves whatever it does not, which is
+# two invocations in one directory with nothing saying so. Clearing is the honest version.
+#
+# The path is checked before anything is removed. `$OUT_DIR` is operator-supplied.
+clear_scene_dir() {
+  [ -n "$1" ] || { echo "FATAL: clear_scene_dir got an empty path"; exit 1; }
+  case "$1" in
+    *..*) echo "FATAL: refusing to clear '$1' — it contains '..'"; exit 1 ;;
+  esac
+  case "$1" in
+    "$OUT_DIR"/*/*) ;;
+    *) echo "FATAL: refusing to clear '$1' — not an <arm>/<scene> under $OUT_DIR"
+       exit 1 ;;
+  esac
+  [ -d "$1" ] || return 0
+  echo "      clearing $(find "$1" -type f 2>/dev/null | wc -l | tr -d ' ') file(s) left by an attempt that did not finish"
+  rm -rf "${1:?}"
 }
 
 # What one scene's smoke gate means for the sweep. `gate_verdict <arm> <rc> <output>`:
@@ -181,9 +235,39 @@ if [ -d "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
     echo "       aggregate with nothing on disk saying so. Pass a fresh --tag."
     exit 1
   fi
-  echo "WARN: --force — reusing a non-empty $OUT_DIR. Earlier records will be pooled"
-  echo "      into the aggregates below and cannot be told apart."
+  if [ "$RESUME" = 1 ]; then
+    echo "  --resume: reusing $OUT_DIR on purpose. Finished scenes are skipped and"
+    echo "  unfinished ones are cleared and re-run, so the invariant still holds at the"
+    echo "  grain it can: one scene directory, one invocation."
+  else
+    echo "WARN: --force — reusing a non-empty $OUT_DIR. Earlier records will be pooled"
+    echo "      into the aggregates below and cannot be told apart."
+  fi
 fi
+
+# A RESUME MUST NOT CHANGE THE KNOBS MID-SWEEP. The scenes already on disk ran at the
+# eta this file recorded; finishing the rest at a different one produces ONE tag holding
+# two configurations, which `dream_report` would later call a mixed arm -- after the
+# night, and only if someone read section F. `--dream-eta` is a flag precisely so it can
+# be forgotten on the resume invocation, so it is checked here instead.
+check_resumed_knobs() {
+  local record="$OUT_DIR/provenance.txt"
+  [ -f "$record" ] || return 0
+  local was_eta was_cap
+  was_eta="$(awk '/^dream_eta:/ {print $2}' "$record")"
+  was_cap="$(awk '/^dream_max_ret:/ {print $2}' "$record")"
+  [ -n "$was_eta" ] || return 0   # a tag from before these were recorded; nothing to check
+  if [ "$was_eta" != "$DREAM_ETA" ] || [ "$was_cap" != "$DREAM_MAX_RETAINED" ]; then
+    echo "FATAL: this resume would change the DREAM knobs mid-sweep."
+    echo "       on disk: --dream-eta $was_eta --dream-max-retained $was_cap"
+    echo "       now:     --dream-eta $DREAM_ETA --dream-max-retained $DREAM_MAX_RETAINED"
+    echo "       The scenes already finished ran at the first pair. One tag holding two"
+    echo "       configurations is not one run. Pass the same knobs, or a fresh --tag."
+    exit 2
+  fi
+  echo "  --resume: knobs match the record (eta $was_eta, cap $was_cap)"
+}
+[ "$RESUME" = 1 ] && check_resumed_knobs
 
 # --- 1. self-update by re-exec (bash runs the body it loaded, not the file) -
 if [ "$NO_PULL" = 0 ]; then
@@ -196,10 +280,17 @@ if [ "$NO_PULL" = 0 ]; then
     export _REEXEC=1
     _force_flag=""
     [ "$FORCE" = 1 ] && _force_flag="--force"
+    # --resume HAS TO SURVIVE THE RE-EXEC. Without it the new body sees --force alone,
+    # re-runs the scenes already on disk, and dies on the first episode file
+    # `write_episode` refuses to overwrite -- after the pull, with the operator asleep.
+    _resume_flag=""
+    [ "$RESUME" = 1 ] && _resume_flag="--resume"
     exec bash "$0" --tag "$TAG" --n-episodes "$N_EPISODES" --max-steps "$MAX_STEPS" \
          --sounding-steps "$SOUNDING_STEPS" --anomaly-class "$ANOMALY_CLASS" \
          --seed "$SEED" --limit "$LIMIT" ${SCENES:+--scenes "$SCENES"} \
-         ${WANTED_ARMS:+--arms "$WANTED_ARMS"} --out-dir "$OUT_DIR" ${_force_flag:+--force}
+         ${WANTED_ARMS:+--arms "$WANTED_ARMS"} --out-dir "$OUT_DIR" \
+         --dream-eta "$DREAM_ETA" --dream-max-retained "$DREAM_MAX_RETAINED" \
+         ${_force_flag:+--force} ${_resume_flag:+--resume}
   fi
 else
   banner "[1/5] git pull SKIPPED (--no-pull)"
@@ -305,13 +396,35 @@ DREAM_KNOBS="--dream \
   --dream-stm-horizon 8 --dream-stm-decay 0.8 --dream-present-weight 0.7 \
   --dream-coherence 0.99 --dream-min-segment 3 --dream-max-segment 12 \
   --dream-alpha 1.0 --dream-beta 1.0 --dream-gamma 1.0 \
-  --dream-eta 2.0 --dream-max-retained 12 \
+  --dream-eta $DREAM_ETA --dream-max-retained $DREAM_MAX_RETAINED \
   --dream-min-support 2 \
   --dream-k-experience 3 --dream-k-pattern 2 --dream-k-knowledge 1 \
   --dream-temperature 0.5 \
   --dream-lambda-plan 1.0 --dream-lambda-memory 0.5 --dream-lambda-feasibility 0.5"
 
-ARM_NAMES=(full no-climb no-cue scan-only anechoic dream)
+# THE CONTROL ADR-0024 ASKED FOR, and the only thing that makes a DREAM arm readable.
+# `dream-2` was a TWO-VARIABLE contrast: `runner.py`'s claim that `pick_plan` reduces to
+# `pick_waypoint` on an empty memory is FALSE at `lambda_feasibility = 0.5`, so `full` vs
+# `dream` differenced the memory term AND the feasibility term at once, and with the
+# memory near-empty the likelier reading is that it measured feasibility at about zero.
+#
+# `dream-nomem` is the same arm with `lambda_memory = 0.0` and EVERYTHING ELSE identical:
+# same segmentation, same consolidation, same retrieval, same feasibility weight. So
+#   dream       vs dream-nomem  = the memory term, alone, which is eq. 26's whole claim
+#   dream-nomem vs full         = the feasibility term, alone, which dream-2 confounded
+# It is built by substitution rather than by a second literal so the two arms CANNOT
+# drift apart in any other knob, and the substitution is checked: a silent no-op here
+# would run the control as a duplicate of the treatment and difference an arm with itself.
+DREAM_KNOBS_NOMEM="${DREAM_KNOBS/--dream-lambda-memory 0.5/--dream-lambda-memory 0.0}"
+if [ "$DREAM_KNOBS_NOMEM" = "$DREAM_KNOBS" ]; then
+  echo "FATAL: the dream-nomem substitution matched nothing, so the control arm is"
+  echo "       byte-identical to the treatment arm. Someone changed --dream-lambda-memory"
+  echo "       in DREAM_KNOBS without updating the substitution above. A sweep run this"
+  echo "       way would difference an arm against itself and report a clean null."
+  exit 2
+fi
+
+ARM_NAMES=(full no-climb no-cue scan-only anechoic dream dream-nomem)
 ARM_FLAGS=(
   ""
   "--climb-rule off"
@@ -319,6 +432,7 @@ ARM_FLAGS=(
   "--cast-policy scan_only"
   "--ir-policy anechoic"
   "--clap $DREAM_KNOBS"
+  "--clap $DREAM_KNOBS_NOMEM"
 )
 ARM_WHY=(
   "the BASELINE: the complete system, and the row every other one is quoted against"
@@ -327,6 +441,7 @@ ARM_WHY=(
   "R3 every dead step turns instead of walking a leg — the pre-eps-1 control"
   "R5 flat IRs at all three render sites — does the reverb tail buy any SWS"
   "DREAM: M^S, consolidation, a three-level M^L that GROWS across this arm's episodes, and memory-weighted planning"
+  "THE CONTROL for the arm above: identical in every knob but lambda_memory = 0.0, so the difference is eq. 26's memory term and nothing else"
 )
 
 if [ -n "$WANTED_ARMS" ]; then
@@ -387,12 +502,15 @@ mkdir -p "$OUT_DIR"
   echo "commit:         $COMMIT"
   echo "args:           $ORIGINAL_ARGS"
   echo "scenes:         ${SCENE_LIST[*]}"
+  echo "resume:         $RESUME"
   echo "arms:           ${ARM_NAMES[*]}"
   echo "n_episodes:     $N_EPISODES (per scene, per arm) -> $PER_ARM per arm"
   echo "max_steps:      $MAX_STEPS"
   echo "sounding_steps: $SOUNDING_STEPS (fixed_steps, ADR-0017)"
   echo "anomaly_class:  $ANOMALY_CLASS"
   echo "seed:           $SEED"
+  echo "dream_eta:      $DREAM_ETA"
+  echo "dream_max_ret:  $DREAM_MAX_RETAINED"
   echo "started:        $(date -Is)"
 } > "$OUT_DIR/provenance.txt"
 
@@ -409,6 +527,7 @@ fi
 
 FAILED_RUNS=0
 ZERO_YIELD=""
+RESUMED=0
 banner "[4/5] $N_ARMS arms x $N_SCENES scenes"
 for i in "${!ARM_NAMES[@]}"; do
   arm="${ARM_NAMES[$i]}"
@@ -430,9 +549,32 @@ for i in "${!ARM_NAMES[@]}"; do
   if [ "$arm" = "dream" ]; then
     MEMORY_FILE="$OUT_DIR/$arm/memory.json"
     echo "      chaining M^E across scenes through $MEMORY_FILE"
+    # A RESUME CAN SILENTLY SHORTEN THE CHAIN. A scene whose episodes finished but whose
+    # memory dump never landed leaves a finished directory and a memory file that never
+    # saw it; skipping that scene drops a house from `M^E` for the whole rest of the
+    # sweep, and no audit afterwards can tell. The memory file records its own scene
+    # list, so the disagreement is cheap to catch -- and it is caught BEFORE the first
+    # episode of the resumed arm, not after the night.
+    if [ "$RESUME" = 1 ]; then
+      _finished=""
+      for _scene in "${SCENE_LIST[@]}"; do
+        is_finished_scene "$OUT_DIR/$arm/$_scene" || break
+        _finished="$_finished $_scene"
+      done
+      python -m earshot.tools.chain_check "$MEMORY_FILE" --expect "$_finished" || {
+        echo "FATAL: the chained M^E does not match the scenes this resume would skip."
+        exit 1
+      }
+    fi
   fi
   for scene in "${SCENE_LIST[@]}"; do
     run_dir="$OUT_DIR/$arm/$scene"
+    if [ "$RESUME" = 1 ] && is_finished_scene "$run_dir"; then
+      RESUMED=$((RESUMED + 1))
+      echo "    $arm / $scene   already finished, skipped (--resume)"
+      continue
+    fi
+    [ "$RESUME" = 1 ] && clear_scene_dir "$run_dir"
     echo "    $arm / $scene   ($(date +%H:%M:%S))"
     # `--dream-memory-in` only once the file EXISTS. The first scene of the chain has no
     # memory to restore, and `run()` treats a missing in-path as an error rather than as
@@ -589,6 +731,16 @@ if [ -n "$VACUOUS_CELLS" ]; then
   echo "  the baseline is absent from it by construction, and an arm that appears often is"
   echo "  an arm that stops working in whole rooms rather than losing episodes evenly."
   echo " $VACUOUS_CELLS"
+fi
+
+if [ "$RESUMED" -gt 0 ]; then
+  # Said out loud, because the numbers above then come from more than one invocation on
+  # more than one day, and a reader comparing wall clocks or quoting "one run" needs to
+  # know. The EPISODES are unaffected: each scene directory still holds exactly one
+  # invocation's work, which is what `episode_diff` pairs on.
+  echo ""
+  echo "  RESUMED: $RESUMED scene/arm cell(s) were already finished and were NOT re-run."
+  echo "           This tag's records come from more than one invocation of this script."
 fi
 
 if [ "$FAILED_RUNS" -ne 0 ]; then

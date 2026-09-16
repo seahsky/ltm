@@ -74,7 +74,9 @@ ANCHOR_METRIC = "source_at_class_anchor"
 # `full`. The placement question is the same for it either way -- an episode whose
 # source is not at its class anchor is one no recalled category could have got right,
 # and that is a property of the EPISODE rather than of the arm that ran it.
-ABLATION_ARMS = ("full", "no-climb", "no-cue", "scan-only", "anechoic", "dream")
+ABLATION_ARMS = (
+    "full", "no-climb", "no-cue", "scan-only", "anechoic", "dream", "dream-nomem",
+)
 
 # The label for an episode whose audit carries no `scene_id`. Not a scene, and not folded
 # into one.

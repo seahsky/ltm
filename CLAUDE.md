@@ -135,6 +135,26 @@ nrun bash earshot/tools/eta_pass.sh --tag <fresh-tag>   # --eta E --max-retained
 # scene's. Nothing about `G` changes. SCENE ORDER IS PART OF THE RESULT for that arm now
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> --arms "full dream"
 
+# THE CONTROL THAT MAKES A DREAM ARM READABLE (ADR-0024). `dream-2` was a TWO-variable
+# contrast: `pick_plan` does NOT reduce to `pick_waypoint` at `lambda_feasibility 0.5`,
+# so `full` vs `dream` differenced the memory term AND the feasibility term at once.
+# `dream-nomem` is `dream` with `lambda_memory 0.0` and every other knob identical, built
+# by substitution so the two CANNOT drift apart. Three arms decompose it:
+#   dream vs dream-nomem  = the memory term alone, which is eq. 26's whole claim
+#   dream-nomem vs full   = the feasibility term alone, which dream-2 confounded
+# `--dream-eta`/`--dream-max-retained` are flags so a sweep runs at the value
+# `eta_pass.sh` priced, without editing this driver at 11pm.
+#
+# `--resume` PICKS IT UP AFTER A CRASH, at the scene grain: a scene that wrote a
+# summary.json is skipped, an unfinished one is cleared and re-run. It refuses to change
+# the knobs mid-sweep, and for the chained `dream` arm it refuses unless the memory
+# file's own scene list matches the scenes it is about to skip -- a chain that silently
+# lost a house cannot be detected afterwards. Pass the SAME flags on the resume
+nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
+  --arms "full dream dream-nomem" --dream-eta <priced>
+nrun bash earshot/tools/ablation_sweep.sh --tag <same-tag> \
+  --arms "full dream dream-nomem" --dream-eta <priced> --resume
+
 # the same chain by hand, one scene at a time. `--dream-memory-in` on a MISSING file is
 # an error and never a silent empty memory: the two are indistinguishable afterwards,
 # which is exactly how `dream-1` looked like a working run
