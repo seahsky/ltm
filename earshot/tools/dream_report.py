@@ -106,6 +106,7 @@ KNOB_KEYS: Tuple[str, ...] = (
     "dream_beta",
     "dream_gamma",
     "dream_eta",
+    "dream_max_retained",
     "dream_min_support",
     "dream_k_experience",
     "dream_k_pattern",

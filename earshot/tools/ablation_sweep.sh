@@ -260,7 +260,7 @@ fi
 # is first. `ARM_FLAGS` is a single string per arm, word-split at the call site: every
 # entry is a literal flag and value with no spaces inside either, so the split is safe
 # and `shellcheck` is told so once, there.
-# DREAM's fourteen knobs, in one place. `--dream` refuses to run without every one of
+# DREAM's fifteen knobs, in one place. `--dream` refuses to run without every one of
 # them (the paper values none, so there is nothing to default to) and each is recorded on
 # every episode's audit by `DreamKnobs.as_metrics`, so this line and the artefact cannot
 # disagree. The values are FIRST CHOICES and this run is what prices them:
@@ -272,9 +272,30 @@ fi
 #     0.99 cuts near the median rather than never (a value above 0.9905 never cuts) or
 #     always (below 0.9256). min/max segment 3/12 bound it either side.
 #   alpha/beta/gamma 1 -- eq. 10, equal weight until a run says otherwise.
-#   eta 0.5 -- eq. 13. The box's real `I_j` ran 1.0000-1.2901 with an EMPTY memory (every
-#     N_j is 1.0 there), so 0.5 retains everything on episode one and starts to bite as
-#     soon as M^E has rows to be unlike. `dream_rows_added` is how the run reports it.
+#   eta 2.0 / max-retained 8 -- eq. 13, AND BOTH ARE UNPRICED. `dream-2` set eta 0.5
+#     against the box's empty-memory `I_j` of 1.0000-1.2901, which is a regime that
+#     occurs ONCE per chain: with M^E non-empty, max I_j was about 0.38 and the gate
+#     never opened again (275 of 282 episodes retained nothing, 45 rows all night, 38 of
+#     them from the one empty-memory episode). ADR-0024 fixed the cause -- C_j and U_j
+#     were shares carrying a hidden 1/J while N_j is a cosine -- so `mean(C_j + U_j)` is
+#     now exactly 2.0 for ANY J and any memory state. eta 2.0 therefore reads as "this
+#     segment carried more than an average segment's worth", which is stationary in a
+#     way 0.5 never was. IT IS STILL A GUESS ABOUT A DISTRIBUTION NOBODY HAS MEASURED.
+#     PRICE IT BEFORE THE NEXT HEADLINE ARM: run one scene, read `dream_segments_over_eta`
+#     from `dream_report`, and set eta so its median sits BELOW max-retained. If the cap
+#     binds on most episodes then the cap is the retention rule and eta is decoration,
+#     which is the top-k deviation ADR-0024 declined to ship.
+#   max-retained 12 -- the cap on eq. 13, argued at `consolidate.retain`. It bounds the
+#     empty-memory episode, which clears any eta below 1 outright because N_j is 1.0 for
+#     every segment there: dream-2's first episode wrote 38 rows that way and this would
+#     have held it to 12. Below the 21-84 segments a 250-step episode produces, so it
+#     bites a flood and is mostly absent on an episode whose gate is working.
+#     A SYNTHETIC PROBE IS WHY IT IS 12 AND NOT 8. Over 250-step trajectories differing
+#     only in whether progress arrives evenly or in bursts, the count clearing eta 2.0
+#     ran 9 to 14 of 21, and eta 3.0 ran 0 to 3 of the same fixtures. That spread over
+#     fixtures this similar is the finding: THE DISTRIBUTION IS NOT PREDICTABLE OFF-BOX,
+#     a cap of 8 would have bound on every synthetic episode tried, and a cap that always
+#     binds IS the retention rule with eta as decoration.
 #   min-support 2 -- eq. 16. A regularity that happened once is not one.
 #   k 3/2/1, temperature 0.5 -- eq. 20-23.
 #   lambda 1 / 0.5 / 0.5 -- eq. 26. S_plan keeps unit weight so the arm stays anchored to
@@ -283,7 +304,8 @@ fi
 DREAM_KNOBS="--dream \
   --dream-stm-horizon 8 --dream-stm-decay 0.8 --dream-present-weight 0.7 \
   --dream-coherence 0.99 --dream-min-segment 3 --dream-max-segment 12 \
-  --dream-alpha 1.0 --dream-beta 1.0 --dream-gamma 1.0 --dream-eta 0.5 \
+  --dream-alpha 1.0 --dream-beta 1.0 --dream-gamma 1.0 \
+  --dream-eta 2.0 --dream-max-retained 12 \
   --dream-min-support 2 \
   --dream-k-experience 3 --dream-k-pattern 2 --dream-k-knowledge 1 \
   --dream-temperature 0.5 \

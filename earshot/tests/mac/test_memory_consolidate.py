@@ -244,16 +244,37 @@ class TestTheSegmentationChoice(unittest.TestCase):
 
 class TestContribution(unittest.TestCase):
     """`C_j` (eq. 10). The clause is "the contribution of the segment to successful
-    navigation"; the choice is a share of the distance the episode actually closed."""
+    navigation"; the choice is the distance the episode actually closed, as a MULTIPLE of
+    the mean segment's (ADR-0024 -- a share carried a hidden 1/J that `N_j` does not)."""
 
     def _segments(self, positions):
         return segment_trajectory(
             [_step(x=x) for x in positions], coherence=0.9, min_length=1, max_length=2
         )
 
-    def test_the_shares_sum_to_one_when_any_progress_was_made(self):
-        segments = self._segments([0.0, 1.0, 2.0, 5.0])
-        self.assertAlmostEqual(sum(contribution(segments, target=Xyz(10.0, 0.0, 0.0))), 1.0, 5)
+    def test_the_mean_is_one_whatever_the_segment_count(self):
+        """THE PROPERTY THE 1/J BUG BROKE, pinned at three different `J`.
+
+        `mean_j(C_j) = 1.0` exactly, so `I_j` is commensurate with `N_j` (a cosine) at
+        every episode length. Under the old share form the mean was `1/J`, which is what
+        made eq. 10 degenerate to eq. 12 and cost `dream-2` its retention. ADR-0024.
+        """
+        for positions in ([0.0, 1.0, 2.0, 5.0],
+                          [0.0, 1.0, 2.0, 3.0, 4.0, 7.0],
+                          [float(i) for i in range(12)]):
+            segments = self._segments(positions)
+            scores = contribution(segments, target=Xyz(100.0, 0.0, 0.0))
+            self.assertAlmostEqual(sum(scores) / len(scores), 1.0, 5)
+
+    def test_the_scale_does_not_move_with_the_segment_count(self):
+        """A longer episode must not make every segment look less important. Two
+        trajectories closing the same distance over different `J` keep the same mean."""
+        short = contribution(self._segments([0.0, 2.0, 4.0]), target=Xyz(100.0, 0.0, 0.0))
+        long = contribution(
+            self._segments([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]),
+            target=Xyz(100.0, 0.0, 0.0),
+        )
+        self.assertAlmostEqual(sum(short) / len(short), sum(long) / len(long), 5)
 
     def test_the_segment_that_closed_more_scores_more(self):
         segments = self._segments([0.0, 1.0, 2.0, 8.0])
@@ -263,14 +284,18 @@ class TestContribution(unittest.TestCase):
 
     def test_the_transitions_tile_the_episode_exactly(self):
         """One rule for both `C_j` and `U_j`: a transition belongs to the segment holding
-        its LATER step. Every transition lands in exactly one bucket, so the shares are
-        shares of the episode's own total and not of an arbitrary subset."""
+        its LATER step. Every transition lands in exactly one bucket, so the scores are
+        measured against the episode's own total and not against an arbitrary subset.
+
+        The tiling is recovered by scaling back through the mean (ADR-0024: the divisor
+        is the mean segment, so the raw amount is `score * total / J`)."""
         positions = [0.0, 1.0, 3.0, 6.0, 7.0, 9.0]
         segments = self._segments(positions)
         target = Xyz(20.0, 0.0, 0.0)
-        shares = contribution(segments, target=target)
-        raw = [share * (positions[-1] - positions[0]) for share in shares]
-        self.assertAlmostEqual(sum(raw), positions[-1] - positions[0], places=4)
+        scores = contribution(segments, target=target)
+        closed = positions[-1] - positions[0]
+        raw = [score * closed / len(scores) for score in scores]
+        self.assertAlmostEqual(sum(raw), closed, places=4)
 
     def test_walking_away_scores_zero_and_never_negative(self):
         """Scoring a detour negative would make `alpha` a penalty scale as well as a
@@ -281,8 +306,11 @@ class TestContribution(unittest.TestCase):
         implementation ALSO returned all zeros and the arm passed vacuously -- the
         forced-failure run is what caught that."""
         segments = self._segments([0.0, 3.0, 2.5, 2.0])
-        shares = contribution(segments, target=Xyz(10.0, 0.0, 0.0))
-        np.testing.assert_allclose(shares, [1.0, 0.0], atol=1e-6)
+        scores = contribution(segments, target=Xyz(10.0, 0.0, 0.0))
+        # The whole of the episode's progress sits in one of two segments, so that one
+        # carries 2x the mean and the other carries none. Under the old share form this
+        # read [1.0, 0.0]; the ZERO is the arm that matters and it is unchanged.
+        np.testing.assert_allclose(scores, [2.0, 0.0], atol=1e-6)
 
     def test_an_episode_that_closed_nothing_scores_every_segment_zero(self):
         """All zeros rather than an equal split: no segment contributed, and an equal
@@ -325,10 +353,10 @@ class TestSurprise(unittest.TestCase):
         beliefs = [
             Xyz(0.0, 0.0, 0.0), Xyz(0.1, 0.0, 0.0), Xyz(0.2, 0.0, 0.0), Xyz(9.0, 0.0, 0.0)
         ]
-        shares = surprise(self._segments(beliefs))
-        self.assertEqual(len(shares), 2)
-        self.assertGreater(shares[1], shares[0])
-        self.assertAlmostEqual(sum(shares), 1.0, places=5)
+        scores = surprise(self._segments(beliefs))
+        self.assertEqual(len(scores), 2)
+        self.assertGreater(scores[1], scores[0])
+        self.assertAlmostEqual(sum(scores) / len(scores), 1.0, places=5)
 
     def test_a_belief_appearing_is_not_a_belief_changing(self):
         """**THE ARM THAT KEEPS `U_j` ABOUT THE AGENT.** `None -> Xyz` is the anomaly
@@ -336,9 +364,11 @@ class TestSurprise(unittest.TestCase):
         episode on whichever segment held the onset -- a measurement of the task's
         structure, not of the agent's predictions."""
         beliefs = [None, None, Xyz(50.0, 0.0, 0.0), Xyz(50.5, 0.0, 0.0)]
-        shares = surprise(self._segments(beliefs))
-        self.assertEqual(shares[0], 0.0)
-        self.assertAlmostEqual(shares[1], 1.0, places=5)
+        scores = surprise(self._segments(beliefs))
+        self.assertEqual(scores[0], 0.0)
+        # Every revision the episode had is in the second of two segments, so it carries
+        # 2x the mean. The onset itself contributing NOTHING is the arm under test.
+        self.assertAlmostEqual(scores[1], 2.0, places=5)
 
     def test_a_belief_disappearing_is_not_a_revision_either(self):
         beliefs = [Xyz(1.0, 0.0, 0.0), Xyz(1.0, 0.0, 0.0), None, None]
@@ -499,24 +529,24 @@ class TestRetain(unittest.TestCase):
 
     def test_only_segments_above_the_threshold_survive(self):
         segments = self._three()
-        kept = retain(segments, [0.1, 0.9, 0.5], eta=0.4)
+        kept = retain(segments, [0.1, 0.9, 0.5], eta=0.4, max_kept=99)
         self.assertEqual([segment.steps[0].position.x for segment in kept], [1.0, 2.0])
 
     def test_the_threshold_is_strict(self):
         """`> eta`, as written. A segment exactly at the threshold is dropped."""
         segments = self._three()
-        self.assertEqual(len(retain(segments, [0.5, 0.5, 0.5], eta=0.5)), 0)
+        self.assertEqual(len(retain(segments, [0.5, 0.5, 0.5], eta=0.5, max_kept=99)), 0)
 
     def test_order_is_preserved(self):
         segments = self._three()
-        kept = retain(segments, [1.0, 1.0, 1.0], eta=0.0)
+        kept = retain(segments, [1.0, 1.0, 1.0], eta=0.0, max_kept=99)
         self.assertEqual([segment.steps[0].position.x for segment in kept], [0.0, 1.0, 2.0])
 
     def test_a_length_mismatch_raises_rather_than_truncating(self):
         """Zipping to the shorter of the two would drop `D*`'s tail with nothing saying
         so, which is the silent-failure shape this repo keeps removing."""
         with self.assertRaises(ValueError) as caught:
-            retain(self._three(), [0.1, 0.9], eta=0.0)
+            retain(self._three(), [0.1, 0.9], eta=0.0, max_kept=99)
         self.assertIn("not these segments' scores", str(caught.exception))
 
     def test_eta_is_keyword_only_and_required(self):
@@ -527,8 +557,51 @@ class TestRetain(unittest.TestCase):
         """Separate from `importance` on purpose: the scores are what the audit records
         and what tells a later sweep whether `eta` was set anywhere sensible."""
         segments = self._three()
-        self.assertEqual(len(retain(segments, [9.0, 9.0, 9.0], eta=8.0)), 3)
-        self.assertEqual(len(retain(segments, [1.0, 1.0, 1.0], eta=8.0)), 0)
+        self.assertEqual(len(retain(segments, [9.0, 9.0, 9.0], eta=8.0, max_kept=99)), 3)
+        self.assertEqual(len(retain(segments, [1.0, 1.0, 1.0], eta=8.0, max_kept=99)), 0)
+
+    def test_the_cap_is_inert_when_fewer_clear_eta_than_it_allows(self):
+        """BOTH ARMS OF THE CAP, and this is the one that says it is not always on.
+
+        A deviation from eq. 13 that fired on every episode would BE the retention rule.
+        This pins that it is absent whenever the gate is doing its own work.
+        """
+        segments = self._three()
+        kept = retain(segments, [0.1, 0.9, 0.5], eta=0.4, max_kept=2)
+        self.assertEqual([segment.steps[0].position.x for segment in kept], [1.0, 2.0])
+
+    def test_the_cap_keeps_the_highest_scoring_and_holds_order(self):
+        """The other arm: more clear `eta` than the cap allows, so it bites. The kept set
+        is the top `max_kept` BY SCORE, returned in trajectory order, not score order."""
+        segments = self._three()
+        kept = retain(segments, [0.9, 0.2, 0.7], eta=0.1, max_kept=2)
+        self.assertEqual([segment.steps[0].position.x for segment in kept], [0.0, 2.0])
+
+    def test_the_cap_bounds_the_empty_memory_flood(self):
+        """THE CASE THE CAP EXISTS FOR. `novelty` hands an empty `M^E` `N_j = 1.0` for
+        every segment, so episode one of a chain clears any `eta` below 1 outright --
+        `dream-2` wrote 38 of its 45 rows from one walk that way. ADR-0024."""
+        segments = self._three()
+        every_segment_clears = [1.4, 1.2, 1.3]
+        self.assertEqual(len(retain(segments, every_segment_clears, eta=0.5, max_kept=99)), 3)
+        self.assertEqual(len(retain(segments, every_segment_clears, eta=0.5, max_kept=1)), 1)
+
+    def test_ties_at_the_cap_boundary_go_to_the_earlier_segment(self):
+        """Deterministic in its inputs, not in a sort's stability."""
+        segments = self._three()
+        kept = retain(segments, [0.8, 0.8, 0.8], eta=0.1, max_kept=2)
+        self.assertEqual([segment.steps[0].position.x for segment in kept], [0.0, 1.0])
+
+    def test_a_cap_below_one_raises(self):
+        """A cap of 0 writes nothing ever, which reads on an audit exactly like the eta
+        collapse it was added to prevent. Refused at the door instead."""
+        with self.assertRaises(ValueError) as caught:
+            retain(self._three(), [1.0, 1.0, 1.0], eta=0.0, max_kept=0)
+        self.assertIn("max_kept=0", str(caught.exception))
+
+    def test_max_kept_is_keyword_only_and_required(self):
+        with self.assertRaises(TypeError):
+            retain(self._three(), [1.0, 1.0, 1.0], eta=0.0)
 
 
 class TestTheWholePipeline(unittest.TestCase):
@@ -554,8 +627,8 @@ class TestTheWholePipeline(unittest.TestCase):
         self.assertEqual(len(scores), len(segments))
         # Nothing in memory, so every N_j is 1.0 and every score clears a threshold below
         # gamma. The interesting case -- a threshold that drops something -- is above.
-        self.assertEqual(len(retain(segments, scores, eta=0.99)), len(segments))
-        self.assertEqual(len(retain(segments, scores, eta=99.0)), 0)
+        self.assertEqual(len(retain(segments, scores, eta=0.99, max_kept=99)), len(segments))
+        self.assertEqual(len(retain(segments, scores, eta=99.0, max_kept=99)), 0)
 
     def test_consolidation_never_mutates_its_input(self):
         """Every function here is pure. `task/` will call these on the episode's own

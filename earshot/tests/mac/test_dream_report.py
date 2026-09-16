@@ -116,6 +116,7 @@ KNOBS = DreamKnobs(
     max_segment=12,
     importance=ImportanceWeights(alpha=1.0, beta=1.0, gamma=1.0),
     eta=0.5,
+    max_retained=8,
     min_support=2,
     k_experience=3,
     k_pattern=2,

@@ -4104,3 +4104,48 @@ The sweep exited 1 because `mL8ThkuaVTM` yields zero episodes in all three arms:
 **The SWS confound above is the next cheap read.** A tail-only manipulation at fixed class, or a `win-burst`-class control run under `WindowPolicy.CONTINUOUS`, would separate the class effect from the tail effect at no additional box design cost.
 
 **File index.** `earshot/tools/window_pilot.sh`'s `PILOT_ARMS`; `earshot/tools/window_report.py`'s `read_arm`, `format_arm`, `ArmReading`; `earshot/tools/episode_diff.py` for the paired McNemar; ADR-0017 for the sounding window and SWS; ADR-0019 for the cue readout and `cue_tail_steps`; ADR-0018's 2026-09-01 amendment for the co-primary contrast this pilot does not yet test. Data: the run's email report, not on disk in this worktree.
+
+# dream-2 - the DREAM arm is a null about a gate that could not open (run report, recorded 2026-09-16)
+
+`bash earshot/tools/ablation_sweep.sh --tag dream-2 --arms full dream`, commit `1706b6e`, riftvm, 4h45m, exit 0, all nine criteria green on every scene but one (`dream/TEEsavR23oF` RED on criterion 5 alone, 0 of 15, recorded as a measurement).
+
+## Source reached, by arm
+
+| arm | reached | of 282 | steps/ep | audio s/ep |
+|---|---|---|---|---|
+| `full` | 94 | 33.3% | 191.3 | 7.25 |
+| `dream` | 92 | 32.6% | 197.5 | 5.44 |
+
+`episode_diff`: 27 gained, 29 lost, net −2 over 56 discordant pairs, **exact McNemar p = 0.8939**. Scene-level sign test 5 up / 8 down of 13 non-tied.
+
+## THE NULL IS NOT ABOUT MEMORY. DO NOT QUOTE IT AS ONE.
+
+`dream_report` over the same run: **275 of 282 episodes retained NOTHING, 45 rows written over the whole arm, 38 of them by a single episode.** `M^P` sat at median 1 row and max 2. `M^K` carried zero weight on all 281 episodes that defined omega.
+
+The cause is a units defect in this repo's code, not a knob set badly. `_shares` normalised `C_j` and `U_j` into shares of an episode total, so each carried a hidden `1/J` while `N_j` (eq. 12) is a cosine and carries none. At the `J` a 250-step episode actually produces (21 to 84, verified by executing `segment_trajectory`), `mean(C_j + U_j)` was 0.024 to 0.095 against an `N_j` of order 1. **Eq. 10 degenerated to eq. 12 and `eta` was a pure novelty threshold.** With `M^E` non-empty its keys sat at 0.909 to 0.989 cosine, so `N_j` fell into [0.011, 0.091] and `max I_j` was about 0.38 against `eta = 0.5`. Nothing could clear it. The run's own `dream_importance_min` of 0.0128 is a measured nearest-neighbour cosine of 0.9872.
+
+`eta = 0.5` had been priced against the box's empty-memory `I_j` range of 1.0000 to 1.2901 — a regime that occurs exactly once per chain, because `novelty` returns 1.0 for every segment of an empty store. So episode one of the chain wrote its whole trajectory (`rows_added` 38 = that episode's `J`) and every later episode wrote nothing.
+
+Four competing explanations were checked and refused: segmentation is healthy; consolidation is **not** gated on success (282 consolidated, 92 reached, 7 retained); the store has no dedup, cap or silent partial read; scene order in the reader matches the sweep.
+
+## Two further defects, found reading this run
+
+**The divert override removes memory from the phase the headline measures.** `task/plan.py::_rank` sorts on is-divert before `Score`, so whenever a divert is in the pool eq. 26 is never read. A target is named on every diverting step, so DREAM is arithmetically inert across the whole detour — the stage 4 to 5 transition `source_reached` names. Memory's only route to the headline is indirect, through where the agent stands at `t_anom`. Sign unmeasured.
+
+**`dream-2` is a two-variable contrast.** `runner.py:880-884` claims `pick_plan` reduces to `pick_waypoint` on an empty memory. That holds only at `lambda_feasibility = 0`, which is what the pinning test uses; the run used 0.5, and `S_feas` is not constant across candidates. So 92 vs 94 is `full` against a feasibility term *and* a memory term, and with the memory near-empty the likelier reading is that it measured the feasibility term at near-zero effect.
+
+## What the chain fix did and did not do
+
+`2b04fd9` worked: 1 of 282 episodes started empty against `dream-1`'s 19 of 19. It also took the number of independent memory realisations from 19 to 1, which violates the independence `episode_diff`'s McNemar assumes in a way the tool cannot detect. **p = 0.8939 remains quotable against the sharp null that the memory changed nothing** — the chain is inert under it and the violation is anti-conservative — but **any effect-size bound read off this run is withdrawn**, and the scene-level sign test is structurally wrong for a chained arm: it reads a position-dependent effect as a wash.
+
+## What is decided
+
+ADR-0024 lands two changes: `C_j` and `U_j` become multiples of the episode's mean segment (an implementation bug fix — eq. 10 as published specifies no normalisation), and `retain` gains a per-episode cap on eq. 13 (a bounded deviation, inert whenever fewer than the cap clear `eta`, audited by the new `dream_segments_over_eta`). The sweep moves to `eta 2.0 / max-retained 12`, **both unpriced**.
+
+## What is measured next
+
+**In this order, and the first three are cheap.** (1) Price `eta` on one scene from `dream_segments_over_eta`; if the cap binds on most episodes the cap is the retention rule and `eta` is decoration. (2) Instrument eq. 26 — `as_measurements` exists and nothing reads it, so none of its five numbers is on any `dream-2` audit — and read `plan_pick_differs_from_no_memory` restricted to `divert is None`; **near zero there settles retention as the wrong fix**. (3) Run the `--dream-lambda-memory 0.0` control with `lambda_feasibility` held, which is what makes this run interpretable. (4) Only then a headline arm, as build-then-freeze, with `dtg_source_final` as the primary rather than binary reach.
+
+**The fix is a precondition for a fair test, not a treatment.** No Find-SR prediction is registered: omega was already moving on 236 of 281 episodes here and the outcome did not move, this repo's base rate for retuning a threshold in response to an inert mechanism is 0 for 6, and `matrix-2` measured an episodic store *hurting* a right prior by 10.3 points.
+
+**File index.** `earshot/memory/consolidate.py` (`_mean_multiples`, `retain`); `earshot/task/dream.py` (`DreamKnobs.max_retained`); `earshot/task/runner.py` (`dream_segments_over_eta`); `earshot/tools/dream_report.py`; `earshot/tools/ablation_sweep.sh`'s `DREAM_KNOBS`; ADR-0024. Data: the run's email report and `runs/dream-2/` on the box, not on disk in this worktree.

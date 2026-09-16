@@ -89,6 +89,7 @@ def knobs(**overrides):
         max_segment=6,
         importance=ImportanceWeights(alpha=1.0, beta=1.0, gamma=1.0),
         eta=0.5,
+        max_retained=99,
         min_support=2,
         k_experience=2,
         k_pattern=1,
@@ -134,7 +135,7 @@ def _clap():
 
 class TestTheKnobs(unittest.TestCase):
     def test_every_knob_reaches_the_audit(self):
-        """Eighteen named numbers. A sweep that cannot say what its knobs were is a sweep
+        """Nineteen named numbers. A sweep that cannot say what its knobs were is a sweep
         whose result cannot be reproduced, which has cost this repo real box time."""
         names = [name for name, _value in knobs().as_metrics()]
         self.assertEqual(len(names), len(set(names)))
@@ -562,6 +563,7 @@ class TestTheCli(unittest.TestCase):
             "stm-horizon": "4", "stm-decay": "0.8", "present-weight": "0.7",
             "coherence": "0.95", "min-segment": "2", "max-segment": "6",
             "alpha": "1", "beta": "1", "gamma": "1", "eta": "0.5",
+            "max-retained": "99",
             "min-support": "2", "k-experience": "2", "k-pattern": "1",
             "k-knowledge": "1", "temperature": "0.5", "lambda-plan": "1",
             "lambda-memory": "1", "lambda-feasibility": "1",
@@ -587,7 +589,7 @@ class TestTheCli(unittest.TestCase):
         self.assertAlmostEqual(built.plan_weights.feasibility, 1.0)
 
     def test_a_missing_knob_is_refused_and_every_missing_one_is_named(self):
-        """**FOURTEEN FLAGS IS TOO MANY TO DISCOVER ONE FAILED LAUNCH AT A TIME.** A
+        """**FIFTEEN FLAGS IS TOO MANY TO DISCOVER ONE FAILED LAUNCH AT A TIME.** A
         sweep driver that found them one argparse error after another would burn a box
         slot per knob."""
         argv = ["--dream"] + self._knobs(eta=None, temperature=None)
@@ -656,7 +658,7 @@ class TestTheCli(unittest.TestCase):
         print("{} knob(s) on the audit, neither of them a path".format(len(written)))
 
     def test_the_knob_count_matches_what_the_audit_writes(self):
-        """Eighteen flags, eighteen audit numbers. A knob that reached the run and not
+        """Nineteen flags, nineteen audit numbers. A knob that reached the run and not
         the record would be a number nobody could reproduce a sweep from."""
         built = dream_kwargs_from_args(
             self._args(["--dream"] + self._knobs())
