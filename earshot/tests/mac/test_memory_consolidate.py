@@ -35,6 +35,7 @@ from earshot.memory.consolidate import (
     importance,
     novelty,
     retain,
+    retention_metrics,
     segment_trajectory,
     surprise,
 )
@@ -643,6 +644,87 @@ class TestTheWholePipeline(unittest.TestCase):
         )
         for original, step in zip(before, steps):
             np.testing.assert_array_equal(original, step.observation)
+
+
+class TestRetentionMetricsSayWhichRuleRetained(unittest.TestCase):
+    """`eta-1` wrote twelve rows on every one of fifteen episodes and the audit could not
+    say whether `eta` passed twelve or the cap refused the rest. These are the numbers
+    that separate them, and they live here rather than in `runner.py` so a Mac can hold
+    them to the function they describe.
+    """
+
+    SCORES = (0.5, 4.0, 1.0, 9.0, 2.5, 7.0)
+
+    def test_the_counts_are_J_and_the_number_over_eta(self):
+        metrics = retention_metrics(self.SCORES, eta=2.0, max_kept=3)
+        self.assertEqual(metrics["dream_segments_scored"], 6.0)
+        self.assertEqual(metrics["dream_segments_over_eta"], 4.0)
+        print("J=6, over eta=2.0: {:.0f}".format(metrics["dream_segments_over_eta"]))
+
+    def test_the_price_is_the_score_at_the_cap_s_rank(self):
+        metrics = retention_metrics(self.SCORES, eta=2.0, max_kept=3)
+        # sorted desc: 9.0, 7.0, 4.0, 2.5, 1.0, 0.5 -- the 3rd is 4.0
+        self.assertAlmostEqual(metrics["dream_importance_at_cap"], 4.0)
+        print("rank-3 I_j = {:.4f}".format(metrics["dream_importance_at_cap"]))
+
+    def test_an_eta_set_at_the_price_admits_FEWER_than_the_cap(self):
+        """The property that makes the number actionable: it is the value `eta` has to
+        clear. eq. 13 is strictly greater, so `eta` at the rank-k score admits k-1."""
+        metrics = retention_metrics(self.SCORES, eta=2.0, max_kept=3)
+        priced = retention_metrics(
+            self.SCORES, eta=metrics["dream_importance_at_cap"], max_kept=3)
+        self.assertLess(priced["dream_segments_over_eta"], 3.0)
+        print("eta at the price admits {:.0f} of a cap of 3".format(
+            priced["dream_segments_over_eta"]))
+
+    def test_the_counts_agree_with_what_retain_actually_kept(self):
+        """**THE INVARIANT.** A report that disagrees with the function it describes is
+        worse than no report: the audit would price `eta` against a retention that never
+        happened. Asserted across the cap binding and not binding."""
+        segments = tuple(
+            Segment(steps=(_step(observation=_turned(index * 0.1)),) * 2)
+            for index in range(len(self.SCORES))
+        )
+        for cap in (1, 2, 3, 4, 6):
+            for eta in (0.0, 2.0, 5.0, 20.0):
+                kept = retain(segments, self.SCORES, eta=eta, max_kept=cap)
+                metrics = retention_metrics(self.SCORES, eta=eta, max_kept=cap)
+                self.assertEqual(
+                    len(kept),
+                    min(int(metrics["dream_segments_over_eta"]), cap),
+                    "cap={} eta={}: the report and retain disagree".format(cap, eta),
+                )
+        print("retain and retention_metrics agree over 20 (cap, eta) pairs")
+
+    def test_an_episode_shorter_than_the_cap_has_NO_price_rather_than_zero(self):
+        """ABSENT IS NEVER ZERO. There is no rank-12 score in a 5-segment episode, and a
+        0.0 there would price `eta` at the floor and read as 'every eta binds'."""
+        metrics = retention_metrics(self.SCORES, eta=2.0, max_kept=99)
+        self.assertNotIn("dream_importance_at_cap", metrics)
+        self.assertEqual(metrics["dream_segments_scored"], 6.0)
+        print("6 segments, cap 99: no price recorded")
+
+    def test_exactly_as_many_segments_as_the_cap_still_has_a_price(self):
+        metrics = retention_metrics(self.SCORES, eta=0.0, max_kept=6)
+        self.assertAlmostEqual(metrics["dream_importance_at_cap"], 0.5)
+
+    def test_no_segments_scored_records_the_zero_and_no_range(self):
+        metrics = retention_metrics((), eta=2.0, max_kept=3)
+        self.assertEqual(metrics["dream_segments_scored"], 0.0)
+        self.assertEqual(metrics["dream_segments_over_eta"], 0.0)
+        self.assertNotIn("dream_importance_max", metrics)
+        self.assertNotIn("dream_importance_at_cap", metrics)
+
+    def test_a_cap_below_one_raises_as_retain_does(self):
+        """One rule, two functions. A cap `retain` refuses must not be a cap the audit
+        happily describes."""
+        with self.assertRaises(ValueError):
+            retention_metrics(self.SCORES, eta=2.0, max_kept=0)
+
+    def test_it_does_not_mutate_its_input(self):
+        scores = list(self.SCORES)
+        retention_metrics(scores, eta=2.0, max_kept=3)
+        self.assertEqual(scores, list(self.SCORES))
 
 
 if __name__ == "__main__":

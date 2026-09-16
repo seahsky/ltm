@@ -133,3 +133,34 @@ And `matrix-2` measured an episodic store *hurting* a right prior by 10.3 points
 The memory it tested was one episode's segments duplicated 45 ways, scored by a gate that could not open, feeding a term that is switched off during the phase the headline measures.
 Its p = 0.8939 is quotable only against the sharp null that the memory changed nothing, under which the chain is inert and the violation is anti-conservative.
 Any effect-size bound read off it is withdrawn.
+
+## Addendum, 2026-09-16: step 1 ran, and it is not finished
+
+`eta-1` ran the pre-registered step 1: one scene (`4ok3usBNeis`), 15 episodes, 250 steps, `eta = 2.0`, `max_retained = 12`, 7m 36s.
+It took two attempts to become readable, and both failures were in the readout rather than the run.
+The driver did not exist when the first invocation was made, and the second exited 2 because `dream_report` walked only the sweep's `<arm>/<scene>/` layout while the driver writes a bare run directory, so fifteen episodes sat on disk being reported as none.
+`dream_segments_over_eta` — the number this step exists to read — was written by `runner.py` on every episode and read by nothing, which is `dream-1`'s failure repeated inside the fix for `dream-2`.
+
+**The rescale works.**
+`dream-2` retained nothing on 275 of 282 episodes once `M^E` was non-empty.
+`eta-1` retained on 15 of 15, `M^E` reached 180 rows in one scene, `M^P` reached 2 patterns, and `omega^E` moved by more than the 0.05 flat floor on 13 of the 14 episodes where it was defined at all — against `dream-2`, where the gate could not open.
+Key degeneracy fell with it: pairwise cosine among `M^E`'s keys has a median mean of 0.7577 at 50+ rows, where the box previously measured 0.909 to 0.989.
+The DREAM step cost 0.0183 s at the median against the 0.057 s the sweep's wall clock was sized from.
+
+**And the branch this ADR pre-registered as a STOP is the one that fired.**
+Segments clearing `eta` per episode: min 15, median 26, max 39, against a cap of 12.
+The cap bound on 15 of 15 episodes.
+`I_j` ranged from 0.0054 to 16.0641, so 2.0 sits low in a distribution that is far wider than the synthetic probe suggested.
+Under a cap that always binds, eq. 13 selected `D*` and top-k chose the memory, which is the deviation this ADR declined to ship.
+
+**What that does and does not invalidate.**
+The retained set is not wrong.
+Top-12 by `I_j` is the same twelve segments an `eta` admitting exactly twelve would select, so `eta-1`'s memory contents are what a correctly-priced run would have built, and sections A, B, D and E stand.
+What is lost is eq. 13's ability to write FEWER than twelve rows on an unremarkable episode, which is the whole of what a threshold is for.
+This is a spec-fidelity defect, not a corrupted measurement.
+
+**Step 1 is therefore not complete, and the cap is not to be raised in answer to it.**
+`eta` must rise until the cap binds on a minority.
+Pricing it by re-running the scene per guess is the wrong instrument, so `retention_metrics` now records `dream_importance_at_cap`: the `I_j` of the segment ranked `max_retained`-th, which is by construction the value `eta` must clear to admit at most the cap.
+One further `eta_pass.sh` run reads it, and `eta` is then set once from data rather than from a fixture.
+Steps 2, 3 and 4 are unchanged and still gate any headline arm.

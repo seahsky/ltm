@@ -125,6 +125,7 @@ from earshot.report.audit import (
 from earshot.task.dataset import AnomalyEpisode, EmptyDatasetError, build_anomaly_episodes
 from earshot.task.episodes import available_scenes, find_scenes_dir, find_split_dir, load_scene
 from earshot.task.memory_build import stores_for_cell
+from earshot.memory.consolidate import retention_metrics
 from earshot.memory.longterm import LongTermMemory
 from earshot.memory.retrieve import RetrievedContext
 from earshot.task.dream import (
@@ -2003,19 +2004,17 @@ def run_episode(
             metrics["dream_omega_p_mean"] = float(sum(dream_omega_p) / len(dream_omega_p))
             metrics["dream_omega_k_mean"] = float(sum(dream_omega_k) / len(dream_omega_k))
         metrics["dream_tau_steps"] = float(len(dream_state))
-        metrics["dream_segments_scored"] = float(len(importance_scores))
-        if importance_scores:
-            metrics["dream_importance_max"] = float(max(importance_scores))
-            metrics["dream_importance_min"] = float(min(importance_scores))
-        # HOW MANY CLEARED `eta` BEFORE THE CAP, which is what makes the cap auditable.
-        # `dream_rows_added` alone cannot say whether an episode wrote `max_retained`
-        # rows because that is all it had or because the cap refused the rest, and those
-        # are different findings: the first is a healthy episode, the second is the
-        # empty-memory flood `retain`'s cap exists to bound. Recorded on every episode,
-        # so a run where it NEVER exceeds the cap has measured the cap inert rather than
-        # leaving a reader to assume it.
-        metrics["dream_segments_over_eta"] = float(
-            sum(1 for score in importance_scores if float(score) > float(dream.knobs.eta))
+        # WHAT `retain` JUST DID, as the numbers that separate "eta retained" from "the
+        # cap did" and price the eta that would replace it. The arithmetic is in
+        # `memory/consolidate.py` beside `retain` itself, so it is testable without a
+        # simulator: these three decide whether a 14h15m comparison is worth booking, and
+        # they shipped untested when they lived here.
+        metrics.update(
+            retention_metrics(
+                importance_scores,
+                eta=float(dream.knobs.eta),
+                max_kept=int(dream.knobs.max_retained),
+            )
         )
         # HOW MUCH OF THE KEY SPACE `M^E` ACTUALLY USES. The box measured 0.909-0.989
         # over ten rows from one walk and omega was flat as a consequence -- a retrieval

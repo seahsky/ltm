@@ -66,6 +66,8 @@ def dream_metrics(
     omega_p=0.3,
     omega_k=0.2,
     segments_over_eta=None,
+    segments_scored=None,
+    importance_at_cap=None,
 ):
     """One episode's DREAM metrics, in the shape the runner writes them.
 
@@ -85,6 +87,12 @@ def dream_metrics(
         "dream_importance_min": 1.0,
         "dream_importance_max": 1.29,
     }
+    if segments_scored is not None:
+        metrics["dream_segments_scored"] = float(segments_scored)
+    if importance_at_cap is not None:
+        # The I_j of the segment ranked `max_retained`-th. ABSENT on an episode with
+        # fewer segments than the cap, which is why it is not defaulted here either.
+        metrics["dream_importance_at_cap"] = float(importance_at_cap)
     if segments_over_eta is not None:
         # Written by `runner.py` on every episode: how many segments cleared eta BEFORE
         # `max_retained` truncated. Absent on every run made before that counter landed.
@@ -456,6 +464,44 @@ class TestRetentionBothArms(Fixture):
             [(REACHED, dream_metrics(rows_added=0.0, segments_over_eta=0.0))] * 4)
         self.assertIn("eta RETAINED NOTHING", text)
         self.assertNotIn("eta IS THE RETENTION RULE", text)
+        print(text)
+
+    def test_a_bound_cap_prices_the_eta_that_would_replace_it(self):
+        """**WHAT `eta-1` COULD NOT SAY.** That run proved 2.0 too low and left the
+        right value unknown, which costs one re-run of the scene per guess. The I_j at
+        the cap's rank is that value, measured."""
+        text = self.read([
+            (REACHED, dream_metrics(rows_added=8.0, segments_over_eta=20.0,
+                                    segments_scored=50.0, importance_at_cap=value))
+            for value in (3.0, 5.0, 9.0)
+        ])
+        self.assertIn("THE CAP IS THE RETENTION RULE", text)
+        self.assertIn("PRICING eta OFF THIS RUN", text)
+        self.assertIn("median 5.0000", text)
+        self.assertIn("segments SCORED per episode", text)
+        print(text)
+
+    def test_a_bound_cap_without_the_price_says_so_rather_than_inventing_one(self):
+        """THE OTHER ARM. A run predating the counter must not have an eta read off it."""
+        text = self.read(
+            [(REACHED, dream_metrics(rows_added=8.0, segments_over_eta=20.0))] * 3)
+        self.assertIn("THE CAP IS THE RETENTION RULE", text)
+        self.assertIn("RECORDED NOWHERE", text)
+        self.assertNotIn("PRICING eta OFF THIS RUN", text)
+        print(text)
+
+    def test_episodes_too_short_to_fill_the_cap_are_counted_apart(self):
+        """ABSENT IS NEVER ZERO: an episode with fewer segments than the cap has no
+        rank-12 score, and folding it in as 0.0 would price eta at the floor."""
+        text = self.read([
+            (REACHED, dream_metrics(rows_added=8.0, segments_over_eta=20.0,
+                                    importance_at_cap=5.0)),
+            (REACHED, dream_metrics(rows_added=8.0, segments_over_eta=20.0,
+                                    importance_at_cap=5.0)),
+            (REACHED, dream_metrics(rows_added=2.0, segments_over_eta=20.0)),
+        ])
+        self.assertIn("median 5.0000", text)
+        self.assertIn("1 episode(s) scored fewer than 8 segments", text)
         print(text)
 
     def test_an_empty_pattern_store_is_named_as_an_absence_omega_weighted(self):
