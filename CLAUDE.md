@@ -110,6 +110,18 @@ python -m earshot.tools.window_report runs/<tag> \
 # unreadable is not flat
 python -m earshot.tools.dream_report runs/<tag>          # --arm NAME for a non-`dream` arm
 
+# PRICE `eta` BEFORE BOOKING A NIGHT (ADR-0024 step 1). `dream-2` set eta 0.5 against the
+# box's EMPTY-memory `I_j`, a regime that occurs once per chain, and the gate never opened
+# again: 275 of 282 episodes retained NOTHING, 38 of the arm's 45 rows from one walk. The
+# cause was a units bug — `C_j`/`U_j` were shares carrying a hidden `1/J` that `N_j` does
+# not — so eq. 10 degenerated to eq. 12. Fixed; `mean(C_j + U_j)` is now 2.0 for ANY `J`,
+# and eta is MEANINGFUL AND UNPRICED. One scene, minutes, prints its own readout.
+# READ SECTION C: set eta so the median of `dream_segments_over_eta` sits BELOW
+# max-retained. If the cap binds on most episodes the CAP is the retention rule and eta is
+# decoration — that is ADR-0024's top-k deviation and it needs its own ADR, not a quietly
+# raised cap. A reportable DREAM comparison costs 14h15m; this can rule it out first
+nrun bash earshot/tools/eta_pass.sh --tag <fresh-tag>   # --eta E --max-retained N --scene S
+
 # THE CHAIN, ADDED AFTER `dream-1` CAME BACK A NULL. That sweep built nineteen memories
 # and threw each away — the driver invokes the runner once per scene, so section D above
 # found all 19 scenes starting from an empty `M^E`. `omega_t` reaches the agent ONLY
