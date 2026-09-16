@@ -392,9 +392,37 @@ for i in "${!ARM_NAMES[@]}"; do
   arm="${ARM_NAMES[$i]}"
   echo ""
   echo "  --- arm $arm: ${ARM_WHY[$i]} ---"
+  # THE DREAM ARM CHAINS ITS MEMORY ACROSS SCENES; every other arm has none to chain.
+  # `dream-1` built nineteen memories and threw each away (`dream_report` section D), so
+  # `M^P` -- the only level `omega_t` can weigh against, per
+  # `tests/mac/test_dream_omega_reach.py` -- almost never had two successes sharing a
+  # concept triple. One file, appended to by each scene in turn, is what gives `abstract`
+  # a corpus to find a regularity IN.
+  #
+  # SCENE ORDER IS NOW PART OF THE RESULT for this arm. `SCENE_LIST` is built once and
+  # sorted above, so it is fixed and a re-run repeats it; but episode k of the last scene
+  # now depends on every scene before it, and a sweep that changed `--scenes` would not
+  # be comparing the same thing. `episode_diff` still pairs by (scene, index) and is
+  # unaffected.
+  MEMORY_FILE=""
+  if [ "$arm" = "dream" ]; then
+    MEMORY_FILE="$OUT_DIR/$arm/memory.json"
+    echo "      chaining M^E across scenes through $MEMORY_FILE"
+  fi
   for scene in "${SCENE_LIST[@]}"; do
     run_dir="$OUT_DIR/$arm/$scene"
     echo "    $arm / $scene   ($(date +%H:%M:%S))"
+    # `--dream-memory-in` only once the file EXISTS. The first scene of the chain has no
+    # memory to restore, and `run()` treats a missing in-path as an error rather than as
+    # an empty memory on purpose -- a typo that silently started from nothing would
+    # reproduce exactly the defect this chain removes.
+    MEMORY_FLAGS=""
+    if [ -n "$MEMORY_FILE" ]; then
+      MEMORY_FLAGS="--dream-memory-out $MEMORY_FILE"
+      if [ -f "$MEMORY_FILE" ]; then
+        MEMORY_FLAGS="--dream-memory-in $MEMORY_FILE $MEMORY_FLAGS"
+      fi
+    fi
     # `--detector oracle` and `--localization realizable` are the defaults and are passed
     # explicitly: the ORACLE STOP deletes the stop_miss half of the failure mass, so
     # these find numbers are an upper bound and the command line should say so rather
@@ -412,6 +440,7 @@ for i in "${!ARM_NAMES[@]}"; do
       --sounding-policy fixed_steps \
       --sounding-steps "$SOUNDING_STEPS" \
       ${ARM_FLAGS[$i]} \
+      ${MEMORY_FLAGS} \
       > "$OUT_DIR/$arm-$scene.log" 2>&1
     status=$?
     if [ "$status" -ne 0 ]; then

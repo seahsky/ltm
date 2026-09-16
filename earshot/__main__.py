@@ -257,6 +257,23 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             help="{} (eq. {}). Required with --dream.".format(flag, equation),
         )
+    # NOT in DREAM_KNOB_FLAGS, deliberately. Every entry in that table is a knob the
+    # paper leaves unvalued and `DreamKnobs.as_metrics` writes onto every episode; these
+    # two are paths to a file on a particular box and belong on no audit. Keeping them
+    # out is also what keeps "--dream needs every knob" true: a chain is optional.
+    parser.add_argument(
+        "--dream-memory-in",
+        default=None,
+        help="restore M^E from this file before the first episode (written by "
+             "--dream-memory-out). Requires --dream. A MISSING file is an error and "
+             "never a silent empty memory: the two are indistinguishable afterwards.",
+    )
+    parser.add_argument(
+        "--dream-memory-out",
+        default=None,
+        help="write M^E here after the last episode, overwriting. Requires --dream. "
+             "Point both flags at one path to chain scenes into a lifelong memory.",
+    )
     return parser
 
 
@@ -299,6 +316,20 @@ def dream_kwargs_from_args(args: argparse.Namespace) -> Dict[str, object]:
     discovered them one failed launch after another would burn a box slot per knob.
     """
     if not getattr(args, "dream", False):
+        # The chain flags are meaningless without the mechanism they carry, and a run
+        # that accepted them silently would write nothing and report success -- which is
+        # the shape of every incident in this repo's convention list.
+        stray = [
+            name for name in ("dream_memory_in", "dream_memory_out")
+            if getattr(args, name, None) is not None
+        ]
+        if stray:
+            raise SystemExit(
+                "{} need --dream; without it there is no M^L to carry and the run would "
+                "quietly ignore them".format(
+                    " ".join("--{}".format(name.replace("_", "-")) for name in stray)
+                )
+            )
         return {}
     missing = [
         flag for flag, _kind, _eq in DREAM_KNOB_FLAGS
@@ -336,7 +367,12 @@ def dream_kwargs_from_args(args: argparse.Namespace) -> Dict[str, object]:
                 memory=float(value["lambda_memory"]),
                 feasibility=float(value["lambda_feasibility"]),
             ),
-        )
+        ),
+        # Passed through as given, including `None`. `run()` starts from an empty `M^E`
+        # on `None` in, and writes nothing on `None` out, so a DREAM run with neither
+        # flag is byte-identical to one from before they existed.
+        "dream_memory_in": args.dream_memory_in,
+        "dream_memory_out": args.dream_memory_out,
     }
 
 

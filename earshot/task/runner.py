@@ -2220,6 +2220,8 @@ def run(
     memory_k: int = 5,
     memory_min_confidence: Optional[float] = None,
     dream_knobs: Optional[DreamKnobs] = None,
+    dream_memory_in: Optional[str] = None,
+    dream_memory_out: Optional[str] = None,
 ) -> RunSummary:
     """Assert the environment, build the dataset, run the episodes, write the artefacts.
 
@@ -2405,15 +2407,34 @@ def run(
             )
         from earshot.task.models import load_clip_encoder
 
-        # `M^L` starts EMPTY and is never seeded from a prior pass. That is the design:
-        # DREAM's claim is that an agent accumulates its own experience across episodes,
-        # so a memory handed to it at step zero would be measuring the prior pass instead.
-        # `M^K` -- the one level a prior pass could fill -- stays empty here too, and
-        # wiring the matrix's `SemanticStore` into it is a separate, arguable change.
+        # `M^L` IS NEVER SEEDED FROM A PRIOR PASS, and `dream_memory_in` is not that.
+        # DREAM's claim is that an agent accumulates its OWN experience, so a memory
+        # handed to it at step zero would be measuring whoever built it. What
+        # `dream_memory_in` restores is this same agent's own `M^E` from an earlier
+        # invocation, which is the difference between a lifelong run and nineteen
+        # unrelated ones. `M^K` -- the one level a prior pass could fill -- stays empty
+        # either way, and `task/dream_store.py` says why it is an input and not an output.
+        #
+        # `dream-1` is the measurement behind the flag: `tools/dream_report.py` section D
+        # found all 19 scenes starting from an empty `M^E`, because the sweep invokes this
+        # function once per scene.
+        if dream_memory_in is not None:
+            from earshot.task.dream_store import load_memory, memory_summary
+
+            seeded = load_memory(
+                dream_memory_in, min_support=int(dream_knobs.min_support)
+            )
+            say("M^L: restored from {} — {}".format(
+                dream_memory_in, memory_summary(seeded)
+            ))
+        else:
+            seeded = empty_memory()
         dream = DreamContext(
-            knobs=dream_knobs, memory=empty_memory(), clip_encoder=load_clip_encoder()
+            knobs=dream_knobs, memory=seeded, clip_encoder=load_clip_encoder()
         )
-        say("CLIP: loaded — DREAM is on, M^L starts empty")
+        say("CLIP: loaded — DREAM is on, M^L holds {} row(s)".format(
+            len(dream.memory.experience)
+        ))
 
     write_env_report(
         cfg.run_dir,
@@ -2509,6 +2530,25 @@ def run(
             ))
     finally:
         world.close()
+
+    if dream is not None and dream_memory_out is not None:
+        # AFTER THE LOOP AND NOT IN THE `finally`. A scene that crashed contributes
+        # nothing to the chain, which is what makes the driver's continue-on-failure rule
+        # mean the same thing here as it does everywhere else: the next scene inherits
+        # the last COMPLETE scene's memory, not a partial one. `dump_memory` writes to a
+        # staging name and renames, so a kill during the write leaves the previous
+        # scene's file whole.
+        from earshot.task.dream_store import (
+            dump_memory,
+            memory_summary,
+            read_provenance,
+        )
+
+        chain = read_provenance(dream_memory_out) + (dataset.scene_label,)
+        dump_memory(dream_memory_out, dream.memory, scenes=chain)
+        say("M^L: wrote {} — {} over {} scene(s)".format(
+            dream_memory_out, memory_summary(dream.memory), len(chain)
+        ))
 
     summary = RunSummary(
         run_dir=cfg.run_dir,

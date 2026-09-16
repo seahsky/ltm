@@ -219,6 +219,85 @@ class TestBothLoopsAskIt(unittest.TestCase):
         guard = self.source.rindex('is_zero_yield "', 0, gate)
         self.assertIn("SKIPPED, zero yield", self.source[guard:gate])
 
+class TestTheDreamArmChainsItsMemory(unittest.TestCase):
+    """The per-scene reset `dream_report` section D measured, removed in the driver.
+
+    The chain is shell, so it is asserted against the script text and then RUN as shell
+    below -- a copy of the logic pasted into this file would pass forever after someone
+    edited the driver, which is the rule this module's docstring already states.
+    """
+
+    def setUp(self):
+        self.source = DRIVER.read_text()
+
+    def test_only_the_dream_arm_gets_a_memory_file(self):
+        """No other arm has an M^L to chain, and giving one a path would be a lie."""
+        self.assertIn('if [ "$arm" = "dream" ]; then', self.source)
+        self.assertIn('MEMORY_FILE="$OUT_DIR/$arm/memory.json"', self.source)
+
+    def test_the_flags_reach_the_runner_invocation(self):
+        launch = self.source.index("python -m earshot \\")
+        window = self.source[launch:launch + 900]
+        self.assertIn("${MEMORY_FLAGS}", window)
+
+    def test_the_in_flag_is_withheld_until_the_file_exists(self):
+        """`run()` treats a missing in-path as an error, so the first scene must not
+        pass one. A driver that always passed it would fail every sweep's first scene."""
+        self.assertIn('if [ -f "$MEMORY_FILE" ]; then', self.source)
+        guard = self.source.index('if [ -f "$MEMORY_FILE" ]; then')
+        self.assertIn("--dream-memory-in", self.source[guard:guard + 200])
+
+    def test_the_scene_order_caveat_is_written_down(self):
+        """Episode k of the last scene now depends on every scene before it."""
+        self.assertIn("SCENE ORDER IS NOW PART OF THE RESULT", self.source)
+
+    def _flags_for(self, arm, exists):
+        """Run the driver's own flag logic in bash, for one arm and one file state."""
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        memory_file = pathlib.Path(root) / "memory.json"
+        if exists:
+            memory_file.write_text("{}", encoding="utf-8")
+        script = """
+        arm="{arm}"
+        OUT_DIR="{root}"
+        MEMORY_FILE=""
+        if [ "$arm" = "dream" ]; then
+          MEMORY_FILE="{memory}"
+        fi
+        MEMORY_FLAGS=""
+        if [ -n "$MEMORY_FILE" ]; then
+          MEMORY_FLAGS="--dream-memory-out $MEMORY_FILE"
+          if [ -f "$MEMORY_FILE" ]; then
+            MEMORY_FLAGS="--dream-memory-in $MEMORY_FILE $MEMORY_FLAGS"
+          fi
+        fi
+        echo "$MEMORY_FLAGS"
+        """.format(arm=arm, root=root, memory=memory_file)
+        done = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=True
+        )
+        return done.stdout.strip()
+
+    def test_the_first_dream_scene_writes_and_does_not_read(self):
+        flags = self._flags_for("dream", exists=False)
+        self.assertIn("--dream-memory-out", flags)
+        self.assertNotIn("--dream-memory-in", flags)
+        print("first dream scene: {}".format(flags))
+
+    def test_every_later_dream_scene_reads_and_writes(self):
+        flags = self._flags_for("dream", exists=True)
+        self.assertIn("--dream-memory-in", flags)
+        self.assertIn("--dream-memory-out", flags)
+        print("later dream scene: {}".format(flags))
+
+    def test_the_baseline_arm_gets_no_chain_flags_at_all(self):
+        """THE CONTROL. `full` must reach the runner byte-identical to before."""
+        for exists in (False, True):
+            self.assertEqual("", self._flags_for("full", exists=exists))
+        print("full arm: no chain flags, with or without a memory file present")
+
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

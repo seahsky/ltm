@@ -110,6 +110,25 @@ python -m earshot.tools.window_report runs/<tag> \
 # unreadable is not flat
 python -m earshot.tools.dream_report runs/<tag>          # --arm NAME for a non-`dream` arm
 
+# THE CHAIN, ADDED AFTER `dream-1` CAME BACK A NULL. That sweep built nineteen memories
+# and threw each away — the driver invokes the runner once per scene, so section D above
+# found all 19 scenes starting from an empty `M^E`. `omega_t` reaches the agent ONLY
+# through `memory_consistency`, which renormalises omega^E against omega^P, so it cannot
+# act until `M^P` is non-empty — and `M^P` needs two successes sharing a concept triple,
+# which 15 episodes in one room at 33% reach rarely give. The `dream` arm now chains
+# `M^E` through one file, so `abstract` sees nineteen scenes' successes instead of one
+# scene's. Nothing about `G` changes. SCENE ORDER IS PART OF THE RESULT for that arm now
+nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> --arms "full dream"
+
+# the same chain by hand, one scene at a time. `--dream-memory-in` on a MISSING file is
+# an error and never a silent empty memory: the two are indistinguishable afterwards,
+# which is exactly how `dream-1` looked like a working run
+python -m earshot --run-dir runs/<tag>/dream/<scene> --clap --dream <knobs> \
+  --dream-memory-out runs/<tag>/dream/memory.json        # first scene: write only
+python -m earshot --run-dir runs/<tag>/dream/<scene2> --clap --dream <knobs> \
+  --dream-memory-in runs/<tag>/dream/memory.json \
+  --dream-memory-out runs/<tag>/dream/memory.json        # every later scene
+
 # DID ADR-0022's PLACEMENT CHANGE ACTUALLY REACH THIS SWEEP — the question a moved SR
 # cannot answer, because a re-run of the SAME task moves by 3.0 points on identical bytes.
 # Splits every arm into anchored / geometric / MISSING and gives each branch its own
