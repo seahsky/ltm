@@ -18,6 +18,8 @@ precedent for a mac test that holds a shell script to a rule.
 import pathlib
 import re
 import shlex
+import shutil
+import tempfile
 import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
@@ -199,6 +201,69 @@ class TestTheFlagsReachTheRunner(unittest.TestCase):
             self.fail("the driver's knob list is incomplete: {}".format(exit_))
 
 
+class TestTheReadoutCanReadWhatTheRunWrote(unittest.TestCase):
+    """**THE `eta-1` FAILURE, FENCED.** The run worked: 15 episodes, 7m 36s, every
+    funnel stage recorded. Then step 4 printed "NO EPISODES ON DISK" and the driver
+    exited 2, because the runner writes `<run-dir>/episodes/` and `dream_report` walked
+    only the sweep's `<arm>/<scene>/episodes/`.
+
+    Two halves, and both are asserted: the driver hands the SAME directory to the runner
+    and to the readout, and that directory's layout is one the readout reads.
+    """
+
+    def _argument_after(self, flag):
+        """The token following `flag` in the script, as written."""
+        tokens = ETA_PASS.read_text().split()
+        self.assertIn(flag, tokens, "{} is not in eta_pass.sh".format(flag))
+        return tokens[tokens.index(flag) + 1]
+
+    def test_the_runner_and_the_readout_are_pointed_at_one_directory(self):
+        run_dir = self._argument_after("--run-dir")
+        text = ETA_PASS.read_text()
+        report_line = [
+            line for line in text.splitlines()
+            if "earshot.tools.dream_report" in line and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(len(report_line), 1, "expected one dream_report invocation")
+        self.assertIn(run_dir.strip('"'), report_line[0])
+
+    def test_the_layout_the_driver_writes_is_one_the_readout_reads(self):
+        """The half a text comparison cannot make. Writes the driver's layout with the
+        REAL writer and reads it with the REAL reader, no simulator involved."""
+        from earshot.report.agent import AgentReport
+        from earshot.report.artifacts import write_episode
+        from earshot.report.audit import EpisodeAudit, FunnelStage, StepRecord
+        from earshot.tools.dream_report import main as dream_report_main
+
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        # `--run-dir runs/$TAG`, exactly as the driver passes it: no scene directory.
+        run_dir = pathlib.Path(root) / "eta-1"
+        run_dir.mkdir()
+        for index in range(2):
+            write_episode(
+                str(run_dir), index, AgentReport(resumed=True),
+                EpisodeAudit(
+                    episode_index=index,
+                    scene_id="4ok3usBNeis",
+                    funnel_stage=FunnelStage.PRIMARY_RESUMED,
+                    steps=(StepRecord(step=0, measured_rms=0.1, audio_render_s=0.05),),
+                    metrics={
+                        "dream_informed_steps": 20.0,
+                        "dream_rows_added": 12.0,
+                        "dream_segments_over_eta": 21.0,
+                        "dream_experience_rows": 12.0,
+                    },
+                ),
+            )
+
+        self.assertEqual(
+            dream_report_main([str(run_dir)]), 0,
+            "the readout cannot read the layout the driver writes; that is the eta-1 "
+            "failure and it exits 2 after the box time is already spent",
+        )
+
+
 class TestItReadsWhatItRan(unittest.TestCase):
     """A driver that leaves the readout to a second command is a driver whose numbers
     reach nobody. `dream-1` wrote its central quantity onto 282 episodes and no reader
@@ -211,7 +276,7 @@ class TestItReadsWhatItRan(unittest.TestCase):
         """The cap binding on most episodes is a STOP, not a cap to raise quietly."""
         text = ETA_PASS.read_text()
         self.assertIn("dream_segments_over_eta", text)
-        self.assertIn("CAP is the retention rule", text)
+        self.assertIn("CAP IS THE RETENTION RULE", text)
 
     def test_it_disclaims_being_a_measurement_of_dream(self):
         """One scene, one run, against a 16.2% flip rate. ADR-0016's rule, in the output

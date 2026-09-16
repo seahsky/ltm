@@ -19,9 +19,14 @@ omega and a dead one both report, so the SPREAD is the statistic and the mean is
 against how many rows that memory held, because "the keys are degenerate" and "the memory
 had two rows" are different findings and a pooled median cannot separate them.
 
-**C. DID `eta` RETAIN ANYTHING.** ``dream_rows_added`` per episode. An arm where it is
-always 0 consolidated nothing all night and every other number is about an empty memory.
-An arm where it never falls is a threshold that is not thresholding.
+**C. DID `eta` RETAIN ANYTHING, AND WAS IT eta THAT DID.** ``dream_rows_added`` per
+episode. An arm where it is always 0 consolidated nothing all night and every other
+number is about an empty memory. An arm where it never falls is a threshold that is not
+thresholding. ``dream_rows_added`` CANNOT SAY WHICH RULE RETAINED, though: eta passing
+twelve segments and a cap of twelve truncating forty write the same twelve rows. So
+``dream_segments_over_eta`` — the count before ``max_retained`` truncates — is read
+beside it, and the section says which of the two selected the memory. That is ADR-0024's
+open question, and `eta_pass.sh` exists to answer it.
 
 **D. HOW FAR THE MEMORY EVER REACHED.** The sweep runs one ``python -m earshot`` per
 scene, so ``run()``'s carry-over is within a scene and every scene starts from empty. That
@@ -54,7 +59,7 @@ import statistics
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from earshot.report.artifacts import episode_paths, read_audit
+from earshot.report.artifacts import episode_paths, read_audit, run_paths
 from earshot.report.audit import EpisodeAudit, FunnelStage
 from earshot.task.smoke import episode_indices
 from earshot.tools.window_report import scene_dirs
@@ -65,6 +70,7 @@ __all__ = [
     "ROW_BANDS",
     "EpisodeRow",
     "read_rows",
+    "scene_dirs_or_flat",
     "band_of",
     "present",
     "format_omega",
@@ -157,6 +163,10 @@ class EpisodeRow:
     experience_rows: Optional[float]
     pattern_rows: Optional[float]
     rows_added: Optional[float]
+    # How many segments cleared eta BEFORE `max_retained` truncated. The pair
+    # (this, `rows_added`) is what separates "eta is the retention rule" from
+    # "the cap is, and eta is decoration" — ADR-0024's open question.
+    segments_over_eta: Optional[float]
     tau_steps: Optional[float]
     importance_min: Optional[float]
     importance_max: Optional[float]
@@ -185,15 +195,38 @@ def _metric(audit: EpisodeAudit, key: str) -> Optional[float]:
     return None if value is None else float(value)
 
 
+def scene_dirs_or_flat(arm_dir: str) -> Tuple[pathlib.Path, ...]:
+    """The arm's scene directories, or the directory ITSELF when it holds one run.
+
+    A sweep writes ``<tag>/<arm>/<scene>/episodes/``, which is what ``scene_dirs``
+    finds. One invocation of the runner writes ``<run-dir>/episodes/`` and NO scene
+    directory at all — the shape ``eta_pass.sh`` produces, and the shape CLAUDE.md's
+    one-episode command has always produced.
+
+    ``eta-1`` ran 15 episodes, wrote them in that shape, and this reader printed "NO
+    EPISODES ON DISK" and exited 2 over data that was on disk the whole time. That is
+    ``pilot-1``'s failure from the other side, and the same rule answers it: a reader
+    that finds nothing must be wrong about the layout before the run is called empty.
+    """
+    scenes = scene_dirs(arm_dir)
+    if scenes:
+        return scenes
+    root = pathlib.Path(arm_dir)
+    return (root,) if run_paths(root)[1].is_dir() else ()
+
+
 def read_rows(arm_dir: str) -> Tuple[EpisodeRow, ...]:
     """Every episode under one arm directory, in scene then index order.
 
     The scene name comes from the directory, matching ``window_report``: a scene that
     built no episodes still has a directory, and the sweep's shape has to survive the
-    reading.
+    reading. A FLAT run directory is named after the tag rather than the scene, so there
+    — and only there — the name comes off the audit instead.
     """
     rows: List[EpisodeRow] = []
-    for scene in scene_dirs(arm_dir):
+    root = pathlib.Path(arm_dir)
+    for scene in scene_dirs_or_flat(arm_dir):
+        flat = scene == root
         # `window_report.load_arm_audits` pools an arm's audits and drops which scene
         # each came from, and section D is entirely about the per-scene shape. So the
         # three pieces it is built from are called here instead — `episode_indices` is
@@ -204,7 +237,9 @@ def read_rows(arm_dir: str) -> Tuple[EpisodeRow, ...]:
             audit = read_audit(audit_path)
             rows.append(
                 EpisodeRow(
-                    scene=scene.name,
+                    scene=(
+                        str(audit.scene_id or scene.name) if flat else scene.name
+                    ),
                     index=int(audit.episode_index),
                     # `>= SOURCE_REACHED`, the SAME definition `window_report`
                     # uses, quoted from its comment: two definitions of
@@ -224,6 +259,8 @@ def read_rows(arm_dir: str) -> Tuple[EpisodeRow, ...]:
                     experience_rows=_metric(audit, "dream_experience_rows"),
                     pattern_rows=_metric(audit, "dream_pattern_rows"),
                     rows_added=_metric(audit, "dream_rows_added"),
+                    segments_over_eta=_metric(
+                        audit, "dream_segments_over_eta"),
                     tau_steps=_metric(audit, "dream_tau_steps"),
                     importance_min=_metric(audit, "dream_importance_min"),
                     importance_max=_metric(audit, "dream_importance_max"),
@@ -544,7 +581,8 @@ def format_precondition(rows: Sequence[EpisodeRow]) -> str:
 
 
 def format_retention(rows: Sequence[EpisodeRow]) -> str:
-    """Section C. Whether ``eta`` retained, and whether it ever refused."""
+    """Section C. Whether ``eta`` retained, whether it refused, and whether it was
+    ``eta`` rather than ``max_retained`` that chose what the memory holds."""
     out: List[str] = []
     out.append("C. RETENTION — IS eta (eq. 13) DOING ANYTHING")
 
@@ -566,7 +604,86 @@ def format_retention(rows: Sequence[EpisodeRow]) -> str:
         )
     )
     out.append("   total rows written over the arm: {:.0f}".format(sum(added)))
-    if zero == 0:
+
+    # WHICH RULE ACTUALLY RETAINED. `rows_added` alone cannot say: eta passing twelve
+    # segments and a cap of twelve truncating forty both write twelve rows. The runner
+    # counts the segments over eta BEFORE the cap for exactly this, and until now
+    # nothing read it — the `dream-1` shape, where a run's own decisive number reached
+    # no reader.
+    over, over_absent = present([row.segments_over_eta for row in rows])
+    caps = sorted({
+        value
+        for value in (row.knobs.get("dream_max_retained") for row in rows)
+        if value is not None
+    })
+    cap_bound: Optional[int] = None
+    if over:
+        out.append(
+            "   segments over eta per episode, BEFORE the cap: {}".format(_stats(over))
+        )
+        if over_absent:
+            out.append(
+                "     absent on {} of {} episode(s)".format(over_absent, len(rows))
+            )
+        if len(caps) == 1:
+            cap_bound = sum(1 for value in over if value >= caps[0])
+            out.append(
+                "   the cap (--dream-max-retained) is {:.0f}, and it BOUND on {} of {} "
+                "episode(s)".format(caps[0], cap_bound, len(over))
+            )
+        elif len(caps) > 1:
+            out.append(
+                "   MIXED CAPS in one directory ({}) — two configurations, so there "
+                "is no single cap\n   to judge this against.".format(
+                    ", ".join("{:.0f}".format(value) for value in caps))
+            )
+        else:
+            out.append(
+                "   no episode recorded --dream-max-retained, so the count above "
+                "cannot be\n   compared against the cap it was written to be compared "
+                "against."
+            )
+    elif over_absent == len(rows):
+        out.append(
+            "   dream_segments_over_eta RECORDED NOWHERE. This run predates the "
+            "counter, so\n   whether eta or the cap did the retaining cannot be "
+            "decided from this run."
+        )
+
+    if cap_bound is not None and cap_bound * 2 > len(over):
+        out.append("")
+        out.append(
+            "   THE CAP IS THE RETENTION RULE, NOT eta. More segments cleared eta than "
+            "the cap"
+        )
+        out.append(
+            "   admits on {} of {} episode(s), so eq. 13 selected D* and the cap then "
+            "took the".format(cap_bound, len(over))
+        )
+        out.append(
+            "   top {:.0f} by I_j. That is a top-k rule wearing a threshold's name. "
+            "RAISE eta".format(caps[0])
+        )
+        out.append(
+            "   until this line reads a minority, or write the ADR that adopts top-k on"
+        )
+        out.append("   purpose. Do NOT quietly raise the cap.")
+    elif zero == len(added):
+        out.append("")
+        out.append(
+            "   eta RETAINED NOTHING, ALL NIGHT. Every other number in this report is"
+        )
+        out.append("   about an empty memory.")
+    elif cap_bound == 0:
+        out.append("")
+        out.append(
+            "   eta IS THE RETENTION RULE. The cap never bound, so every row written "
+            "was one"
+        )
+        out.append(
+            "   eq. 13 chose. The cap is the bound it was added to be and nothing more."
+        )
+    elif zero == 0:
         out.append("")
         out.append(
             "   eta REFUSED NOTHING, ALL NIGHT. Every episode's segments cleared the"
@@ -579,12 +696,6 @@ def format_retention(rows: Sequence[EpisodeRow]) -> str:
             "importance"
         )
         out.append("   range beside it is what it should have been set against.")
-    elif zero == len(added):
-        out.append("")
-        out.append(
-            "   eta RETAINED NOTHING, ALL NIGHT. Every other number in this report is"
-        )
-        out.append("   about an empty memory.")
 
     lows, _ = present([row.importance_min for row in rows])
     highs, _ = present([row.importance_max for row in rows])
@@ -752,9 +863,10 @@ def format_report(rows: Sequence[EpisodeRow], *, arm: str, arm_dir: str) -> str:
     ]
     if not rows:
         header.append(
-            "NO EPISODES ON DISK under {}. The arm directory exists or does not; "
-            "either\nway nothing was read. Check the arm name against the sweep's own "
-            "directories.".format(arm_dir)
+            "NO EPISODES ON DISK under {}. Three layouts are read: <tag>/<arm>/"
+            "<scene>/,\none arm directory holding <scene>/, and one run directory "
+            "holding episodes/ itself.\nNone of them matched, so either the arm name "
+            "is wrong or the run wrote nothing.".format(arm_dir)
         )
         return "\n".join(header)
     body = [
@@ -784,8 +896,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "run_dir",
         help=(
-            "a sweep directory (runs/<tag>, which holds <arm>/<scene>/) or one arm "
-            "directory directly"
+            "a sweep directory (runs/<tag>, which holds <arm>/<scene>/), one arm "
+            "directory directly, or ONE RUN directory holding episodes/ itself — the "
+            "shape a single `python -m earshot --run-dir` invocation writes"
         ),
     )
     parser.add_argument(
