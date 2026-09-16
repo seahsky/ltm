@@ -4149,3 +4149,56 @@ ADR-0024 lands two changes: `C_j` and `U_j` become multiples of the episode's me
 **The fix is a precondition for a fair test, not a treatment.** No Find-SR prediction is registered: omega was already moving on 236 of 281 episodes here and the outcome did not move, this repo's base rate for retuning a threshold in response to an inert mechanism is 0 for 6, and `matrix-2` measured an episodic store *hurting* a right prior by 10.3 points.
 
 **File index.** `earshot/memory/consolidate.py` (`_mean_multiples`, `retain`); `earshot/task/dream.py` (`DreamKnobs.max_retained`); `earshot/task/runner.py` (`dream_segments_over_eta`); `earshot/tools/dream_report.py`; `earshot/tools/ablation_sweep.sh`'s `DREAM_KNOBS`; ADR-0024. Data: the run's email report and `runs/dream-2/` on the box, not on disk in this worktree.
+
+# dream-3
+
+`bash earshot/tools/ablation_sweep.sh --tag dream-3 --arms "full dream dream-nomem" --dream-eta 4.5`, exit 0, 7h41m, commit `bb661b0`, host riftvm, 2026-09-16.
+Three arms, 19 scenes, 15 episodes each, `n = 282` paired per arm, every gate green, one zero-yield scene (`mL8ThkuaVTM`) in all three arms.
+The decision record is ADR-0025.
+
+| arm | source reached | rate | steps/ep | SWS |
+|---|---|---|---|---|
+| `full` | 86 / 282 | 30.5% | 190.5 | 0.105 |
+| `dream` | 79 / 282 | 28.0% | 198.3 | 0.090 |
+| `dream-nomem` | 94 / 282 | 33.3% | 197.7 | 0.112 |
+
+`dream-nomem` is `dream` with `lambda_memory = 0.0` and every other knob identical.
+It exists because ADR-0024 found `dream-2` to be a two-variable contrast: `pick_plan` does not reduce to `pick_waypoint` at `lambda_feasibility = 0.5`, so `full` against `dream` differences a feasibility term and a memory term at once.
+
+**The memory term, alone: −15 episodes, −5.3 points.**
+Exact McNemar, `dream` against `dream-nomem`: 28 to 13 over 41 discordant pairs, **p = 0.0275**.
+Scene-level sign test over the driver's own per-scene nets: 11 up, 3 down, 3 tied, **p = 0.0574** (mine, by hand — no tool in this repo computes it).
+
+**The feasibility term, alone: +8 episodes, +2.8 points**, `full` against `dream-nomem`, 29 to 21 over 50 discordant, p ≈ 0.32 (mine, normal approximation).
+
+The two decompose the old contrast exactly: `full` → `dream` is −7, and −7 = +8 − 15.
+
+**Every precondition the earlier DREAM runs failed, this one met.**
+Rows retained per episode: median 4 against `dream-2`'s 0 on 275 of 282.
+`M^E` reached 1192 rows across the nineteen chained scenes against 45.
+`M^P` reached a median of 5 rows against 1.
+`omega^E` moved past the 0.05 flat floor on 270 of 281 episodes.
+The `max_retained` cap bound on 3 of 282, so `eta` was the retention rule and the cap was a bound, which is what `eta-1` and `eta-2` were spent to arrange.
+The mechanism was live and it made the agent worse.
+
+**The harm is uniform across the placement split**, which is why ADR-0025 reads it as noise on the argmax rather than as a wrong prior.
+
+| arm | anchored (n=134) | geometric (n=148) |
+|---|---|---|
+| `full` | 31 (23.1%) | 55 (37.2%) |
+| `dream` | 27 (20.1%) | 52 (35.1%) |
+| `dream-nomem` | 35 (26.1%) | 59 (39.9%) |
+
+A memory holding a real room-level regularity would help where the source sits at an anchor and not elsewhere; one holding a wrong regularity would show the mirror image.
+−6.0 anchored and −4.7 geometric is neither.
+
+**Not reportable as a magnitude.**
+5.3 points is below the 6.71-point single-run MDE at `n = 282`, and `repeat-1` measured SD 7.7 episodes on the difference between byte-identical reruns.
+`eta-1` and `eta-2` demonstrate it locally: identical command, identical seed, 3 versus 2 reached.
+
+**One unintended asymmetry.**
+The sweep chains `M^E` only for the arm named `dream`, so `dream-nomem` built at most 96 rows per scene and discarded them.
+At `lambda_memory = 0` that store cannot enter the plan score, so the contrast stands; what the run cannot answer is whether a smaller memory with the term ON would do better.
+
+Cost: 0.0231 s per DREAM step at the median against the 0.057 s the sweep's wall clock was sized from.
+`M^K` carried no weight on any episode in any arm — the semantic level has never been populated.
