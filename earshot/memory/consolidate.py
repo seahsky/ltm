@@ -48,7 +48,7 @@ lives in `task/`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -64,6 +64,7 @@ __all__ = [
     "novelty",
     "importance",
     "retain",
+    "retention_metrics",
 ]
 
 
@@ -497,3 +498,47 @@ def retain(
             sorted(over, key=lambda index: (-float(scores[index]), index))[:int(max_kept)]
         )
     return tuple(segments[index] for index in over)
+
+
+def retention_metrics(
+    scores: Sequence[float], *, eta: float, max_kept: int
+) -> Dict[str, float]:
+    """What `retain` just did, as the three numbers that price `eta`. Pure.
+
+    `dream_rows_added` alone cannot say which rule selected the memory: `eta` passing
+    twelve segments and a cap of twelve truncating forty write the same twelve rows.
+    These separate them, and the third prices the fix:
+
+    * `dream_segments_scored` — J, the denominator the other two are fractions of.
+    * `dream_segments_over_eta` — how many cleared eq. 13 BEFORE the cap. Above
+      `max_kept`, the cap was the retention rule and `eta` was decoration.
+    * `dream_importance_at_cap` — the I_j of the segment ranked `max_kept`-th, which is
+      the value `eta` must clear to admit at most the cap. ABSENT, never 0.0, when
+      fewer than `max_kept` segments were scored: there is no such rank, and a 0.0 there
+      would read as "every eta binds", the opposite of what a short episode means.
+
+    This lives here rather than in `runner.py` because `runner.py` cannot be imported
+    without a simulator, and arithmetic that decides what to spend a night on should not
+    be the part of the tree a Mac cannot test. `eta-1` shipped these counters untested
+    for exactly that reason.
+    """
+    if int(max_kept) < 1:
+        raise ValueError(
+            "retention_metrics got max_kept={}; the same cap `retain` refuses, and a "
+            "rank below 1 has no meaning".format(max_kept)
+        )
+    values = [float(score) for score in scores]
+    metrics: Dict[str, float] = {
+        "dream_segments_scored": float(len(values)),
+        "dream_segments_over_eta": float(
+            sum(1 for score in values if score > float(eta))
+        ),
+    }
+    if values:
+        metrics["dream_importance_max"] = max(values)
+        metrics["dream_importance_min"] = min(values)
+    if len(values) >= int(max_kept):
+        metrics["dream_importance_at_cap"] = sorted(values, reverse=True)[
+            int(max_kept) - 1
+        ]
+    return metrics

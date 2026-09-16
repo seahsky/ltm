@@ -167,6 +167,13 @@ class EpisodeRow:
     # (this, `rows_added`) is what separates "eta is the retention rule" from
     # "the cap is, and eta is decoration" — ADR-0024's open question.
     segments_over_eta: Optional[float]
+    # J: how many segments eq. 11 scored at all, the denominator the two counts above
+    # are fractions of. Written since `dream-1` and read by nothing until now.
+    segments_scored: Optional[float]
+    # The I_j of the segment ranked `max_retained`-th from the top: the value `eta` has
+    # to clear to admit at most the cap. Absent on an episode with fewer segments than
+    # the cap, where no such rank exists.
+    importance_at_cap: Optional[float]
     tau_steps: Optional[float]
     importance_min: Optional[float]
     importance_max: Optional[float]
@@ -261,6 +268,8 @@ def read_rows(arm_dir: str) -> Tuple[EpisodeRow, ...]:
                     rows_added=_metric(audit, "dream_rows_added"),
                     segments_over_eta=_metric(
                         audit, "dream_segments_over_eta"),
+                    segments_scored=_metric(audit, "dream_segments_scored"),
+                    importance_at_cap=_metric(audit, "dream_importance_at_cap"),
                     tau_steps=_metric(audit, "dream_tau_steps"),
                     importance_min=_metric(audit, "dream_importance_min"),
                     importance_max=_metric(audit, "dream_importance_max"),
@@ -610,6 +619,11 @@ def format_retention(rows: Sequence[EpisodeRow]) -> str:
     # counts the segments over eta BEFORE the cap for exactly this, and until now
     # nothing read it — the `dream-1` shape, where a run's own decisive number reached
     # no reader.
+    scored, _scored_absent = present([row.segments_scored for row in rows])
+    if scored:
+        out.append(
+            "   segments SCORED per episode (J, eq. 11): {}".format(_stats(scored))
+        )
     over, over_absent = present([row.segments_over_eta for row in rows])
     caps = sorted({
         value
@@ -668,6 +682,42 @@ def format_retention(rows: Sequence[EpisodeRow]) -> str:
             "   until this line reads a minority, or write the ADR that adopts top-k on"
         )
         out.append("   purpose. Do NOT quietly raise the cap.")
+        at_cap, at_cap_absent = present([row.importance_at_cap for row in rows])
+        if at_cap:
+            out.append("")
+            out.append(
+                "   PRICING eta OFF THIS RUN, so the next one is not another guess. The "
+                "I_j of the"
+            )
+            out.append(
+                "   segment ranked {:.0f}th — the value eta must clear to admit at most "
+                "the cap:".format(caps[0])
+            )
+            out.append("     {}".format(_stats(at_cap)))
+            out.append(
+                "   eta at the median binds on half these episodes; at the max it binds "
+                "on all of"
+            )
+            out.append(
+                "   them and the cap never fires. Both are THIS scene at THIS memory "
+                "size — one"
+            )
+            out.append("   run, so treat them as a starting point and re-read this line.")
+            if at_cap_absent:
+                out.append(
+                    "     {} episode(s) scored fewer than {:.0f} segments and have no "
+                    "such rank.".format(at_cap_absent, caps[0])
+                )
+        else:
+            out.append("")
+            out.append(
+                "   dream_importance_at_cap RECORDED NOWHERE, so this run says eta is "
+                "too low"
+            )
+            out.append(
+                "   and not what it should be instead. Pricing it costs one re-run per "
+                "guess."
+            )
     elif zero == len(added):
         out.append("")
         out.append(
