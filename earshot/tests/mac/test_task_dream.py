@@ -608,6 +608,53 @@ class TestTheCli(unittest.TestCase):
                 "--dream-{} is in the table but never reached the parser".format(flag),
             )
 
+    def test_the_chain_flags_reach_the_run_and_default_to_none(self):
+        """`--dream-memory-in/out`. `None` on both is a run that behaves as before.
+
+        `dream-1` needed this and did not have it: the sweep invokes `run()` once per
+        scene, so `M^E` was built and thrown away nineteen times.
+        """
+        without = dream_kwargs_from_args(self._args(["--dream"] + self._knobs()))
+        self.assertIsNone(without["dream_memory_in"])
+        self.assertIsNone(without["dream_memory_out"])
+
+        chained = dream_kwargs_from_args(self._args(
+            ["--dream", "--dream-memory-in", "/tmp/in.json",
+             "--dream-memory-out", "/tmp/out.json"] + self._knobs()
+        ))
+        self.assertEqual(chained["dream_memory_in"], "/tmp/in.json")
+        self.assertEqual(chained["dream_memory_out"], "/tmp/out.json")
+
+    def test_a_chain_flag_without_dream_is_refused_rather_than_ignored(self):
+        """THE OTHER ARM. A run that accepted them silently would write nothing.
+
+        That is the shape of every incident in this repo's convention list: a thing that
+        did not happen, reported as a success.
+        """
+        for flag in ("--dream-memory-in", "--dream-memory-out"):
+            with self.assertRaises(SystemExit) as caught:
+                dream_kwargs_from_args(self._args([flag, "/tmp/x.json"]))
+            self.assertIn(flag, str(caught.exception))
+            self.assertIn("need --dream", str(caught.exception))
+        print("both chain flags refuse to run without --dream")
+
+    def test_the_chain_flags_are_not_knobs_and_reach_no_audit(self):
+        """A path on a particular box is not a knob, and belongs on no episode record.
+
+        Keeping them out of `DREAM_KNOB_FLAGS` is also what keeps "--dream needs every
+        knob" true: the chain is optional and the knobs are not.
+        """
+        names = [flag for flag, _kind, _eq in DREAM_KNOB_FLAGS]
+        self.assertNotIn("memory_in", names)
+        self.assertNotIn("memory_out", names)
+        built = dream_kwargs_from_args(
+            self._args(["--dream", "--dream-memory-out", "/tmp/out.json"]
+                       + self._knobs())
+        )["dream_knobs"]
+        written = [name for name, _value in built.as_metrics()]
+        self.assertNotIn("dream_memory_out", written)
+        print("{} knob(s) on the audit, neither of them a path".format(len(written)))
+
     def test_the_knob_count_matches_what_the_audit_writes(self):
         """Eighteen flags, eighteen audit numbers. A knob that reached the run and not
         the record would be a number nobody could reproduce a sweep from."""

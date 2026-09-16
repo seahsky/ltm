@@ -268,6 +268,55 @@ class TestWhatADreamStepCosts(unittest.TestCase):
             "and the rebuild of M^P is the thing to look at".format(elapsed),
         )
 
+    def test_a_real_M_E_survives_the_round_trip_to_disk(self):
+        """The chain that removes `dream-1`'s per-scene reset, on REAL `z^av` rows.
+
+        The mac suite round-trips three-wide toy vectors. What the sweep writes is a
+        1024-wide fused CLIP+CLAP embedding, and the things that can go wrong at that
+        width -- dtype, finiteness, the JSON float widening and narrowing -- only appear
+        on a real one. `ExperienceEntry` refuses a non-finite key, so a lossy round trip
+        raises here rather than producing a retrieval key pointing nowhere.
+
+        Printed because the file size is the trade this format took knowingly.
+        """
+        import json
+        import pathlib
+        import tempfile
+
+        from earshot.task.dream_store import dump_memory, load_memory, memory_summary
+
+        memory, _scores = consolidate_episode(
+            self.state, self.context,
+            sound_concept="toilet_flush", target_concept="toilet", room_concept=None,
+            reached=True, final_gap_m=0.5,
+        )
+        if not len(memory.experience):
+            self.skipTest("nothing was retained, so there is no memory to round trip")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(pathlib.Path(tmp) / "memory.json")
+            dump_memory(path, memory, scenes=("one-scene",))
+            size_mb = pathlib.Path(path).stat().st_size / 1e6
+            restored = load_memory(
+                path, min_support=int(self.context.knobs.min_support)
+            )
+            rows = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+
+        width = memory.experience.dim
+        print("  {} real M^E row(s) at h^av width {} -> {:.2f} MB on disk".format(
+            len(memory.experience), width, size_mb))
+        print("  restored: {}".format(memory_summary(restored)))
+        self.assertEqual(len(restored.experience), len(memory.experience))
+        self.assertEqual(restored.experience.dim, width)
+        self.assertEqual(len(rows["experience"]), len(memory.experience))
+        for before, after in zip(memory.experience.entries,
+                                 restored.experience.entries):
+            np.testing.assert_allclose(before.context, after.context, rtol=0, atol=0)
+            np.testing.assert_allclose(before.trajectory, after.trajectory,
+                                       rtol=0, atol=0)
+        print("  every component EXACT after the round trip (atol 0), so a retrieval "
+              "against a restored memory is the same retrieval")
+
     def test_the_retrieval_is_live_once_the_memory_has_rows(self):
         """A second episode against a filled `M^L`, which is the state every episode
         after the first runs in. An empty memory retrieves nothing, so timing the first
