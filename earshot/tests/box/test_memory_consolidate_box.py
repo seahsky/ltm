@@ -288,7 +288,14 @@ class TestTheSegmentationOnARealWalk(unittest.TestCase):
             print("    delta_{}: {:2d} steps  C {:.4f}  U {:.4f}  I {:.4f}".format(
                 index, len(segment), contributions[index], surprises[index], scores[index]))
         print("  I range {:.4f} to {:.4f}".format(min(scores), max(scores)))
-        self.assertAlmostEqual(sum(contributions), 1.0, places=4)
+        print("  mean C_j {:.4f} over {} segment(s)  (1.0 by construction, ADR-0024)".format(
+            sum(contributions) / len(contributions), len(contributions)))
+        # THE MEAN IS 1.0, NOT THE SUM. `C_j` is a multiple of the episode's mean segment
+        # rather than a share of its total (ADR-0024): the share form carried a hidden
+        # `1/J` that `N_j` does not, which made `I_j` a novelty score with a rounding
+        # error added and cost `dream-2` its whole retention. This assertion is the
+        # commensurability the rescale buys, checked on a real walk rather than a fixture.
+        self.assertAlmostEqual(sum(contributions) / len(contributions), 1.0, places=4)
         self.assertEqual(set(surprises), {0.0}, "a belief appeared where none was set")
         self.assertTrue(all(math.isfinite(score) for score in scores))
 
