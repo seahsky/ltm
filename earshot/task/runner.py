@@ -67,7 +67,12 @@ from earshot.agent.detector import GoalDetector, OracleDetector
 from earshot.agent.proposers import SOURCE_INVESTIGATE, Candidate, FrontierProposer
 from earshot.agent.reachability import assert_pool, reachable_pool
 from earshot.agent.scorer import pick_waypoint
-from earshot.task.plan import PlanWeights, pick_plan
+from earshot.task.plan import (
+    PlanChoice,
+    PlanWeights,
+    compare_to_no_memory,
+    score_plans,
+)
 from earshot.audio.bed import bed_signal
 from earshot.audio.calibration import (
     CalibrationError,
@@ -849,8 +854,13 @@ def _choose_waypoint(
     planner: PlannerConfig,
     divert: Optional[Candidate] = None,
     plan: Optional[Tuple[RetrievedContext, PlanWeights]] = None,
-) -> Tuple[Xyz, str, Dict[str, int]]:
-    """Propose, filter on the navmesh, and pick one. Returns ``(waypoint, source, counters)``.
+) -> Tuple[Xyz, str, Dict[str, int], Optional[PlanChoice]]:
+    """Propose, filter on the navmesh, and pick one.
+
+    Returns ``(waypoint, source, counters, choice)``. ``choice`` is ``None`` for the
+    pre-DREAM pick, which has no memory term to have changed anything, and is never a
+    zeroed record of one -- absent is not "the memory did nothing", which is the rule
+    this tree has paid for twice.
 
     Two stages because ADR-0008's invariant has two ways to be met. The frontier pool can
     be empty of *cells* — the proposer answers that itself with the compass fan — or full
@@ -874,6 +884,7 @@ def _choose_waypoint(
         )
         kept = assert_pool(report, stage="compass fan after the frontier pool emptied")
         counters = report.counters()
+    choice: Optional[PlanChoice] = None
     if plan is None:
         scored = pick_waypoint(kept)
     else:
@@ -882,9 +893,15 @@ def _choose_waypoint(
         # to `pick_waypoint` exactly when memory is empty (PR #113), so a DREAM run's
         # first episode -- and every step of a run whose `M^L` never fills -- picks what
         # the pre-DREAM agent picks, by construction rather than by a branch here.
+        #
+        # `score_plans` rather than `pick_plan` because the COUNTERFACTUAL needs the whole
+        # ranked pool, and `pick_plan` is that call's first element. Scoring still happens
+        # exactly once per step: `compare_to_no_memory` re-ranks numbers already computed.
         retrieved, weights = plan
-        scored = pick_plan(kept, retrieved, weights=weights)
-    return scored.candidate.position, scored.candidate.source, counters
+        ranked = score_plans(kept, retrieved, weights=weights)
+        scored = ranked[0]
+        choice = compare_to_no_memory(ranked, weights=weights)
+    return scored.candidate.position, scored.candidate.source, counters, choice
 
 
 # ----------------------------------------------------------------------
@@ -1163,6 +1180,14 @@ def run_episode(
     dream_omega_p: List[float] = []
     dream_omega_k: List[float] = []
     dream_informed_steps = 0
+    # EQ. 26's OWN COUNTERS (ADR-0024 step 2). `dream_informed_steps` says the
+    # memory ANSWERED; none of these existed to say whether it CHANGED anything.
+    plan_ranked_steps = 0
+    plan_divert_steps = 0
+    plan_eligible_steps = 0
+    plan_pick_differs = 0
+    plan_mem_spreads: List[float] = []
+    plan_margins: List[float] = []
     dream_retrieved: Optional[RetrievedContext] = None
     prev_action: Optional[str] = None
 
@@ -1528,7 +1553,7 @@ def run_episode(
                 if memory_prior is not None:
                     target = memory_prior.target
             divert = _divert_candidate(target, pose) if target is not None else None
-            waypoint, action, step_counters = _steer(
+            waypoint, action, step_counters, plan_choice = _steer(
                 proposer,
                 pose,
                 waypoint,
@@ -1545,6 +1570,21 @@ def run_episode(
             )
             for key, value in step_counters.items():
                 counters[key] = counters.get(key, 0) + int(value)
+            if plan_choice is not None:
+                # THE NUMBER THIS WHOLE INSTRUMENTATION EXISTS FOR, and its denominators.
+                # `plan_eligible_steps` excludes the steps at which the answer was fixed
+                # before the memory was consulted -- the divert override in force, a pool
+                # of one, or a retrieval that returned nothing -- because a difference
+                # rate over steps where no difference was POSSIBLE is not a rate.
+                plan_ranked_steps += 1
+                if plan_choice.divert_in_pool:
+                    plan_divert_steps += 1
+                plan_margins.append(float(plan_choice.margin))
+                if plan_choice.memory_could_act:
+                    plan_eligible_steps += 1
+                    plan_mem_spreads.append(float(plan_choice.memory_spread))
+                    if plan_choice.differs:
+                        plan_pick_differs += 1
 
         displacement: Optional[float] = None
         if action is not None and action != ACT_STOP:
@@ -1992,6 +2032,23 @@ def run_episode(
         # is written even when it is 0 -- "omega was never defined" and "omega was flat"
         # are different findings and a missing key cannot tell them apart.
         metrics["dream_informed_steps"] = float(dream_informed_steps)
+        # EQ. 26, MEASURED (ADR-0024 step 2). `dream-3` inferred "noise on the argmax"
+        # from an outcome -- a 5.3-point loss in equal proportion on anchored and
+        # geometric episodes. These say it directly, or refute it.
+        metrics["plan_ranked_steps"] = float(plan_ranked_steps)
+        metrics["plan_divert_steps"] = float(plan_divert_steps)
+        metrics["plan_eligible_steps"] = float(plan_eligible_steps)
+        metrics["plan_pick_differs"] = float(plan_pick_differs)
+        if plan_mem_spreads:
+            metrics["plan_mem_spread_mean"] = float(
+                sum(plan_mem_spreads) / len(plan_mem_spreads)
+            )
+            metrics["plan_mem_spread_max"] = float(max(plan_mem_spreads))
+        if plan_margins:
+            # NEGATIVE margins are the divert override outranking a higher-scoring
+            # frontier, which is that override's cost in eq. 26's own units.
+            metrics["plan_margin_mean"] = float(sum(plan_margins) / len(plan_margins))
+            metrics["plan_margin_min"] = float(min(plan_margins))
         if dream_omega_e:
             ordered = sorted(dream_omega_e)
             metrics["dream_omega_e_mean"] = float(sum(dream_omega_e) / len(dream_omega_e))
@@ -2113,7 +2170,7 @@ def _steer(
     planner: PlannerConfig,
     divert: Optional[Candidate],
     plan: Optional[Tuple[RetrievedContext, PlanWeights]] = None,
-) -> Tuple[Optional[Xyz], Optional[str], Dict[str, int]]:
+) -> Tuple[Optional[Xyz], Optional[str], Dict[str, int], Optional[PlanChoice]]:
     """The next action toward a waypoint, re-proposing once if the current one is spent.
 
     Two attempts, because the two ways a waypoint stops being answerable both resolve by
@@ -2128,9 +2185,13 @@ def _steer(
     record; an invented action is a trajectory that lies.
     """
     counters: Dict[str, int] = {}
+    # The counterfactual belongs to the step that RANKED a pool. A step that re-used the
+    # waypoint it already had ranked nothing, and folding it in as "the memory changed
+    # nothing" would put steps in the denominator at which eq. 26 was never consulted.
+    choice: Optional[PlanChoice] = None
     for _attempt in range(2):
         if waypoint is None or proposer.is_decision_step():
-            waypoint, _source, counters = _choose_waypoint(
+            waypoint, _source, counters, choice = _choose_waypoint(
                 proposer,
                 pose,
                 snap_point=snap_point,
@@ -2146,10 +2207,10 @@ def _steer(
             waypoint = None
             continue
         if action is not None:
-            return waypoint, action, counters
+            return waypoint, action, counters, choice
         proposer.request_replan()
         waypoint = None
-    return waypoint, None, counters
+    return waypoint, None, counters, choice
 
 
 def _funnel_stage(

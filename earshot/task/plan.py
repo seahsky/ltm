@@ -87,6 +87,8 @@ __all__ = [
     "score_plans",
     "pick_plan",
     "as_measurements",
+    "PlanChoice",
+    "compare_to_no_memory",
 ]
 
 # `h^traj`'s component order, restated as the two indices this module reads. Named rather
@@ -278,16 +280,25 @@ def score_plan(
     )
 
 
-def _rank(scored: PlanScore) -> Tuple[int, float, int]:
-    """Sort key, carried from `agent.scorer._rank` and load-bearing for the same reason.
+def _rank_key(scored: PlanScore, total: float) -> Tuple[int, float, int]:
+    """The ordering, with the total left open so a counterfactual can reuse it.
 
     The divert first BY RANK, then `Score` descending, then emission order. See the module
     docstring: eq. 26 puts a memory term back into the blend that made the divert's 1.0
     tie-able, so without this a frontier the memory likes would outrank the anomaly the
     controller has already decided to investigate.
+
+    `total` is a parameter and not read off `scored` because `compare_to_no_memory` has to
+    rank the SAME pool under a different total. Two orderings written out twice is how the
+    counterfactual comes to differ from the real pick for a reason that is not the memory.
     """
     is_divert = 0 if scored.candidate.source == SOURCE_INVESTIGATE else 1
-    return (is_divert, -scored.total, scored.candidate.candidate_id)
+    return (is_divert, -float(total), scored.candidate.candidate_id)
+
+
+def _rank(scored: PlanScore) -> Tuple[int, float, int]:
+    """Sort key, carried from `agent.scorer._rank` and load-bearing for the same reason."""
+    return _rank_key(scored, scored.total)
 
 
 def score_plans(
@@ -337,4 +348,84 @@ def as_measurements(scored: PlanScore) -> Tuple[Tuple[str, float], ...]:
         ("plan_s_feas", float(scored.feasibility)),
         ("plan_score_total", float(scored.total)),
         ("plan_memory_informed", 1.0 if scored.memory_informed else 0.0),
+    )
+
+@dataclass(frozen=True)
+class PlanChoice:
+    """What eq. 26's memory term did to ONE step's pick. Pure data, no simulator.
+
+    `dream-3` measured the memory term costing 5.3 points and doing it in equal
+    proportion on anchored and geometric episodes, which is the signature of noise on the
+    argmax rather than of a wrong-but-structured prior. That reading was an INFERENCE
+    from an outcome. These fields measure it directly.
+    """
+
+    picked_id: int
+    picked_id_without_memory: int
+    divert_in_pool: bool
+    pool: int
+    memory_informed: bool
+    # `max S_mem - min S_mem` over the pool. A term that is CONSTANT across candidates
+    # cannot move an argmax however large it is, which is the failure `k_experience`
+    # predicts: `memory_consistency` averages `_leg_agreement` over the retrieved hits,
+    # and a degenerate store averaged over k converges to the same value for everyone.
+    memory_spread: float
+    # The gap from the pick to the runner-up IN RANK ORDER. NEGATIVE when the divert
+    # override outranks a higher-scoring frontier, which is that override's cost in the
+    # units eq. 26 is written in -- the number `plan.py:281` has never had attached to it.
+    margin: float
+
+    @property
+    def differs(self) -> bool:
+        return self.picked_id != self.picked_id_without_memory
+
+    @property
+    def memory_could_act(self) -> bool:
+        """Whether this step is even ELIGIBLE to show a difference.
+
+        Three ways it is not, and pooling them with the rest is how a denominator comes
+        to include steps at which the answer was fixed before the memory was consulted:
+        the divert override was in force, the pool held one candidate, or the retrieval
+        returned nothing to be consistent with.
+        """
+        return (not self.divert_in_pool) and self.pool > 1 and self.memory_informed
+
+
+def compare_to_no_memory(
+    scored: Sequence[PlanScore], *, weights: PlanWeights
+) -> PlanChoice:
+    """Did `l2 S_mem` change the pick. Pure, and it does NOT re-score anything.
+
+    `PlanScore` already carries the three terms separately, so the counterfactual is a
+    re-ranking of numbers already computed: `l1 S_plan + l3 S_feas`, the same blend an
+    arm with `lambda_memory = 0` ranks on. That matters for cost -- this runs on every
+    decision step of every episode -- and for correctness: re-scoring would consult the
+    memory again and a retrieval that is not deterministic would answer a different
+    question.
+
+    Takes the list `score_plans` returns, already ordered.
+    """
+    if not scored:
+        raise ValueError(
+            "compare_to_no_memory got an empty pool; ADR-0008's invariant is asserted "
+            "in reachability.assert_pool and pick_plan raises on the same input"
+        )
+    best = scored[0]
+    without = min(
+        scored,
+        key=lambda one: _rank_key(
+            one, weights.plan * one.plan + weights.feasibility * one.feasibility
+        ),
+    )
+    memories = [float(one.memory) for one in scored]
+    return PlanChoice(
+        picked_id=int(best.candidate.candidate_id),
+        picked_id_without_memory=int(without.candidate.candidate_id),
+        divert_in_pool=any(
+            one.candidate.source == SOURCE_INVESTIGATE for one in scored
+        ),
+        pool=len(scored),
+        memory_informed=bool(best.memory_informed),
+        memory_spread=float(max(memories) - min(memories)),
+        margin=float(best.total - scored[1].total) if len(scored) > 1 else 0.0,
     )
