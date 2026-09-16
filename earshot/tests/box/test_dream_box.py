@@ -98,7 +98,7 @@ def _knobs():
         stm_horizon=8, stm_decay=0.8, present_weight=0.7,
         coherence=0.995, min_segment=2, max_segment=8,
         importance=ImportanceWeights(alpha=1.0, beta=1.0, gamma=1.0),
-        eta=0.5, min_support=2,
+        eta=0.5, max_retained=8, min_support=2,
         k_experience=3, k_pattern=2, k_knowledge=1, temperature=0.5,
         plan_weights=PlanWeights(plan=1.0, memory=0.5, feasibility=0.5),
     )

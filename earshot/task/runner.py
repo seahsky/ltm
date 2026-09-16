@@ -2007,6 +2007,16 @@ def run_episode(
         if importance_scores:
             metrics["dream_importance_max"] = float(max(importance_scores))
             metrics["dream_importance_min"] = float(min(importance_scores))
+        # HOW MANY CLEARED `eta` BEFORE THE CAP, which is what makes the cap auditable.
+        # `dream_rows_added` alone cannot say whether an episode wrote `max_retained`
+        # rows because that is all it had or because the cap refused the rest, and those
+        # are different findings: the first is a healthy episode, the second is the
+        # empty-memory flood `retain`'s cap exists to bound. Recorded on every episode,
+        # so a run where it NEVER exceeds the cap has measured the cap inert rather than
+        # leaving a reader to assume it.
+        metrics["dream_segments_over_eta"] = float(
+            sum(1 for score in importance_scores if float(score) > float(dream.knobs.eta))
+        )
         # HOW MUCH OF THE KEY SPACE `M^E` ACTUALLY USES. The box measured 0.909-0.989
         # over ten rows from one walk and omega was flat as a consequence -- a retrieval
         # cannot discriminate between keys that are all the same key. Measured on the

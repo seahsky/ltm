@@ -277,7 +277,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# The fourteen numbers `ICRA2027_Memory` names and does not value, as CLI flags. The
+# The fifteen numbers `ICRA2027_Memory` leaves open, as CLI flags (fourteen it names and
+# does not value, plus `max_retained`, which caps eq. 13 -- see ADR-0024). The
 # table drives both the parser and `dream_kwargs_from_args`, so a knob cannot reach one
 # and not the other -- which is the failure `config_from_args`'s own docstring describes
 # ("a CLI whose flags quietly stop reaching the config").
@@ -292,6 +293,7 @@ DREAM_KNOB_FLAGS = (
     ("beta", float, "10"),
     ("gamma", float, "10"),
     ("eta", float, "13"),
+    ("max_retained", int, "13"),
     ("min_support", int, "16"),
     ("k_experience", int, "20"),
     ("k_pattern", int, "21"),
@@ -357,6 +359,7 @@ def dream_kwargs_from_args(args: argparse.Namespace) -> Dict[str, object]:
                 gamma=float(value["gamma"]),
             ),
             eta=float(value["eta"]),
+            max_retained=int(value["max_retained"]),
             min_support=int(value["min_support"]),
             k_experience=int(value["k_experience"]),
             k_pattern=int(value["k_pattern"]),

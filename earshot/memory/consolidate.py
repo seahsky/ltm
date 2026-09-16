@@ -80,19 +80,33 @@ def _unit(vector: np.ndarray) -> np.ndarray:
     return values / norm
 
 
-def _shares(amounts: Sequence[float]) -> Tuple[float, ...]:
-    """Each non-negative amount as a share of their total; all zeros when the total is 0.
+def _mean_multiples(amounts: Sequence[float]) -> Tuple[float, ...]:
+    """Each non-negative amount as a multiple of their MEAN; all zeros when the total is 0.
 
-    Both `C_j` and `U_j` are shares of an episode total rather than absolute quantities,
-    which is what lets them sit in eq. 10 beside `N_j` with no metre-to-cosine conversion
-    constant between them. A scale knob there would be an eighth number the paper does not
-    have, and it would set the balance of the whole score.
+    **NOT a share of the total, which is what this returned until `dream-2` priced it.**
+    A share carries a hidden `1/J`: `sum_j C_j = 1` exactly, so the mean share is `1/J`,
+    while `N_j` (eq. 12) is a cosine and carries no such factor. At the `J` a 250-step
+    episode actually segments into -- 21 to 84 at the shipped `coherence`, `min_segment`
+    and `max_segment` -- `mean(C_j + U_j)` was 0.024 to 0.095 against an `N_j` of order 1.
+    So eq. 10 DEGENERATED TO EQ. 12: `I_j` was a novelty score with a rounding error added,
+    and `eta` was a pure novelty threshold. With `M^E` non-empty its keys sat at 0.909 to
+    0.989 cosine, putting `N_j` in [0.011, 0.091] and `max I_j` near 0.38, so nothing could
+    clear `eta = 0.5` and `dream-2` retained NOTHING on 275 of 282 episodes. ADR-0024.
+
+    Dividing by the mean rather than the total fixes the scale and keeps every property
+    the share form was chosen for: `mean_j(C_j) = 1.0` exactly for any `J`, so the terms
+    are stationary in episode length; both stay unitless, so no metre-to-cosine constant
+    appears; `alpha` and `beta` stay constants, which is what eq. 10 requires; and no knob
+    is added. Eq. 10 as published specifies no normalisation at all and gives no formula
+    for either term, so this is CLOSER to the paper than the share form was, not further
+    from it. It reads as "this segment carried 3.2x its fair share of the progress".
     """
     positive = [max(0.0, float(amount)) for amount in amounts]
     total = float(sum(positive))
     if total == 0.0:
         return tuple(0.0 for _ in positive)
-    return tuple(amount / total for amount in positive)
+    mean = total / float(len(positive))
+    return tuple(amount / mean for amount in positive)
 
 
 @dataclass(frozen=True, eq=False)
@@ -288,9 +302,9 @@ def _transitions(segments: Sequence[Segment]) -> List[List[Tuple[TrajectoryStep,
 
     ONE tiling rule, applied to both `C_j` and `U_j`: a transition belongs to the segment
     containing its later step. Every transition of the episode lands in exactly one
-    bucket, so both quantities sum over segments to the episode's own total and each share
-    is a share of something real. The first step of the episode has no predecessor and so
-    contributes to neither.
+    bucket, so both quantities sum over segments to the episode's own total and each
+    segment is measured against something real. The first step of the episode has no
+    predecessor and so contributes to neither.
     """
     buckets: List[List[Tuple[TrajectoryStep, TrajectoryStep]]] = []
     previous: Optional[TrajectoryStep] = None
@@ -305,7 +319,10 @@ def _transitions(segments: Sequence[Segment]) -> List[List[Tuple[TrajectoryStep,
 
 
 def contribution(segments: Sequence[Segment], *, target: Xyz) -> Tuple[float, ...]:
-    """`C_j` (eq. 10): each segment's share of the distance the episode actually closed.
+    """`C_j` (eq. 10): each segment's distance closed, as a multiple of the mean segment's.
+
+    **A MULTIPLE OF THE MEAN, NOT A SHARE OF THE TOTAL** -- see `_mean_multiples`, which
+    argues the change and names what the share form cost `dream-2`.
 
     **`target` IS NOT THE SOURCE.** See the module docstring: the wiring passes the
     episode's own final position, so nothing ground-truth reaches a memory the agent
@@ -335,15 +352,17 @@ def contribution(segments: Sequence[Segment], *, target: Xyz) -> Tuple[float, ..
         )
         for pairs in _transitions(segments)
     ]
-    return _shares(gaps)
+    return _mean_multiples(gaps)
 
 
 def surprise(segments: Sequence[Segment]) -> Tuple[float, ...]:
-    """`U_j` (eq. 10): each segment's share of how far the agent's belief moved.
+    """`U_j` (eq. 10): how far the agent's belief moved, as a multiple of the mean segment's.
+
+    **A MULTIPLE OF THE MEAN, NOT A SHARE OF THE TOTAL** -- see `_mean_multiples`.
 
     The paper's clause is "unexpected changes in the agent's predictions". The agent's
     prediction is where it currently believes the source to be, so the change is how far
-    that estimate travelled between steps, and the share is over the episode's total.
+    that estimate travelled between steps, scaled by the episode's mean segment.
 
     **A belief appearing is not a belief changing.** `None -> Xyz` is the anomaly firing
     and the agent forming its first estimate; scoring that as a large revision would put
@@ -359,7 +378,7 @@ def surprise(segments: Sequence[Segment]) -> Tuple[float, ...]:
         )
         for pairs in _transitions(segments)
     ]
-    return _shares(revisions)
+    return _mean_multiples(revisions)
 
 
 def novelty(representation: np.ndarray, memory: Sequence[np.ndarray]) -> float:
@@ -430,19 +449,51 @@ def importance(
 
 
 def retain(
-    segments: Sequence[Segment], scores: Sequence[float], *, eta: float
+    segments: Sequence[Segment], scores: Sequence[float], *, eta: float, max_kept: int
 ) -> Tuple[Segment, ...]:
-    """`D* = {delta_j | I_j > eta}` (eq. 13). Strictly greater, as written.
+    """`D* = {delta_j | I_j > eta}` (eq. 13), capped at `max_kept` segments per episode.
 
-    Pure and total: it filters, it does not re-score, and a `segments`/`scores` length
-    mismatch raises rather than zipping to the shorter of the two — a silently truncated
-    `D*` is a consolidation that dropped its tail with nothing saying so.
+    Strictly greater, as written. Pure and total: it filters, it does not re-score, and a
+    `segments`/`scores` length mismatch raises rather than zipping to the shorter of the
+    two — a silently truncated `D*` is a consolidation that dropped its tail with nothing
+    saying so.
+
+    **THE CAP IS A DEVIATION FROM EQ. 13 AND IT IS A BOUNDED ONE.** Eq. 13 is one of the
+    three equations the paper gives in full and it has no cap. This one exists because
+    eq. 12 hands an EMPTY memory `N_j = 1.0` for every segment, so the first episode of
+    any chain clears any `eta` below 1 outright and writes its whole trajectory. That is
+    not a threshold that was set wrong; it is a regime in which no threshold below 1 can
+    refuse anything. `dream-2` measured the cost exactly: 38 of its 45 rows came from one
+    walk in one house, and `M^E` spent nineteen scenes as seven experiences wearing 45
+    rows. `novelty`'s own docstring predicted this shape while arguing 1.0 over 2.0;
+    returning 1.0 changed the margin and not the mechanism.
+
+    **It is INERT whenever fewer than `max_kept` segments clear `eta`**, which is every
+    episode after the first in a run whose `eta` is priced correctly, and the caller
+    records how many cleared so the audit says when it bound rather than leaving a reader
+    to infer it from a row count. See ADR-0024.
+
+    Ties at the cap boundary go to the EARLIER segment, so the result is a deterministic
+    function of the inputs and not of a sort's stability.
     """
     if len(segments) != len(scores):
         raise ValueError(
             "retain got {} segments and {} scores; a mismatch means the scores are not "
             "these segments' scores".format(len(segments), len(scores))
         )
-    return tuple(
-        segment for segment, score in zip(segments, scores) if float(score) > float(eta)
-    )
+    if int(max_kept) < 1:
+        raise ValueError(
+            "retain got max_kept={}; a cap below 1 makes consolidation write nothing "
+            "ever, which is indistinguishable from the eta collapse it exists to "
+            "prevent".format(max_kept)
+        )
+    over = [
+        index
+        for index, score in enumerate(scores)
+        if float(score) > float(eta)
+    ]
+    if len(over) > int(max_kept):
+        over = sorted(
+            sorted(over, key=lambda index: (-float(scores[index]), index))[:int(max_kept)]
+        )
+    return tuple(segments[index] for index in over)

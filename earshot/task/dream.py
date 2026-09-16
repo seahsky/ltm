@@ -87,10 +87,14 @@ __all__ = [
 class DreamKnobs:
     """Every number `ICRA2027_Memory` leaves open, in one place, none with a default.
 
-    Fourteen of them. That is not a design smell, it is the count of things the paper
+    Fifteen of them. That is not a design smell, it is the count of things the paper
     names and does not value, and collecting them here is what makes them auditable -- the
-    alternative is fourteen defaults scattered across five modules, each of which would
+    alternative is fifteen defaults scattered across five modules, each of which would
     reach no artefact. Each field names the equation it belongs to.
+
+    `max_retained` is the one that is NOT simply a number the paper omits: eq. 13 has no
+    cap and this adds one. It is argued at `consolidate.retain` and in ADR-0024, and it
+    sits here so it reaches the audit like every other choice.
     """
 
     # eq. 4 and 19: the short-term memory and the query built from it
@@ -104,6 +108,7 @@ class DreamKnobs:
     # eq. 10 and 13: what is worth keeping
     importance: ImportanceWeights
     eta: float
+    max_retained: int
     # eq. 16: how often a regularity must recur
     min_support: int
     # eq. 20-23: the three retrievals and the weighting
@@ -132,6 +137,7 @@ class DreamKnobs:
             ("dream_beta", float(self.importance.beta)),
             ("dream_gamma", float(self.importance.gamma)),
             ("dream_eta", float(self.eta)),
+            ("dream_max_retained", float(self.max_retained)),
             ("dream_min_support", float(self.min_support)),
             ("dream_k_experience", float(self.k_experience)),
             ("dream_k_pattern", float(self.k_pattern)),
@@ -346,7 +352,12 @@ def consolidate_episode(
         memory=context.memory.novelty_vectors(),
         weights=context.knobs.importance,
     )
-    kept = retain(segments, scores, eta=float(context.knobs.eta))
+    kept = retain(
+        segments,
+        scores,
+        eta=float(context.knobs.eta),
+        max_kept=int(context.knobs.max_retained),
+    )
     if not kept:
         return (context.memory, tuple(scores))
     outcome = Outcome(reached=bool(reached), final_gap_m=float(final_gap_m))
