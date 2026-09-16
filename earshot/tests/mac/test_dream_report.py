@@ -40,6 +40,7 @@ from earshot.tools.dream_report import (
     main,
     present,
     read_rows,
+    scene_dirs_or_flat,
 )
 from earshot.tools.window_report import read_arm
 
@@ -64,6 +65,7 @@ def dream_metrics(
     omega_e=0.5,
     omega_p=0.3,
     omega_k=0.2,
+    segments_over_eta=None,
 ):
     """One episode's DREAM metrics, in the shape the runner writes them.
 
@@ -83,6 +85,10 @@ def dream_metrics(
         "dream_importance_min": 1.0,
         "dream_importance_max": 1.29,
     }
+    if segments_over_eta is not None:
+        # Written by `runner.py` on every episode: how many segments cleared eta BEFORE
+        # `max_retained` truncated. Absent on every run made before that counter landed.
+        metrics["dream_segments_over_eta"] = float(segments_over_eta)
     if informed:
         metrics.update(
             {
@@ -140,6 +146,27 @@ def write_scene(arm_dir, scene, episodes):
         )
         write_episode(str(scene_dir), index, AgentReport(resumed=True), audit)
     return scene_dir
+
+
+def write_flat_run(run_dir, scene, episodes):
+    """One RUN directory, through the real writer, with no scene directory at all.
+
+    What `python -m earshot --run-dir runs/<tag>` writes, and what `eta_pass.sh`'s own
+    invocation wrote for `eta-1`: `runs/eta-1/episodes/ep0000.audit.json` and no
+    `runs/eta-1/<scene>/` anywhere.
+    """
+    root = pathlib.Path(run_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    for index, (stage, metrics) in enumerate(episodes):
+        audit = EpisodeAudit(
+            episode_index=index,
+            scene_id=scene,
+            funnel_stage=stage,
+            steps=steps(20),
+            metrics=metrics,
+        )
+        write_episode(str(root), index, AgentReport(resumed=True), audit)
+    return root
 
 
 class Fixture(unittest.TestCase):
@@ -384,6 +411,53 @@ class TestRetentionBothArms(Fixture):
         self.assertIn("episodes that retained NOTHING: 2 of 4", text)
         print(text)
 
+    def test_a_cap_that_bound_on_most_episodes_names_the_cap_as_the_rule(self):
+        """**THE ADR-0024 BRANCH.** `KNOBS` caps at 8. Twenty segments clear eta and
+        eight are kept, so eq. 13 chose D* and top-k chose the memory. `rows_added`
+        alone reads identically to an eta that passed exactly eight."""
+        text = self.read(
+            [(REACHED, dream_metrics(rows_added=8.0, segments_over_eta=20.0))] * 4)
+        self.assertIn("THE CAP IS THE RETENTION RULE", text)
+        self.assertIn("BOUND on 4 of 4", text)
+        self.assertNotIn("eta IS THE RETENTION RULE", text)
+        print(text)
+
+    def test_a_cap_that_never_bound_names_eta_as_the_rule(self):
+        """THE OTHER ARM, same numbers of rows written, opposite verdict."""
+        text = self.read(
+            [(REACHED, dream_metrics(rows_added=3.0, segments_over_eta=3.0))] * 4)
+        self.assertIn("eta IS THE RETENTION RULE", text)
+        self.assertIn("BOUND on 0 of 4", text)
+        self.assertNotIn("THE CAP IS THE RETENTION RULE", text)
+        print(text)
+
+    def test_the_counter_is_printed_with_its_median(self):
+        text = self.read([
+            (REACHED, dream_metrics(rows_added=8.0, segments_over_eta=value))
+            for value in (2.0, 9.0, 40.0)
+        ])
+        self.assertIn("segments over eta per episode, BEFORE the cap", text)
+        self.assertIn("median 9.0000", text)
+        print(text)
+
+    def test_a_run_without_the_counter_declines_to_decide(self):
+        """**ABSENT IS NEVER ZERO.** `dream-2` predates the counter; reading its silence
+        as "the cap never bound" would answer ADR-0024's question with no data."""
+        text = self.read([(REACHED, dream_metrics(rows_added=8.0))] * 4)
+        self.assertIn("RECORDED NOWHERE", text)
+        self.assertNotIn("THE CAP IS THE RETENTION RULE", text)
+        self.assertNotIn("eta IS THE RETENTION RULE", text)
+        print(text)
+
+    def test_retaining_nothing_outranks_a_cap_that_never_bound(self):
+        """A cap cannot bind on an episode that kept nothing, and "eta IS the retention
+        rule" is the wrong thing to print about a memory that stayed empty."""
+        text = self.read(
+            [(REACHED, dream_metrics(rows_added=0.0, segments_over_eta=0.0))] * 4)
+        self.assertIn("eta RETAINED NOTHING", text)
+        self.assertNotIn("eta IS THE RETENTION RULE", text)
+        print(text)
+
     def test_an_empty_pattern_store_is_named_as_an_absence_omega_weighted(self):
         arm = self.arm()
         write_scene(arm, "sceneA", [
@@ -475,6 +549,84 @@ class TestTheKnobsComeFromTheRunAndNotTheDriver(Fixture):
         self.assertIn("MIXED ARM", text)
         self.assertIn("dream_eta", text)
         print(text)
+
+
+class TestOneRunDirectoryIsALayout(Fixture):
+    """**THE `eta-1` FAILURE.** 15 episodes ran, 7m 36s of V100 time wrote them to
+    `runs/eta-1/episodes/`, and this reader printed "NO EPISODES ON DISK" and exited 2
+    over data that was on disk the whole time. The sweep layout was the only one
+    `read_rows` walked, and a single `--run-dir` invocation does not produce it.
+
+    Both arms, per ADR-0014: the flat layout reads, AND a directory that is not a run
+    still finds nothing rather than being invented into one.
+    """
+
+    def test_a_flat_run_directory_is_read(self):
+        run = write_flat_run(
+            pathlib.Path(self.root) / "eta-1", "4ok3usBNeis",
+            [(REACHED, dream_metrics()), (ABANDONED, dream_metrics(spread=0.4))],
+        )
+
+        rows = read_rows(str(run))
+
+        self.assertEqual(len(rows), 2)
+        print("flat run directory: {} episode(s) read".format(len(rows)))
+
+    def test_the_scene_comes_off_the_audit_and_not_off_the_tag(self):
+        """The directory is named after the TAG there, so the scene has to come from
+        somewhere else or section D reports a house called `eta-1`."""
+        run = write_flat_run(
+            pathlib.Path(self.root) / "eta-1", "4ok3usBNeis",
+            [(REACHED, dream_metrics())],
+        )
+
+        rows = read_rows(str(run))
+
+        self.assertEqual(rows[0].scene, "4ok3usBNeis")
+        print("scene read as {!r}, not {!r}".format(rows[0].scene, "eta-1"))
+
+    def test_the_command_line_reads_it_with_the_default_arm(self):
+        """`dream_report runs/eta-1` — no `--arm`, no scene directory. The exact
+        invocation `eta_pass.sh` makes."""
+        write_flat_run(
+            pathlib.Path(self.root) / "eta-1", "4ok3usBNeis",
+            [(REACHED, dream_metrics())] * 3,
+        )
+
+        self.assertEqual(main([str(pathlib.Path(self.root) / "eta-1")]), 0)
+        print("main() on a flat run directory exits 0")
+
+    def test_the_sweep_layout_still_wins_where_both_could_match(self):
+        """The fallback must not fire on a directory that HAS scenes: reading a sweep as
+        one flat run would silently drop every scene but whatever sat at the root."""
+        arm = self.arm("dream")
+        write_scene(arm, "sceneA", [(REACHED, dream_metrics())] * 2)
+        write_scene(arm, "sceneB", [(REACHED, dream_metrics())])
+
+        found = scene_dirs_or_flat(str(arm))
+
+        self.assertEqual([path.name for path in found], ["sceneA", "sceneB"])
+        self.assertNotIn(pathlib.Path(arm), found)
+        print("sweep layout still reads as {} scene(s)".format(len(found)))
+
+    def test_a_directory_that_is_not_a_run_finds_nothing(self):
+        """**THE FORCED-FAILURE ARM.** A fallback that turns any directory into a run
+        would make a typo'd path read as an empty arm."""
+        empty = pathlib.Path(self.root) / "not-a-run"
+        empty.mkdir()
+        (empty / "provenance.txt").write_text("tag=not-a-run\n")
+
+        self.assertEqual(scene_dirs_or_flat(str(empty)), ())
+        self.assertEqual(main([str(empty)]), 2)
+        print("a directory with no episodes/ is still nothing, and exits 2")
+
+    def test_an_empty_episodes_directory_is_still_nothing(self):
+        run = pathlib.Path(self.root) / "eta-0"
+        (run / "episodes").mkdir(parents=True)
+
+        self.assertEqual(read_rows(str(run)), ())
+        self.assertEqual(main([str(run)]), 2)
+        print("an episodes/ directory holding no audits exits 2")
 
 
 class TestTheCommandLine(Fixture):

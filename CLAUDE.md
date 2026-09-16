@@ -116,10 +116,13 @@ python -m earshot.tools.dream_report runs/<tag>          # --arm NAME for a non-
 # cause was a units bug — `C_j`/`U_j` were shares carrying a hidden `1/J` that `N_j` does
 # not — so eq. 10 degenerated to eq. 12. Fixed; `mean(C_j + U_j)` is now 2.0 for ANY `J`,
 # and eta is MEANINGFUL AND UNPRICED. One scene, minutes, prints its own readout.
-# READ SECTION C: set eta so the median of `dream_segments_over_eta` sits BELOW
-# max-retained. If the cap binds on most episodes the CAP is the retention rule and eta is
-# decoration — that is ADR-0024's top-k deviation and it needs its own ADR, not a quietly
-# raised cap. A reportable DREAM comparison costs 14h15m; this can rule it out first
+# READ SECTION C: it prints `dream_segments_over_eta` beside the cap and NAMES which of
+# the two retained, because `dream_rows_added` cannot — eta passing twelve segments and a
+# cap of twelve truncating forty write the same twelve rows. "THE CAP IS THE RETENTION
+# RULE" means eta is decoration: ADR-0024's top-k deviation, which needs its own ADR and
+# not a quietly raised cap. A reportable DREAM comparison costs 14h15m; this rules it out
+# first. `dream_report` reads a bare run directory too, so `runs/<tag>` off this driver is
+# readable without the sweep's `<arm>/<scene>/` layout
 nrun bash earshot/tools/eta_pass.sh --tag <fresh-tag>   # --eta E --max-retained N --scene S
 
 # THE CHAIN, ADDED AFTER `dream-1` CAME BACK A NULL. That sweep built nineteen memories
