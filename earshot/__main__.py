@@ -242,6 +242,28 @@ def build_parser() -> argparse.ArgumentParser:
              "re-measured (`matrix_audit` section E) rather than carried over",
     )
     parser.add_argument(
+        "--memory-proposes",
+        action="store_true",
+        help="ADR-0026: the recalled place is emitted as a SECOND investigate candidate "
+             "and eq. 26 chooses, instead of REPLACING the acoustic estimate outright "
+             "(the default, and what every result before this flag was measured under). "
+             "**NEEDS --dream TO DO ANYTHING**: both candidates are diverts, so the "
+             "structural override cannot separate them and without a memory term there "
+             "is nothing to choose with. Without --dream the arm correctly reduces to "
+             "the acoustic behaviour rather than quietly becoming replacement",
+    )
+    parser.add_argument(
+        "--memory-propose-max-offset",
+        type=float,
+        default=6.0,
+        help="THE SAFETY RAIL (ADR-0026). A proposal further than this, by NAVMESH route, "
+             "from the acoustic estimate is not emitted at all. matrix-2 measured a "
+             "wrong prior with nothing above it costing 10.3 points; ranking fixes the "
+             "ordering and not the magnitude, and an unbounded proposal is that failure "
+             "one rank lower. Negative removes the rail, which is an arm to measure "
+             "against and not a default. Default 6.0 m is a FIRST CHOICE the run prices",
+    )
+    parser.add_argument(
         "--dream",
         action="store_true",
         help="run DREAM (ICRA2027_Memory eq. 4-27): short-term memory, end-of-episode "
@@ -462,6 +484,15 @@ def memory_kwargs_from_args(args: argparse.Namespace) -> Dict[str, object]:
         "memory_min_confidence": (
             None if args.memory_abstain_below is None
             else float(args.memory_abstain_below)
+        ),
+        "memory_proposes": bool(args.memory_proposes),
+        # Negative is the operator's way to say "no rail", because argparse cannot take
+        # `None` on a float flag without a sentinel and a string sentinel would have to be
+        # parsed twice. `MemoryContext.__post_init__` refuses zero and negatives, so the
+        # translation happens exactly here and the dataclass keeps one meaning per value.
+        "memory_propose_max_offset_m": (
+            None if float(args.memory_propose_max_offset) < 0.0
+            else float(args.memory_propose_max_offset)
         ),
     }
 
