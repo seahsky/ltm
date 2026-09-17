@@ -217,6 +217,29 @@ nrun bash earshot/tools/matrix_sweep.sh --tag matrix-1
 python -m earshot.tools.window_report runs/matrix-1 \
   --arms "heard_seen heard_unseen not_heard_seen not_heard_unseen"
 
+# ADR-0026: DOES THE PRIOR HELP WHEN IT HAS TO EARN THE PICK? The recalled place used to
+# REPLACE the acoustic estimate outright, unranked, which is what matrix-2 measured at
+# -10.3 points against a RIGHT prior. It is a second investigate candidate now and eq. 26
+# chooses. BOTH ARMS ARE DREAM ARMS and that is forced: both candidates are diverts, so
+# without a memory term nothing can separate them and --memory-proposes is a no-op.
+# FOUR arms, because `-a`/`-b` are the SAME command twice: repeat-1 measured a 16.2% flip
+# on byte-identical reruns, dream-3's -5.3 pts became dream-4's -0.7, so the repeat is
+# measured IN THE SAME RUN and the contrast is read against tonight's own noise.
+# ~10.3-11.3 h at 4 arms x 19 val scenes x 15 episodes (32.4-35.8 s/ep, MEASURED on DREAM
+# arms). Run --prior-only FIRST: it is the assignment, the tour and the coverage gate in
+# about two minutes, and it answers "does this assignment tour cleanly" before the night
+nrun bash earshot/tools/propose_sweep.sh --tag propose-1 --prior-only
+nrun bash earshot/tools/propose_sweep.sh --tag propose-1 --resume
+
+# THE PRIMARY OUTCOME IS STAGE 4 -> STAGE 5 CONVERSION, not Find-SR (ADR-0026): the
+# mechanism acts during the detour, so the attrition in front of it is noise. The driver
+# prints this for all four pairs; this is the same reader by hand. It drops a pair unless
+# BOTH arms reached the gate, and prints each arm's drop count — conditioning is only
+# sound while the gate is UPSTREAM of what the arms differ in, and a gap between those two
+# counts is the evidence that it is not
+python -m earshot.tools.episode_diff runs/<tag>/replace-a runs/<tag>/propose-a \
+  --given-stage INVESTIGATE_ENTERED
+
 # THE MATRIX-1 REVIEW'S FOUR READ-ONLY QUESTIONS, off a finished sweep's own artefacts:
 # A. store coverage -- which assigned scenes the prior pass completed, and the SILENT
 #    drops a pre-`pass_provenance` store hides (a scene in no provenance list at all ran
