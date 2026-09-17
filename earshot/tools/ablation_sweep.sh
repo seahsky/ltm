@@ -227,6 +227,29 @@ gate_verdict() {
   return 2
 }
 
+# Which arm every other one is PAIRED AGAINST. `reference_arm <name>...`, in the order the
+# operator asked for them, prints the one to quote against.
+#
+# `full` is the reference whenever the sweep ran it: it is the baseline of record
+# (ADR-0021) and its position in `--arms` is not meant to matter. Otherwise the FIRST arm
+# asked for is the reference.
+#
+# THE SECOND RULE EXISTS BECAUSE THE FIRST ONE CALLED A GOOD RUN A FAILURE. `dream-4` ran
+# `--arms "dream dream-nomem"` -- the two-arm repeat pair ADR-0025 pre-registered by name
+# -- for 5h40m, wrote all 564 episodes, passed every gate, and exited 1 because no
+# directory called `full` was on disk. A sweep that did not ASK for the baseline is not a
+# sweep missing it. Red is for an arm that was requested and did not run; what this is, is
+# a contrast between two arms, and the reader prints which one it chose so nothing is ever
+# quoted against an arm the operator did not expect.
+reference_arm() {
+  local first="$1"
+  local arm
+  for arm in "$@"; do
+    [ "$arm" = "full" ] && { echo "full"; return 0; }
+  done
+  echo "$first"
+}
+
 # --- ONE DIRECTORY IS ONE RUN, before anything expensive ------------------
 if [ -d "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
   if [ "$FORCE" = 0 ]; then
@@ -696,24 +719,30 @@ echo "  --- every arm, side by side ---"
 # layout here — <tag>/<arm>/<scene>/ — is the one that module already reads.
 python -m earshot.tools.window_report "$OUT_DIR" --arms "${ARM_NAMES[*]}" || READ_FAILED=1
 
+REFERENCE_ARM="$(reference_arm "${ARM_NAMES[@]}")"
+REFERENCE_DIR="$OUT_DIR/$REFERENCE_ARM"
 echo ""
-echo "  --- each ablation arm against the baseline, PAIRED BY EPISODE ---"
+echo "  --- each arm against $REFERENCE_ARM, PAIRED BY EPISODE ---"
 echo "  Exact McNemar over the pairs. Report the scene-level sign test with it:"
 echo "  a mechanism that was green and exact at the episode level has already come"
 echo "  back null at the scene level in this repo, and neither test breaks the other."
-BASELINE_DIR="$OUT_DIR/full"
-if [ -d "$BASELINE_DIR" ]; then
+if [ ! -d "$REFERENCE_DIR" ]; then
+  echo "  SKIPPED: the reference arm '$REFERENCE_ARM' has no episodes on disk. Every row"
+  echo "           below would be quoted against nothing, which is not a smaller result."
+  echo "           It is no result."
+  READ_FAILED=1
+elif [ "${#ARM_NAMES[@]}" -lt 2 ]; then
+  echo "  SKIPPED: one arm. There is nothing to pair it against, which is a property of"
+  echo "           what was asked for and not a failure. A single arm is a pilot: it times"
+  echo "           the episode and exposes mechanism failures, and resolves no difference."
+else
   for arm in "${ARM_NAMES[@]}"; do
-    [ "$arm" = "full" ] && continue
+    [ "$arm" = "$REFERENCE_ARM" ] && continue
     [ -d "$OUT_DIR/$arm" ] || continue
     echo ""
-    echo "  === full -> $arm ==="
-    python -m earshot.tools.episode_diff "$BASELINE_DIR" "$OUT_DIR/$arm" 2>&1 | tail -n 30
+    echo "  === $REFERENCE_ARM -> $arm ==="
+    python -m earshot.tools.episode_diff "$REFERENCE_DIR" "$OUT_DIR/$arm" 2>&1 | tail -n 30
   done
-else
-  echo "  SKIPPED: no baseline arm on disk. Every row below would be quoted against"
-  echo "           nothing, which is not a smaller result — it is no result."
-  READ_FAILED=1
 fi
 
 echo ""
@@ -752,9 +781,11 @@ if [ "$FAILED_RUNS" -ne 0 ]; then
 fi
 if [ "$READ_FAILED" -ne 0 ]; then
   echo ""
-  echo "RED: the readout found no episode under any arm, or found no baseline to quote"
-  echo "     against. Runs that produced nothing and a reader that cannot find what they"
-  echo "     produced look identical from here: check $OUT_DIR/<arm>/<scene>/episodes/."
+  echo "RED: the readout found no episode under an arm this sweep was ASKED to run."
+  echo "     Runs that produced nothing and a reader that cannot find what they produced"
+  echo "     look identical from here: check $OUT_DIR/<arm>/<scene>/episodes/."
+  echo "     An arm that was never requested is NOT this: --arms without \`full\` is a"
+  echo "     contrast between the arms named, quoted against the first of them."
   exit 1
 fi
 if [ "$GATE_FAILED" -ne 0 ]; then
@@ -764,6 +795,8 @@ if [ "$GATE_FAILED" -ne 0 ]; then
   exit 1
 fi
 echo ""
-echo "GREEN — every arm ran and every gate passed. The 'full' row is the paper's HM3D"
-echo "        baseline; the other four are the ablation table. This sweep contains NO"
-echo "        memory arm and is not ADR-0018's generalization matrix."
+echo "GREEN — every arm ran and every gate passed."
+echo "        arms: ${ARM_NAMES[*]}"
+echo "        Every row above is quoted against '$REFERENCE_ARM'."
+echo "        This is the ablation table. It is NOT ADR-0018's generalization matrix,"
+echo "        which is a different driver (matrix_sweep.sh) over different cells."

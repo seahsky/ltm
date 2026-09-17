@@ -4152,6 +4152,11 @@ ADR-0024 lands two changes: `C_j` and `U_j` become multiples of the episode's me
 
 # dream-3
 
+> **THE −5.3 POINTS BELOW DID NOT REPLICATE.**
+> `dream-4` re-ran this pair of arms and measured −0.7 points, p = 0.8555.
+> Read the `dream-4` section before quoting any number in this one as an effect.
+> The arm rates, the precondition table and the decomposition are measurements and stand as measurements; the *causal* reading of them is withdrawn.
+
 `bash earshot/tools/ablation_sweep.sh --tag dream-3 --arms "full dream dream-nomem" --dream-eta 4.5`, exit 0, 7h41m, commit `bb661b0`, host riftvm, 2026-09-16.
 Three arms, 19 scenes, 15 episodes each, `n = 282` paired per arm, every gate green, one zero-yield scene (`mL8ThkuaVTM`) in all three arms.
 The decision record is ADR-0025.
@@ -4232,3 +4237,58 @@ This is the measurement, and the same section prices the override for the first 
 
 Caveat: one scene, 73-row memory, against `dream-3`'s 1192-row chained store.
 Retrieval hits change with store size, so 2.81% is indicative for this condition and is not the rate `dream-3` ran at.
+
+# dream-4
+
+`bash earshot/tools/ablation_sweep.sh --tag dream-4 --arms "dream dream-nomem" --dream-eta 4.5`, **exit 1 on a readout defect, not on the run**, 5h40m, commit `fcca4b7`, host riftvm, 2026-09-17.
+Two arms, 19 scenes, 15 episodes each, `n = 282` paired per arm, all 38 smoke gates green, one zero-yield scene (`mL8ThkuaVTM`) in both arms.
+This is the repeat pair ADR-0025's first version pre-registered.
+The decision record is ADR-0025, rewritten by this run.
+
+| arm | source reached | rate | steps/ep | SWS |
+|---|---|---|---|---|
+| `dream` | 89 / 282 | 31.6% | 197.7 | 0.115 |
+| `dream-nomem` | 91 / 282 | 32.3% | 197.2 | 0.126 |
+
+**The effect did not replicate.**
+
+| run | `dream` | `dream-nomem` | delta | discordant | exact McNemar | scene sign test |
+|---|---|---|---|---|---|---|
+| `dream-3` | 79 / 282 (28.0%) | 94 / 282 (33.3%) | −5.3 pts | 13 vs 28 of 41 | p = 0.0275 | 11 / 3 / 3, p = 0.0574 |
+| `dream-4` | 89 / 282 (31.6%) | 91 / 282 (32.3%) | −0.7 pts | 14 vs 16 of 30 | **p = 0.8555** | 7 / 6 / 4, **p = 1.0** |
+
+Both sign tests are mine, by hand from the driver's per-scene nets; no tool in this repo computes one.
+The McNemar figures are `episode_diff`'s own.
+
+**The decisive number is one arm against itself.**
+`dream` went 79 to 89 reached across the two runs, at the same knobs, the same seed, the same nineteen scenes: **10 episodes, 3.5 points**.
+The two arms differ by 2 episodes in `dream-4`.
+One arm moved five times further against its own repeat than the arms moved against each other.
+`repeat-1` measured SD 7.7 episodes on the difference between byte-identical reruns, and this is that number arriving on schedule.
+`eta-1` against `eta-2` is the same demonstration at one scene.
+
+**The pooled test is not a result and is recorded here so nobody computes it twice.**
+27 against 44 over 71 discordant gives p = 0.0568.
+Those are the same 282 episodes measured twice, not 564 independent pairs, so McNemar's independence assumption is violated in the anti-conservative direction.
+Direction only.
+
+**What survives is the conjunction.**
+The mechanism is live (`eq26-1`: 11 of 392 eligible steps changed, `S_mem` spread 0.1053).
+Its reach is 0.54% of ranked steps, 0.73 changed picks per episode.
+Its effect on Find-SR is not measurable at `n = 282` over two runs.
+Those three are consistent, and together they say: **a memory term that demonstrably steers, on fewer than one waypoint choice per episode, moves the outcome by no amount this design can resolve.**
+The most likely single explanation is the divert override, which excludes eq. 26 from 79.4% of ranked steps including the whole detour the headline metric measures.
+
+**The exit code is a defect in the readout and the run is clean.**
+The sweep looked for a directory called `full`, did not find one, and reported "no baseline to quote against".
+`--arms "dream dream-nomem"` never asked for `full`.
+The driver called its own pre-registered command a failure after 5h40m of correct work, and the pairing had to be run by hand:
+
+```
+python -m earshot.tools.episode_diff runs/dream-4/dream runs/dream-4/dream-nomem
+```
+
+The readout now chooses a reference arm (`full` when the sweep ran it, otherwise the first arm asked for), names it in the header, and is red only when an arm that *was* requested is missing from disk.
+A single-arm sweep is no longer red either.
+`tests/mac/test_ablation_readout.py` holds both halves of the rule.
+
