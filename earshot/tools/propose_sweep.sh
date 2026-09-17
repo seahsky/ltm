@@ -594,36 +594,20 @@ pair "within REPLACE" replace-a replace-b
 pair "within PROPOSE" propose-a propose-b
 
 banner "DID THE MECHANISM RUN AT ALL"
-# ADR-0026's fourth branch, and it is checked BEFORE the contrast is believed: if eq. 26
-# ranked the proposal first on under 5% of eligible steps, the rail or the store is
-# suppressing the mechanism and the run is not a result about memory. `dream-1` wrote its
-# central quantity to disk and no reader could print it; this is that lesson applied.
-python - "$OUT_DIR" <<'PYEOF' || echo "  (the proposal counters could not be read)"
-import json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-for arm in sorted(d.name for d in root.iterdir() if d.is_dir() and d.name.startswith("propose")):
-    tot = {}
-    for audit in root.joinpath(arm).glob("*/episodes/*/audit.json"):
-        try:
-            metrics = json.loads(audit.read_text()).get("metrics") or {}
-        except (OSError, ValueError):
-            continue
-        for key, value in metrics.items():
-            if key.startswith("memory_propose_") and key != "memory_propose_rail_m":
-                tot[key] = tot.get(key, 0.0) + float(value)
-    eligible = tot.get("memory_propose_eligible", 0.0)
-    first = tot.get("memory_propose_ranked_first", 0.0)
-    share = "n/a" if eligible <= 0 else "{:.2%}".format(first / eligible)
-    print("  {:<12} eligible={:.0f} ranked_first={:.0f} ({})  emitted={:.0f} "
-          "railed={:.0f} unrouted={:.0f}".format(
-              arm, eligible, first, share, tot.get("memory_propose_emitted", 0.0),
-              tot.get("memory_propose_railed", 0.0),
-              tot.get("memory_propose_unrouted", 0.0)))
-    if eligible > 0 and first / eligible < 0.05:
-        print("       UNDER 5%: ADR-0026's fourth branch. The rail or the store is")
-        print("       suppressing the mechanism, and this run is NOT a result about")
-        print("       memory until that is fixed. Read it before reading the contrast.")
-PYEOF
+# ADR-0026's fourth branch, checked BEFORE the contrast is believed: if eq. 26 ranked the
+# proposal first on under 5% of the steps it was eligible on, the rail or the store is
+# suppressing the mechanism and this run is not a result about memory.
+#
+# A TESTED MODULE AND NOT A HEREDOC, because the first version of this section WAS a
+# heredoc and it globbed `<scene>/episodes/<N>/audit.json` while the writer writes
+# `<scene>/episodes/ep0000.audit.json`. It matched nothing, printed 0 for every counter,
+# and reported "the mechanism never ran" over `propose-1`'s 1128 episodes with the audits
+# on disk the whole time. That is `dream-1`'s failure and `pilot-1`'s, and the rule both
+# bought is the one it broke: nothing in the suite can see a reader inside a bash string.
+# Nonzero here means the counters were UNREADABLE, which is not "the mechanism was
+# inert" -- the distinction `propose_report` exists to keep. It rides on READ_STATUS so
+# the sweep exits nonzero rather than printing a vacuous section and passing.
+python -m earshot.tools.propose_report "$OUT_DIR" || READ_STATUS=$?
 
 {
   echo "finished:       $(date -Is)"
