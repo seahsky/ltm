@@ -79,6 +79,7 @@ __all__ = [
     "format_reach",
     "format_cost",
     "format_knobs",
+    "format_plan",
     "format_report",
     "main",
 ]
@@ -167,6 +168,16 @@ class EpisodeRow:
     # (this, `rows_added`) is what separates "eta is the retention rule" from
     # "the cap is, and eta is decoration" — ADR-0024's open question.
     segments_over_eta: Optional[float]
+    # EQ. 26's OWN COUNTERS (ADR-0024 step 2). `dream-3` inferred "noise on the argmax"
+    # from an outcome; these say it directly. `plan_eligible_steps` is the denominator
+    # that excludes the steps where the answer was fixed before the memory was read.
+    plan_ranked_steps: Optional[float]
+    plan_divert_steps: Optional[float]
+    plan_eligible_steps: Optional[float]
+    plan_pick_differs: Optional[float]
+    plan_mem_spread_mean: Optional[float]
+    plan_margin_mean: Optional[float]
+    plan_margin_min: Optional[float]
     # J: how many segments eq. 11 scored at all, the denominator the two counts above
     # are fractions of. Written since `dream-1` and read by nothing until now.
     segments_scored: Optional[float]
@@ -268,6 +279,13 @@ def read_rows(arm_dir: str) -> Tuple[EpisodeRow, ...]:
                     rows_added=_metric(audit, "dream_rows_added"),
                     segments_over_eta=_metric(
                         audit, "dream_segments_over_eta"),
+                    plan_ranked_steps=_metric(audit, "plan_ranked_steps"),
+                    plan_divert_steps=_metric(audit, "plan_divert_steps"),
+                    plan_eligible_steps=_metric(audit, "plan_eligible_steps"),
+                    plan_pick_differs=_metric(audit, "plan_pick_differs"),
+                    plan_mem_spread_mean=_metric(audit, "plan_mem_spread_mean"),
+                    plan_margin_mean=_metric(audit, "plan_margin_mean"),
+                    plan_margin_min=_metric(audit, "plan_margin_min"),
                     segments_scored=_metric(audit, "dream_segments_scored"),
                     importance_at_cap=_metric(audit, "dream_importance_at_cap"),
                     tau_steps=_metric(audit, "dream_tau_steps"),
@@ -724,15 +742,31 @@ def format_retention(rows: Sequence[EpisodeRow]) -> str:
             "   eta RETAINED NOTHING, ALL NIGHT. Every other number in this report is"
         )
         out.append("   about an empty memory.")
-    elif cap_bound == 0:
+    elif cap_bound is not None:
+        # THE HEALTHY CASE, WHICH PRINTED NOTHING AT ALL UNTIL `dream-3`. The verdict was
+        # gated on the cap binding EXACTLY never, so a run where it bound on 3 of 282 --
+        # a bound doing precisely its job -- fell through every branch and the section
+        # ended without saying whether the fix had worked. A reader cannot tell "healthy"
+        # from "this tool has no opinion", which is the same defect as a silent pass.
         out.append("")
-        out.append(
-            "   eta IS THE RETENTION RULE. The cap never bound, so every row written "
-            "was one"
-        )
-        out.append(
-            "   eq. 13 chose. The cap is the bound it was added to be and nothing more."
-        )
+        if cap_bound == 0:
+            out.append(
+                "   eta IS THE RETENTION RULE. The cap NEVER bound, so every row "
+                "written was one"
+            )
+            out.append(
+                "   eq. 13 chose, and the cap is the bound it was added to be."
+            )
+        else:
+            out.append(
+                "   eta IS THE RETENTION RULE. The cap bound on {} of {} episode(s), a "
+                "minority, so".format(cap_bound, len(over))
+            )
+            out.append(
+                "   eq. 13 chose the memory on the rest and the cap caught the tail "
+                "without"
+            )
+            out.append("   becoming the rule. This is the shape ADR-0024 asked for.")
     elif zero == 0:
         out.append("")
         out.append(
@@ -904,6 +938,144 @@ def format_knobs(rows: Sequence[EpisodeRow]) -> str:
     return "\n".join(out)
 
 
+
+# `S_mem` values this far apart are one value. A term CONSTANT across the pool cannot move
+# an argmax however large it is, which is what `k_experience` predicts of a degenerate
+# store: `memory_consistency` averages `_leg_agreement` over the retrieved hits, so a
+# store whose keys are nearly the same key converges to the same number for every
+# candidate. Stated once, here, so the verdict is not a judgement made in prose.
+FLAT_MEM_SPREAD = 1e-4
+
+
+def format_plan(rows: Sequence[EpisodeRow]) -> str:
+    """Section G. Did `l2 S_mem` ever change the pick (ADR-0024 step 2).
+
+    `dream_informed_steps` says the memory ANSWERED. It has never said whether the answer
+    CHANGED anything, and those are different claims: `dream-2` was read as a live
+    mechanism on the strength of the first while eq. 26's five numbers were on no audit
+    at all. This section is the second claim, measured.
+    """
+    out: List[str] = ["G. EQ. 26 — DID THE MEMORY TERM CHANGE THE PICK"]
+
+    ranked, ranked_absent = present([row.plan_ranked_steps for row in rows])
+    if not ranked:
+        out.append(
+            "   NOT RECORDED on any of {} episode(s). This run predates the eq. 26\n"
+            "   counters, so whether the memory moved a single pick is unknown for it —\n"
+            "   which is NOT the same as the memory having moved nothing.".format(
+                ranked_absent)
+        )
+        return "\n".join(out)
+
+    eligible, _ = present([row.plan_eligible_steps for row in rows])
+    differs, _ = present([row.plan_pick_differs for row in rows])
+    diverts, _ = present([row.plan_divert_steps for row in rows])
+
+    out.append("   steps that RANKED a pool:    {:.0f}".format(sum(ranked)))
+    if diverts:
+        out.append(
+            "     of those, divert in pool:   {:.0f} — the override decides these "
+            "structurally,".format(sum(diverts))
+        )
+        out.append(
+            "                                 so eq. 26 is never read on them "
+            "(plan.py's _rank)"
+        )
+    out.append(
+        "     ELIGIBLE (no divert, pool > 1, retrieval answered): {:.0f}".format(
+            sum(eligible) if eligible else 0.0)
+    )
+
+    total_eligible = sum(eligible) if eligible else 0.0
+    total_differs = sum(differs) if differs else 0.0
+    if total_eligible == 0.0:
+        out.append("")
+        out.append(
+            "   THE MEMORY WAS NEVER IN A POSITION TO ACT. Every ranked step had the "
+            "divert"
+        )
+        out.append(
+            "   override in force, a pool of one, or nothing retrieved. A memory arm "
+            "run this"
+        )
+        out.append("   way differs from its control by the COST of retrieval and nothing else.")
+        return "\n".join(out)
+
+    rate = 100.0 * total_differs / total_eligible
+    out.append(
+        "   PICKS THE MEMORY CHANGED:    {:.0f} of {:.0f} eligible step(s) "
+        "({:.2f}%)".format(total_differs, total_eligible, rate)
+    )
+
+    spreads, _ = present([row.plan_mem_spread_mean for row in rows])
+    if spreads:
+        out.append(
+            "   S_mem SPREAD across the pool (max - min), per-episode mean: {}".format(
+                _stats(spreads))
+        )
+    margins, _ = present([row.plan_margin_mean for row in rows])
+    worst, _ = present([row.plan_margin_min for row in rows])
+    if margins and worst:
+        out.append(
+            "   margin to the runner-up IN RANK ORDER: mean {:.4f}   worst "
+            "{:.4f}".format(sum(margins) / len(margins), min(worst))
+        )
+        if min(worst) < 0.0:
+            out.append(
+                "     NEGATIVE means the divert override outranked a HIGHER-scoring "
+                "candidate.\n     That is the override's cost in eq. 26's own units, "
+                "and this is the first\n     run to put a number on it."
+            )
+
+    out.append("")
+    if total_differs == 0.0:
+        out.append(
+            "   THE MEMORY TERM IS INERT. It answered, it was weighted, and it changed "
+            "NO pick"
+        )
+        out.append(
+            "   on any eligible step. Whatever a memory arm's outcome differs by, it is "
+            "not the"
+        )
+        out.append(
+            "   memory steering: retention, eta and the store's contents are all "
+            "upstream of a"
+        )
+        out.append("   term that never won an argmax.")
+        if spreads and max(spreads) < FLAT_MEM_SPREAD:
+            out.append("")
+            out.append(
+                "   AND THE CAUSE IS VISIBLE: S_mem is CONSTANT across the pool "
+                "(spread < {:g} on".format(FLAT_MEM_SPREAD)
+            )
+            out.append(
+                "   every episode). `memory_consistency` averages `_leg_agreement` over "
+                "k hits, and"
+            )
+            out.append(
+                "   a store whose keys are nearly the same key returns the same number "
+                "for every"
+            )
+            out.append(
+                "   candidate. The fix is k_experience or the store's diversity, NOT "
+                "lambda_memory."
+            )
+    else:
+        out.append(
+            "   THE MEMORY TERM IS LIVE: it changed the pick on {:.2f}% of eligible "
+            "steps.".format(rate)
+        )
+        out.append(
+            "   An outcome difference between this arm and a lambda_memory = 0 control "
+            "is"
+        )
+        out.append(
+            "   therefore ATTRIBUTABLE to steering, and the sign of that difference is "
+            "whether"
+        )
+        out.append("   the steering helped. It is not a cost-of-retrieval artefact.")
+    return "\n".join(out)
+
 def format_report(rows: Sequence[EpisodeRow], *, arm: str, arm_dir: str) -> str:
     """The whole readout."""
     header = [
@@ -931,6 +1103,8 @@ def format_report(rows: Sequence[EpisodeRow], *, arm: str, arm_dir: str) -> str:
         format_cost(rows),
         "",
         format_knobs(rows),
+        "",
+        format_plan(rows),
     ]
     return "\n".join(header + body)
 

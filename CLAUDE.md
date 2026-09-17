@@ -107,7 +107,13 @@ python -m earshot.tools.window_report runs/<tag> \
 # (C) whether `eta` retained or refused anything; (D) how large a memory the sweep ever
 # built — it names a per-scene reset, which is what the sweep's one-runner-per-scene loop
 # produces. Read-only, no GPU, seconds. Exits 2 if the arm recorded omega nowhere:
-# unreadable is not flat
+# unreadable is not flat.
+# (G) DID THE MEMORY TERM CHANGE THE PICK — eq. 26's own counterfactual, re-ranking each
+# step's pool at lambda_memory 0. `dream_informed_steps` only ever said the memory
+# ANSWERED. The denominator EXCLUDES steps where the answer was fixed before the memory
+# was read (divert override in force, pool of one, nothing retrieved). An INERT verdict
+# with a zero S_mem spread names `k_experience`/store diversity as the fix and rules out
+# lambda_memory; a LIVE verdict makes an outcome difference attributable to steering
 python -m earshot.tools.dream_report runs/<tag>          # --arm NAME for a non-`dream` arm
 
 # PRICE `eta` BEFORE BOOKING A NIGHT (ADR-0024 step 1). `dream-2` set eta 0.5 against the

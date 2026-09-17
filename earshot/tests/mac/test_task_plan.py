@@ -49,6 +49,7 @@ from earshot.memory.store import SemanticStore
 from earshot.task.plan import (
     PlanWeights,
     as_measurements,
+    compare_to_no_memory,
     feasibility,
     memory_consistency,
     pick_plan,
@@ -452,6 +453,168 @@ class TestPickPlan(unittest.TestCase):
             "a memory of long successful legs did not move the pick toward the long "
             "candidate, so S_mem is inert",
         )
+
+
+class TestCompareToNoMemory(unittest.TestCase):
+    """**ADR-0024 STEP 2.** `dream-3` measured the memory term costing 5.3 points in
+    equal proportion on anchored and geometric episodes and I read that as noise on the
+    argmax. That was an INFERENCE from an outcome. This is the measurement.
+
+    Both arms throughout: a memory that changes the pick and one that does not, and every
+    reason a step is ineligible asserted against a step that is.
+    """
+
+    # `omega` with all the mass on experience, so `S_mem` is `_leg_agreement` against the
+    # retrieved trajectory and a candidate can be made to match or not match at will.
+    WEIGHTS = PlanWeights(plan=1.0, memory=1.0, feasibility=0.0)
+
+    def ranked(self, candidates, context, weights=None):
+        return score_plans(candidates, context, weights=weights or self.WEIGHTS)
+
+    def test_a_memory_that_changes_the_pick_is_recorded_as_changing_it(self):
+        """The two candidates tie on `S_plan`, so `S_mem` alone decides."""
+        near = _candidate(candidate_id=0, raw_score=0.5, distance_m=2.0, geodesic_m=2.0)
+        far = _candidate(candidate_id=1, raw_score=0.5, distance_m=9.0, geodesic_m=9.0)
+        # A memory of a LONG leg, which agrees with `far` and not with `near`.
+        context = _context(experiences=[_entry(path_length=9.0, straightness=1.0)],
+                           weights=Weights(experience=1.0, pattern=0.0, knowledge=0.0))
+        ranked = self.ranked([near, far], context)
+
+        choice = compare_to_no_memory(ranked, weights=self.WEIGHTS)
+
+        self.assertTrue(choice.memory_could_act)
+        self.assertTrue(choice.differs)
+        self.assertNotEqual(choice.picked_id, choice.picked_id_without_memory)
+        self.assertGreater(choice.memory_spread, 0.0)
+        print("memory moved the pick {} -> {}, spread {:.4f}".format(
+            choice.picked_id_without_memory, choice.picked_id, choice.memory_spread))
+
+    def test_a_memory_that_agrees_with_the_pick_changes_nothing(self):
+        """THE OTHER ARM. Same machinery, a memory that likes what `S_plan` already
+        liked, and the counter must read 0 rather than 1."""
+        poor = _candidate(candidate_id=0, raw_score=0.0, distance_m=2.0, geodesic_m=2.0)
+        good = _candidate(candidate_id=1, raw_score=1.0, distance_m=2.0, geodesic_m=2.0)
+        context = _context(experiences=[_entry(path_length=2.0, straightness=1.0)],
+                           weights=Weights(experience=1.0, pattern=0.0, knowledge=0.0))
+        choice = compare_to_no_memory(
+            self.ranked([poor, good], context), weights=self.WEIGHTS)
+
+        self.assertTrue(choice.memory_could_act)
+        self.assertFalse(choice.differs)
+        print("memory left the pick at {}".format(choice.picked_id))
+
+    def test_lambda_memory_of_zero_can_never_differ(self):
+        """The control arm's invariant, asserted rather than assumed: at `l2 = 0` the
+        real pick and the counterfactual are the same ranking, so `dream-nomem` cannot
+        record a difference no matter what its memory holds."""
+        off = PlanWeights(plan=1.0, memory=0.0, feasibility=0.5)
+        near = _candidate(candidate_id=0, raw_score=0.5, distance_m=2.0, geodesic_m=2.0)
+        far = _candidate(candidate_id=1, raw_score=0.5, distance_m=9.0, geodesic_m=9.0)
+        context = _context(experiences=[_entry(path_length=9.0, straightness=1.0)],
+                           weights=Weights(experience=1.0, pattern=0.0, knowledge=0.0))
+
+        choice = compare_to_no_memory(self.ranked([near, far], context, off), weights=off)
+
+        self.assertFalse(choice.differs)
+
+    def test_a_divert_in_the_pool_makes_the_step_INELIGIBLE(self):
+        """`_rank` puts the divert first structurally, so eq. 26 is never read on those
+        steps. Counting them in the denominator would dilute the rate with steps at which
+        the answer was fixed before the memory was consulted."""
+        divert = _candidate(candidate_id=0, source=SOURCE_INVESTIGATE, raw_score=0.0)
+        other = _candidate(candidate_id=1, raw_score=1.0)
+        context = _context(experiences=[_entry()],
+                           weights=Weights(experience=1.0, pattern=0.0, knowledge=0.0))
+
+        choice = compare_to_no_memory(
+            self.ranked([divert, other], context), weights=self.WEIGHTS)
+
+        self.assertTrue(choice.divert_in_pool)
+        self.assertFalse(choice.memory_could_act)
+        self.assertEqual(choice.picked_id, 0)
+
+    def test_a_pool_of_one_makes_the_step_ineligible(self):
+        context = _context(experiences=[_entry()],
+                           weights=Weights(experience=1.0, pattern=0.0, knowledge=0.0))
+        choice = compare_to_no_memory(
+            self.ranked([_candidate(candidate_id=4)], context), weights=self.WEIGHTS)
+
+        self.assertEqual(choice.pool, 1)
+        self.assertFalse(choice.memory_could_act)
+        self.assertEqual(choice.margin, 0.0)
+
+    def test_a_retrieval_that_answered_NOTHING_makes_the_step_ineligible(self):
+        """An empty `M^L` is not a memory that declined to move the pick."""
+        choice = compare_to_no_memory(
+            self.ranked([_candidate(candidate_id=0), _candidate(candidate_id=1)],
+                        _empty_context()),
+            weights=self.WEIGHTS)
+
+        self.assertFalse(choice.memory_informed)
+        self.assertFalse(choice.memory_could_act)
+
+    def test_a_memory_term_CONSTANT_across_the_pool_has_zero_spread(self):
+        """The `k_experience` failure, made visible. A term that is the same number for
+        every candidate cannot move an argmax however large it is."""
+        same_a = _candidate(candidate_id=0, raw_score=0.4, distance_m=2.0, geodesic_m=2.0)
+        same_b = _candidate(candidate_id=1, raw_score=0.6, distance_m=2.0, geodesic_m=2.0)
+        context = _context(experiences=[_entry(path_length=2.0, straightness=1.0)],
+                           weights=Weights(experience=1.0, pattern=0.0, knowledge=0.0))
+
+        choice = compare_to_no_memory(
+            self.ranked([same_a, same_b], context), weights=self.WEIGHTS)
+
+        self.assertAlmostEqual(choice.memory_spread, 0.0, places=6)
+        self.assertFalse(choice.differs)
+        print("identical legs -> S_mem spread {:.6f}, pick unmoved".format(
+            choice.memory_spread))
+
+    def test_the_margin_goes_NEGATIVE_when_the_divert_outranks_a_better_total(self):
+        """The divert override's cost in eq. 26's own units, which `plan.py`'s ranking
+        comment asserts and no number has ever been attached to.
+
+        `score_candidate` hands a divert a hard 1.0 that no frontier reaches, so `S_plan`
+        alone can never produce this. It takes the memory term lifting a frontier above
+        it -- which is exactly the situation the override exists for, and the one it has
+        always resolved silently."""
+        divert = _candidate(candidate_id=0, source=SOURCE_INVESTIGATE, raw_score=0.0,
+                            distance_m=9.0, geodesic_m=9.0)
+        liked = _candidate(candidate_id=1, raw_score=1.0, distance_m=2.0, geodesic_m=2.0)
+        # A memory of a SHORT straight leg: agrees with `liked`, not with the divert.
+        context = _context(experiences=[_entry(path_length=2.0, straightness=1.0)],
+                           weights=Weights(experience=1.0, pattern=0.0, knowledge=0.0))
+
+        ranked = self.ranked([divert, liked], context)
+        choice = compare_to_no_memory(ranked, weights=self.WEIGHTS)
+
+        self.assertEqual(choice.picked_id, 0, "the override did not hold")
+        self.assertGreater(ranked[1].total, ranked[0].total,
+                           "the fixture did not lift the frontier above the divert")
+        self.assertLess(choice.margin, 0.0)
+        print("divert outranked a candidate scoring {:.4f} higher".format(-choice.margin))
+
+    def test_an_empty_pool_raises_as_pick_plan_does(self):
+        with self.assertRaises(ValueError) as caught:
+            compare_to_no_memory([], weights=self.WEIGHTS)
+        self.assertIn("assert_pool", str(caught.exception))
+
+    def test_the_ranked_head_IS_what_pick_plan_returns(self):
+        """**THE REGRESSION GUARD.** `runner._choose_waypoint` now calls `score_plans`
+        and takes `[0]` where it called `pick_plan`. If those ever diverge, the
+        instrumentation would have silently changed the agent it was measuring."""
+        pool = [
+            _candidate(candidate_id=0, raw_score=0.2, distance_m=3.0, geodesic_m=3.0),
+            _candidate(candidate_id=1, raw_score=0.9, distance_m=2.0, geodesic_m=2.0),
+            _candidate(candidate_id=2, raw_score=0.5, distance_m=5.0, geodesic_m=8.0),
+        ]
+        context = _context(experiences=[_entry(path_length=5.0)],
+                           weights=Weights(experience=1.0, pattern=0.0, knowledge=0.0))
+        for weights in (EVEN, PLAN_ONLY, self.WEIGHTS):
+            self.assertEqual(
+                score_plans(pool, context, weights=weights)[0].candidate.candidate_id,
+                pick_plan(pool, context, weights=weights).candidate.candidate_id,
+            )
+        print("score_plans[0] == pick_plan under 3 weightings")
 
 
 class TestTheWholePath(unittest.TestCase):

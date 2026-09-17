@@ -33,6 +33,7 @@ from earshot.tools.dream_report import (
     band_of,
     format_knobs,
     format_omega,
+    format_plan,
     format_precondition,
     format_reach,
     format_report,
@@ -65,6 +66,7 @@ def dream_metrics(
     omega_e=0.5,
     omega_p=0.3,
     omega_k=0.2,
+    plan=None,
     segments_over_eta=None,
     segments_scored=None,
     importance_at_cap=None,
@@ -87,6 +89,23 @@ def dream_metrics(
         "dream_importance_min": 1.0,
         "dream_importance_max": 1.29,
     }
+    if plan is not None:
+        # (ranked, diverts, eligible, differs, spread, margin_mean, margin_min)
+        # NOT `spread`: that name is this function's omega-spread parameter, and
+        # rebinding it here made the fixture fail on an unrelated line.
+        (ranked, diverts, eligible, differs,
+         mem_spread, margin, margin_min) = plan
+        metrics.update({
+            "plan_ranked_steps": float(ranked),
+            "plan_divert_steps": float(diverts),
+            "plan_eligible_steps": float(eligible),
+            "plan_pick_differs": float(differs),
+        })
+        if mem_spread is not None:
+            metrics["plan_mem_spread_mean"] = float(mem_spread)
+        if margin is not None:
+            metrics["plan_margin_mean"] = float(margin)
+            metrics["plan_margin_min"] = float(margin_min)
     if segments_scored is not None:
         metrics["dream_segments_scored"] = float(segments_scored)
     if importance_at_cap is not None:
@@ -430,6 +449,20 @@ class TestRetentionBothArms(Fixture):
         self.assertNotIn("eta IS THE RETENTION RULE", text)
         print(text)
 
+    def test_a_cap_that_bound_on_a_MINORITY_still_names_eta_as_the_rule(self):
+        """**THE GAP `dream-3` FOUND.** The verdict was gated on the cap binding exactly
+        never, so a run where it bound on 3 of 282 -- a bound doing its job -- fell
+        through every branch and section C ended with no verdict at all. Healthy and
+        "this tool has no opinion" must not look the same."""
+        text = self.read(
+            [(REACHED, dream_metrics(rows_added=4.0, segments_over_eta=4.0))] * 4
+            + [(REACHED, dream_metrics(rows_added=8.0, segments_over_eta=20.0))]
+        )
+        self.assertIn("eta IS THE RETENTION RULE", text)
+        self.assertIn("bound on 1 of 5 episode(s), a minority", text)
+        self.assertNotIn("THE CAP IS THE RETENTION RULE", text)
+        print(text)
+
     def test_a_cap_that_never_bound_names_eta_as_the_rule(self):
         """THE OTHER ARM, same numbers of rows written, opposite verdict."""
         text = self.read(
@@ -511,6 +544,88 @@ class TestRetentionBothArms(Fixture):
         ])
         text = format_retention(read_rows(str(arm)))
         self.assertIn("M^P WAS EMPTY ON EVERY EPISODE", text)
+        print(text)
+
+
+class TestEq26IsMeasuredAndNotInferred(Fixture):
+    """**ADR-0024 STEP 2, READ BACK.** `dream-3` measured the memory term costing 5.3
+    points in equal proportion on anchored and geometric episodes, and "noise on the
+    argmax" was my inference from that shape. Section G is the direct measurement, and
+    every verdict it can reach is exercised with its opposite beside it.
+    """
+
+    def read(self, episodes):
+        arm = self.arm("dream-{}".format(
+            len(list(pathlib.Path(self.root).iterdir()))))
+        write_scene(arm, "sceneA", episodes)
+        return format_plan(read_rows(str(arm)))
+
+    def test_a_term_that_changed_no_pick_is_called_inert(self):
+        text = self.read([
+            (REACHED, dream_metrics(plan=(200, 40, 150, 0, 0.3, 0.1, 0.0)))
+        ] * 3)
+        self.assertIn("THE MEMORY TERM IS INERT", text)
+        self.assertIn("0 of 450 eligible step(s) (0.00%)", text)
+        self.assertNotIn("THE MEMORY TERM IS LIVE", text)
+        print(text)
+
+    def test_a_term_that_changed_picks_is_called_live(self):
+        """THE OTHER ARM."""
+        text = self.read([
+            (REACHED, dream_metrics(plan=(200, 40, 150, 12, 0.3, 0.1, 0.0)))
+        ] * 3)
+        self.assertIn("THE MEMORY TERM IS LIVE", text)
+        self.assertIn("8.00% of eligible steps", text)
+        self.assertNotIn("THE MEMORY TERM IS INERT", text)
+        print(text)
+
+    def test_an_inert_term_that_is_CONSTANT_names_the_cause(self):
+        """`k_experience`'s predicted failure: a term identical for every candidate
+        cannot move an argmax, and the fix is then the store, not lambda_memory."""
+        text = self.read([
+            (REACHED, dream_metrics(plan=(200, 40, 150, 0, 0.0, 0.1, 0.0)))
+        ] * 3)
+        self.assertIn("THE MEMORY TERM IS INERT", text)
+        self.assertIn("S_mem is CONSTANT across the pool", text)
+        self.assertIn("k_experience or the store's diversity", text)
+        print(text)
+
+    def test_an_inert_term_that_VARIES_does_not_blame_the_store(self):
+        """A term that differs across candidates and still never wins is a different
+        finding: S_plan dominates it. Naming the store there would send the fix to the
+        wrong place."""
+        text = self.read([
+            (REACHED, dream_metrics(plan=(200, 40, 150, 0, 0.3, 0.1, 0.0)))
+        ] * 3)
+        self.assertIn("THE MEMORY TERM IS INERT", text)
+        self.assertNotIn("S_mem is CONSTANT", text)
+
+    def test_a_run_with_no_eligible_step_says_so_rather_than_dividing_by_zero(self):
+        """Every ranked step had the divert in force, a pool of one, or no retrieval."""
+        text = self.read([
+            (REACHED, dream_metrics(plan=(200, 200, 0, 0, None, 0.1, 0.0)))
+        ] * 3)
+        self.assertIn("NEVER IN A POSITION TO ACT", text)
+        self.assertNotIn("THE MEMORY TERM IS INERT", text)
+        print(text)
+
+    def test_a_run_predating_the_counters_is_not_read_as_an_inert_term(self):
+        """**ABSENT IS NEVER ZERO.** `dream-2` and `dream-3` have none of these fields,
+        and reading their silence as "the memory moved nothing" would answer step 2 with
+        no data."""
+        text = self.read([(REACHED, dream_metrics())] * 3)
+        self.assertIn("NOT RECORDED", text)
+        self.assertNotIn("THE MEMORY TERM IS INERT", text)
+        self.assertNotIn("THE MEMORY TERM IS LIVE", text)
+        print(text)
+
+    def test_a_negative_margin_names_the_diverts_cost(self):
+        """The first number ever attached to `plan.py`'s divert override."""
+        text = self.read([
+            (REACHED, dream_metrics(plan=(200, 40, 150, 3, 0.3, -0.05, -0.42)))
+        ] * 3)
+        self.assertIn("NEGATIVE means the divert override outranked", text)
+        self.assertIn("-0.4200", text)
         print(text)
 
 
