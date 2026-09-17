@@ -167,11 +167,43 @@ class MemoryContext:
     # that always answers, which is every result measured before this existed.
     min_confidence: Optional[float] = None
 
+    # ADR-0026. False is `memory-replace`, which is every result measured before this
+    # existed: the prior OVERWRITES the acoustic estimate and, because the divert class
+    # holds exactly one candidate, the structural override in `_rank` makes it the pick
+    # with nothing ranking it. True is `memory-propose`: the prior is emitted as a SECOND
+    # investigate candidate and eq. 26 chooses between the two.
+    #
+    # It lives here rather than on `RunConfig` for the reason `k` and `min_confidence` do,
+    # and the ADR's "typed on RunConfig" sentence is wrong about the address while right
+    # about the rule: ADR-0008 forbids an environment flag, and ADR-0013 does not widen
+    # the config for a value only the caller uses. The config has no edge to this store.
+    proposes: bool = False
+
+    # THE SAFETY RAIL, and it is part of ADR-0026's decision rather than a tuning knob.
+    # A memory waypoint further than this from the acoustic estimate is NOT EMITTED. The
+    # failure `matrix-2` measured is a wrong prior with nothing above it; an unbounded
+    # proposal reproduces exactly that, one rank lower. `None` removes the rail, which is
+    # a thing to measure against and not a default.
+    #
+    # A first choice, in `ablation_sweep.sh`'s sense: the run prices it. 6.0 m is the
+    # order of the median final-pose route to source in `dream-4` (6.72 m / 7.00 m), so a
+    # proposal that survives it is a detour of the scale the task already walks.
+    propose_max_offset_m: Optional[float] = 6.0
+
     def __post_init__(self) -> None:
         if int(self.k) < 1:
             raise ValueError(
                 "MemoryContext needs k >= 1, got {} -- a vote over no neighbours is not "
                 "a weaker prediction, it is no prediction".format(self.k)
+            )
+        if self.propose_max_offset_m is not None and float(
+            self.propose_max_offset_m
+        ) <= 0.0:
+            raise ValueError(
+                "propose_max_offset_m must be positive or None, got {}. A rail at or "
+                "below zero suppresses every proposal, which is `proposes=False` wearing "
+                "a knob's name and would read as a live arm that measured nothing"
+                .format(self.propose_max_offset_m)
             )
 
     @property

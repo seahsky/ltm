@@ -187,6 +187,26 @@ ENERGY_HISTORY = 2 * RISING_WINDOW
 # divert is identifiable in the audit by its id as well as by its source.
 DIVERT_CANDIDATE_ID = 0
 
+# ADR-0026's second member of the divert class: the waypoint the semantic prior proposes,
+# when `MemoryContext.proposes` is on.
+#
+# **GREATER THAN `DIVERT_CANDIDATE_ID`, AND THAT IS THE WHOLE SEMANTICS.** The id is
+# `_rank`'s last tie-break, so the acoustic estimate wins an exact tie and the prior has
+# to EARN the pick on `Score`. A first draft used -1 and a test caught what that does:
+# `agent/scorer.score_candidate` gives every SOURCE_INVESTIGATE candidate a hard 1.0, so
+# on a run with no DREAM context the two diverts tie exactly and the lower id took the
+# pick unconditionally. That is replacement again, one rank lower, which is the precise
+# failure ADR-0026 exists to remove.
+#
+# The consequence is worth saying out loud: **`proposes=True` can only change a pick where
+# eq. 26 runs.** Without a memory term there is nothing to choose WITH, and the arm
+# correctly reduces to the acoustic behaviour rather than quietly becoming replacement.
+# A `memory-propose` sweep arm is therefore a DREAM arm.
+#
+# Far above any per-episode frontier count so it stays identifiable in an audit by id
+# alone; `_emit` issues from 1 and the acoustic divert holds 0.
+MEMORY_CANDIDATE_ID = 1_000_000
+
 
 def ir_under_policy(impulse: Any, policy: IrPolicy) -> Any:
     """The impulse response the run actually convolves, under ADR-0018's ``IrPolicy``.
@@ -845,6 +865,56 @@ def _divert_candidate(target: Xyz, pose: Pose) -> Candidate:
     )
 
 
+def _memory_candidate(
+    target: Xyz,
+    pose: Pose,
+    *,
+    acoustic: Optional[Xyz],
+    geodesic: Callable[[Xyz, Xyz], Optional[float]],
+    max_offset_m: Optional[float],
+) -> Tuple[Optional[Candidate], str]:
+    """ADR-0026: the prior's waypoint as a candidate that must WIN, not one that replaces.
+
+    Returns ``(candidate, why)``. ``why`` is the audit's word for what happened and is
+    never silently empty: "emitted", "no_acoustic", "unrouted", or "railed".
+
+    **THE RAIL IS THE POINT OF THE SIGNATURE.** `matrix-2` measured a semantic prior
+    costing 10.3 points against a RIGHT prior, and the mechanism was that nothing ranked
+    it: `target = memory_prior.target` overwrote the acoustic estimate outright. Emitting
+    it as a candidate fixes the ranking half. It does not fix the magnitude half, because
+    eq. 26 could still prefer a proposal on the far side of the house. So a proposal
+    further than ``max_offset_m`` from the acoustic estimate never enters the pool.
+
+    ``geodesic`` and not a straight line, for `resolve_prior`'s own reason: a point behind
+    a wall is not near, and ``None`` is an unrouted pair rather than a distance of zero.
+    An unrouted proposal is SUPPRESSED, which is the conservative direction -- the agent
+    keeps the estimate the cue gave it.
+    """
+    if acoustic is None:
+        return None, "no_acoustic"
+    if max_offset_m is not None:
+        offset = geodesic(acoustic, target)
+        if offset is None:
+            return None, "unrouted"
+        if float(offset) > float(max_offset_m):
+            return None, "railed"
+    dx, dz = target.x - pose.position.x, target.z - pose.position.z
+    return Candidate(
+        candidate_id=MEMORY_CANDIDATE_ID,
+        position=target,
+        source=SOURCE_INVESTIGATE,
+        distance_m=math.hypot(dx, dz),
+        # `_divert_candidate`'s reason, unchanged: `reachable_pool` recomputes the bearing
+        # at the snapped position, and 0.0 is the honest placeholder.
+        bearing_rad=0.0,
+        # 1.0 is the divert's own `raw_score`, so the two members of the divert class
+        # arrive at eq. 26 indistinguishable on everything EXCEPT their positions. Giving
+        # the proposal a different raw score here would decide the contrast in the
+        # constructor instead of in the ranking, which is the defect this ADR removes.
+        raw_score=1.0,
+    ), "emitted"
+
+
 def _choose_waypoint(
     proposer: FrontierProposer,
     pose: Pose,
@@ -852,7 +922,7 @@ def _choose_waypoint(
     snap_point: Callable[[Xyz], Optional[Xyz]],
     geodesic: Callable[[Xyz, Xyz], Optional[float]],
     planner: PlannerConfig,
-    divert: Optional[Candidate] = None,
+    diverts: Tuple[Candidate, ...] = (),
     plan: Optional[Tuple[RetrievedContext, PlanWeights]] = None,
 ) -> Tuple[Xyz, str, Dict[str, int], Optional[PlanChoice]]:
     """Propose, filter on the navmesh, and pick one.
@@ -862,23 +932,25 @@ def _choose_waypoint(
     zeroed record of one -- absent is not "the memory did nothing", which is the rule
     this tree has paid for twice.
 
+    ``diverts`` is a CLASS and not a candidate, which is ADR-0026. `_rank` sorts every
+    member of it ahead of every frontier, so the interrupt stays an override however many
+    there are; what more than one buys is that eq. 26 finally has something to rank on the
+    detour, where `eq26-1` measured a divert in the pool on 79.4% of ranked steps and the
+    class had exactly one member. An empty tuple is the pre-interrupt pool, unchanged.
+
     Two stages because ADR-0008's invariant has two ways to be met. The frontier pool can
     be empty of *cells* — the proposer answers that itself with the compass fan — or full
     of cells the navmesh rejects wholesale, which is the occupancy-versus-navmesh
     disagreement the invariant exists for. Only the caller can answer the second, which is
     why ``compass_fan`` is public.
     """
-    proposed = list(proposer.propose(pose))
-    if divert is not None:
-        proposed.insert(0, divert)
+    proposed = list(diverts) + list(proposer.propose(pose))
     report = reachable_pool(
         proposed, pose, snap_point=snap_point, geodesic=geodesic, cfg=planner
     )
     kept, counters = report.candidates, report.counters()
     if not kept:
-        fan = list(proposer.compass_fan(pose))
-        if divert is not None:
-            fan.insert(0, divert)
+        fan = list(diverts) + list(proposer.compass_fan(pose))
         report = reachable_pool(
             fan, pose, snap_point=snap_point, geodesic=geodesic, cfg=planner
         )
@@ -901,6 +973,16 @@ def _choose_waypoint(
         ranked = score_plans(kept, retrieved, weights=weights)
         scored = ranked[0]
         choice = compare_to_no_memory(ranked, weights=weights)
+    # WHICH MEMBER OF THE DIVERT CLASS WON, recorded here because this is the only place
+    # that knows. `source` is SOURCE_INVESTIGATE for both, so a reader downstream cannot
+    # tell them apart, and "eq. 26 ranked the proposal first" is the number ADR-0026's
+    # fourth branch is decided on. Written on every ranked step, 0 included: a counter
+    # that only appears when it fired cannot distinguish "never won" from "never ran".
+    if any(c.candidate_id == MEMORY_CANDIDATE_ID for c in kept):
+        counters["memory_propose_eligible"] = 1
+        counters["memory_propose_ranked_first"] = int(
+            scored.candidate.candidate_id == MEMORY_CANDIDATE_ID
+        )
     return scored.candidate.position, scored.candidate.source, counters, choice
 
 
@@ -1519,6 +1601,12 @@ def run_episode(
             # is a 2 m hop in whatever direction the scan/cast cycle last chose, and
             # `abl-1` priced that at SWS 27 of 272. That silence is the headroom, and it is
             # the regime the four cells are meant to differ in.
+            # RESET EVERY STEP, deliberately. `memory_prior` is resolved once per
+            # episode and persists; the PROPOSAL does not, because the rail and the route
+            # between the two targets are both functions of where the agent is standing.
+            # Carrying it forward would let a proposal that was legal at the window close
+            # survive into a pose where it is not.
+            memory_target: Optional[Xyz] = None
             if memory is not None and is_diverting(decision.mode) and not sounding:
                 if not memory_consulted:
                     memory_consulted = True
@@ -1550,9 +1638,42 @@ def run_episode(
                         ) if memory_prior is not None else
                         "nothing ({})".format(memory_miss.value),
                     ))
+                # ADR-0026. `proposes=False` is `memory-replace`, every result measured
+                # before this record existed: the prior OVERWRITES the acoustic estimate,
+                # and because the divert class then holds exactly one candidate the
+                # structural override makes it the pick with NOTHING ranking it. That is
+                # the shape `matrix-2` measured at -10.3 points against a right prior --
+                # redundant when the memory agrees with the cue, unchecked when it does
+                # not. `proposes=True` keeps the acoustic estimate and makes the prior
+                # compete for the same pick under eq. 26.
                 if memory_prior is not None:
-                    target = memory_prior.target
-            divert = _divert_candidate(target, pose) if target is not None else None
+                    if memory.proposes:
+                        memory_target = memory_prior.target
+                    else:
+                        target = memory_prior.target
+            diverts: Tuple[Candidate, ...] = ()
+            if target is not None:
+                diverts = (_divert_candidate(target, pose),)
+            if memory_target is not None:
+                proposal, why = _memory_candidate(
+                    memory_target,
+                    pose,
+                    acoustic=target,
+                    geodesic=geodesic,
+                    max_offset_m=(
+                        None if memory is None else memory.propose_max_offset_m
+                    ),
+                )
+                # Counted on every step it was considered, not once per episode: the rail
+                # and the routing can go either way as the agent moves, and an episode
+                # count would hide a proposal that was live for one step and railed for
+                # forty. `dream-1` is the reason a number that decides a reading is
+                # written where a reader can reach it.
+                counters["memory_propose_" + why] = (
+                    counters.get("memory_propose_" + why, 0) + 1
+                )
+                if proposal is not None:
+                    diverts = diverts + (proposal,)
             waypoint, action, step_counters, plan_choice = _steer(
                 proposer,
                 pose,
@@ -1561,7 +1682,7 @@ def run_episode(
                 snap_point=world.snap_point,
                 geodesic=geodesic,
                 planner=cfg.planner,
-                divert=divert,
+                diverts=diverts,
                 plan=(
                     None
                     if dream is None or dream_retrieved is None
@@ -1992,6 +2113,33 @@ def run_episode(
         # episodes a floor would act on, and `matrix_prior_confidence` alone cannot tell
         # a re-measurement what the declined ones scored.
         metrics["memory_vote_confidence"] = float(memory_vote[1])
+    if memory is not None and memory.proposes:
+        # ADR-0026's readout, and it ships with the mechanism for `dream-1`'s reason: that
+        # run wrote its central quantity to disk and no reader could print it, and `eta-1`
+        # repeated the same failure inside the fix for it.
+        #
+        # ZERO IS WRITTEN EXPLICITLY. `counters` only holds keys that fired, so an arm
+        # where the proposal never won and an arm where it never ran look identical from
+        # the artefact. These five make them different: `eligible` counts the ranked steps
+        # the proposal reached the pool on, `ranked_first` the ones eq. 26 preferred it,
+        # and the three suppression reasons say which gate stopped the rest.
+        #
+        # `ranked_first / eligible` is the fraction ADR-0026's fourth branch reads: under
+        # 5% means the rail or the store is suppressing the mechanism, and the run is not
+        # a result about memory until that is fixed.
+        for key in (
+            "memory_propose_eligible",
+            "memory_propose_ranked_first",
+            "memory_propose_emitted",
+            "memory_propose_railed",
+            "memory_propose_unrouted",
+            "memory_propose_no_acoustic",
+        ):
+            metrics[key] = float(counters.get(key, 0))
+        metrics["memory_propose_rail_m"] = (
+            -1.0 if memory.propose_max_offset_m is None
+            else float(memory.propose_max_offset_m)
+        )
 
     grown_memory: Optional[LongTermMemory] = None
     if dream is not None and dream_state is not None:
@@ -2168,7 +2316,7 @@ def _steer(
     snap_point: Callable[[Xyz], Optional[Xyz]],
     geodesic: Callable[[Xyz, Xyz], Optional[float]],
     planner: PlannerConfig,
-    divert: Optional[Candidate],
+    diverts: Tuple[Candidate, ...] = (),
     plan: Optional[Tuple[RetrievedContext, PlanWeights]] = None,
 ) -> Tuple[Optional[Xyz], Optional[str], Dict[str, int], Optional[PlanChoice]]:
     """The next action toward a waypoint, re-proposing once if the current one is spent.
@@ -2197,7 +2345,7 @@ def _steer(
                 snap_point=snap_point,
                 geodesic=geodesic,
                 planner=planner,
-                divert=divert,
+                diverts=diverts,
                 plan=plan,
             )
         try:
@@ -2289,6 +2437,8 @@ def run(
     memory_prior_stores: Optional[Tuple[SemanticStore, EpisodicStore]] = None,
     memory_k: int = 5,
     memory_min_confidence: Optional[float] = None,
+    memory_proposes: bool = False,
+    memory_propose_max_offset_m: Optional[float] = 6.0,
     dream_knobs: Optional[DreamKnobs] = None,
     dream_memory_in: Optional[str] = None,
     dream_memory_out: Optional[str] = None,
@@ -2356,6 +2506,8 @@ def run(
             ),
             k=memory_k,
             min_confidence=memory_min_confidence,
+            proposes=bool(memory_proposes),
+            propose_max_offset_m=memory_propose_max_offset_m,
         )
         say("memory: {} ({} semantic row(s)) -- {}".format(
             memory_condition.value, len(memory.semantic), RUN_DISCLOSURE

@@ -355,6 +355,45 @@ class TestMemoryKwargsFromArgs(unittest.TestCase):
         )
         self.assertEqual(len(loaded_episodic), 0)
 
+    def _propose_kwargs(self, *extra):
+        """A real dumped store, because `memory_kwargs_from_args` loads one before it
+        reaches the flags under test."""
+        from earshot.task.memory_build import dump_stores
+
+        semantic = SemanticStore(entries=(
+            SemanticEntry(sound_class="alarm", room="bedroom", category="bed",
+                          embedding=[1.0, 0.0], donor_scene="donor_scene"),
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = "{}/store.json".format(tmp)
+            dump_stores(path, semantic, EpisodicStore())
+            return memory_kwargs_from_args(self._args(
+                "--memory-condition", "heard_seen", "--memory-store", path, *extra
+            ))
+
+    def test_replacement_is_what_a_cell_gets_without_the_flag(self):
+        """ADR-0026. Every matrix result was measured under replacement, so a cell that
+        does not ask for proposing must not receive it."""
+        self.assertIs(self._propose_kwargs()["memory_proposes"], False)
+
+    def test_the_flag_turns_proposing_on(self):
+        self.assertIs(self._propose_kwargs("--memory-proposes")["memory_proposes"], True)
+
+    def test_the_rail_defaults_to_six_metres(self):
+        self.assertEqual(self._propose_kwargs()["memory_propose_max_offset_m"], 6.0)
+
+    def test_a_negative_rail_is_the_operators_way_to_remove_it(self):
+        """argparse cannot take `None` on a float flag, and `MemoryContext` refuses zero
+        and negatives outright, so the translation lives in exactly one place."""
+        kwargs = self._propose_kwargs("--memory-propose-max-offset", "-1")
+        self.assertIsNone(kwargs["memory_propose_max_offset_m"])
+
+    def test_a_bare_invocation_still_carries_no_memory_keywords(self):
+        """The new flags must not break `run()`'s byte-identical guarantee: a caller with
+        no --memory-condition reaches `run()` with an EMPTY dict, not with proposing
+        typed out as False."""
+        self.assertEqual(memory_kwargs_from_args(self._args("--memory-proposes")), {})
+
     def test_memory_k_defaults_to_five(self):
         from earshot.task.memory_build import dump_stores
 

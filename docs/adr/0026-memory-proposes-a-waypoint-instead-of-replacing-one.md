@@ -127,3 +127,35 @@ Both arms, per ADR-0014: the proposer firing and being ranked first on some step
 A counter on every audit for how often the memory candidate was emitted, how often it was suppressed by the rail, and how often eq. 26 ranked it first.
 `dream-1` wrote its central quantity to disk and no reader could print it, and `eta-1` repeated that inside the fix for it.
 The readout ships in the same change as the mechanism, or the run cannot be read.
+
+## Addendum, 2026-09-17: two things the implementation corrected
+
+Written after the mechanism landed, before any run.
+Both corrections make the pre-registration above more restrictive, not less, and neither changes the branches.
+
+**1. The knob is on `MemoryContext`, not `RunConfig`.**
+The decision above says "typed on `RunConfig` (ADR-0008, no environment flags)".
+The rule is right and the address was wrong.
+`MemoryContext`'s own docstring already settles it for `k` and `min_confidence`: the config has no edge to the store, and ADR-0013 does not widen it for a value only the caller uses.
+`proposes` and `propose_max_offset_m` sit beside them.
+ADR-0008's actual requirement, that behaviour is typed rather than read from the environment, is met.
+
+**2. `memory-propose` is a DREAM arm. It has to be, and the pre-registration did not say so.**
+
+Both members of the divert class are `SOURCE_INVESTIGATE`, so `_rank`'s structural override cannot separate them.
+Something else has to, and the only thing that can is the memory term.
+`agent/scorer.score_candidate` gives every investigate candidate a hard 1.0, so on a run with **no** DREAM context the two diverts tie exactly on `Score` and the ranking falls through to its last key, the candidate id.
+
+A first draft gave the proposal a negative id and a test caught what that does.
+The proposal took every tie, the agent walked to the recalled place in both arms, and the two trajectories matched step for step.
+That would have read as "the mechanism is inert" when what it actually was is **replacement wearing the new name**, which is the exact failure this record exists to remove, one rank lower.
+
+The id is now greater than `DIVERT_CANDIDATE_ID`, so the acoustic estimate wins an exact tie and the prior has to earn the pick on `Score`.
+The consequence is the correction: **`--memory-proposes` without `--dream` reduces to the acoustic behaviour and changes nothing.**
+That is the correct reduction rather than a limitation, and `test_without_a_memory_term_proposing_reduces_to_the_acoustic_behaviour` holds it.
+
+**What this does to the sweep.**
+The contrast needs `--clap`, a semantic store from a prior pass, **and** the DREAM knobs, in both arms.
+`ablation_sweep.sh` runs DREAM arms and no prior pass; `matrix_sweep.sh` runs a prior pass and no DREAM.
+Neither driver can carve this contrast today, and the driver work is a separate change from the mechanism.
+The knobs the arms differ in remain exactly one: `--memory-proposes`.
