@@ -89,13 +89,16 @@ nrun bash earshot/tools/window_pilot.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag>
 
 # THE OVERNIGHT SWEEP: the paper's HM3D baseline and the ablation table, in one run.
-# Five arms — `full` is the baseline of record (ADR-0021), the other four each remove one
-# component. Every arm shares its episodes with the baseline, so `episode_diff` pairs
-# them. It prints the MDE it is buying BEFORE it spends the night earning it: ~9.6 h and
-# 6.68 points at the defaults (15 episodes x 19 scenes x 5 arms)
+# SEVEN arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
+# `no-cue`, `scan-only` and `anechoic` each remove one component; `dream` and
+# `dream-nomem` are the memory pair (ADR-0025) and differ in `lambda_memory` alone.
+# Every arm shares its episodes with the reference, so `episode_diff` pairs them. It
+# prints the MDE it is buying BEFORE it spends the night earning it -- read that estimate
+# rather than a figure quoted here, because it is computed from the arms you asked for.
+# `--arms` runs a subset, and a subset without `full` is quoted against its FIRST arm
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag> \
-  --arms "full no-climb no-cue scan-only anechoic"
+  --arms "full no-climb no-cue scan-only anechoic dream dream-nomem"
 
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
