@@ -4149,3 +4149,86 @@ ADR-0024 lands two changes: `C_j` and `U_j` become multiples of the episode's me
 **The fix is a precondition for a fair test, not a treatment.** No Find-SR prediction is registered: omega was already moving on 236 of 281 episodes here and the outcome did not move, this repo's base rate for retuning a threshold in response to an inert mechanism is 0 for 6, and `matrix-2` measured an episodic store *hurting* a right prior by 10.3 points.
 
 **File index.** `earshot/memory/consolidate.py` (`_mean_multiples`, `retain`); `earshot/task/dream.py` (`DreamKnobs.max_retained`); `earshot/task/runner.py` (`dream_segments_over_eta`); `earshot/tools/dream_report.py`; `earshot/tools/ablation_sweep.sh`'s `DREAM_KNOBS`; ADR-0024. Data: the run's email report and `runs/dream-2/` on the box, not on disk in this worktree.
+
+# dream-3
+
+`bash earshot/tools/ablation_sweep.sh --tag dream-3 --arms "full dream dream-nomem" --dream-eta 4.5`, exit 0, 7h41m, commit `bb661b0`, host riftvm, 2026-09-16.
+Three arms, 19 scenes, 15 episodes each, `n = 282` paired per arm, every gate green, one zero-yield scene (`mL8ThkuaVTM`) in all three arms.
+The decision record is ADR-0025.
+
+| arm | source reached | rate | steps/ep | SWS |
+|---|---|---|---|---|
+| `full` | 86 / 282 | 30.5% | 190.5 | 0.105 |
+| `dream` | 79 / 282 | 28.0% | 198.3 | 0.090 |
+| `dream-nomem` | 94 / 282 | 33.3% | 197.7 | 0.112 |
+
+`dream-nomem` is `dream` with `lambda_memory = 0.0` and every other knob identical.
+It exists because ADR-0024 found `dream-2` to be a two-variable contrast: `pick_plan` does not reduce to `pick_waypoint` at `lambda_feasibility = 0.5`, so `full` against `dream` differences a feasibility term and a memory term at once.
+
+**The memory term, alone: −15 episodes, −5.3 points.**
+Exact McNemar, `dream` against `dream-nomem`: 28 to 13 over 41 discordant pairs, **p = 0.0275**.
+Scene-level sign test over the driver's own per-scene nets: 11 up, 3 down, 3 tied, **p = 0.0574** (mine, by hand — no tool in this repo computes it).
+
+**The feasibility term, alone: +8 episodes, +2.8 points**, `full` against `dream-nomem`, 29 to 21 over 50 discordant, p ≈ 0.32 (mine, normal approximation).
+
+The two decompose the old contrast exactly: `full` → `dream` is −7, and −7 = +8 − 15.
+
+**Every precondition the earlier DREAM runs failed, this one met.**
+Rows retained per episode median 4 against `dream-2`'s 0 on 275 of 282; `M^E` 1192 rows against 45; `M^P` median 5 against 1; `omega^E` past the 0.05 flat floor on 270 of 281; the cap bound on 3 of 282, so `eta` was the retention rule.
+The mechanism was live and it made the agent worse.
+
+**The harm is uniform across the placement split.**
+
+| arm | anchored (n=134) | geometric (n=148) |
+|---|---|---|
+| `full` | 31 (23.1%) | 55 (37.2%) |
+| `dream` | 27 (20.1%) | 52 (35.1%) |
+| `dream-nomem` | 35 (26.1%) | 59 (39.9%) |
+
+−6.0 points anchored and −4.7 geometric.
+A memory holding a real room-level regularity would help where the source sits at an anchor and not elsewhere; one holding a wrong regularity would mirror it.
+That shape was first read here as a memory term gone constant across candidates.
+**`eq26-1` refuted that reading** — see below.
+
+**Not reportable as a magnitude.**
+5.3 points is below the 6.71-point single-run MDE at `n = 282`, and `repeat-1` measured SD 7.7 episodes on the difference between byte-identical reruns.
+`eta-1` and `eta-2` demonstrate it locally: identical command, identical seed, 3 versus 2 reached.
+
+**One unintended asymmetry.**
+The sweep chains `M^E` only for the arm named `dream`, so `dream-nomem` built at most 96 rows per scene and discarded them.
+At `lambda_memory = 0` that store cannot enter the plan score, so the contrast stands; what the run cannot answer is whether a smaller memory with the term ON would do better.
+
+Cost: 0.0231 s per DREAM step at the median against the 0.057 s the sweep's wall clock was sized from.
+`M^K` carried no weight on any episode in any arm.
+
+# eq26-1
+
+`bash earshot/tools/eta_pass.sh --tag eq26-1 --eta 4.5`, exit 0, 7m29s, commit `e2d3d84`, 2026-09-17.
+ADR-0024 step 2: one scene, 15 episodes, with eq. 26's own counters (PR #128).
+
+```
+steps that RANKED a pool:                                    2028
+  of those, divert in pool:                                  1611   (79.4%)
+  ELIGIBLE (no divert, pool > 1, retrieval answered):          392   (19.3%)
+PICKS THE MEMORY CHANGED:                        11 of 392 eligible   (2.81%)
+S_mem spread across the pool, per-episode mean:  median 0.1053
+margin to the runner-up in rank order:           mean 0.2465, worst -0.2861
+```
+
+**Verdict LIVE.** The memory term changes picks, so an outcome difference against a `lambda_memory = 0` control is steering rather than the cost of retrieval.
+
+**It refutes the constant-term reading.**
+`S_mem` spread is a median of 0.1053, not zero.
+The term varies across candidates, so `k_experience` and store degeneracy are not indicted by this measurement and `dream-3`'s uniform placement harm needs some other account.
+
+**Its reach is 0.5% of decision steps.**
+Eleven changed picks over 2028 ranked steps is 0.54%, or 0.73 per episode.
+That is a thin channel for a 5.3-point swing, and it raises the weight on the alternative reading: `dream` and `dream-nomem` disagreed on 41 of 282 episodes (14.5%), and `repeat-1` measured 16.2% disagreement between byte-identical reruns.
+The two arms behave no more differently than one arm does from itself; the whole signal is the asymmetry 28 against 13.
+
+**The divert override excludes eq. 26 from 79.4% of ranked steps.**
+ADR-0024 recorded that defect and left its sign unmeasured.
+This is the measurement, and the same section prices the override for the first time: a worst-case margin of −0.2861 is a divert outranking a candidate that scored that much higher under eq. 26.
+
+Caveat: one scene, 73-row memory, against `dream-3`'s 1192-row chained store.
+Retrieval hits change with store size, so 2.81% is indicative for this condition and is not the rate `dream-3` ran at.
