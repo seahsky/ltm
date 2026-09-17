@@ -156,8 +156,24 @@ class TestTheReadoutAnswersTheQuestionItWasRunFor(unittest.TestCase):
         """ADR-0026's fourth branch: under 5% of eligible steps and the run is not a
         result about memory at all."""
         self.assertIn("DID THE MECHANISM RUN AT ALL", self.text)
-        self.assertIn("memory_propose_ranked_first", self.text)
-        self.assertIn("UNDER 5%", self.text)
+        self.assertIn("earshot.tools.propose_report", self.text)
+
+    def test_an_unreadable_check_makes_the_sweep_exit_nonzero(self):
+        """`propose_report` exits 2 when the counters are unreadable, and that must not
+        print a vacuous section and pass. Unreadable is not inert."""
+        section = self.text[self.text.index("DID THE MECHANISM RUN AT ALL"):]
+        self.assertIn("|| READ_STATUS=$?", section)
+
+    def test_the_mechanism_check_is_a_module_and_not_a_heredoc(self):
+        """propose-1 spent eleven hours and its check printed 0 for every counter,
+        because it was an inline heredoc globbing a path the writer does not use:
+        `<scene>/episodes/<N>/audit.json` against the real
+        `<scene>/episodes/ep0000.audit.json`. Nothing in the suite could see the string.
+        dream-1 and pilot-1 both bought this rule before it was broken again here."""
+        section = self.text[self.text.index("DID THE MECHANISM RUN AT ALL"):]
+        self.assertNotIn("PYEOF", section)
+        self.assertNotIn("import json", section)
+        self.assertNotIn("pathlib", section)
 
 
 if __name__ == "__main__":
