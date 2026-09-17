@@ -104,6 +104,10 @@ def load_outcomes(
                 "reached": audit.funnel_stage >= stage,
                 "source": _source_key(audit),
                 "stage": audit.funnel_stage.name,
+                # The RAW stage, for `--given-stage`. Kept beside the boolean rather than
+                # recomputed from the name downstream, so the conditioning and the
+                # success test read the same field.
+                "stage_value": int(audit.funnel_stage),
             }
         out[scene_dir.name] = episodes
     return out
@@ -112,17 +116,35 @@ def load_outcomes(
 def pair_episodes(
     before: Mapping[str, Mapping[int, Mapping[str, Any]]],
     after: Mapping[str, Mapping[int, Mapping[str, Any]]],
+    *,
+    given_stage: Optional[FunnelStage] = None,
 ) -> Dict[str, Any]:
     """Match episodes across two sweeps by `(scene, index)` and verify the source. Pure.
 
     Everything that could not be paired comes back named. A comparison that quietly
     dropped half its episodes and reported a clean p over the rest is the failure mode
     worth more than the convenience of a shorter return type.
+
+    ``given_stage`` makes the rate CONDITIONAL: a pair where either arm failed to reach
+    that stage is dropped, and the result is P(success | the episode got that far). ADR-
+    0026 pre-registers `SOURCE_REACHED` given `INVESTIGATE_ENTERED`, because that is the
+    transition the mechanism acts on and Find-SR carries the stage 2 and stage 3
+    attrition in front of it as noise.
+
+    **CONDITIONING ON A DOWNSTREAM VARIABLE WOULD BE A BIAS, SO READ `given_dropped`.**
+    It is sound only while the gate is UPSTREAM of the treatment. For ADR-0026 it is:
+    the prior is consulted inside `is_diverting`, which is stage 4 already, so nothing
+    the arm does can change whether stage 4 was reached. That argument is not a promise.
+    The return carries how many pairs each arm's gate dropped, and a real difference
+    between the two is the evidence that the gate was NOT upstream after all, in which
+    case the conditional rate is not interpretable and the unconditional one is.
     """
     scenes_both = sorted(set(before) & set(after))
     pairs: List[Dict[str, Any]] = []
     unmatched_index: List[str] = []
     mismatched_source: List[str] = []
+    given_dropped_before: List[str] = []
+    given_dropped_after: List[str] = []
     for scene in scenes_both:
         b_eps, a_eps = before[scene], after[scene]
         for index in sorted(set(b_eps) | set(a_eps)):
@@ -133,6 +155,16 @@ def pair_episodes(
             if not _same_source(b.get("source"), a.get("source")):
                 mismatched_source.append("{}#{}".format(scene, index))
                 continue
+            if given_stage is not None:
+                floor = int(given_stage)
+                b_in = int(b.get("stage_value", -1)) >= floor
+                a_in = int(a.get("stage_value", -1)) >= floor
+                if not (b_in and a_in):
+                    if not b_in:
+                        given_dropped_before.append("{}#{}".format(scene, index))
+                    if not a_in:
+                        given_dropped_after.append("{}#{}".format(scene, index))
+                    continue
             pairs.append({
                 "scene": scene,
                 "episode": index,
@@ -148,6 +180,9 @@ def pair_episodes(
         "unmatched_index": unmatched_index,
         "mismatched_source": mismatched_source,
         "n_dropped": len(unmatched_index) + len(mismatched_source),
+        "given_stage": None if given_stage is None else given_stage.name,
+        "given_dropped_before": given_dropped_before,
+        "given_dropped_after": given_dropped_after,
     }
 
 
@@ -197,8 +232,11 @@ def format_report(
     """The printed report. Pure, so the arithmetic is assertable without a run on disk."""
     before_label, after_label = labels
     lines = [
-        "{} — {} against {}, PAIRED BY EPISODE".format(
-            stage.name, before_label, after_label),
+        "{}{} — {} against {}, PAIRED BY EPISODE".format(
+            stage.name,
+            "" if pairing.get("given_stage") is None
+            else " GIVEN " + str(pairing["given_stage"]),
+            before_label, after_label),
         "-" * 72,
     ]
     n = int(result["n_discordant"])
@@ -213,6 +251,21 @@ def format_report(
         lines.append("  NO DISCORDANT PAIRS — the two arms agreed on every episode.")
     else:
         lines.append("  exact McNemar p = {:.4f}".format(result["p_value"]))
+    if pairing.get("given_stage") is not None:
+        n_before = len(pairing.get("given_dropped_before", ()))
+        n_after = len(pairing.get("given_dropped_after", ()))
+        lines.append("")
+        lines.append("  CONDITIONAL RATE. Pairs dropped for not reaching {}:".format(
+            pairing["given_stage"]))
+        lines.append("    {:<20} {}".format(before_label, n_before))
+        lines.append("    {:<20} {}".format(after_label, n_after))
+        lines.extend(_wrap(
+            "Conditioning on a stage is sound only while that stage is UPSTREAM of "
+            "whatever the two arms differ in. If it is, the two counts above are the "
+            "same process measured twice and should be close. A real gap between them "
+            "IS the evidence that the gate was not upstream, and the conditional rate "
+            "stops being interpretable: read the unconditional one instead, which is "
+            "this same command without --given-stage."))
     lines.append("")
     lines.extend(_wrap(
         "The concordant pairs are excluded by construction: an episode both arms "
@@ -279,6 +332,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--stage", default=HEADLINE_STAGE.name,
         help="funnel stage counted as a success (default {})".format(HEADLINE_STAGE.name))
+    parser.add_argument(
+        "--given-stage", default=None,
+        help="make the rate CONDITIONAL on having reached this stage in BOTH arms, so "
+             "the report is P(--stage | --given-stage). ADR-0026 pre-registers "
+             "SOURCE_REACHED given INVESTIGATE_ENTERED: that is the transition the "
+             "memory proposer acts on, and Find-SR carries the stage 2 and stage 3 "
+             "attrition in front of it as noise. Only sound while the given stage is "
+             "UPSTREAM of what the arms differ in; the report prints each arm's drop "
+             "count so that assumption is checkable rather than assumed")
     args = parser.parse_args(argv)
 
     try:
@@ -288,13 +350,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.stage, ", ".join(s.name for s in FunnelStage)))
         return 2
     try:
+        given_stage = None
+        if args.given_stage is not None:
+            try:
+                given_stage = FunnelStage[args.given_stage]
+            except KeyError:
+                print("unknown --given-stage {!r}; expected one of {}".format(
+                    args.given_stage, ", ".join(s.name for s in FunnelStage)))
+                return 2
+            if int(given_stage) > int(stage):
+                print(
+                    "--given-stage {} is AFTER --stage {}, so every conditioned pair "
+                    "would already be a success and the rate would be 1.0 by "
+                    "construction".format(given_stage.name, stage.name)
+                )
+                return 2
         before = load_outcomes(args.before, stage=stage)
         after = load_outcomes(args.after, stage=stage)
     except ValueError as exc:
         print(str(exc))
         return 2
 
-    pairing = pair_episodes(before, after)
+    pairing = pair_episodes(before, after, given_stage=given_stage)
     if not pairing["n_pairs"]:
         print("no episode paired between {} and {} — nothing to test".format(
             args.before, args.after))

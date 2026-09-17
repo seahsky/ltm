@@ -145,6 +145,95 @@ class TestTheEpisodesArePairedAndVerified(unittest.TestCase):
             load_outcomes(str(scene))
 
 
+class TestTheConditionalRate(unittest.TestCase):
+    """`--given-stage`, which ADR-0026 needs: the memory proposer acts DURING the detour,
+    so `SOURCE_REACHED` given `INVESTIGATE_ENTERED` is the transition it can move and
+    Find-SR carries the stage 2 and stage 3 attrition in front of it as noise.
+
+    Conditioning on a stage is only sound while that stage is upstream of what the arms
+    differ in, so the drop counts are part of the result and not diagnostics.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def tag(self, name):
+        path = pathlib.Path(self.root) / name
+        path.mkdir()
+        return path
+
+    def pairing(self, before_stages, after_stages, **kwargs):
+        before, after = self.tag("before"), self.tag("after")
+        write_scene(before, "sceneA", before_stages)
+        write_scene(after, "sceneA", after_stages)
+        return pair_episodes(
+            load_outcomes(str(before), stage=FunnelStage.SOURCE_REACHED),
+            load_outcomes(str(after), stage=FunnelStage.SOURCE_REACHED),
+            **kwargs
+        )
+
+    def test_without_it_every_episode_is_in_the_denominator(self):
+        never = FunnelStage.ONSET_FIRED
+        pairing = self.pairing([never, REACHED], [never, REACHED])
+        self.assertEqual(pairing["n_pairs"], 2)
+        self.assertIsNone(pairing["given_stage"])
+
+    def test_it_drops_pairs_that_never_reached_the_gate(self):
+        """An episode that never entered INVESTIGATE cannot say anything about a
+        mechanism that only runs inside the detour."""
+        never = FunnelStage.ONSET_FIRED
+        pairing = self.pairing(
+            [never, REACHED], [never, REACHED],
+            given_stage=FunnelStage.INVESTIGATE_ENTERED,
+        )
+        self.assertEqual(pairing["n_pairs"], 1)
+        self.assertEqual(pairing["given_stage"], "INVESTIGATE_ENTERED")
+
+    def test_a_pair_needs_the_gate_in_BOTH_arms(self):
+        """Dropping on one side only would compare an arm's conditioned rate against the
+        other's unconditioned one."""
+        never = FunnelStage.ONSET_FIRED
+        pairing = self.pairing(
+            [never], [REACHED], given_stage=FunnelStage.INVESTIGATE_ENTERED
+        )
+        self.assertEqual(pairing["n_pairs"], 0)
+
+    def test_each_arms_drops_are_counted_separately(self):
+        """THE NUMBER THAT MAKES THE CONDITIONING CHECKABLE. If the gate is upstream of
+        the treatment these two are the same process measured twice; a real gap between
+        them is the evidence that it is not, and the conditional rate stops meaning
+        anything."""
+        never = FunnelStage.ONSET_FIRED
+        pairing = self.pairing(
+            [never, never, REACHED], [never, REACHED, REACHED],
+            given_stage=FunnelStage.INVESTIGATE_ENTERED,
+        )
+        self.assertEqual(len(pairing["given_dropped_before"]), 2)
+        self.assertEqual(len(pairing["given_dropped_after"]), 1)
+
+    def test_the_gate_itself_counts_as_reaching_it(self):
+        """`>=`, not `>`. An episode that entered INVESTIGATE and stopped there is in the
+        denominator and is a failure in the numerator, which is the whole quantity."""
+        pairing = self.pairing(
+            [ABANDONED], [ABANDONED], given_stage=FunnelStage.INVESTIGATE_ENTERED
+        )
+        self.assertEqual(pairing["n_pairs"], 1)
+        self.assertFalse(pairing["pairs"][0]["before"])
+
+    def test_the_report_names_the_conditioning_and_prints_both_drop_counts(self):
+        never = FunnelStage.ONSET_FIRED
+        pairing = self.pairing(
+            [never, REACHED], [ABANDONED, REACHED],
+            given_stage=FunnelStage.INVESTIGATE_ENTERED,
+        )
+        text = format_report(pairing, mcnemar(pairing["pairs"]),
+                             stage=FunnelStage.SOURCE_REACHED)
+        self.assertIn("GIVEN INVESTIGATE_ENTERED", text)
+        self.assertIn("CONDITIONAL RATE", text)
+        self.assertIn("not upstream", text)
+
+
 class TestTheMcNemarArithmetic(unittest.TestCase):
     def test_concordant_pairs_are_excluded_and_discordant_ones_decide(self):
         """The whole point: 300 episodes both arms agreed on carry no information about a
