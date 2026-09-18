@@ -4292,3 +4292,53 @@ The readout now chooses a reference arm (`full` when the sweep ran it, otherwise
 A single-arm sweep is no longer red either.
 `tests/mac/test_ablation_readout.py` holds both halves of the rule.
 
+# propose-1
+
+`bash earshot/tools/propose_sweep.sh --tag propose-1`, ~11h, commit `eabc93f`, host riftvm, 2026-09-17/18.
+Four arms, 19 val scenes, 15 episodes each, `n = 282` paired per arm, prior pass 19 of 19 scenes complete.
+ADR-0026 pre-registered it; **ADR-0027 is the decision record and it fires ADR-0026's third branch**.
+
+| arm | source reached | rate |
+|---|---|---|
+| `replace-b` | 93 / 282 | 33.0% |
+| `replace-a` | 84 / 282 | 29.8% |
+| `propose-b` | 65 / 282 | 23.0% |
+| `propose-a` | 60 / 282 | 21.3% |
+
+The arms differ in `--memory-proposes` and nothing else. `replace` is today's behaviour: the prior overwrites the acoustic estimate unranked. `propose` emits it as a second investigate candidate and eq. 26 chooses.
+
+**Making the prior earn the pick cost 26 episodes, 9.2 points, and it reproduced.**
+
+| contrast | conditional, stage 4 to 5 | Find-SR@1m |
+|---|---|---|
+| repeat 1, `replace-a` vs `propose-a` | net −25 over 41, **p = 0.0001** | net −24 over 46, p = 0.0005 |
+| repeat 2, `replace-b` vs `propose-b` | net −28 over 44, **p = 0.0000** | net −28 over 54, p = 0.0002 |
+| within `replace`, a vs b | net +4 over 10, p = 0.3438 | net +9 over 21, p = 0.0784 |
+| within `propose`, a vs b | net +0 over 16, **p = 1.0000** | net +5 over 27, p = 0.4421 |
+
+**THE WITHIN-ARM ROWS ARE WHY THIS IS THE FIRST REPORTABLE RESULT IN THE ARC.**
+The same command twice disagreed by 9 episodes and 5 episodes. The contrast is 26, about 2.9x that floor, at the same magnitude in both repeats.
+Every earlier comparison rested on a single run of each arm against `repeat-1`'s historical 16.2% flip rate. `dream-3` measured −5.3 pts at p = 0.0275 and `dream-4` measured −0.7 at p = 0.8555 on one contrast; measuring the repeat inside the run is that lesson spent.
+
+Conditioning is sound: pairs dropped for not reaching `INVESTIGATE_ENTERED` were 91 vs 87 and 81 vs 78. Close, as required if stage 4 is upstream of the treatment, which it is (the prior is consulted inside `is_diverting`).
+
+**The mechanism was live at ~50%, which is what makes it a finding.**
+
+```
+propose-a   eligible 3764   ranked first 1981   52.6%   emitted 3813   railed 4255   unrouted 235   no_acoustic 163
+propose-b   eligible 3837   ranked first 1902   49.6%   emitted 3842   railed 4366   unrouted 257   no_acoustic 162
+```
+
+Far above ADR-0026's 5% fourth-branch floor, and far above `eq26-1`'s 2.81% on a frontier pool: between two divert candidates the memory term decides about half the picks.
+
+**EQ. 26 IS ANTI-SELECTIVE.** `replace` always takes the memory's waypoint; `propose` takes it half the time. Both pure policies beat the mix, and the mix sits 9.2 points below the better one. A merely uninformative selector splits the difference; landing *below both* requires preferring the worse option more often than chance.
+`plan.py:44-50` wrote down why before this ran: there is no shared space between `h^av` and a navmesh point, so `S_mem` can only compare walk length and straightness. It is being asked which of two places holds a sound, and it has no access to the question.
+
+This is the measurement behind the structural divert override (`plan.py:30-42`), which was built on the judgement that eq. 26 could not be trusted to rank a divert. The judgement was right.
+
+**Not claimed.** That memory helps: `replace` sitting on `full`'s 30.5%/33.3% is a CROSS-RUN comparison and `repeat-1` is why that is not reportable. There is still no NONE arm (ADR-0023).
+**The rail is not cleared**: 6.0 m suppressed more than it admitted, about half of all consultations, so half the memory's opinions never reached the pool.
+49 and 5 emitted proposals were navmesh-filtered before ranking, so `emitted` exceeds `eligible`.
+
+**A readout defect nearly inverted this result.** The sweep's own mechanism check printed zero for every counter over all 1128 episodes: an inline heredoc globbing `<scene>/episodes/<N>/audit.json` against a writer that writes `<scene>/episodes/ep0000.audit.json`. Read that way the run says the mechanism was inert, which is the exact opposite of the truth. `tools/propose_report.py` (PR #135) is the tested reader; `dream-1` and `pilot-1` are the same failure.
+
