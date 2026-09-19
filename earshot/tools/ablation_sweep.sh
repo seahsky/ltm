@@ -63,6 +63,30 @@
 #              0.112 — a well-powered null whose comparison is CONFOUNDED BY SOUND CLASS.
 #              This arm asks the same question with class held fixed.
 #
+# `oracle-loc` IS NOT ONE OF THESE, and it is in this list so nobody reads it as one.
+# Every arm above REMOVES a component. `--localization oracle` ADDS the source coordinate,
+# so the arm is a CEILING: what the navmesh follower and the scan/cast sweep reach when
+# localization costs nothing. It is not `full` minus anything and it does not belong in
+# the ablation table.
+#
+#   THE ARRIVAL CAVEAT, and it is the reason this paragraph is long. The two arms do not
+#   share an arrival test. The oracle arm arrives when it is inside
+#   `ControllerConfig.investigate_arrive_radius_m` (1.5 m, `agent/config.py`), applied at
+#   the `if realizable` branch in `task/runner.py`; the realizable arm arrives on
+#   peak-or-plateau PLUS a visual confirm against the 1.0 m ring. Both land on
+#   `FunnelStage.SOURCE_REACHED`, so a `full`-vs-`oracle-loc` delta mixes "knew where it
+#   was" with "had an easier bar to clear", in a proportion this sweep CANNOT separate.
+#   Quote the arm as a ceiling on its own criterion. A number differenced against `full`
+#   needs the arrival test matched first, which is a code change and not a flag.
+#
+#   `oracle-pilot` (2026-09-19, one scene, `4ok3usBNeis`) is the prior: 15/15 against
+#   `abl-2/full`'s 5/15, McNemar p=0.0020 — on 15 episodes in ONE room, where the
+#   independence the test assumes does not hold. The same run measured 84% of its detour
+#   steps plateaued, so the cue was not what found the source in the arm that found it
+#   every time. That number rests on a reconstruction the oracle arm can never validate
+#   (`tools/detour_report.py` says so now), which is its own reason to run this arm
+#   BESIDE `full` rather than alone.
+#
 # NO MEMORY ARM IS IN THIS SWEEP, deliberately. ADR-0018's four cells need the stores
 # wired into the runner and a prior pass that has run; neither exists yet, and four
 # identical arms named after four conditions is worse than no table. This sweep is the
@@ -447,13 +471,20 @@ if [ "$DREAM_KNOBS_NOMEM" = "$DREAM_KNOBS" ]; then
   exit 2
 fi
 
-ARM_NAMES=(full no-climb no-cue scan-only anechoic dream dream-nomem)
+ARM_NAMES=(full no-climb no-cue scan-only anechoic oracle-loc dream dream-nomem)
 ARM_FLAGS=(
   ""
   "--climb-rule off"
   "--lateral-cue off"
   "--cast-policy scan_only"
   "--ir-policy anechoic"
+  # THE ONLY ARM THAT ADDS INFORMATION INSTEAD OF REMOVING A COMPONENT, and the only one
+  # whose flag is already on the command line above. `--localization realizable` is
+  # passed explicitly at the invocation and `${ARM_FLAGS[$i]}` is word-split AFTER it, so
+  # argparse's last-wins gives this arm `oracle`. That ordering is load-bearing: moving
+  # `ARM_FLAGS` before the explicit flags would silently run this arm realizable and
+  # report a null.
+  "--localization oracle"
   "--clap $DREAM_KNOBS"
   "--clap $DREAM_KNOBS_NOMEM"
 )
@@ -463,6 +494,7 @@ ARM_WHY=(
   "R2 the interaural sign is ambiguous — loudness without binaural localization"
   "R3 every dead step turns instead of walking a leg — the pre-eps-1 control"
   "R5 flat IRs at all three render sites — does the reverb tail buy any SWS"
+  "THE CEILING, not an ablation: the agent is HANDED the source coordinate, so this is what the navmesh follower and the scan/cast sweep reach when localization is free. READ THE ARRIVAL CAVEAT IN THE HEADER before differencing it against full"
   "DREAM: M^S, consolidation, a three-level M^L that GROWS across this arm's episodes, and memory-weighted planning"
   "THE CONTROL for the arm above: identical in every knob but lambda_memory = 0.0, so the difference is eq. 26's memory term and nothing else"
 )

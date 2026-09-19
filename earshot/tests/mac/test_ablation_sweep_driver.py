@@ -298,6 +298,89 @@ class TestTheDreamArmChainsItsMemory(unittest.TestCase):
         print("full arm: no chain flags, with or without a memory file present")
 
 
+class TestTheOracleArmActuallyOverridesTheHardcodedFlag(unittest.TestCase):
+    """`oracle-loc` is the one arm whose flag is ALREADY on the command line.
+
+    Every other arm names a flag the invocation does not pass. This one collides:
+    `--localization realizable` is passed explicitly at `ablation_sweep.sh`, and the arm
+    wins only because `${ARM_FLAGS[$i]}` is word-split AFTER it and argparse takes the
+    last occurrence of a `store` action.
+
+    **Both halves of that are assumptions until something asserts them**, and each fails
+    silently in the same direction: the arm runs REALIZABLE, the run finishes green, and
+    the sweep reports a ceiling arm that is a duplicate of the baseline. That is exactly
+    the shape of `dream-2` -- a control byte-identical to its treatment, differenced
+    against itself, reported as a clean null.
+
+    So the ordering is read out of the shipped script, and the override is put to the
+    REAL parser rather than to a belief about argparse.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = DRIVER.read_text()
+
+    def test_the_arm_is_declared_with_the_flag_it_needs(self):
+        self.assertIn("oracle-loc", self.text)
+        self.assertIn('"--localization oracle"', self.text)
+
+    def test_the_arm_flags_are_word_split_after_the_explicit_localization(self):
+        """THE ORDERING, which is the whole mechanism. Reordering these two lines runs
+        the ceiling arm as the baseline and nothing anywhere would say so."""
+        explicit = self.text.index("--localization realizable")
+        arm_flags = self.text.index("${ARM_FLAGS[$i]}")
+        self.assertLess(
+            explicit, arm_flags,
+            "ARM_FLAGS must be word-split AFTER --localization realizable, or the "
+            "oracle-loc arm silently runs realizable and reports a null",
+        )
+        print("ordering: --localization realizable at {}, ARM_FLAGS at {}".format(
+            explicit, arm_flags))
+
+    def test_the_real_parser_takes_the_last_localization(self):
+        """Put to `earshot.__main__.build_parser`, not to a copy of argparse's rules."""
+        from earshot.__main__ import build_parser
+
+        args = build_parser().parse_args([
+            "--run-dir", "runs/x",
+            "--localization", "realizable",
+            "--localization", "oracle",
+        ])
+        self.assertEqual(args.localization, "oracle")
+        print("last-wins confirmed on the shipped parser: {}".format(args.localization))
+
+    def test_the_control_arm_is_unaffected_by_the_same_ordering(self):
+        """ADR-0014's other arm. `full` carries an EMPTY flag string, so the explicit
+        `realizable` is the only one the parser sees and the baseline cannot drift."""
+        from earshot.__main__ import build_parser
+
+        args = build_parser().parse_args([
+            "--run-dir", "runs/x", "--localization", "realizable",
+        ])
+        self.assertEqual(args.localization, "realizable")
+
+    def test_the_three_arm_arrays_stay_the_same_length(self):
+        """A name with no flags, or flags with no reason, pairs an arm with another
+        arm's command line. Counted off the shipped text rather than trusted."""
+        names = self.text[self.text.index("ARM_NAMES=("):]
+        names = names[len("ARM_NAMES=("):names.index(")")].split()
+        flags = _count_array_entries(self.text, "ARM_FLAGS=(")
+        why = _count_array_entries(self.text, "ARM_WHY=(")
+        self.assertEqual(len(names), flags, "ARM_NAMES and ARM_FLAGS disagree")
+        self.assertEqual(len(names), why, "ARM_NAMES and ARM_WHY disagree")
+        print("{} arm(s), all three arrays agree: {}".format(len(names), " ".join(names)))
+
+
+def _count_array_entries(text: str, opener: str) -> int:
+    """Quoted entries of a bash array literal, ignoring comment lines inside it."""
+    body = text[text.index(opener) + len(opener):]
+    body = body[:body.index("\n)")]
+    return sum(
+        1 for line in body.splitlines()
+        if line.strip().startswith('"') or line.strip() == '""'
+    )
+
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
