@@ -203,11 +203,13 @@ def rms_steps(pairs, *, onset=ONSET_STEP, action=None, realizable=None, lateral=
     )
 
 
-def rms_audit(pairs, *, stage=FunnelStage.INVESTIGATE_ENTERED, index=0, **kwargs):
+def rms_audit(pairs, *, stage=FunnelStage.INVESTIGATE_ENTERED, index=0,
+              localization=None, **kwargs):
     return EpisodeAudit(
         episode_index=index,
         source_xyz=SOURCE,
         funnel_stage=stage,
+        localization_arm=localization,
         onset=OnsetRecord(onset_step=ONSET_STEP),
         steps=rms_steps(pairs, **kwargs),
     )
@@ -727,6 +729,69 @@ class TestTheReconstructionCheck(unittest.TestCase):
         self.assertEqual(agg["rule_check"]["n_checked"], 0)
         self.assertIsNone(agg["rule_check"]["agreement"])
         self.assertIn("RECONSTRUCTION UNVALIDATED", format_report(agg))
+
+    def test_an_all_oracle_run_says_the_check_cannot_be_armed_rather_than_re_run(self):
+        """`oracle-pilot`'s shape, and the advice that cost is the point.
+
+        `step_controller` writes `realizable_action` in its ``if realizable:`` branch
+        alone, so an oracle episode records none BY CONSTRUCTION. Telling that reader to
+        "re-run to arm the check" sends them to spend a night arriving back at the same
+        zero — which is what the run that found this was one step away from doing.
+        """
+        agg = aggregate([
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)], localization="oracle")),
+        ])
+        text = format_report(agg)
+        self.assertEqual(agg["rule_check"]["localization_arms"], ["oracle"])
+        self.assertIn("RECONSTRUCTION UNVALIDATED", text)
+        self.assertIn("CANNOT BE ARMED ON THIS RUN", text)
+        self.assertIn("--localization realizable", text)
+        self.assertNotIn("Re-run to arm the check", text)
+
+    def test_a_realizable_run_missing_the_field_still_reads_re_run(self):
+        """The other arm of the branch above, and the reason it is a branch.
+
+        `yield-2` predates `StepRecord.realizable_action` and ran the realizable arm, so
+        a re-run genuinely WOULD arm its check. Collapsing the two cases into one message
+        would either mislead this reader or waste the oracle one's night.
+        """
+        text = format_report(aggregate([
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)], localization="realizable")),
+        ]))
+        self.assertIn("Re-run to arm the check", text)
+        self.assertNotIn("CANNOT BE ARMED ON THIS RUN", text)
+
+    def test_a_record_with_no_arm_at_all_keeps_the_old_advice(self):
+        """A record written before `localization_arm` existed. Unknown is not oracle, and
+        guessing would tell a realizable run its check can never be armed."""
+        agg = aggregate([trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)]))])
+        self.assertEqual(agg["rule_check"]["localization_arms"], [])
+        self.assertEqual(agg["rule_check"]["n_arm_unknown"], 1)
+        self.assertIn("Re-run to arm the check", format_report(agg))
+
+    def test_a_mixed_run_names_both_arms_rather_than_picking_one(self):
+        """Pooling an oracle episode with a realizable one makes the plateau share a
+        number about two different controllers."""
+        text = format_report(aggregate([
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)],
+                                localization="oracle", index=0)),
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)],
+                                localization="realizable", index=1)),
+        ]))
+        self.assertIn("THE RUN MIXES ARMS", text)
+        self.assertIn("oracle, realizable", text)
+
+    def test_a_checked_run_says_none_of_it(self):
+        """The healthy path: a run that DID record the field reports agreement, and no
+        branch above fires."""
+        text = format_report(aggregate([
+            trace_one(rms_audit(
+                [(3.0, 0.05), (2.8, 0.05), (2.6, 0.05)], localization="realizable",
+                realizable=[ACT_FORWARD, ACT_TURN_LEFT, ACT_TURN_LEFT], lateral=-1)),
+        ]))
+        self.assertIn("reconstruction checked on 3 step(s)", text)
+        self.assertNotIn("RECONSTRUCTION UNVALIDATED", text)
+        self.assertNotIn("CANNOT BE ARMED ON THIS RUN", text)
 
     def test_the_plateau_table_names_both_arms(self):
         text = format_report(aggregate([

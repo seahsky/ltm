@@ -562,6 +562,13 @@ def trace_one(
         "walked_is_upper_bound": outcome == REACHED,
         "rising_eps": eps,
         "eps_measured": scatter is not None,
+        # WHICH ARM WROTE THIS, because it decides whether the rule check CAN be armed.
+        # `StepRecord.realizable_action` is set in `step_controller`'s `if realizable:`
+        # branch alone, so an oracle episode records none BY CONSTRUCTION and no re-run
+        # of that arm will ever produce one. `format_report` needs the distinction:
+        # "nobody recorded it yet" and "this arm cannot record it" are the same zero and
+        # different findings, and only one of them is fixed by running it again.
+        "localization_arm": audit.localization_arm,
     }
     if outcome == NO_DETOUR:
         return row
@@ -848,6 +855,17 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
             "n_agree": agreed,
             "n_stop_excluded": sum(int(t.get("n_rule_stop") or 0) for t in traces),
             "agreement": (agreed / checked) if checked else None,
+            # The arms that wrote these episodes, so an unvalidated check can say WHY.
+            # Sorted and deduplicated; `None` for a record predating the field is kept
+            # out, because "unknown arm" is not an arm and folding it into either name
+            # would let one unlabelled episode decide what the whole run is called.
+            "localization_arms": sorted({
+                str(t["localization_arm"]) for t in traces
+                if t.get("localization_arm") is not None
+            }),
+            "n_arm_unknown": sum(
+                1 for t in traces if t.get("localization_arm") is None
+            ),
         },
         "per_episode": sorted(traces, key=lambda r: int(r.get("episode") or 0)),
     }
@@ -1090,11 +1108,38 @@ def _plateau_lines(agg: Mapping[str, Any]) -> List[str]:
     if not check.get("n_checked"):
         # NOT a silent pass. Nothing here was validated, and a reader who cannot tell
         # that from a validated run will trust a reconstruction no one checked.
+        #
+        # TWO CAUSES, ONE ZERO, and telling them apart is the whole of this branch. The
+        # rule writes `realizable_action` in `step_controller`'s `if realizable:` branch
+        # alone, so an all-oracle run records none BY CONSTRUCTION: "re-run to arm the
+        # check" is advice that cannot be followed there, and following it costs a night
+        # to arrive back at the same zero. The `oracle-pilot` run is what found this —
+        # 84% of its detour steps plateaued, on a reconstruction its own arm can never
+        # validate.
+        arms = list(check.get("localization_arms") or ())
         lines.extend(_wrap(
             "RECONSTRUCTION UNVALIDATED — no record carries "
             "StepRecord.realizable_action, so what the cue SAID was never compared "
             "against what was recomputed. Every plateau above rests on an unchecked "
-            "model of the controller. Re-run to arm the check."))
+            "model of the controller."))
+        if arms == ["oracle"]:
+            lines.append("")
+            lines.extend(_wrap(
+                "AND IT CANNOT BE ARMED ON THIS RUN. Every episode here ran the ORACLE "
+                "localization arm, which never enters the branch that records the cue's "
+                "answer, so no re-run of this arm will produce one. The plateaus above "
+                "are a COUNTERFACTUAL: what the carried rule would have said on "
+                "trajectories it did not steer. Run the same scenes under "
+                "--localization realizable to validate the reconstruction."))
+        elif len(arms) > 1:
+            lines.append("")
+            lines.extend(_wrap(
+                "THE RUN MIXES ARMS ({}), and the oracle episodes among them can never "
+                "carry the field. Split the run by arm before reading the plateaus as "
+                "one population.".format(", ".join(arms))))
+        else:
+            lines.append("")
+            lines.extend(_wrap("Re-run to arm the check."))
     else:
         lines.extend(_wrap(
             "reconstruction checked on {} step(s): {} agree ({}). {} STOP step(s) "
