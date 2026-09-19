@@ -238,8 +238,12 @@ An onset that fired on anything other than the anomaly. Diagnosed by **onset pro
 
 **Onset provenance**:
 `onset_step` compared to `t_anom`. An onset before `t_anom` cannot be the anomaly, because the anomaly is not playing yet.
-This is the one check that distinguishes a working interrupt from a vacuum cleaner, and it is invisible in `summary.json` — it lives in the `[audio] onset @step` log line.
-_Avoid_: reading `n_audio_onset_fired` as evidence the anomaly was heard (it counts onsets, not causes), and reading `n_audio_gate_rejected=0` as "the gate had nothing to reject" (onset is one-shot, so 0 means the gate ACCEPTED the first over-threshold tick).
+This is the one check that distinguishes a working interrupt from a vacuum cleaner, and since the clean-room rebuild it is **enforced rather than reported**: it raises, so a run that finished is a run that passed it.
+`audio.onset.observe_step` raises `ProvenanceError` on any pre-`t_anom` reading that is not the bed level within `pre_onset_rms_tol`, per step, because "the source started early" and "the bed decayed at step 40" are different bugs.
+`audio.onset.assert_provenance` then raises on the recorded state, before either artefact is written (`task/runner.py`), on three things: a recorded onset earlier than `t_anom`, a recorded pre-onset RMS that is no longer the bed level, and **zero pre-onset readings**, because an invariant that never ran is unverified rather than satisfied.
+What reaches disk is `provenance_asserted` on the `onset` record in `ep####.audit.json`, and it is `true` on every episode that has an artefact at all.
+_Avoid_: `n_audio_onset_fired` and `n_audio_gate_rejected`. Those are the pre-rebuild counters, they exist nowhere in the tree, and a count of onsets was never evidence of a cause.
+_Avoid_: looking for this in a log line. There is no `[audio] onset @step` line, and reading provenance off a console is the failure mode the raise replaced.
 
 ### The realizable climb
 
