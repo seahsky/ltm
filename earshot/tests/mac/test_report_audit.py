@@ -256,6 +256,7 @@ class TestTheAuditRoundTrips(unittest.TestCase):
             localization_arm="realizable",
             detector_arm="oracle",
             source_xyz=Xyz(1.5, 0.1, -2.25),
+            source_class="toilet_flush",
             t_anom=16,
             dist_at_stop=0.83,
             funnel_stage=FunnelStage.PRIMARY_RESUMED,
@@ -308,6 +309,44 @@ class TestTheAuditRoundTrips(unittest.TestCase):
         self.assertEqual(restored.audio_context.n_vertices, 392364)
         self.assertEqual(tuple(restored.audio_context.ir_shape), (2, 72300))
         self.assertTrue(restored.audio_context.log_canary_seen)
+
+
+class TestTheGroundTruthClassOnTheRecord(unittest.TestCase):
+    """``source_class`` — which sound was actually played, per episode.
+
+    It was recoverable per RUN before this field (``env_report.json`` carries
+    ``run_config.anomaly_class``) and per EPISODE from nothing. That is the gap:
+    ``tools/episode_diff.py`` pairs two sweeps by episode index, so a class held only at
+    run level lets a ``snoring`` episode be subtracted from a ``toilet_flush`` one with
+    nothing on either record to catch it — the same argument the four ablation arms are
+    on the record for.
+
+    The name is not ``anomaly_class`` on purpose. That name is taken, by
+    ``AgentReport.anomaly_class``, which is CLAP's verdict, and
+    ``test_report_boundary.py`` requires the two field sets to be disjoint.
+    """
+
+    def test_the_class_round_trips(self):
+        original = EpisodeAudit(source_class="keyboard_typing", steps=_steps())
+        restored = EpisodeAudit.from_dict(original.as_dict())
+        self.assertEqual(restored, original)
+        self.assertEqual(restored.source_class, "keyboard_typing")
+
+    def test_a_record_written_before_the_field_reads_back_unknown(self):
+        """Absent is ``None``, never a fabricated class.
+
+        ``None`` here means "this record predates the field". It does not mean the
+        episode had no anomaly — under ADR-0009 every episode has exactly one.
+        """
+        data = EpisodeAudit(steps=_steps()).as_dict()
+        del data["source_class"]
+        self.assertIsNone(EpisodeAudit.from_dict(data).source_class)
+
+    def test_it_is_serialised_rather_than_dropped(self):
+        """The arm the deletion above cannot cover: a written record carries the key."""
+        self.assertEqual(
+            EpisodeAudit(source_class="snoring").as_dict()["source_class"], "snoring"
+        )
 
 
 class TestTheSoundingWindowOnTheRecord(unittest.TestCase):
