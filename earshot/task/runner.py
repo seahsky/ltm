@@ -2263,6 +2263,9 @@ def run_episode(
         memory_prior_category=(None if memory_prior is None else memory_prior.category),
         memory_prior_miss=(None if memory_miss is None else memory_miss.value),
         source_xyz=source,
+        # The class that was actually rendered, off the built episode rather than off
+        # `cfg`, so a builder that ever varies it per episode stays recorded correctly.
+        source_class=str(anomaly_episode.anomaly_class),
         t_anom=t_anom,
         sounding_window=window_record,
         source_reached_step=source_reached_step,

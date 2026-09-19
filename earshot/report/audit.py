@@ -618,6 +618,23 @@ class EpisodeAudit:
     memory_prior_category: Optional[str] = None
     memory_prior_miss: Optional[str] = None
     source_xyz: Optional[Xyz] = None
+    # WHICH SOUND WAS ACTUALLY PLAYED, which is ground truth and lives nowhere else on a
+    # per-episode artefact. `AgentReport.anomaly_class` is CLAP's verdict, so a reader
+    # that takes it for the ground truth is reading the thing under test as its own
+    # answer key -- and the two disagree exactly when the classifier is wrong, which is
+    # the case a per-class breakdown is for. Named `source_class` and not
+    # `anomaly_class` because `test_report_boundary.py` requires the audit's field names
+    # to be DISJOINT from the testimony's, which is the same confusion enforced.
+    #
+    # It is a run-level constant (`build_anomaly_episodes` stamps one class on every
+    # episode) and `env_report.json` already records it under `run_config`, so this is
+    # not the only copy on disk. It is here for `climb_rule`'s reason: every comparison
+    # this tree makes is per EPISODE, and `tools/episode_diff.py` pairs by index, so a
+    # class recorded only at run level lets a `snoring` episode be subtracted from a
+    # `toilet_flush` one with nothing on either record to catch it.
+    #
+    # `None` means the record predates the field, NOT that the episode had no anomaly.
+    source_class: Optional[str] = None
     t_anom: Optional[int] = None
     # ADR-0017's window, beside the step it opens at. `None` on every record written
     # before the window existed, which reads as "unknown" rather than as "continuous".
@@ -750,6 +767,7 @@ class EpisodeAudit:
             "cast_policy": self.cast_policy,
             "ir_policy": self.ir_policy,
             "source_xyz": list(self.source_xyz.as_tuple()) if self.source_xyz else None,
+            "source_class": self.source_class,
             "t_anom": None if self.t_anom is None else int(self.t_anom),
             "sounding_window": (
                 self.sounding_window.as_dict()
@@ -802,6 +820,9 @@ class EpisodeAudit:
             cast_policy=data.get("cast_policy"),
             ir_policy=data.get("ir_policy"),
             source_xyz=Xyz.from_sequence(source) if source is not None else None,
+            # `.get` for the arms' reason: a record written before the field reads back
+            # None, which is "unknown", and never a fabricated class.
+            source_class=data.get("source_class"),
             t_anom=None if t_anom is None else int(t_anom),
             sounding_window=(
                 SoundingWindowRecord.from_dict(window) if window is not None else None

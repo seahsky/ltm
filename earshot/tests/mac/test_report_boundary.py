@@ -47,7 +47,13 @@ AGENT_REPORT_FIELDS = frozenset(
 # must also genuinely be ON it. A misspelled entry would pass the exclusion check while
 # checking nothing, which is the inert-pin class this map keeps finding: ticket 17's
 # constraint on a package nothing installs, ticket 20's exclusion of an absent directory.
-PRIVILEGED_FIELDS = frozenset({"source_xyz", "dist_at_stop", "source_is_visible_history"})
+#
+# ``source_class`` joins them for a reason the other three do not have: the testimony
+# carries an ``anomaly_class`` of its own, and it is CLAP's verdict. The two names have
+# to stay apart or a reader grades the classifier against itself.
+PRIVILEGED_FIELDS = frozenset(
+    {"source_xyz", "dist_at_stop", "source_is_visible_history", "source_class"}
+)
 
 
 @dataclasses.dataclass(frozen=True)

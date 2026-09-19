@@ -309,6 +309,20 @@ class TestTheFullLoop(unittest.TestCase):
         self.assertIsNone(self.result.report.anomaly_class)
         self.assertEqual(self.anomaly_episode.anomaly_class, "alarm")
 
+    def test_the_answer_key_records_the_class_the_testimony_cannot(self):
+        """``source_class`` — the sound that was actually played, per episode.
+
+        The other half of the test above. The agent names nothing here, so with the
+        class on no per-episode artefact a per-class breakdown of this run would have
+        had to come from ``env_report.json``'s run config — which is correct today only
+        because the class is a run-level constant, and which ``tools/episode_diff.py``
+        does not read when it pairs two sweeps by episode index.
+        """
+        self.assertEqual(
+            self.result.audit.source_class, self.anomaly_episode.anomaly_class
+        )
+        self.assertNotIn("source_class", self.result.report.as_dict())
+
     def test_source_visibility_is_recorded_and_never_read_by_the_controller(self):
         """§3.3. The structural half is ``test_analyst_only.py``; this is the record."""
         self.assertTrue(all(row.source_is_visible for row in self.result.audit.steps))
@@ -2914,13 +2928,21 @@ def _clap_episode(encoder, **cfg_overrides):
     world = FakeWorld(start=Xyz(0.0, 0.0, 0.0), yaw=0.0)
     source = Xyz(0.0, 0.0, -5.0)
     handle = FakeAudioSensorHandle(world, source)
+    cfg_overrides.setdefault("max_steps", 80)
+    cfg = make_config(t_anom=2, **cfg_overrides)
     anomaly_episode = make_anomaly_episode(
         source=source,
         t_anom=2,
         episode=make_episode(goals=[make_goal(Xyz(0.0, 0.0, -9.0))]),
+        # THE EPISODE TAKES THE RUN'S CLASS, because in the real runner it cannot do
+        # anything else: `run` passes `cfg.anomaly_class` into `build_anomaly_episodes`,
+        # which stamps it on every episode, and resolves the clip from the same field.
+        # This helper used to leave the episode on the fixture default, so a caller that
+        # overrode the class produced a run whose config and whose dataset disagreed --
+        # a state production cannot reach, and one that made `audit.source_class` look
+        # wrong when it was faithfully recording what it was handed.
+        anomaly_class=cfg.anomaly_class,
     )
-    cfg_overrides.setdefault("max_steps", 80)
-    cfg = make_config(t_anom=2, **cfg_overrides)
     return (
         run(
             world,
@@ -3055,6 +3077,42 @@ class TestTheTestimonyNamesTheRunsOwnBank(unittest.TestCase):
         """Two banks, ONE render. The audio encoder is 153.5 M params, and a gate and a
         testimony about different renders would agree only by luck."""
         self.assertEqual(len(self.encoder.waveforms), 1)
+
+
+class TestTheAnswerKeyDisagreesWithTheTestimonyWhenCLAPIsWrong(unittest.TestCase):
+    """THE CASE ``source_class`` EXISTS FOR, and the only one that separates the two.
+
+    ``AgentReport.anomaly_class`` is CLAP's verdict and ``EpisodeAudit.source_class`` is
+    what was rendered. On every other CLAP test in this file they agree, so either field
+    would serve as the other's value and a per-class breakdown built on the testimony
+    would look correct. They come apart exactly when the classifier is wrong — which is
+    the case a per-class breakdown is being read to find.
+
+    Both classes sit in ``SOUNDING_CLASSES``, so the testimony bank genuinely could have
+    named the right one and did not. The gate keeps its own bank (``alarm`` at 0.5 is
+    what fires it), which is HAZARD 1 and the reason these are two banks at all.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from earshot.audio.clap import CLASS_TO_CLAP_PROMPT
+
+        encoder = _encoder_scoring({
+            CLASS_TO_CLAP_PROMPT["alarm"]: 0.5,
+            CLASS_TO_CLAP_PROMPT["toilet_flush"]: 1.0,
+        })
+        cls.result, _cfg = _clap_episode(encoder, anomaly_class="snoring")
+
+    def test_the_testimony_names_the_wrong_class(self):
+        self.assertEqual(self.result.report.anomaly_class, "toilet_flush")
+
+    def test_the_answer_key_names_the_class_that_was_played(self):
+        self.assertEqual(self.result.audit.source_class, "snoring")
+
+    def test_a_breakdown_off_the_testimony_would_misattribute_this_episode(self):
+        self.assertNotEqual(
+            self.result.audit.source_class, self.result.report.anomaly_class
+        )
 
 
 class TestTheCarriedBankStillWorks(unittest.TestCase):
