@@ -74,8 +74,13 @@ ANCHOR_METRIC = "source_at_class_anchor"
 # `full`. The placement question is the same for it either way -- an episode whose
 # source is not at its class anchor is one no recalled category could have got right,
 # and that is a property of the EPISODE rather than of the arm that ran it.
+# `oracle-loc` is here on the same terms as `dream` and for a sharper version of the same
+# reason: it ADDS the source coordinate rather than removing a component, so it is a
+# ceiling and not an ablation -- but placement is a property of the EPISODE, and the arm
+# pairs by episode against `full`, so the anchored/geometric split reads identically.
 ABLATION_ARMS = (
-    "full", "no-climb", "no-cue", "scan-only", "anechoic", "dream", "dream-nomem",
+    "full", "no-climb", "no-cue", "scan-only", "anechoic", "oracle-loc",
+    "dream", "dream-nomem",
 )
 
 # The label for an episode whose audit carries no `scene_id`. Not a scene, and not folded
