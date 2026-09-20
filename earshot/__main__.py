@@ -130,7 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--localization",
         choices=[arm.value for arm in Localization],
         default=defaults.localization.value,
-        help="realizable (the smoke, §8) or oracle (the bisection tool)",
+        help="realizable (the smoke, §8), oracle (the bisection tool, which arrives at "
+        "1.5 m and so is NOT scored on Find-SR's 1.0 m ring), or oracle_matched (the "
+        "same point goal arriving on the realizable arm's own detector confirm, which is "
+        "the arm to difference against realizable -- ADR-0028)",
     )
     parser.add_argument(
         "--detector",

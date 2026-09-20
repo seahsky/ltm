@@ -748,6 +748,56 @@ class TestTheReconstructionCheck(unittest.TestCase):
         self.assertIn("--localization realizable", text)
         self.assertNotIn("Re-run to arm the check", text)
 
+    def test_the_matched_oracle_arm_gets_the_same_verdict_as_the_oracle_arm(self):
+        """ADR-0028's arm is blind to the field for the SAME reason, and this branch used
+        to test for the arm NAME.
+
+        `realizable_action` is written in ``if realizable:`` and `oracle_matched` is not
+        realizable, so it records none either. Matching on `== "oracle"` would send this
+        reader down "re-run to arm the check" — a night spent arriving back at the same
+        zero, which is exactly the cost this branch exists to prevent.
+        """
+        agg = aggregate([
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)], localization="oracle_matched")),
+        ])
+        text = format_report(agg)
+        self.assertEqual(agg["rule_check"]["localization_arms"], ["oracle_matched"])
+        self.assertIn("CANNOT BE ARMED ON THIS RUN", text)
+        self.assertIn("oracle_matched", text)
+        self.assertNotIn("Re-run to arm the check", text)
+
+    def test_two_oracle_family_arms_together_are_still_unarmable_not_merely_mixed(self):
+        """`--arms "oracle-loc oracle-loc-matched"` reads as ONE run to this tool.
+
+        Neither arm can carry the field, so "split the run by arm" is the wrong advice:
+        splitting it produces two unarmable halves. The verdict has to be unarmable.
+        """
+        text = format_report(aggregate([
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)],
+                                localization="oracle", index=0)),
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)],
+                                localization="oracle_matched", index=1)),
+        ]))
+        self.assertIn("CANNOT BE ARMED ON THIS RUN", text)
+        self.assertNotIn("THE RUN MIXES ARMS", text)
+
+    def test_the_decisive_pair_is_mixed_and_names_only_the_blind_half(self):
+        """ADR-0028's own run, `--arms "full oracle-loc-matched"`, read as one directory.
+
+        Here splitting IS the right advice, because one half can be validated. The note
+        names WHICH half cannot, so the reader does not go looking for the field in the
+        `full` episodes.
+        """
+        text = format_report(aggregate([
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)],
+                                localization="realizable", index=0)),
+            trace_one(rms_audit([(3.0, 0.05), (2.8, 0.05)],
+                                localization="oracle_matched", index=1)),
+        ]))
+        self.assertIn("THE RUN MIXES ARMS", text)
+        self.assertIn("oracle_matched, realizable", text)
+        self.assertNotIn("CANNOT BE ARMED ON THIS RUN", text)
+
     def test_a_realizable_run_missing_the_field_still_reads_re_run(self):
         """The other arm of the branch above, and the reason it is a branch.
 

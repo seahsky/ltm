@@ -203,8 +203,10 @@ _Avoid_: baseline (unqualified — say which of S1/S1+); calling S1+ "the strong
 The two sub-studies. Named, never numbered: "Study 1" and "S1" are different things and the collision has already caused a misread.
 
 **Realizable localization**:
-Reaching the anomaly source using only live binaural energy-gradient climb + L/R level sign + visual confirmation — no oracle source xyz. A/B'd against the oracle-source arm (the disclosed upper bound). Ceiling ~1 grid cell (~1 m), sim is level-only.
-_Avoid_: DOA (the near-zero time-difference cue is not what drives this).
+Reaching the anomaly source using only live binaural energy-gradient climb + L/R level sign + visual confirmation — no oracle source xyz. Ceiling ~1 grid cell (~1 m), sim is level-only.
+A/B'd against the oracle-source arm, and **which one** has to be said: `oracle_matched` shares this arm's arrival test (the detector's 1.0 m confirm) and is the upper bound; `oracle` arrives at 1.5 m instead, so it is an upper bound on its own criterion only.
+`oracle-1` measured why the distinction is not pedantry — 94.3% source-reached and 2 of 270 Find-SR@1m out of the same 282 episodes (ADR-0028).
+_Avoid_: DOA (the near-zero time-difference cue is not what drives this); "the oracle arm" unqualified; calling `oracle` the upper bound on Find-SR.
 
 **Warm vs cold (seen axis)**:
 Warm = the agent mapped this scene on a prior silent pass (visual LTM has it). Cold = first visit.

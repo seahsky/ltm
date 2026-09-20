@@ -80,7 +80,7 @@ ANCHOR_METRIC = "source_at_class_anchor"
 # pairs by episode against `full`, so the anchored/geometric split reads identically.
 ABLATION_ARMS = (
     "full", "no-climb", "no-cue", "scan-only", "anechoic", "oracle-loc",
-    "dream", "dream-nomem",
+    "oracle-loc-matched", "dream", "dream-nomem",
 )
 
 # The label for an episode whose audit carries no `scene_id`. Not a scene, and not folded

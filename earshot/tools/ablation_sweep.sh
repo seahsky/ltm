@@ -63,29 +63,52 @@
 #              0.112 — a well-powered null whose comparison is CONFOUNDED BY SOUND CLASS.
 #              This arm asks the same question with class held fixed.
 #
-# `oracle-loc` IS NOT ONE OF THESE, and it is in this list so nobody reads it as one.
-# Every arm above REMOVES a component. `--localization oracle` ADDS the source coordinate,
-# so the arm is a CEILING: what the navmesh follower and the scan/cast sweep reach when
-# localization costs nothing. It is not `full` minus anything and it does not belong in
-# the ablation table.
+# `oracle-loc` AND `oracle-loc-matched` ARE NOT ABLATIONS, and they are in this list so
+# nobody reads them as ones. Every arm above REMOVES a component. These two ADD the source
+# coordinate, so they are CEILINGS: what the navmesh follower and the scan/cast sweep
+# reach when localization costs nothing. Neither is `full` minus anything and neither
+# belongs in the ablation table.
 #
-#   THE ARRIVAL CAVEAT, and it is the reason this paragraph is long. The two arms do not
-#   share an arrival test. The oracle arm arrives when it is inside
-#   `ControllerConfig.investigate_arrive_radius_m` (1.5 m, `agent/config.py`), applied at
-#   the `if realizable` branch in `task/runner.py`; the realizable arm arrives on
-#   peak-or-plateau PLUS a visual confirm against the 1.0 m ring. Both land on
-#   `FunnelStage.SOURCE_REACHED`, so a `full`-vs-`oracle-loc` delta mixes "knew where it
-#   was" with "had an easier bar to clear", in a proportion this sweep CANNOT separate.
-#   Quote the arm as a ceiling on its own criterion. A number differenced against `full`
-#   needs the arrival test matched first, which is a code change and not a flag.
+#   THE ARRIVAL CAVEAT, AND `oracle-1` MEASURED IT RATHER THAN ARGUING IT. The two arms
+#   do not share an arrival test. `oracle-loc` arrives when it is inside
+#   `ControllerConfig.investigate_arrive_radius_m` (1.5 m, horizontal, `agent/config.py`);
+#   the realizable arm arrives on the detector's confirm, which under `Detector.ORACLE` is
+#   a GEODESIC 1.0 m — Find-SR's own primary ring. Both land on
+#   `FunnelStage.SOURCE_REACHED`.
 #
-#   `oracle-pilot` (2026-09-19, one scene, `4ok3usBNeis`) is the prior: 15/15 against
-#   `abl-2/full`'s 5/15, McNemar p=0.0020 — on 15 episodes in ONE room, where the
-#   independence the test assumes does not hold. The same run measured 84% of its detour
-#   steps plateaued, so the cue was not what found the source in the arm that found it
-#   every time. That number rests on a reconstruction the oracle arm can never validate
-#   (`tools/detour_report.py` says so now), which is its own reason to run this arm
-#   BESIDE `full` rather than alone.
+#   `oracle-1` (2026-09-19, 19 val scenes, n=282/arm) is what that costs. Source-reached:
+#   `full` 93/282 = 33.0%, `oracle-loc` 266/282 = 94.3%, +173 and 0 lost, exact McNemar
+#   p = 0.0000, gains in 19 of 19 scenes. AND FIND-SR@1m INVERTS: 93 of 270 for `full`
+#   against 2 of 270 for `oracle-loc`, source SPL 0.251 against 0.007. An agent that stops
+#   at 1.5 m has not entered the ring the metric scores. So the +173 is arrival criterion
+#   in a proportion that run CANNOT separate from information, and no "localization is
+#   worth N points" claim comes off it.
+#
+#   `oracle-loc-matched` is that arm with the confound removed (ADR-0028): the same point
+#   goal, routed to through the same pool, arriving on `visual_confirm` — the SAME
+#   expression the realizable arm STOPs on, off the same detector query. It differs from
+#   `full` in INFORMATION ALONE, so it is the arm to difference against `full` and the
+#   only one of the two that is a ceiling on Find-SR@1m.
+#
+#   RUN `full` AND `oracle-loc-matched` TOGETHER. `episode_diff` can pair across runs, but
+#   `repeat-1` measured 16.2% of outcomes flipping on byte-identical reruns, so the
+#   decisive contrast gets its control in the same night. `oracle-loc` beside them is
+#   optional and prices the ring alone; `oracle-1`'s arms already pair with these.
+#
+#   WHAT SURVIVES `oracle-1` UNCONFOUNDED, because it rests on the oracle arm alone:
+#   NAVIGATION IS NOT THE LIMITER. Of its 16 abandoned episodes, TWELVE had no navmesh
+#   route to the source at any step. With the coordinate handed over and a route
+#   available the agent reaches 1.5 m in 266 of 270 = 98.5%, four routable failures in the
+#   whole sweep. The follower, the step budget and the navmesh are not what holds `full`
+#   at 33.0%. Those same 12 cap ANY Find-SR at 95.7% and are unwinnable under any
+#   controller — the detector's view-point list for the anomaly object is seeded with the
+#   source position alone, and a `None` distance reads as not-detected.
+#
+#   `oracle-pilot` (2026-09-19, one scene, `4ok3usBNeis`) was the prior and is superseded
+#   by the sweep above. It measured 84% of its detour steps plateaued, so the cue was not
+#   what found the source in the arm that found it every time. That number rests on a
+#   reconstruction NEITHER oracle arm can validate (`tools/detour_report.py` says so now),
+#   which is its own reason to run these arms BESIDE `full` rather than alone.
 #
 # NO MEMORY ARM IS IN THIS SWEEP, deliberately. ADR-0018's four cells need the stores
 # wired into the runner and a prior pass that has run; neither exists yet, and four
@@ -102,7 +125,8 @@
 #        (default 15, PER SCENE PER ARM), --max-steps M (default 250), --scenes "a b c"
 #        (default: every scene with a mesh), --limit N (default 0 = no limit),
 #        --sounding-steps N (default 60), --anomaly-class C (default alarm),
-#        --seed S, --out-dir DIR, --arms "a b" (default: all five), --no-pull, --force,
+#        --seed S, --out-dir DIR, --arms "a b" (default: every arm in ARM_NAMES),
+#        --no-pull, --force,
 #        --resume.
 #
 # --resume PICKS UP A KILLED SWEEP at the scene grain. It implies --force (it reuses the
@@ -471,7 +495,7 @@ if [ "$DREAM_KNOBS_NOMEM" = "$DREAM_KNOBS" ]; then
   exit 2
 fi
 
-ARM_NAMES=(full no-climb no-cue scan-only anechoic oracle-loc dream dream-nomem)
+ARM_NAMES=(full no-climb no-cue scan-only anechoic oracle-loc oracle-loc-matched dream dream-nomem)
 ARM_FLAGS=(
   ""
   "--climb-rule off"
@@ -485,6 +509,12 @@ ARM_FLAGS=(
   # `ARM_FLAGS` before the explicit flags would silently run this arm realizable and
   # report a null.
   "--localization oracle"
+  # THE SAME CEILING ON THE BASELINE'S OWN CRITERION (ADR-0028). Same override, same
+  # last-wins ordering; what differs from the line above is which arrival test the arm is
+  # scored on, and that is a `Localization` value rather than a radius. `oracle-1`
+  # measured why the two are not interchangeable: 94.3% source-reached and 0.7%
+  # Find-SR@1m out of the SAME arm.
+  "--localization oracle_matched"
   "--clap $DREAM_KNOBS"
   "--clap $DREAM_KNOBS_NOMEM"
 )
@@ -494,7 +524,8 @@ ARM_WHY=(
   "R2 the interaural sign is ambiguous — loudness without binaural localization"
   "R3 every dead step turns instead of walking a leg — the pre-eps-1 control"
   "R5 flat IRs at all three render sites — does the reverb tail buy any SWS"
-  "THE CEILING, not an ablation: the agent is HANDED the source coordinate, so this is what the navmesh follower and the scan/cast sweep reach when localization is free. READ THE ARRIVAL CAVEAT IN THE HEADER before differencing it against full"
+  "THE CEILING ON ITS OWN CRITERION, not an ablation: HANDED the source coordinate and arriving at 1.5 m. oracle-1 measured 94.3% source-reached and 2 of 270 Find-SR@1m out of this arm, so DO NOT difference it against full — read the arrival caveat in the header and use oracle-loc-matched"
+  "THE CEILING ON THE BASELINE'S CRITERION (ADR-0028): handed the source coordinate and arriving on the realizable arm's own detector confirm, so it differs from full in INFORMATION ALONE. This is the arm a localization ceiling is quoted from"
   "DREAM: M^S, consolidation, a three-level M^L that GROWS across this arm's episodes, and memory-weighted planning"
   "THE CONTROL for the arm above: identical in every knob but lambda_memory = 0.0, so the difference is eq. 26's memory term and nothing else"
 )

@@ -110,6 +110,7 @@ import textwrap
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from earshot.agent.config import DetectorConfig
+from earshot.config import Localization
 from earshot.agent.controller import (
     ACT_FORWARD,
     ACT_STOP,
@@ -1111,32 +1112,42 @@ def _plateau_lines(agg: Mapping[str, Any]) -> List[str]:
         #
         # TWO CAUSES, ONE ZERO, and telling them apart is the whole of this branch. The
         # rule writes `realizable_action` in `step_controller`'s `if realizable:` branch
-        # alone, so an all-oracle run records none BY CONSTRUCTION: "re-run to arm the
+        # alone, so a run with no realizable episode in it records none BY CONSTRUCTION:
+        # "re-run to arm the
         # check" is advice that cannot be followed there, and following it costs a night
         # to arrive back at the same zero. The `oracle-pilot` run is what found this —
         # 84% of its detour steps plateaued, on a reconstruction its own arm can never
         # validate.
         arms = list(check.get("localization_arms") or ())
+        # THE TEST IS "NOT REALIZABLE", NEVER "IS ORACLE". `realizable_action` is written
+        # in `step_controller`'s `if realizable:` branch, so EVERY oracle-family arm is
+        # silent there — ADR-0028's `oracle_matched` as much as `oracle`. Naming the one
+        # arm that existed when this branch was written would send an `oracle_matched`
+        # run down the "re-run to arm the check" path, which is a night spent arriving
+        # back at the same zero.
+        blind = [arm for arm in arms if arm != Localization.REALIZABLE.value]
         lines.extend(_wrap(
             "RECONSTRUCTION UNVALIDATED — no record carries "
             "StepRecord.realizable_action, so what the cue SAID was never compared "
             "against what was recomputed. Every plateau above rests on an unchecked "
             "model of the controller."))
-        if arms == ["oracle"]:
+        if arms and len(blind) == len(arms):
             lines.append("")
             lines.extend(_wrap(
-                "AND IT CANNOT BE ARMED ON THIS RUN. Every episode here ran the ORACLE "
-                "localization arm, which never enters the branch that records the cue's "
-                "answer, so no re-run of this arm will produce one. The plateaus above "
-                "are a COUNTERFACTUAL: what the carried rule would have said on "
-                "trajectories it did not steer. Run the same scenes under "
-                "--localization realizable to validate the reconstruction."))
-        elif len(arms) > 1:
+                "AND IT CANNOT BE ARMED ON THIS RUN. Every episode here ran a "
+                "non-realizable localization arm ({}), which never enters the branch "
+                "that records the cue's answer, so no re-run of this arm will produce "
+                "one. The plateaus above are a COUNTERFACTUAL: what the carried rule "
+                "would have said on trajectories it did not steer. Run the same scenes "
+                "under --localization realizable to validate the "
+                "reconstruction.".format(", ".join(arms))))
+        elif blind:
             lines.append("")
             lines.extend(_wrap(
-                "THE RUN MIXES ARMS ({}), and the oracle episodes among them can never "
-                "carry the field. Split the run by arm before reading the plateaus as "
-                "one population.".format(", ".join(arms))))
+                "THE RUN MIXES ARMS ({}), and the non-realizable episodes among them "
+                "({}) can never carry the field. Split the run by arm before reading "
+                "the plateaus as one population.".format(
+                    ", ".join(arms), ", ".join(blind))))
         else:
             lines.append("")
             lines.extend(_wrap("Re-run to arm the check."))

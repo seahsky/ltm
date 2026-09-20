@@ -58,6 +58,21 @@ class TestRunConfig(unittest.TestCase):
         self.assertIs(config.localization, Localization.REALIZABLE)
         self.assertIs(config.detector, Detector.ORACLE)
 
+    def test_the_matched_oracle_arm_is_reachable_from_the_cli(self):
+        """ADR-0028's arm, at the surface a sweep driver actually types.
+
+        `ablation_sweep.sh` passes this string and nothing validates shell text, so a
+        renamed enum value would reach the box as an argparse error at 11pm rather than
+        here. The value is asserted literally for that reason.
+        """
+        self.assertEqual(Localization.ORACLE_MATCHED.value, "oracle_matched")
+        config = config_from_args(
+            build_parser().parse_args(
+                ["--run-dir", "runs/z", "--localization", "oracle_matched"]
+            )
+        )
+        self.assertIs(config.localization, Localization.ORACLE_MATCHED)
+
     def test_the_default_arms_reproduce_todays_behaviour(self):
         """ADR-0018's four new arms: adding them must change NOTHING until one is set.
 
