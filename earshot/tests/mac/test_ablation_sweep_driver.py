@@ -371,6 +371,78 @@ class TestTheOracleArmActuallyOverridesTheHardcodedFlag(unittest.TestCase):
         print("{} arm(s), all three arrays agree: {}".format(len(names), " ".join(names)))
 
 
+class TestTheMatchedOracleArmIsSelectableAndIsNotThePrefixArm(unittest.TestCase):
+    """ADR-0028's arm, and the hazard its NAME creates.
+
+    `oracle-loc-matched` has `oracle-loc` as a prefix, and the two arms are scored on
+    different criteria -- `oracle-1` read 94.3% source-reached out of one and 0.7%
+    Find-SR@1m out of the same episodes. A selector that prefix-matched would run BOTH
+    under one name, or the wrong one under either, and the sweep would finish green
+    while the readout differenced a ceiling against a ceiling on another criterion.
+
+    So the selection is RUN IN BASH off the shipped arrays rather than reasoned about,
+    and the flag string is asserted against the enum's own value rather than a literal
+    typed twice.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("bash") is None:
+            raise unittest.SkipTest("no bash on PATH")
+        cls.text = DRIVER.read_text()
+
+    def _select(self, wanted: str):
+        """The driver's own `--arms` block, over its own arrays, for one selection."""
+        arrays = self.text[self.text.index("ARM_NAMES=("):self.text.index("N_SCENES=")]
+        script = 'WANTED_ARMS="{}"\n{}\nfor i in "${{!ARM_NAMES[@]}}"; do\n'.format(
+            wanted, arrays
+        ) + '  printf "%s\\t%s\\n" "${ARM_NAMES[$i]}" "${ARM_FLAGS[$i]}"\ndone\n'
+        done = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=True
+        )
+        return [
+            tuple(line.split("\t")) for line in done.stdout.splitlines() if line.strip()
+        ]
+
+    def test_the_arm_carries_exactly_the_enums_own_value(self):
+        """A renamed enum member must break HERE and not at 11pm on the box, where the
+        only symptom is argparse's `invalid choice` after the scene list has loaded."""
+        from earshot.config import Localization
+
+        self.assertIn(
+            '"--localization {}"'.format(Localization.ORACLE_MATCHED.value), self.text
+        )
+
+    def test_selecting_it_gives_the_matched_flag_and_nothing_else(self):
+        self.assertEqual(
+            self._select("oracle-loc-matched"),
+            [("oracle-loc-matched", "--localization oracle_matched")],
+        )
+
+    def test_selecting_the_prefix_arm_does_not_drag_the_matched_one_in(self):
+        """THE PREFIX HAZARD, put to bash. Exact `=` is what makes this pass; a `case`
+        or a glob would not, and the difference is invisible in a green run."""
+        selected = self._select("oracle-loc")
+        self.assertEqual(selected, [("oracle-loc", "--localization oracle")])
+
+    def test_the_decisive_pair_selects_in_order_with_full_first(self):
+        """The run this arm exists for. `full` is the IN-RUN control, because
+        `repeat-1` measured 16.2% of outcomes flipping on byte-identical reruns, and
+        `window_report` quotes a subset without `full` against its FIRST arm."""
+        selected = self._select("full oracle-loc-matched")
+        self.assertEqual(
+            selected,
+            [("full", ""), ("oracle-loc-matched", "--localization oracle_matched")],
+        )
+        print("decisive pair resolves to: {}".format(selected))
+
+    def test_the_two_ceiling_arms_do_not_share_a_flag(self):
+        """If they ever did, one of them is a duplicate of the other and the sweep pays
+        a night to difference an arm against itself -- `dream-2`'s shape exactly."""
+        both = dict(self._select("oracle-loc oracle-loc-matched"))
+        self.assertEqual(len(set(both.values())), 2, both)
+
+
 def _count_array_entries(text: str, opener: str) -> int:
     """Quoted entries of a bash array literal, ignoring comment lines inside it."""
     body = text[text.index(opener) + len(opener):]

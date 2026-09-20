@@ -89,9 +89,13 @@ nrun bash earshot/tools/window_pilot.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag>
 
 # THE OVERNIGHT SWEEP: the paper's HM3D baseline and the ablation table, in one run.
-# SEVEN arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
+# NINE arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
 # `no-cue`, `scan-only` and `anechoic` each remove one component; `dream` and
 # `dream-nomem` are the memory pair (ADR-0025) and differ in `lambda_memory` alone.
+# `oracle-loc` and `oracle-loc-matched` are CEILINGS and not ablations -- they ADD the
+# source coordinate. Difference only the MATCHED one against `full`: `oracle-1` measured
+# the other at 94.3% source-reached and 2 of 270 Find-SR@1m out of one arm, because it
+# arrives at 1.5 m and the metric scores 1.0 m (ADR-0028).
 # Every arm shares its episodes with the reference, so `episode_diff` pairs them. It
 # prints the MDE it is buying BEFORE it spends the night earning it -- read that estimate
 # rather than a figure quoted here, because it is computed from the arms you asked for.
@@ -99,6 +103,13 @@ python -m earshot.tools.window_report runs/<tag>
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag> \
   --arms "full no-climb no-cue scan-only anechoic dream dream-nomem"
+
+# THE LOCALIZATION CEILING, on the baseline's own criterion (ADR-0028). Two arms, ~3.5 h:
+# `full` is the in-run control, because `repeat-1` measured 16.2% of outcomes flipping on
+# byte-identical reruns and the decisive contrast does not get a control from last night
+nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
+  --arms "full oracle-loc-matched"
+python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/oracle-loc-matched
 
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
