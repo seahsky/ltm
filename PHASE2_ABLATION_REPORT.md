@@ -4342,3 +4342,38 @@ This is the measurement behind the structural divert override (`plan.py:30-42`),
 
 **A readout defect nearly inverted this result.** The sweep's own mechanism check printed zero for every counter over all 1128 episodes: an inline heredoc globbing `<scene>/episodes/<N>/audit.json` against a writer that writes `<scene>/episodes/ep0000.audit.json`. Read that way the run says the mechanism was inert, which is the exact opposite of the truth. `tools/propose_report.py` (PR #135) is the tested reader; `dream-1` and `pilot-1` are the same failure.
 
+
+# oracle-1 - the ceiling arm measured its own arrival radius (run report, recorded 2026-09-20)
+
+`bash earshot/tools/ablation_sweep.sh --tag oracle-1 --arms "full oracle-loc"`, 3h30m, exit 0, commit `72b8184`, host riftvm, 2026-09-19.
+Two arms, 19 val scenes, 15 episodes each, `n = 282` paired per arm.
+**The first `--localization oracle` run in the history of this repo**: the flag has existed since the clean room and no driver had ever passed it (PR #140 added the arm).
+**ADR-0028 is the decision record.**
+
+| arm | source reached | rate | Find-SR@1m | source SPL | steps/ep |
+|---|---|---|---|---|---|
+| `full` | 93 / 282 | 33.0% | 93 / 270 | 0.251 | 189.9 |
+| `oracle-loc` | 266 / 282 | **94.3%** | **2 / 270** | 0.007 | 172.7 |
+
+`episode_diff`: 282 paired, 93 both, 16 neither, **173 oracle-only, 0 full-only, exact McNemar p = 0.0000**, gains in 19 of 19 scenes, every pair agreeing on `source_xyz`.
+
+**THE +173 IS THE ARM'S OWN ARRIVAL RADIUS. DO NOT QUOTE IT AS A LOCALIZATION CEILING.**
+The two arms do not share an arrival test. `oracle` arrives inside `investigate_arrive_radius_m`, 1.5 m horizontal; `realizable` arrives on the detector's confirm, `DetectorConfig.oracle_radius_m`, a geodesic 1.0 m set at Find-SR's primary ring. Both write `FunnelStage.SOURCE_REACHED`, and `compute_source_spl` scores a reach at `success_radius` 1.0.
+So the oracle agent stopped the instant it crossed 1.5 m and never earned the criterion the baseline is quoted on. `full`'s own identity is the proof: 93 reached and 93 Find-SR@1m, the same 93.
+The p = 0.0000 is for the stage-5 rate, which is the confounded comparison. It is not evidence about Find-SR@1m.
+
+**WHAT SURVIVES, AND IT RESTS ON THE ORACLE ARM ALONE: NAVIGATION IS NOT THE LIMITER.**
+Of the 16 abandoned episodes, **12 had no navmesh route to the source at any step of the detour** (`mv2HUxq3B53` 1, `p53SfW6mjZe` 4, `qyAac8rV8Zk` 6, `wcojb4TFT35` 1).
+With the coordinate handed over and a route available the agent reaches 1.5 m in **266 of 270, 98.5%** — four routable failures in the whole sweep (2 in `5cdEh9F2hJL`, 2 in `mv2HUxq3B53`).
+The follower, the step budget and the navmesh are not what holds `full` at 33.0%. That is a localization failure, and this is the first evidence for the claim rather than an argument for it.
+
+**Two counts that come free.**
+`refused` 0 and `in-ring` 0 in all 19 scenes: no abandoned oracle episode stood inside the ring and was scored as not arriving, so the `arrive-2` refusal lever is spent in this arm. `detour_report`'s ceiling line ("a rule that admitted the arrivals it already had would read at most 266 of 282") answers the REFUSAL question, not the matched-1.0 m one.
+The 12 unrouted episodes **cap any Find-SR at 270 of 282, 95.7%**, under any controller: the detector's view-point list for the anomaly object is seeded with the source position alone and a `None` distance reads as not detected. Consistent with `yield-2`'s 23 of 365.
+
+**Free check that passed.** `full` 33.0% here against `abl-2`'s 35.8% is 2.8 points, inside `repeat-1`'s measured 3.0-point apparatus noise. The two sweeps agree and HM3D v0.2 did not move underneath them.
+
+**Not claimed.** SWS 0.116 → 0.230 is measured on the early-stop-contaminated arm and is not a result.
+The one-scene `oracle-pilot` that preceded this (15/15 on `4ok3usBNeis`, McNemar p = 0.0020 against `abl-2/full`'s 5/15) is superseded; its 84%-plateaued figure rests on a reconstruction neither oracle arm can validate, which PR #139 makes `detour_report` say.
+
+**What is measured next.** `--arms "full oracle-loc-matched"`, about 3h30m, `full` as the in-run control. ADR-0028 pre-registers the three branches on the matched arm's Find-SR@1m against `full`'s 33.0%.

@@ -61,10 +61,32 @@ class Localization(Enum):
     live-audio path unexercised in the one episode that exists to prove it. ``ORACLE``
     point-goals to the true source position and is retained as a bisection tool — if the
     smoke fails, running it separates audio from controller in one step.
+
+    **``ORACLE`` AND ``REALIZABLE`` DO NOT SHARE AN ARRIVAL TEST, AND ``ORACLE_MATCHED``
+    IS THE ARM THAT DOES** (ADR-0028). ``ORACLE`` arrives inside
+    ``ControllerConfig.investigate_arrive_radius_m`` (1.5 m, horizontal); ``REALIZABLE``
+    arrives on the detector's confirm, which under ``Detector.ORACLE`` is a geodesic 1.0 m
+    — Find-SR's own primary ring. `oracle-1` measured what that costs: source-reached went
+    33.0% to 94.3% (+173 of 282, p = 0.0000), and **Find-SR@1m INVERTED, 93 of 270 to 2 of
+    270**, because an agent that stops at 1.5 m has not entered the ring the metric scores.
+    So a ``full`` vs ``ORACLE`` delta mixes "knew where the source was" with "had a wider
+    bar to clear", in a proportion that run cannot separate.
+
+    ``ORACLE_MATCHED`` is ``ORACLE``'s steering — handed the true source position, routed
+    to through the same pool — with ``REALIZABLE``'s arrival test, the detector's confirm
+    and nothing else. The two arms then differ in **information alone**, which is the
+    comparison a localization ceiling needs.
+
+    **This is not a threshold retune** (base rate in this repo: 0 for 7, ADR-0025). No
+    threshold moves: 1.5 m and 1.0 m both keep their values and their arms. What changes
+    is that the ceiling arm is scored on the criterion the baseline is scored on.
+    ``ORACLE`` stays exactly as it was so `oracle-1` remains reproducible from this tree
+    and its ``localization_arm`` field keeps meaning one thing.
     """
 
     REALIZABLE = "realizable"
     ORACLE = "oracle"
+    ORACLE_MATCHED = "oracle_matched"
 
 
 class Detector(Enum):

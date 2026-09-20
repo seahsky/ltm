@@ -837,6 +837,62 @@ def make_detector(cfg: RunConfig, world: Any, anomaly_episode: AnomalyEpisode) -
 
 
 # ----------------------------------------------------------------------
+# the arrival test
+# ----------------------------------------------------------------------
+
+
+def oracle_arrived(
+    localization: Localization,
+    *,
+    horizontal_distance_m: float,
+    visual_confirm: bool,
+    arrive_radius_m: float,
+) -> bool:
+    """Has an oracle-family arm arrived? ADR-0028's whole diff, as a pure function.
+
+    It lives here rather than in ``agent/controller.py`` because the controller takes
+    ``arrived_at_source`` as a plain ``bool`` and may not import ``config`` (ADR-0013's
+    layering). The arm *selects* the test; the controller only obeys the answer, which is
+    why adding an arm costs nothing in ``agent/``.
+
+    - ``REALIZABLE`` is always ``False`` here. Its arrival is the controller's own
+      ``ACT_STOP``, and returning anything else would give the realizable arm a second,
+      privileged route to ``SOURCE_REACHED``.
+    - ``ORACLE`` arrives inside ``investigate_arrive_radius_m`` (1.5 m, horizontal). Kept
+      byte-identical so `oracle-1` stays reproducible from this tree.
+    - ``ORACLE_MATCHED`` arrives on ``visual_confirm`` — the *same expression* the
+      realizable arm STOPs on (``agent/controller.realizable_investigate_step``'s
+      ``if visual_confirm: return ACT_STOP``, the `arrive-2` branch), computed once in the
+      step loop and handed to both. Not a re-implementation of that test at a different
+      radius: one detector, one query, one verdict, so the two arms cannot drift apart.
+
+    **The confirm is GEODESIC and ``dist_at_reach`` is HORIZONTAL**, which is the axis
+    mismatch documented at ``metrics.py``. It runs the safe way here and that is worth
+    saying out loud: a route is never shorter than the straight line it spans, so a
+    confirm at 1.0 m geodesic implies 1.0 m horizontal, so **every ``ORACLE_MATCHED``
+    arrival is inside the ring Find-SR@1m scores**. `oracle-1`'s ``full`` arm is the
+    measured proof — 93 reached and 93 Find-SR@1m, the same 93.
+
+    An unknown arm raises rather than falling through to the ring. A future arm that
+    forgets this function should fail here, not be quietly scored on 1.5 m.
+    """
+    if localization is Localization.REALIZABLE:
+        return False
+    if localization is Localization.ORACLE_MATCHED:
+        return bool(visual_confirm)
+    if localization is Localization.ORACLE:
+        return float(horizontal_distance_m) <= float(arrive_radius_m)
+    raise ValueError(
+        "no arrival test for localization arm {!r}. Add one here rather than letting "
+        "it inherit the oracle arm's 1.5 m ring: `oracle-1` measured that a 1.5 m "
+        "arrival scores 94.3% source-reached and 0.7% Find-SR@1m, so an arm scored on "
+        "the wrong criterion does not look broken, it looks excellent.".format(
+            localization
+        )
+    )
+
+
+# ----------------------------------------------------------------------
 # steering
 # ----------------------------------------------------------------------
 
@@ -1480,11 +1536,15 @@ def run_episode(
             # would ignore it, but "the arm does not have it" is a stronger property than
             # "the arm does not read it", and it costs one conditional.
             source_xyz=None if realizable else source,
-            arrived_at_source=(
-                False
-                if realizable
-                else pose.position.horizontal_distance_to(source)
-                <= float(cfg.controller.investigate_arrive_radius_m)
+            # WHICH arrival test this arm is scored on (ADR-0028). `visual_confirm` is
+            # the one computed above and already handed to the realizable branch below,
+            # so `ORACLE_MATCHED` and `REALIZABLE` arrive on one detector verdict rather
+            # than on two expressions that agree today.
+            arrived_at_source=oracle_arrived(
+                cfg.localization,
+                horizontal_distance_m=pose.position.horizontal_distance_to(source),
+                visual_confirm=visual_confirm,
+                arrive_radius_m=cfg.controller.investigate_arrive_radius_m,
             ),
             anomaly_class=anomaly_class,
             anomaly_object=anomaly_episode.source.anomaly_object,

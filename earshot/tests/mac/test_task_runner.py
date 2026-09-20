@@ -72,6 +72,7 @@ from earshot.task.runner import (
     calibrate_episode,
     calibration_poses,
     make_detector,
+    oracle_arrived,
     run_episode,
     silent_phase_tally,
     tail_is_active,
@@ -641,6 +642,171 @@ class TestTheOracleArm(unittest.TestCase):
             self.result.audit.dist_at_stop,
             ControllerConfig().investigate_arrive_radius_m,
         )
+
+
+class TestTheArrivalTestPerArm(unittest.TestCase):
+    """``oracle_arrived``, ADR-0028's whole diff, unit by unit.
+
+    This is where the three arms are pinned apart. The end-to-end classes below prove the
+    matched arm reaches the source; these prove it is reaching it on a *different test*,
+    which is the part a passing funnel cannot show.
+    """
+
+    ARRIVE = ControllerConfig().investigate_arrive_radius_m  # 1.5 m
+
+    def test_the_realizable_arm_never_arrives_through_this_function(self):
+        """Its arrival is the controller's own STOP.
+
+        A ``True`` here would be a second, privileged route to ``SOURCE_REACHED`` for the
+        one arm whose reach numbers must not rest on the source coordinate — and it would
+        be invisible, because both routes write the same funnel stage.
+        """
+        self.assertFalse(
+            oracle_arrived(
+                Localization.REALIZABLE,
+                horizontal_distance_m=0.0,
+                visual_confirm=True,
+                arrive_radius_m=self.ARRIVE,
+            )
+        )
+
+    def test_the_oracle_arm_reads_the_ring_and_ignores_the_confirm(self):
+        """Byte-identical to the pre-ADR-0028 expression, which is what keeps `oracle-1`
+        reproducible from this tree."""
+        inside = oracle_arrived(
+            Localization.ORACLE,
+            horizontal_distance_m=1.4,
+            visual_confirm=False,
+            arrive_radius_m=self.ARRIVE,
+        )
+        outside = oracle_arrived(
+            Localization.ORACLE,
+            horizontal_distance_m=1.6,
+            visual_confirm=True,
+            arrive_radius_m=self.ARRIVE,
+        )
+        self.assertTrue(inside)
+        self.assertFalse(outside)
+
+    def test_the_matched_arm_reads_the_confirm_and_ignores_the_ring(self):
+        """THE CONFOUND, stated as two assertions.
+
+        1.4 m with no confirm is exactly the episode `oracle-1` scored as reached and
+        Find-SR@1m scored as a miss — 266 of 282 against 2 of 270. The matched arm calls
+        it a miss too, and that is the point.
+        """
+        self.assertFalse(
+            oracle_arrived(
+                Localization.ORACLE_MATCHED,
+                horizontal_distance_m=1.4,
+                visual_confirm=False,
+                arrive_radius_m=self.ARRIVE,
+            )
+        )
+        self.assertTrue(
+            oracle_arrived(
+                Localization.ORACLE_MATCHED,
+                horizontal_distance_m=1.4,
+                visual_confirm=True,
+                arrive_radius_m=self.ARRIVE,
+            )
+        )
+
+    def test_the_matched_arm_does_not_read_the_radius_at_all(self):
+        """So no edit to `investigate_arrive_radius_m` can move this arm's numbers.
+
+        Zero would make the ring unreachable and a huge value would make it free; the arm
+        is indifferent to both, which is what "the radius is not this arm's criterion"
+        means operationally.
+        """
+        for radius in (0.0, 1.5, 1e9):
+            self.assertTrue(
+                oracle_arrived(
+                    Localization.ORACLE_MATCHED,
+                    horizontal_distance_m=42.0,
+                    visual_confirm=True,
+                    arrive_radius_m=radius,
+                )
+            )
+            self.assertFalse(
+                oracle_arrived(
+                    Localization.ORACLE_MATCHED,
+                    horizontal_distance_m=0.0,
+                    visual_confirm=False,
+                    arrive_radius_m=radius,
+                )
+            )
+
+    def test_an_unknown_arm_raises_instead_of_inheriting_the_ring(self):
+        """ADR-0014's forced failure, and it is the one that matters here.
+
+        The dangerous default is silence: an arm that fell through to the 1.5 m ring
+        would not look broken, it would look excellent — `oracle-1` read 94.3%
+        source-reached and 0.7% Find-SR@1m out of exactly that criterion. A non-member is
+        passed rather than a new enum value because adding one to `Localization` would
+        make this test its own subject.
+        """
+        with self.assertRaises(ValueError) as caught:
+            oracle_arrived(
+                Detector.ORACLE,  # a real enum, and deliberately the wrong one
+                horizontal_distance_m=0.0,
+                visual_confirm=True,
+                arrive_radius_m=self.ARRIVE,
+            )
+        self.assertIn("arrival test", str(caught.exception))
+
+
+class TestTheMatchedOracleArm(unittest.TestCase):
+    """ADR-0028's arm, end to end: the oracle's steering on the baseline's criterion.
+
+    Same fixture as ``TestTheOracleArm`` above, one flag apart, so the two classes are a
+    paired comparison of the arrival test and of nothing else.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.world = FakeWorld(start=Xyz(0.0, 0.0, 0.0), yaw=0.0)
+        cls.source = Xyz(1.5, 0.0, -5.0)
+        cls.handle = FakeAudioSensorHandle(cls.world, cls.source)
+        cls.anomaly_episode = make_anomaly_episode(source=cls.source, t_anom=2)
+        cls.cfg = make_config(localization=Localization.ORACLE_MATCHED, max_steps=60)
+        cls.result = run(
+            cls.world, cls.handle, cls.anomaly_episode, cls.cfg, calibration=CALIBRATION
+        )
+
+    def test_it_reaches_the_source_and_says_which_arm_ran(self):
+        self.assertGreaterEqual(
+            self.result.audit.funnel_stage, FunnelStage.SOURCE_REACHED
+        )
+        self.assertEqual(self.result.audit.localization_arm, "oracle_matched")
+
+    def test_it_stopped_inside_the_ring_find_sr_scores_and_not_merely_the_wider_one(self):
+        """The whole reason the arm exists.
+
+        ``TestTheOracleArm`` asserts 1.5 m because 1.5 m is all that arm promises.
+        ``metrics.compute_source_spl`` scores a reach at ``success_radius`` 1.0, so an
+        arm quoted as a localization ceiling has to clear the tighter number — and it
+        clears it by construction rather than by luck, because the confirm it stops on
+        IS a distance test at ``DetectorConfig.oracle_radius_m``.
+        """
+        self.assertLessEqual(
+            self.result.audit.dist_at_stop, DetectorConfig().oracle_radius_m
+        )
+
+    def test_the_testimony_schema_is_identical_to_the_realizable_arm(self):
+        """§5.1 again: a third arm must not become readable off the report either."""
+        self.assertEqual(sorted(self.result.report.as_dict()), sorted(SCHEMA_FIELDS))
+
+    def test_it_is_still_handed_the_coordinate_rather_than_climbing_to_it(self):
+        """Matched arrival, oracle steering — the arm is a ceiling, not a second baseline.
+
+        ``realizable_action`` is written only in the realizable branch, so its absence on
+        every step is the record's own proof that the cue steered nothing here. If this
+        ever fails, the arm has quietly become `full` and its ceiling reading is a
+        duplicate of the baseline — `dream-2`'s shape.
+        """
+        actions = {step.realizable_action for step in self.result.audit.steps}
+        self.assertEqual(actions, {None})
 
 
 class TestTheDivertCandidate(unittest.TestCase):
