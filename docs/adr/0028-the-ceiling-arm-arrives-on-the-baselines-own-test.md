@@ -110,6 +110,7 @@ The confirm is **geodesic** and `dist_at_reach` is **horizontal**, which is the 
 It runs the safe way for this arm — a route is never shorter than the line it spans, so a confirm at 1.0 m geodesic implies 1.0 m horizontal, so every matched arrival is inside the ring Find-SR scores.
 It is still two axes, and a future detector whose confirm is not a distance test (`Detector.CAPTION`) breaks the implication rather than weakening it.
 
-`detour_report`'s unvalidated-reconstruction branch (PR #139) tests for the arm name `oracle`.
-It needs to treat any non-realizable arm the same way, because `realizable_action` is written only in the realizable branch and the matched arm cannot validate the reconstruction either.
-That is a one-predicate follow-up, and it is called out here so it is not discovered from a readout.
+`detour_report`'s unvalidated-reconstruction branch (PR #139) tested for the arm *name* `oracle`, and that predicate is widened in the same change that adds the arm.
+`realizable_action` is written in `step_controller`'s `if realizable:` branch, so every non-realizable arm is blind to it, `oracle_matched` as much as `oracle`.
+Matching on the name would have sent an `oracle_matched` run down "re-run to arm the check", which is a night spent arriving back at the same zero — the cost that branch exists to prevent.
+The test is now "no realizable episode in this run", and two oracle-family arms run together read as unarmable rather than merely mixed, because splitting them produces two unarmable halves.
