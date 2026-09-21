@@ -6,6 +6,8 @@ seam is exercised here rather than mocked — the same reason `test_detour_repor
 real directories.
 """
 
+import contextlib
+import io
 import pathlib
 import shutil
 import tempfile
@@ -17,6 +19,7 @@ from earshot.report.agent import AgentReport
 from earshot.report.artifacts import write_episode
 from earshot.report.audit import EpisodeAudit, FunnelStage
 from earshot.tools.episode_diff import (
+    arm_labels,
     format_report,
     load_outcomes,
     main,
@@ -325,6 +328,78 @@ class TestTheCommandLine(unittest.TestCase):
         write_scene(after, "sceneA", [REACHED])
 
         self.assertEqual(main([str(before), str(after), "--stage", "NOT_A_STAGE"]), 2)
+
+
+class TestTheSameArmAcrossTwoRunsGetsTwoNames(unittest.TestCase):
+    """The flip-rate comparison, which printed the same label on both sides.
+
+    `episode_diff runs/oracle-1/full runs/oracle-2/full` (2026-09-21) printed "full only 19"
+    above "full only 22", and "gained = reached in full only; lost = reached in full only".
+    Which run each number belonged to was recoverable only by redoing the arithmetic
+    against each run's own total. That comparison is how this repo measures its apparatus
+    noise -- `repeat-1`, `dream-3` against `dream-4` -- so it is the one that must not be
+    ambiguous.
+    """
+
+    def test_different_arms_keep_their_basenames(self):
+        """The common case, byte-identical to before: nothing about it was wrong."""
+        self.assertEqual(
+            arm_labels("runs/oracle-2/full", "runs/oracle-2/oracle-loc-matched"),
+            ("full", "oracle-loc-matched"),
+        )
+
+    def test_the_same_arm_in_two_runs_is_named_by_its_run(self):
+        self.assertEqual(
+            arm_labels("runs/oracle-1/full", "runs/oracle-2/full"),
+            ("oracle-1/full", "oracle-2/full"),
+        )
+
+    def test_it_stops_at_the_first_component_that_differs(self):
+        """Deeper paths do not drag their whole prefix into the report."""
+        self.assertEqual(
+            arm_labels("/home/u/ltm/runs/abl-2/full", "/home/u/ltm/runs/oracle-2/full"),
+            ("abl-2/full", "oracle-2/full"),
+        )
+
+    def test_a_trailing_slash_or_a_dot_does_not_invent_a_difference(self):
+        """Shell completion adds the slash; `./` is a habit. Neither is a different arm."""
+        self.assertEqual(
+            arm_labels("runs/oracle-1/full/", "./runs/oracle-2/full"),
+            ("oracle-1/full", "oracle-2/full"),
+        )
+
+    def test_a_run_against_itself_still_gets_two_names(self):
+        """A degenerate comparison, but the report must still say which side is which."""
+        self.assertEqual(
+            arm_labels("runs/oracle-2/full", "runs/oracle-2/full"),
+            ("full (before)", "full (after)"),
+        )
+
+    def test_the_printed_report_is_unambiguous_end_to_end(self):
+        """Through `main`, off real audits, so the label reaches the lines that carried it.
+
+        Built as the box run was: two tags each holding a `full` arm, the second run
+        reaching one episode the first did not and missing one the first reached.
+        """
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        before, after = root / "oracle-1" / "full", root / "oracle-2" / "full"
+        write_scene(before, "sceneA", [REACHED, ABANDONED, REACHED])
+        write_scene(after, "sceneA", [ABANDONED, REACHED, REACHED])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main([str(before), str(after)]), 0)
+        text = out.getvalue()
+
+        self.assertIn("oracle-1/full against oracle-2/full", text)
+        self.assertIn("oracle-2/full only", text)
+        self.assertIn("oracle-1/full only", text)
+        self.assertIn(
+            "gained = reached in oracle-2/full only; lost = reached in oracle-1/full",
+            " ".join(text.split()),
+        )
+        self.assertNotIn("  full only", text)
 
 
 if __name__ == "__main__":
