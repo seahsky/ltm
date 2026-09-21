@@ -161,6 +161,7 @@ Nothing here says a realizable method can approach 98.5%.
 The anomaly object's view-point list is seeded with the source position, so once the oracle agent arrives the confirm is near-certain. That is the design — it isolates "can the agent get there" from "does it know where there is" — and it means goal detection is not exercised in either arm, which is the oracle-STOP disclosure the smoke prints on every scene.
 
 **What the branch names next.** The cast-leg-endpoint change: compare level at leg endpoints 1 to 2 m apart instead of across one 0.25 m step.
+(*Corrected by ADR-0029:* "one 0.25 m step" is `eps-1`'s measurement unit, not the current rule. `is_rising` already compares two five-reading windows. What it lacks is a single heading and a noise estimate that excludes the trend, and ADR-0029 proposes the change on those grounds.)
 `detour_report`'s `sig/sc` of 1.94 over 1.66 m plateau spans says the cue is recoverable at that baseline, and `eps-1` proved that a smaller epsilon over one step cannot recover it.
 It is the first lever in this arc with a measured ceiling behind it, and it attacks the measured cause rather than a threshold.
 It is not booked here. It needs its own record and an off-box price first.
