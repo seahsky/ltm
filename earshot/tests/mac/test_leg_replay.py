@@ -38,6 +38,7 @@ from earshot.report.audit import (
     EpisodeAudit,
     FunnelStage,
     OnsetRecord,
+    SoundingWindowRecord,
     StepRecord,
 )
 from earshot.tools.leg_replay import (
@@ -47,15 +48,21 @@ from earshot.tools.leg_replay import (
     CUT_BY_STOP,
     CUT_BY_SURGE,
     ONE_BRANCH,
+    SILENT,
+    SOUNDING,
+    SPANS_OFFSET,
     STOP,
     UNVERIFIED,
     Leg,
+    RunReplay,
+    by_sounding,
     episode_legs,
     evaluate_gate,
     format_report,
     load_run,
     main,
     score,
+    sounding_state,
 )
 from earshot.types import Xyz
 
@@ -86,19 +93,24 @@ def cast_xs(x0, headings, n):
 
 
 def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=None,
-            routed=True, scatter=EPS, arm=None):
+            routed=True, scatter=EPS, arm=None, offset_at=None, tail=3):
     """An audit whose detour `realizable_action` the controller wrote, tick by tick.
 
     ``gain`` is how much louder the cue gets per metre nearer; negative is a field that
     gets quieter on the approach. ``surge_at`` steps the level up from that detour step
     on, so the rule surges. ``stop_at`` is the detour step the confirm fires on.
     ``tamper_at`` records the wrong action at that detour step, and nothing else changes.
+    ``offset_at`` is the detour step the source stops on: from there the cue is a flat
+    bed with no gradient, and the audit carries the window that says so.
     """
+    offset = None if offset_at is None else PRE + offset_at
     levels, rows, plateau = [], [], 0
     eps = climb_eps(scatter)  # what the runner hands the rule, fallback included
     for i, x in enumerate([xs[0]] * PRE + list(xs)):
         k = i - PRE
         level = 0.1 - gain * x + NOISE[i % len(NOISE)]
+        if offset is not None and i >= offset:
+            level = 0.02 + NOISE[i % len(NOISE)]  # the bed: no source, no gradient
         if surge_at is not None and k >= surge_at:
             level += 20.0
         levels.append(level)
@@ -112,6 +124,7 @@ def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=No
             recorded = ACT_TURN_LEFT if action == ACT_FORWARD else ACT_FORWARD
         rows.append(StepRecord(
             step=i, measured_rms=level, lateral_sign=-1, position=Xyz(x, 0.0, 0.0),
+            source_playing=i >= PRE and (offset is None or i < offset),
             displacement_m=0.25, geodesic_to_source=abs(x) if routed else None,
             realizable_action=recorded))
         if action == ACT_STOP:
@@ -121,6 +134,8 @@ def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=No
         episode_index=index, source_xyz=SOURCE,
         funnel_stage=FunnelStage.INVESTIGATE_ENTERED,
         onset=OnsetRecord(onset_step=PRE),
+        sounding_window=None if offset is None else SoundingWindowRecord(
+            opens_at=PRE, offset_step=offset, policy="fixed_steps", cue_tail_steps=tail),
         calibration=None if scatter is None else CalibrationRecord(
             onset_rms=0.01, bed_rms=0.001, separation_db=40.0, n_poses=16,
             global_volume=1.0, cue_render_scatter=scatter, cue_scatter_repeats=12),
@@ -296,6 +311,76 @@ class TestTheGateIsTheOneWrittenDown(unittest.TestCase):
         return format_report([], gate, display_t_leg=2.5, display_why="test")
 
 
+WINDOW = SoundingWindowRecord(opens_at=0, offset_step=20, policy="fixed_steps",
+                              cue_tail_steps=3)  # the cue is exactly the bed from step 22
+
+
+class TestTheSoundingSplit(unittest.TestCase):
+    """Is the pull toward QUIETER the leg, or the source stopping under it?
+
+    The fence posts are smoke criterion 4's: `offset_step` is the first silent step, and
+    the cue carries the room's tail until `offset_step + cue_tail_steps - 1`."""
+
+    def test_a_leg_read_before_the_offset_is_sounding(self):
+        self.assertEqual(sounding_state(10, 19, WINDOW), SOUNDING)
+
+    def test_a_leg_whose_last_reading_is_the_offset_step_spans_it(self):
+        self.assertEqual(sounding_state(10, 20, WINDOW), SPANS_OFFSET)
+
+    def test_a_leg_that_opens_inside_the_cue_tail_spans_it(self):
+        """No step of it had the source playing, and the room was still falling."""
+        self.assertEqual(sounding_state(21, 29, WINDOW), SPANS_OFFSET)
+
+    def test_a_leg_that_opens_on_the_bed_is_silent(self):
+        self.assertEqual(sounding_state(22, 30, WINDOW), SILENT)
+
+    def test_a_continuous_source_never_stops(self):
+        continuous = SoundingWindowRecord(opens_at=0, policy="continuous")
+        self.assertEqual(sounding_state(100, 200, continuous), SOUNDING)
+
+    def test_a_record_that_cannot_say_is_unknown_rather_than_sounding(self):
+        """No window, or no cue tail (before ADR-0019): guessing SOUNDING would put
+        legs read after the offset into the state that is meant to exclude them."""
+        self.assertIsNone(sounding_state(10, 19, None))
+        self.assertIsNone(sounding_state(10, 19, SoundingWindowRecord(
+            opens_at=0, offset_step=20, policy="fixed_steps")))
+
+    def test_the_legs_of_one_episode_fall_on_both_sides(self):
+        """Offset at detour step 20: the leg read over 7-15 sounds, 16-24 spans it,
+        and 25-33 opens after the tail, at 22."""
+        xs = cast_xs(6.0, [TOWARD] * 4, 40)
+        legs = [leg for leg in replay(episode(xs, offset_at=20)).legs
+                if leg.outcome == COMPLETED]
+        self.assertEqual([leg.sounding for leg in legs], [SOUNDING, SPANS_OFFSET, SILENT])
+
+    def test_the_split_puts_a_stopping_source_where_it_lives(self):
+        """Every leg walks TOWARD the source. The one the source stops under reads
+        quieter anyway, and the split shows it there and not in the sounding state.
+        Pooled, the two cancel into a median that says nothing about either."""
+        xs = cast_xs(6.0, [TOWARD] * 4, 40)
+        legs = replay(episode(xs, offset_at=20)).legs
+        sounding, spans = (
+            next(leg for leg in legs if leg.sounding == state)
+            for state in (SOUNDING, SPANS_OFFSET))
+        self.assertGreater(sounding.t, 2.5)
+        self.assertLess(spans.t, -2.5, "the source stopping must read as quieter")
+        run = RunReplay("r/full", "r/full", 1, 1, legs, 0, 0, 0, ())
+        states = by_sounding([run])
+        self.assertGreater(states[SOUNDING]["median_t_approached"], 0)
+        self.assertLess(states[SPANS_OFFSET]["median_t_approached"], 0)
+        self.assertEqual(states["unknown"]["n_completed"], 0)
+
+    def test_the_section_says_it_is_not_a_gate(self):
+        xs = cast_xs(6.0, [TOWARD] * 4, 40)
+        run = RunReplay("r/full", "r/full", 1, 1, replay(episode(xs, offset_at=20)).legs,
+                        0, 0, 0, ())
+        gate = evaluate_gate({run.label: run.legs})
+        text = format_report([run], gate, display_t_leg=2.5, display_why="test")
+        self.assertIn("BY SOUNDING STATE. NOT A GATE", text)
+        self.assertIn("the grid, sounding legs only", text)
+        self.assertNotIn("  unknown", text, "no unknown row when every leg is known")
+
+
 class TestTheRunsOnDisk(unittest.TestCase):
     """Through the real writers, because that seam is where a replay that is right over
     injected legs finds nothing on disk and reports it as a finding."""
@@ -346,6 +431,9 @@ class TestTheRunsOnDisk(unittest.TestCase):
         self.assertIn(payload["gate"]["verdict"], (BUILD, ONE_BRANCH, STOP))
         self.assertEqual(len(payload["legs"]), 3 + 3 + 4)
         self.assertIsNone(payload["field"])
+        # These fixtures carry no window, so every completed leg is unknown, not sounding.
+        self.assertEqual(payload["by_sounding"]["unknown"]["n_completed"], 2 + 2 + 3)
+        self.assertEqual(payload["by_sounding"]["sounding"]["n_completed"], 0)
 
     def test_an_oracle_arm_is_refused_by_name(self):
         """No `realizable_action` by construction, and not `full`'s rule."""

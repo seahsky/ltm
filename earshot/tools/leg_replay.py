@@ -76,6 +76,16 @@ the useful form of that number: how many completed legs walked 0.5 m or more tow
 source with no surge. The current reader missed each of them, and a LOUDER verdict is what
 ``READ_LEGS`` would add there.
 
+By sounding state, added after the gate read STOP
+-------------------------------------------------
+
+The first readout found every leg pulled toward QUIETER, whichever way it walked.
+``full`` runs ADR-0017's windowed task, so the source stops at ``offset_step`` and a
+detour can outlast it. ``sounding_state`` puts each completed leg in one state off the
+record's own window: read before the offset, spanning it, or read on the bed alone.
+``by_sounding`` then prints the grid and the median ``t`` per state. **It is not a
+gate**, because the split was chosen after the result.
+
 Read-only, no GPU, seconds to minutes. A run that lacks ``realizable_action``,
 ``geodesic_to_source`` or ``CalibrationRecord.cue_render_scatter``, or that is not
 ``full``'s rule, is refused by name.
@@ -104,7 +114,7 @@ from earshot.agent.controller import (
 )
 from earshot.config import CastPolicy, ClimbRule, LateralCue, Localization
 from earshot.report.artifacts import episode_paths, read_audit, run_paths
-from earshot.report.audit import EpisodeAudit
+from earshot.report.audit import EpisodeAudit, SoundingWindowRecord
 from earshot.tools.detour_report import (
     BAND_EDGES_M,
     load_traces,
@@ -137,6 +147,12 @@ __all__ = [
     "score",
     "evaluate_gate",
     "field_by_scene",
+    "SOUNDING",
+    "SPANS_OFFSET",
+    "SILENT",
+    "SOUNDING_STATES",
+    "sounding_state",
+    "by_sounding",
     "format_report",
     "main",
 ]
@@ -152,6 +168,13 @@ UNVERIFIED = "unverified"      # a step's reconstruction disagreed with the reco
 BUILD = "BUILD"
 ONE_BRANCH = "ONE BRANCH"
 STOP = "STOP"
+
+# Where the source was while a completed leg was read (see `sounding_state`). A leg
+# whose record cannot say carries None and is reported as unknown.
+SOUNDING = "sounding"          # every reading before the offset step
+SPANS_OFFSET = "spans_offset"  # the source, or its cue tail, stopped during the leg
+SILENT = "silent"              # every reading is the bed alone
+SOUNDING_STATES = (SOUNDING, SPANS_OFFSET, SILENT)
 
 # provenance: ADR-0029 — the route change a leg needs before its verdict has a right
 # answer. Two forwards' worth; a nominal leg is eight.
@@ -209,6 +232,7 @@ class Leg:
     length_m: Optional[float] = None
     route_start_m: Optional[float] = None
     delta_route_m: Optional[float] = None
+    sounding: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -312,7 +336,8 @@ def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
             run=run, scene=scene, episode=int(audit.episode_index),
             start_step=int(rows[start].step), outcome=outcome)
         if outcome == COMPLETED:
-            leg = _measured(leg, rows[start + 1 : start + LEG_PERIOD + 1])
+            leg = _measured(
+                leg, rows[start + 1 : start + LEG_PERIOD + 1], audit.sounding_window)
         legs.append(leg)
     return EpisodeReplay(tuple(legs), checked, agreed, True, scatter is not None)
 
@@ -335,7 +360,40 @@ def _leg_outcome(
     return COMPLETED
 
 
-def _measured(leg: Leg, readings: Sequence[Any]) -> Leg:
+def sounding_state(
+    first_step: int, last_step: int, window: Optional[SoundingWindowRecord]
+) -> Optional[str]:
+    """Where the source was while a leg's readings were taken, from its window. Pure.
+
+    The fence posts are the smoke gate's (criterion 4). ``offset_step`` is the first
+    silent step, and the cue carries the room's tail until
+    ``offset_step + cue_tail_steps - 1``, the first step whose reading is exactly the bed.
+    So a leg is SOUNDING if its last reading comes before the offset step, SILENT if its
+    first reading is at or after the bed step, and SPANS_OFFSET otherwise: somewhere in
+    it the level fell because the source stopped, whichever way the agent walked.
+
+    A window with no offset step is ``WindowPolicy.CONTINUOUS``, so the source never
+    stopped and every leg is SOUNDING. ``None`` where the record cannot say: no window
+    at all, or no ``cue_tail_steps`` (a record from before ADR-0019's split).
+    """
+    if window is None:
+        return None
+    if window.offset_step is None:
+        return SOUNDING
+    if window.cue_tail_steps is None:
+        return None
+    offset = int(window.offset_step)
+    bed_from = offset + int(window.cue_tail_steps) - 1
+    if int(last_step) < offset:
+        return SOUNDING
+    if int(first_step) >= bed_from:
+        return SILENT
+    return SPANS_OFFSET
+
+
+def _measured(
+    leg: Leg, readings: Sequence[Any], window: Optional[SoundingWindowRecord]
+) -> Leg:
     """A completed leg's verdict inputs, off the readings the controller would hold."""
     positions = [r.position for r in readings]
     if any(p is None for p in positions):
@@ -353,6 +411,7 @@ def _measured(leg: Leg, readings: Sequence[Any]) -> Leg:
         length_m=length,
         route_start_m=None if first is None else float(first),
         delta_route_m=None if first is None or last is None else float(last) - float(first),
+        sounding=sounding_state(readings[0].step, readings[-1].step, window),
     )
 
 
@@ -644,13 +703,17 @@ def _grid_lines(gate: Mapping[str, Any]) -> List[str]:
         "rate.",
         "LOUDER and QUIETER are right/fired, pooled; worst run is the lowest accuracy in "
         "any one run.",
-        _GRID_ROW.format(
-            "T_LEG", "decisive", "LOUDER", "right", "worst run", "QUIETER", "right",
-            "worst run", "false-decisive"),
     ]
-    for row in gate["rows"]:
+    return lines + _grid_table(gate["rows"], indent="")
+
+
+def _grid_table(rows: Sequence[Mapping[str, Any]], *, indent: str) -> List[str]:
+    lines = [indent + _GRID_ROW.format(
+        "T_LEG", "decisive", "LOUDER", "right", "worst run", "QUIETER", "right",
+        "worst run", "false-decisive")]
+    for row in rows:
         pooled, branches = row["pooled"], row["branches"]
-        lines.append(_GRID_ROW.format(
+        lines.append(indent + _GRID_ROW.format(
             "{:.1f}".format(row["t_leg"]), _pct(row["decisive_rate"]),
             *_right_fired(pooled, LEG_LOUDER),
             _pct(branches[LEG_LOUDER]["worst_run_accuracy"]),
@@ -756,6 +819,94 @@ def _field_lines(field: Mapping[str, Mapping[str, Any]]) -> List[str]:
     return lines
 
 
+def _median_t(legs: Sequence[Leg]) -> Optional[float]:
+    values = [float(leg.t) for leg in legs if leg.t is not None]
+    return statistics.median(values) if values else None
+
+
+def by_sounding(runs: Sequence[RunReplay]) -> Dict[str, Dict[str, Any]]:
+    """The grid again, once per sounding state. Pure. **Not a gate.**
+
+    ``SOUNDING``, ``SPANS_OFFSET``, ``SILENT`` and ``"unknown"`` (a record that cannot
+    say), in that order. Each state carries its completed and informative counts, the
+    median ``t`` on legs that approached and on legs that receded, and the rows
+    ``evaluate_gate`` computes over that state's legs alone.
+
+    **The median ``t`` is the number that answers the question the split was built for**,
+    and it needs no ``T_LEG``. A leg that reads direction has a positive median on
+    approaching legs and a negative one on receding legs. A trend that pulls every leg
+    quieter pushes both negative, and it shows in the state where it lives.
+
+    The split was chosen after the gate read STOP, so a state that passes here has not
+    passed the gate. It would need its own pre-registration before it could.
+    """
+    labels = [run.label for run in runs]
+    states: Dict[str, Dict[str, Any]] = {}
+    for state in SOUNDING_STATES + ("unknown",):
+        wanted = None if state == "unknown" else state
+        picked = {
+            run.label: [
+                leg for leg in run.legs
+                if leg.outcome == COMPLETED and leg.sounding == wanted]
+            for run in runs}
+        pooled = [leg for label in labels for leg in picked[label]]
+        graded = [leg for leg in pooled if leg.delta_route_m is not None]
+        approached = [l for l in graded if l.delta_route_m <= -INFORMATIVE_ROUTE_M]
+        receded = [l for l in graded if l.delta_route_m >= INFORMATIVE_ROUTE_M]
+        states[state] = {
+            "n_completed": len(pooled),
+            "n_informative": len(approached) + len(receded),
+            "n_approached": len(approached),
+            "n_receded": len(receded),
+            "median_t_approached": _median_t(approached),
+            "median_t_receded": _median_t(receded),
+            "rows": evaluate_gate(picked)["rows"],
+        }
+    return states
+
+
+_STATE_NAMES = {SOUNDING: "sounding", SPANS_OFFSET: "spans offset", SILENT: "silent",
+                "unknown": "unknown"}
+_STATE_ROW = "  {:<13} {:>9} {:>11} {:>10} {:>8}  {:>20} {:>8}"
+
+
+def _t_cell(value: Optional[float]) -> str:
+    return "n/a" if value is None else "{:+.2f}".format(value)
+
+
+def _sounding_lines(states: Mapping[str, Mapping[str, Any]]) -> List[str]:
+    lines = [
+        "",
+        "BY SOUNDING STATE. NOT A GATE: this split was chosen after the gate read STOP.",
+        "sounding: every reading before the offset step. spans offset: the source or its "
+        "cue tail",
+        "stopped during the leg. silent: every reading at or after offset_step + "
+        "cue_tail_steps - 1,",
+        "where the cue is exactly the bed. Median t needs no T_LEG. If the leg reads "
+        "direction it is",
+        "positive on approaching legs and negative on receding ones. If something pulls "
+        "every leg",
+        "quieter, both are negative.",
+        _STATE_ROW.format("state", "completed", "informative", "approached", "receded",
+                          "median t: approached", "receded"),
+    ]
+    shown = [s for s in SOUNDING_STATES + ("unknown",)
+             if s != "unknown" or states[s]["n_completed"]]
+    for state in shown:
+        entry = states[state]
+        lines.append(_STATE_ROW.format(
+            _STATE_NAMES[state], entry["n_completed"], entry["n_informative"],
+            entry["n_approached"], entry["n_receded"],
+            _t_cell(entry["median_t_approached"]), _t_cell(entry["median_t_receded"])))
+    for state in shown:
+        if not states[state]["n_informative"]:
+            continue
+        lines.append("")
+        lines.append("  the grid, {} legs only".format(_STATE_NAMES[state]))
+        lines += _grid_table(states[state]["rows"], indent="  ")
+    return lines
+
+
 def format_report(
     runs: Sequence[RunReplay],
     gate: Mapping[str, Any],
@@ -773,6 +924,7 @@ def format_report(
     lines += _grid_lines(gate)
     lines += _gate_lines(gate)
     lines += _breakdown_lines(legs, display_t_leg, display_why)
+    lines += _sounding_lines(by_sounding(runs))
     if field is not None:
         lines += _field_lines(field)
     lines += [
@@ -838,6 +990,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 {key: value for key, value in asdict(run).items() if key != "legs"}
                 for run in runs],
             "gate": gate,
+            "by_sounding": by_sounding(runs),
             "field": field,
             "legs": [asdict(leg) for run in runs for leg in run.legs],
         }, indent=2))
