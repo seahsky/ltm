@@ -46,6 +46,7 @@ __all__ = [
     "load_outcomes",
     "pair_episodes",
     "mcnemar",
+    "arm_labels",
     "format_report",
     "main",
 ]
@@ -222,6 +223,33 @@ def _wrap(text: str) -> List[str]:
                          initial_indent="  ", subsequent_indent="  ")
 
 
+def arm_labels(before: str, after: str) -> Tuple[str, str]:
+    """The two names the report prints, and they have to be DIFFERENT names.
+
+    The basename is enough whenever the arms differ, which is the common case and stays
+    byte-identical: `runs/oracle-2/full` against `runs/oracle-2/oracle-loc-matched` still
+    prints `full` and `oracle-loc-matched`.
+
+    It is not enough for the comparison this repo runs most often after a sweep: THE SAME
+    ARM ACROSS TWO RUNS, which is how an apparatus flip rate is measured (`repeat-1`,
+    `dream-3` against `dream-4`, `oracle-1/full` against `oracle-2/full`). There both
+    basenames are `full`, and the report printed "full only 19" above "full only 22" and
+    "gained = reached in full only; lost = reached in full only" -- which side is which is
+    recoverable only by redoing the arithmetic against each run's own total.
+
+    So the suffix grows one path component at a time until the two differ, and stops at
+    the first one that does. Identical paths -- a run against itself -- get the report's
+    own `before`/`after` vocabulary rather than two identical names.
+    """
+    b, a = pathlib.PurePath(before).parts, pathlib.PurePath(after).parts
+    for depth in range(1, max(len(b), len(a)) + 1):
+        before_label, after_label = "/".join(b[-depth:]), "/".join(a[-depth:])
+        if before_label != after_label:
+            return before_label, after_label
+    name = pathlib.PurePath(before).name
+    return "{} (before)".format(name), "{} (after)".format(name)
+
+
 def format_report(
     pairing: Mapping[str, Any],
     result: Mapping[str, Any],
@@ -377,8 +405,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.before, args.after))
         return 2
     result = mcnemar(pairing["pairs"])
-    labels = (pathlib.Path(args.before).name, pathlib.Path(args.after).name)
-    print(format_report(pairing, result, labels=labels, stage=stage))
+    print(format_report(
+        pairing, result, labels=arm_labels(args.before, args.after), stage=stage))
     return 0
 
 
