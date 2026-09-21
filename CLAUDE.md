@@ -118,6 +118,9 @@ python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/oracle-loc-match
 # disagrees with is never graded. Prints the pre-registered branch (BUILD / ONE BRANCH /
 # STOP) and the grid of `T_LEG` it chose from. PRICES THE VERDICT, NOT THE SWEEP: those
 # legs were walked under blind alternation. Refuses any run that is not `full`'s rule.
+# It read STOP on 2026-09-21 (ADR-0029). BY SOUNDING STATE splits the legs by where the
+# source was, off each record's window: before the offset, across it, or on the bed
+# alone. That split is NOT a gate, because it was chosen after the STOP.
 # Read-only, no GPU, minutes
 python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracle-2/full
 
