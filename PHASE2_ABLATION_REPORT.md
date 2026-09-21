@@ -4421,3 +4421,69 @@ SWS 0.102 → 0.266 is now measured on a matched criterion, but it is a ceiling 
 
 **What is measured next.** ADR-0028's first branch names the cast-leg-endpoint change: compare level at leg endpoints 1 to 2 m apart instead of across one 0.25 m step. `detour_report`'s `sig/sc` 1.94 over 1.66 m plateau spans says the cue is recoverable at that baseline; `eps-1` proved a smaller epsilon over one step cannot recover it. It is the first lever in the arc with a measured ceiling behind it. Not booked: it needs its own record and an off-box price first.
 **ADR-0029 is that record, and it corrects this paragraph.** `is_rising` already compares two five-reading windows, so "one 0.25 m step" is `eps-1`'s unit and not the rule. The lever is a reader of each finished cast leg: one heading, noise measured off the fitted trend. The 1.94 is one scene of oracle trajectories and is re-measured at scale by the replay that gates it.
+
+# leg replay - ADR-0029's gate reads STOP (off-box readout, recorded 2026-09-21)
+
+`python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracle-2/full`, host riftvm, 2026-09-21, the tool as merged in PR #147.
+Read-only and no GPU. Three `full` arms, 846 episodes, the same behaviour rendered three times.
+**ADR-0029 pre-registered the branches, and the third one fired: STOP.**
+
+**The replay is exact.** 81,945 of 81,945 detour steps agree with the recorded `realizable_action`, and no leg is UNVERIFIED.
+
+| run | legs started | completed | cut by a surge | cut by a STOP | cut by the detour's end |
+|---|---|---|---|---|---|
+| `abl-2/full` | 2519 | 2167 | 121 | 0 | 231 |
+| `oracle-1/full` | 2593 | 2235 | 112 | 0 | 246 |
+| `oracle-2/full` | 2611 | 2264 | 106 | 0 | 241 |
+
+Of 6,666 completed legs, 6,272 have a route at both ends. 4,817 are informative (|Δroute| ≥ 0.5 m): 2,612 approached the source and 2,205 receded. 1,455 are uninformative.
+
+| T_LEG | decisive | LOUDER right/fired | worst run | QUIETER right/fired | worst run | false-decisive |
+|---|---|---|---|---|---|---|
+| 1.0 | 35.3% | 299/324, 92.3% | 90.4% | 784/1374, 57.1% | 54.9% | 19.7% |
+| 1.5 | 23.4% | 178/189, 94.2% | 92.2% | 555/937, 59.2% | 57.1% | 12.9% |
+| 2.0 | 13.9% | 110/117, 94.0% | 92.7% | 340/554, 61.4% | 59.1% | 7.2% |
+| 2.5 | 7.0% | 54/57, 94.7% | 94.1% | 172/282, 61.0% | 58.9% | 4.1% |
+| 3.0 | 3.1% | 28/29, 96.6% | 92.9% | 74/120, 61.7% | 58.3% | 2.0% |
+| 4.0 | 0.7% | 3/3, 100.0% | n/a | 23/32, 71.9% | 50.0% | 0.7% |
+| 6.0 | 0.0% | 0/0 | n/a | 1/2, 50.0% | n/a | 0.1% |
+
+**WHY STOP.** LOUDER passes both accuracy tests wherever it fires, and it is too rare: 324 of 4,817 informative legs at T 1.0, 6.7% against the 25% it needs.
+QUIETER is near chance at every value that fires on more than 32 legs, 57.1% to 61.7%.
+So BUILD fails on QUIETER, and ONE BRANCH fails on LOUDER's rate.
+
+**THE STOP RESTS ON A DETAIL FIXED BEFORE THE RUN, AND SAY SO WHEN QUOTING IT.** ADR-0029's text did not say whether one branch alone must be decisive on 25% of informative legs.
+PR #147 fixed that it must, before the replay read a run, from the ADR's own reason for the number: fewer changes too little of the cast to matter.
+Without that clause, LOUDER at T 1.0 would be ONE BRANCH, acting on about 108 informative legs per run of 282 episodes.
+Reopening it now would be a threshold chosen after the result, and that base rate is 0 for 7 (ADR-0025). A LOUDER-only arm needs its own pre-registration.
+
+**THE LEG CARRIES THE DIRECTION, AND SOMETHING PULLS EVERY LEG QUIETER.** At T 1.0:
+
+| legs | LOUDER | QUIETER |
+|---|---|---|
+| approached (2,612) | 299, 11.4% | 590, 22.6% |
+| receded (2,205) | 25, 1.1% | 784, 35.6% |
+
+Each branch separates the two directions by 10 to 13 points, so the fit reads a real direction signal.
+But QUIETER fires on approaching legs twice as often as LOUDER does. That is a downward trend along the leg that does not depend on which way the leg walks. Both are measured.
+
+**Hypothesis, not measured: the source had stopped.** `full` runs ADR-0017's windowed task at `fixed_steps`, `sounding_steps` 60, and the detour budget is `investigate_max_steps` 120.
+The detour opens at or after `t_anom`, so the source sounds for at most 60 of its steps, and a detour that runs its budget spends at least half of it with the source silent.
+A leg that spans the offset gets quieter whichever way it walks.
+`StepRecord.source_playing` is on every record, so splitting the legs by sounding state settles this off the same three runs.
+**If it holds, it reaches past this lever (inference):** `is_rising` compares a later window with an earlier one, so the same trend biases the climb against ever calling a rise.
+
+**Breakdowns at T 2.5**, the display default because the gate chose no value:
+- by leg length, QUIETER accuracy rises with length: 41.9% at 0.5–1 m (31 fired), 60.2% at 1–1.5 m, 65.4% at 1.5 m and over. LOUDER is 91% or higher in every bucket where it fires;
+- by route distance at the leg's start, QUIETER is at chance beyond 8 m (101 of 184, 54.9%) and 76.5% at 5–8 m. No informative leg starts inside 1 m.
+
+**The field, at scale.** `detour_report`'s plateau `sig/sc` has a median of **1.50** over 1,227 windows in 19 scenes, against ADR-0029's 1.94 from one scene of oracle trajectories. `mL8ThkuaVTM` builds no episodes.
+Per-scene medians run from 0.98 (`TEEsavR23oF`) to 2.99 (`mv2HUxq3B53`).
+70.6% of windows are louder nearer the source. The lowest are `bxsVRursffK` (40.0%), `DYehNKdT76V` (51.4%) and `Nfvxx8J5NCo` (54.2%).
+`4ok3usBNeis`, the `oracle-pilot` scene, reads 1.22 on realizable trajectories.
+
+**What STOP closes, and what it does not.** It closes `READ_LEGS` as ADR-0029 wrote it, with no box time spent.
+It does not show that a two-metre leg carries no gradient. The direction signal above is measured, and the cause of the downward trend is not.
+
+**What is measured next.** Split the legs by `source_playing`: sounding throughout, stopped mid-leg, silent throughout. It is read-only, it takes minutes, and it runs over the same three runs.
+It does not reopen the gate. It says whether the STOP is about the leg or about reading after the source stopped.
