@@ -141,14 +141,20 @@ Both arms now report one number twice. The confound `oracle-1` carried is gone.
 `detour_report --across-scenes` splits the 16 abandoned **identically** across the two runs — `5cdEh9F2hJL` 2, `mv2HUxq3B53` 3, `p53SfW6mjZe` 4, `qyAac8rV8Zk` 6, `wcojb4TFT35` 1 — with the same 12 unrouted and the same four routable failures (two each in `5cdEh9F2hJL` and `mv2HUxq3B53`).
 So the same episodes reach under either test; the 1.5 m arm stopped short of the ring and the 1.0 m arm walked the last half metre.
 `oracle-1`'s 2 of 270 was a measurement artefact and nothing else. It was never a harder task.
-The identity is at the scene grain, from two readouts; `episode_diff runs/oracle-1/oracle-loc runs/oracle-2/oracle-loc-matched` would put it at the episode grain and has not been run.
+**The episode grain confirms it:** `episode_diff runs/oracle-1/oracle-loc runs/oracle-2/oracle-loc-matched` reads 282 paired, 266 both, 16 neither, **zero discordant pairs**. Every single episode has the same reach outcome under either arrival test.
 
 **The arrival rule is spent.** `refused` 0 and `in-ring` 0 in every scene: no episode stood inside the ring and failed to arrive.
 **The structural ceiling is nearly attained.** 12 of 282 have no navmesh route to the source at any step, capping every arm at 270 of 282, 95.7%. The matched arm reads 266 of 282, 94.3%.
 
 **The baseline did not drift.** `full` at identical behaviour read 35.8% in `abl-2`, 33.0% in `oracle-1` and 31.9% here: 3.9 points over three sweeps, consistent with `repeat-1`'s 3.0-point flip noise.
 `oracle-2`'s code differs from `oracle-1`'s only in `oracle_arrived`, which returns `False` for `REALIZABLE` exactly as the inline expression did, and in `source_class` on the audit, which is a record field.
-So `episode_diff runs/oracle-1/full runs/oracle-2/full` is a free, current flip-rate measurement on the baseline of record, replacing `repeat-1`'s from the `arrive-2` era. It has not been run either.
+So the two `full` arms are a rerun at identical behaviour, and pairing them measures the apparatus.
+`episode_diff runs/oracle-1/full runs/oracle-2/full`: 282 paired, 71 both, 170 neither, **41 discordant (22 against 19), a 14.5% flip rate**, net −3, exact McNemar p = 0.7552, with the flips spread over 17 of 19 scenes.
+That is the current flip rate on the baseline of record, and it agrees with `repeat-1`'s 16.2% from the `arrive-2` era. It moves the paired MDE at `n = 282` from 6.71 to 6.36 points — not enough to change `power.MEASURED_FLIP_RATE`, and the conservative constant is the safer one to keep.
+The null control passed: the tool did not call a difference where the behaviour is identical.
+
+**The noise lives where the gap lives.** The oracle pair flipped **0 of 282** across two runs; the `full` pair flipped **41 of 282**.
+Both pairs are reruns with a fresh render, and only the realizable arm steers by what it hears. The inference — not a measurement, because the oracle pair also differs in arrival test, which the zero shows did not matter — is that the whole of the run-to-run noise enters through the audio-driven steering. That is the same place the 65-point gap is, which makes it a property of the localization rather than of the navigation stack or the scene loader.
 
 **What this does not show.** A ceiling bounds; it does not promise.
 Nothing here says a realizable method can approach 98.5%.

@@ -4401,14 +4401,20 @@ The two arms share the follower, the step budget, the navmesh, the scan/cast swe
 **TIGHTENING THE RING COST NOTHING.** `oracle-1`'s `oracle-loc` (1.5 m) reached 266 of 282; this run's matched arm (1.0 m confirm) reached 266 of 282.
 `detour_report --across-scenes` splits the 16 abandoned identically across the two runs — `5cdEh9F2hJL` 2, `mv2HUxq3B53` 3, `p53SfW6mjZe` 4, `qyAac8rV8Zk` 6, `wcojb4TFT35` 1 — with the same 12 unrouted and the same 4 routable failures (2 in `5cdEh9F2hJL`, 2 in `mv2HUxq3B53`).
 The same episodes reach under either test. `oracle-1`'s 2 of 270 Find-SR@1m was a measurement artefact and never a harder task.
-This identity is at the SCENE grain; `episode_diff runs/oracle-1/oracle-loc runs/oracle-2/oracle-loc-matched` would put it at the episode grain and has not been run.
+**AND AT THE EPISODE GRAIN:** `episode_diff runs/oracle-1/oracle-loc runs/oracle-2/oracle-loc-matched` reads 282 paired, 266 both, 16 neither, **ZERO discordant pairs**. Every episode has the same reach outcome under either arrival test.
 
 `refused` 0 and `in-ring` 0 in every scene: the arrival rule refuses nothing, so the `arrive-2` lever is spent.
 The 12 unrouted cap every arm at 270 of 282 = 95.7%; the matched arm reads 266 of 282 = 94.3%, so the structural ceiling is nearly attained.
 
 **THE BASELINE DID NOT DRIFT, and this is a third reading of the apparatus.**
 `full` at identical behaviour: `abl-2` 35.8%, `oracle-1` 33.0%, `oracle-2` 31.9%. A 3.9-point spread over three sweeps, consistent with `repeat-1`'s 3.0-point flip noise.
-The code between `oracle-1` and `oracle-2` changed the realizable path in nothing: `oracle_arrived` returns `False` for `REALIZABLE`, as the inline expression it replaced did, and `source_class` is a record field. So `episode_diff runs/oracle-1/full runs/oracle-2/full` is a free, current flip rate on the baseline of record, which would retire `repeat-1`'s from the `arrive-2` era. Not yet run.
+The code between `oracle-1` and `oracle-2` changed the realizable path in nothing: `oracle_arrived` returns `False` for `REALIZABLE`, as the inline expression it replaced did, and `source_class` is a record field. So the two `full` arms are a rerun at identical behaviour, and pairing them measures the apparatus.
+
+**THE CURRENT FLIP RATE ON THE BASELINE OF RECORD: 14.5%.** `episode_diff runs/oracle-1/full runs/oracle-2/full`: 282 paired, 71 both, 170 neither, 41 discordant (22 against 19), net −3, exact McNemar p = 0.7552, flips spread over 17 of 19 scenes.
+It agrees with `repeat-1`'s 16.2% from the `arrive-2` era, and it moves the paired MDE at n=282 from 6.71 to 6.36 points (`power.mde_paired`). Not enough to change `power.MEASURED_FLIP_RATE`; the conservative constant stays. The null control passed: no difference called where the behaviour is identical.
+**The label defect this surfaced**: both arms printed as `full`, so the output read "full only 19" above "full only 22". PR #144 names the same arm across two runs by its run.
+
+**THE NOISE LIVES WHERE THE GAP LIVES.** The oracle pair flipped 0 of 282 across two runs; the `full` pair flipped 41 of 282. Both are reruns with a fresh render and only the realizable arm steers by what it hears. The inference, not a measurement (the oracle pair also differs in arrival test, which the zero shows did not matter), is that all of the run-to-run noise enters through the audio-driven steering — the same place the 65-point gap is.
 
 **Not claimed.** A ceiling bounds and does not promise: nothing here says a realizable method approaches 98.5%. The anomaly object's view-point list is seeded with the source position, so the confirm is near-certain once the oracle agent arrives — which isolates "can it get there" from "does it know where there is", and means goal detection is exercised in neither arm (the oracle-STOP disclosure the smoke prints on every scene).
 SWS 0.102 → 0.266 is now measured on a matched criterion, but it is a ceiling on SWS for the same reason and says nothing about a realizable arm's.
