@@ -3,7 +3,7 @@
 Status: **accepted**, 2026-09-21 (PR #146), with the gate's thresholds as proposed.
 Amends ADR-0016's cast. The surge, the scan, the arrival rule and `is_rising` carry unchanged.
 **Gated on an off-box replay.** No controller code ships and no night is booked until the replay's pre-registered branch says so.
-The replay is built (`earshot/tools/leg_replay.py`) and has not yet read a run; see "The gate, operationalized".
+**The gate ran on 2026-09-21 and read STOP.** `READ_LEGS` does not ship; see "The result".
 
 `oracle-2` measured the headroom: Find-SR@1m is 33.3% for `full` and 98.5% for the same controller handed the source coordinate, on the same criterion, over the same episodes (ADR-0028).
 The follower, the budget, the navmesh and the arrival rule ran unchanged in both arms, so the 65.2 points are localization.
@@ -130,6 +130,21 @@ The replay imports them rather than keeping its own copy, so the gate prices the
 
 **What the replay cannot say.** The legs in `full` were walked under blind alternation. A reading rule changes which legs get walked, so the replay prices the *verdict*, not the sweep.
 It is the same caveat `detour_report` prints on its arrival ceiling: a ceiling, not a prediction.
+
+## The result
+
+`leg_replay` over `abl-2/full`, `oracle-1/full` and `oracle-2/full`, 2026-09-21: **STOP**.
+The full readout is in `PHASE2_ABLATION_REPORT.md` under "leg replay".
+
+- **The replay is exact:** 81,945 of 81,945 detour steps agree with the recorded rule, and no leg is unverified. 6,666 legs completed, and 4,817 are informative.
+- **LOUDER is right and rare.** At T 1.0 it is 92.3% right pooled and 90.4% in the worst run, and it fires on 324 informative legs, 6.7%.
+- **QUIETER is near chance:** 57.1% to 61.7% at every value where it fires on more than 32 legs.
+- **The STOP depends on the second operational detail above.** Judged on accuracy alone, LOUDER would be ONE BRANCH at T 1.0. That detail was fixed before the run, so the STOP stands. A LOUDER-only arm needs its own pre-registration.
+- **The leg reads direction, over a downward trend.** At T 1.0, approaching legs read LOUDER 11.4% and QUIETER 22.6%. Receding legs read LOUDER 1.1% and QUIETER 35.6%.
+- **Hypothesis, not measured:** `full`'s source sounds for 60 steps and the detour budget is 120, so legs after the offset get quieter whichever way they walk. `source_playing` on the same records settles it.
+- **The 1.94 re-measured at scale:** a median plateau `sig/sc` of 1.50 over 1,227 windows in 19 scenes, with 70.6% of windows louder nearer the source.
+
+The night below is not booked.
 
 ## The night, if the gate passes
 
