@@ -1,8 +1,9 @@
 # ADR-0029: the cast reads its own legs
 
-Status: **proposed**, 2026-09-21.
+Status: **accepted**, 2026-09-21 (PR #146), with the gate's thresholds as proposed.
 Amends ADR-0016's cast. The surge, the scan, the arrival rule and `is_rising` carry unchanged.
 **Gated on an off-box replay.** No controller code ships and no night is booked until the replay's pre-registered branch says so.
+The replay is built (`earshot/tools/leg_replay.py`) and has not yet read a run; see "The gate, operationalized".
 
 `oracle-2` measured the headroom: Find-SR@1m is 33.3% for `full` and 98.5% for the same controller handed the source coordinate, on the same criterion, over the same episodes (ADR-0028).
 The follower, the budget, the navmesh and the arrival rule ran unchanged in both arms, so the 65.2 points are localization.
@@ -109,6 +110,24 @@ All three runs postdate the three fields by date (`realizable_action` 2026-08-07
 50% is chance. 75% is a verdict right three times in four, and fewer than a quarter of informative legs changes too little of the cast to matter.
 **Those two numbers are judgment rather than derivation, and they are the one decision in this ADR that is Sky's to set before the replay runs.**
 
+### The gate, operationalized before the replay read a run
+
+Building the replay forced four details the branches above leave open.
+Each is fixed in the commit that builds the tool, before it has read a single run, so none of them can be chosen by looking at the result.
+
+- **The grid.** `T_LEG` is chosen from 1.0, 1.5, 2.0, 2.5, 3.0, 4.0 and 6.0, and from nothing else.
+- **Each branch is judged alone.** BUILD needs LOUDER and QUIETER each right at least 75% pooled and at least 70% in every run, and the two together decisive on at least 25% of informative legs. ONE BRANCH needs one branch to pass those accuracy tests and to be decisive on at least 25% of informative legs by itself. The branch text above reads BUILD on the pooled accuracy of both verdicts, but ONE BRANCH only makes sense if each branch is judged separately. Pooling would also let a right LOUDER branch carry a coin-flip QUIETER branch over 75%, and QUIETER is the verdict that reverses the agent.
+- **Where several values pass, the most decisive is chosen.** It changes the most of the cast at the accuracy the gate demands. Ties go to the smaller `T_LEG`.
+- **An accuracy that could not be measured fails.** A branch that fired on no informative leg in one run has no accuracy in that run, and it does not pass.
+
+**The fifth report item was wrong, and the replay reports a replacement.** "How often `is_rising` fired on those same legs" is zero on every leg the replay grades, by construction. A leg gets a verdict only if it reaches its next turn, and a surge would have ended it first.
+The replay reports instead how many completed legs walked 0.5 m or more toward the source with no surge.
+The current reader missed each of those legs, and a right LOUDER verdict is what `READ_LEGS` would add there.
+
+**`leg_t` and `leg_verdict` are in `agent/controller.py` already**, and so far only the replay calls them.
+The replay imports them rather than keeping its own copy, so the gate prices the function the arm will run.
+`leg_verdict` takes `t_leg` with no default, so the arm cannot run at a value the replay did not choose.
+
 **What the replay cannot say.** The legs in `full` were walked under blind alternation. A reading rule changes which legs get walked, so the replay prices the *verdict*, not the sweep.
 It is the same caveat `detour_report` prints on its arrival ceiling: a ceiling, not a prediction.
 
@@ -131,7 +150,7 @@ DREAM's arc is the reason: its memory term was the first lever in this repo prov
 
 ## Consequences
 
-- `CastPolicy.READ_LEGS`, one pure function `leg_verdict` in `agent/controller.py`, and `cast_action` gains the last verdict as an argument.
+- `CastPolicy.READ_LEGS`, and `cast_action` gains the last verdict as an argument. The two pure functions it calls, `leg_t` and `leg_verdict` in `agent/controller.py`, landed with the replay.
 - `ControllerState` carries the current leg's readings and positions. The runner trims `energy_history`, and a leg is longer than the window. This is the same reason the plateau counter lives on the state (ADR-0016).
 - **The reversal needs checking on the fake world before the box.** A rule turn becomes a probe offset, and the follower, not the rule, turns the body. So the realized heading change of "reverse" has to be asserted as 180° in a test, not assumed.
 - `oracle-2` inferred that the run-to-run noise enters through the audio-driven steering. A reader that acts on more of the audio may add variance, which is a second reason the repeat runs in the same night.

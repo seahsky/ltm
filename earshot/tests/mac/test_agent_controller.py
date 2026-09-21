@@ -25,12 +25,17 @@ from earshot.agent.controller import (
     ACT_TURN_LEFT,
     ACT_TURN_RIGHT,
     CAST_STEPS,
+    LEG_INCONCLUSIVE,
+    LEG_LOUDER,
+    LEG_QUIETER,
     SCAN_STEPS,
     SOURCE_PSEUDO_GOAL,
     ControllerState,
     NavMode,
     is_diverting,
     is_rising,
+    leg_t,
+    leg_verdict,
     next_plateau_steps,
     realizable_investigate_probe,
     realizable_investigate_step,
@@ -875,3 +880,76 @@ class TestCastPolicyAcrossAFullDetour(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# A nine-reading leg, 0.25 m apart: the readings the controller holds at the next turn.
+LEG_M = [0.25 * i for i in range(CAST_STEPS + 1)]
+# Deterministic scatter with zero mean and no trend, so a test's slope is the one it set.
+SCATTER = [0.004, -0.003, 0.002, -0.004, 0.003, -0.002, 0.004, -0.003, -0.001]
+
+
+class TestTheLegReader(unittest.TestCase):
+    """ADR-0029's `leg_t` and `leg_verdict`, which `tools/leg_replay` prices before any
+    controller code calls them. ADR-0014's two arms: a leg that got louder reads louder,
+    and one that got quieter or stayed flat does NOT."""
+
+    def _leg(self, slope):
+        return [0.05 + slope * d + e for d, e in zip(LEG_M, SCATTER)]
+
+    def test_a_leg_that_got_louder_reads_louder(self):
+        t = leg_t(LEG_M, self._leg(0.01))
+        self.assertGreater(t, 3.0)
+        self.assertEqual(leg_verdict(t, t_leg=2.5), LEG_LOUDER)
+
+    def test_a_leg_that_got_quieter_reads_quieter_and_never_louder(self):
+        t = leg_t(LEG_M, self._leg(-0.01))
+        self.assertLess(t, -3.0)
+        self.assertEqual(leg_verdict(t, t_leg=2.5), LEG_QUIETER)
+
+    def test_a_flat_leg_is_inconclusive(self):
+        """The forced failure: scatter alone must not buy a verdict at a sane bar."""
+        t = leg_t(LEG_M, self._leg(0.0))
+        self.assertLess(abs(t), 2.5)
+        self.assertEqual(leg_verdict(t, t_leg=2.5), LEG_INCONCLUSIVE)
+
+    def test_the_trend_does_not_enter_its_own_noise(self):
+        """ADR-0029's second gap in `is_rising`. Its bar is the SD of the pooled
+        readings, which carries the trend, so a steeper climb raises its own bar. The
+        leg's noise is the residual off the line, which the slope does not change, so t
+        moves by the same amount for each equal step in slope."""
+        flat, shallow, steep = (leg_t(LEG_M, self._leg(k)) for k in (0.0, 0.01, 0.02))
+        self.assertAlmostEqual(steep - shallow, shallow - flat, places=9)
+
+    def test_a_pinned_agent_gets_no_verdict(self):
+        """Nine readings at one place never tested the field."""
+        self.assertIsNone(leg_t([1.0] * 9, self._leg(0.01)))
+        self.assertEqual(leg_verdict(None, t_leg=2.5), LEG_INCONCLUSIVE)
+
+    def test_too_few_readings_get_no_verdict(self):
+        self.assertIsNone(leg_t([0.0, 0.25], [0.05, 0.06]))
+
+    def test_a_perfect_line_is_withheld_rather_than_infinite(self):
+        """Zero residual is a synthetic trace. An unbounded t would read as the
+        strongest verdict the reader ever gave."""
+        self.assertIsNone(leg_t(LEG_M, [0.05 + 0.01 * d for d in LEG_M]))
+
+    def test_mismatched_series_raise(self):
+        with self.assertRaises(ValueError):
+            leg_t(LEG_M, [0.05] * 3)
+
+    def test_the_bar_is_strict(self):
+        """At exactly the critical value the reader has not cleared it."""
+        self.assertEqual(leg_verdict(2.5, t_leg=2.5), LEG_INCONCLUSIVE)
+        self.assertEqual(leg_verdict(-2.5, t_leg=2.5), LEG_INCONCLUSIVE)
+
+    def test_a_negative_bar_raises(self):
+        with self.assertRaises(ValueError):
+            leg_verdict(1.0, t_leg=-1.0)
+
+    def test_the_critical_value_has_no_default(self):
+        """ADR-0029 sets it off-box, from the replay, before the arm runs once. A
+        default would be a threshold set before the measurement that sets it."""
+        import inspect
+
+        parameter = inspect.signature(leg_verdict).parameters["t_leg"]
+        self.assertIs(parameter.default, inspect.Parameter.empty)

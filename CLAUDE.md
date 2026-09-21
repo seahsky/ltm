@@ -111,6 +111,16 @@ nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
   --arms "full oracle-loc-matched"
 python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/oracle-loc-matched
 
+# ADR-0029's GATE, BEFORE ANY CONTROLLER CODE: does a finished cast leg know which way
+# the source is? Grades the verdict `READ_LEGS` would act on, over `full`'s own legs,
+# against the change in route to the source. The legs are the controller's, rebuilt
+# and checked step by step against the recorded `realizable_action`; a leg the record
+# disagrees with is never graded. Prints the pre-registered branch (BUILD / ONE BRANCH /
+# STOP) and the grid of `T_LEG` it chose from. PRICES THE VERDICT, NOT THE SWEEP: those
+# legs were walked under blind alternation. Refuses any run that is not `full`'s rule.
+# Read-only, no GPU, minutes
+python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracle-2/full
+
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
 # it, so the run's own central quantity reached nobody.
