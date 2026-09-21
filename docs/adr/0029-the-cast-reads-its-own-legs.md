@@ -143,6 +143,9 @@ The full readout is in `PHASE2_ABLATION_REPORT.md` under "leg replay".
 - **The leg reads direction, over a downward trend.** At T 1.0, approaching legs read LOUDER 11.4% and QUIETER 22.6%. Receding legs read LOUDER 1.1% and QUIETER 35.6%.
 - **Hypothesis, not measured:** `full`'s source sounds for 60 steps and the detour budget is 120, so legs after the offset get quieter whichever way they walk. `source_playing` on the same records settles it.
 - **The 1.94 re-measured at scale:** a median plateau `sig/sc` of 1.50 over 1,227 windows in 19 scenes, with 70.6% of windows louder nearer the source.
+- **The sounding split (PR #149, not a gate) keeps the STOP.** Restricted to legs read while the source sounded, LOUDER fires on 14.4% and QUIETER is 59.3% right, so neither branch passes.
+  The gate's denominator counted 2,163 informative legs read on the bed alone, where the cue is constant and no reader can decide. That understated every decisive rate, and it did not change the branch.
+- **The windowed source explains only the 573 legs that span the offset**, which read QUIETER at chance. Sounding legs carry direction (median t −0.37 approaching, −1.38 receding) on top of a shift of about −0.9 that the offset does not explain. The loop phase is the candidate cause, and it is not measured.
 
 The night below is not booked.
 
