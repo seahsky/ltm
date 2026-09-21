@@ -4377,3 +4377,46 @@ The 12 unrouted episodes **cap any Find-SR at 270 of 282, 95.7%**, under any con
 The one-scene `oracle-pilot` that preceded this (15/15 on `4ok3usBNeis`, McNemar p = 0.0020 against `abl-2/full`'s 5/15) is superseded; its 84%-plateaued figure rests on a reconstruction neither oracle arm can validate, which PR #139 makes `detour_report` say.
 
 **What is measured next.** `--arms "full oracle-loc-matched"`, about 3h30m, `full` as the in-run control. ADR-0028 pre-registers the three branches on the matched arm's Find-SR@1m against `full`'s 33.0%.
+
+# oracle-2 - localization is the whole gap (run report, recorded 2026-09-21)
+
+`bash earshot/tools/ablation_sweep.sh --tag oracle-2 --arms "full oracle-loc-matched"`, 3h36m, exit 0, commit `66927ed`, host riftvm, 2026-09-20.
+Two arms, 19 val scenes, 15 episodes each, `n = 282` paired per arm, every smoke gate GREEN.
+**ADR-0028 pre-registered it, and its first branch fired.**
+
+| arm | source reached | **Find-SR@1m** | source SPL | steps/ep | SWS |
+|---|---|---|---|---|---|
+| `full` | 90 / 282 = 31.9% | **90 / 270 = 33.3%** | 0.253 | 192.2 | 0.102 |
+| `oracle-loc-matched` | 266 / 282 = 94.3% | **266 / 270 = 98.5%** | 0.926 (median 1.000) | 178.4 | 0.266 |
+
+`episode_diff`: 282 paired, 90 both, 16 neither, **176 matched-only, 0 full-only, exact McNemar p = 0.0000**, gains in **19 of 19 scenes** (sign-test threshold 15). Every pair agreed on `source_xyz`.
+With all 176 discordant pairs on one side the p is arithmetic: two-sided exact is 0.5^175, about 2e-53.
+
+**LOCALIZATION IS WORTH 65.2 POINTS OF FIND-SR@1m, AND IT IS THE WHOLE GAP.**
+The two arms share the follower, the step budget, the navmesh, the scan/cast sweep and — since ADR-0028 — the arrival test. They differ in whether the agent is handed the source coordinate. That is worth everything between 33.3% and 98.5%, on the baseline's own criterion, in the same night, over the same episodes.
+
+**THE CONFOUND IS GONE, and the record shows it rather than the argument.**
+`oracle-loc-matched` reads **266 reached and 266 Find-SR@1m**, the identity `full` shows at 90 and 90. ADR-0028 predicted it: a 1.0 m geodesic confirm implies a 1.0 m horizontal reach, so every matched arrival is inside the ring the metric scores.
+
+**TIGHTENING THE RING COST NOTHING.** `oracle-1`'s `oracle-loc` (1.5 m) reached 266 of 282; this run's matched arm (1.0 m confirm) reached 266 of 282.
+`detour_report --across-scenes` splits the 16 abandoned identically across the two runs — `5cdEh9F2hJL` 2, `mv2HUxq3B53` 3, `p53SfW6mjZe` 4, `qyAac8rV8Zk` 6, `wcojb4TFT35` 1 — with the same 12 unrouted and the same 4 routable failures (2 in `5cdEh9F2hJL`, 2 in `mv2HUxq3B53`).
+The same episodes reach under either test. `oracle-1`'s 2 of 270 Find-SR@1m was a measurement artefact and never a harder task.
+**AND AT THE EPISODE GRAIN:** `episode_diff runs/oracle-1/oracle-loc runs/oracle-2/oracle-loc-matched` reads 282 paired, 266 both, 16 neither, **ZERO discordant pairs**. Every episode has the same reach outcome under either arrival test.
+
+`refused` 0 and `in-ring` 0 in every scene: the arrival rule refuses nothing, so the `arrive-2` lever is spent.
+The 12 unrouted cap every arm at 270 of 282 = 95.7%; the matched arm reads 266 of 282 = 94.3%, so the structural ceiling is nearly attained.
+
+**THE BASELINE DID NOT DRIFT, and this is a third reading of the apparatus.**
+`full` at identical behaviour: `abl-2` 35.8%, `oracle-1` 33.0%, `oracle-2` 31.9%. A 3.9-point spread over three sweeps, consistent with `repeat-1`'s 3.0-point flip noise.
+The code between `oracle-1` and `oracle-2` changed the realizable path in nothing: `oracle_arrived` returns `False` for `REALIZABLE`, as the inline expression it replaced did, and `source_class` is a record field. So the two `full` arms are a rerun at identical behaviour, and pairing them measures the apparatus.
+
+**THE CURRENT FLIP RATE ON THE BASELINE OF RECORD: 14.5%.** `episode_diff runs/oracle-1/full runs/oracle-2/full`: 282 paired, 71 both, 170 neither, 41 discordant (22 against 19), net −3, exact McNemar p = 0.7552, flips spread over 17 of 19 scenes.
+It agrees with `repeat-1`'s 16.2% from the `arrive-2` era, and it moves the paired MDE at n=282 from 6.71 to 6.36 points (`power.mde_paired`). Not enough to change `power.MEASURED_FLIP_RATE`; the conservative constant stays. The null control passed: no difference called where the behaviour is identical.
+**The label defect this surfaced**: both arms printed as `full`, so the output read "full only 19" above "full only 22". PR #144 names the same arm across two runs by its run.
+
+**THE NOISE LIVES WHERE THE GAP LIVES.** The oracle pair flipped 0 of 282 across two runs; the `full` pair flipped 41 of 282. Both are reruns with a fresh render and only the realizable arm steers by what it hears. The inference, not a measurement (the oracle pair also differs in arrival test, which the zero shows did not matter), is that all of the run-to-run noise enters through the audio-driven steering — the same place the 65-point gap is.
+
+**Not claimed.** A ceiling bounds and does not promise: nothing here says a realizable method approaches 98.5%. The anomaly object's view-point list is seeded with the source position, so the confirm is near-certain once the oracle agent arrives — which isolates "can it get there" from "does it know where there is", and means goal detection is exercised in neither arm (the oracle-STOP disclosure the smoke prints on every scene).
+SWS 0.102 → 0.266 is now measured on a matched criterion, but it is a ceiling on SWS for the same reason and says nothing about a realizable arm's.
+
+**What is measured next.** ADR-0028's first branch names the cast-leg-endpoint change: compare level at leg endpoints 1 to 2 m apart instead of across one 0.25 m step. `detour_report`'s `sig/sc` 1.94 over 1.66 m plateau spans says the cue is recoverable at that baseline; `eps-1` proved a smaller epsilon over one step cannot recover it. It is the first lever in the arc with a measured ceiling behind it. Not booked: it needs its own record and an off-box price first.
