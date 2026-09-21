@@ -55,6 +55,7 @@ is a clean switch, not a better climb.
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Optional, Sequence, Tuple
@@ -83,6 +84,11 @@ __all__ = [
     "is_rising",
     "cast_action",
     "next_plateau_steps",
+    "LEG_LOUDER",
+    "LEG_QUIETER",
+    "LEG_INCONCLUSIVE",
+    "leg_t",
+    "leg_verdict",
     "realizable_investigate_step",
     "realizable_investigate_probe",
     "is_diverting",
@@ -541,6 +547,88 @@ def next_plateau_steps(
     if rising:
         return 0
     return max(0, int(plateau_steps)) + 1
+
+
+# ADR-0029's three leg verdicts. Plain strings, as the actions above are, so a replay or a
+# record can carry one without importing anything from this module.
+LEG_LOUDER = "louder"
+LEG_QUIETER = "quieter"
+LEG_INCONCLUSIVE = "inconclusive"
+
+
+def leg_t(displacements: Sequence[float], levels: Sequence[float]) -> Optional[float]:
+    """How clearly one cast leg got louder or quieter, as a t-statistic. Pure.
+
+    ADR-0029's reader. ``displacements`` is how far along the leg's heading the agent
+    stood at each reading, and ``levels`` is the cue it measured there. The result is the
+    least-squares slope of level on displacement over its standard error: positive when
+    the leg got louder as it went, negative when it got quieter.
+
+    **It differs from ``is_rising`` in the two ways ADR-0029 names.** Its readings are one
+    heading's, so no turn enters them. And its noise is the residual off the fitted line,
+    so the trend under test does not raise its own bar. ``is_rising`` takes the SD of the
+    pooled readings, which carries the trend: on a noiseless linear climb that bar is
+    already 38% of the gap.
+
+    ``None`` where the statistic is not defined: fewer than three readings, no spread in
+    displacement (an agent pinned to a wall never tested the field), or a residual of
+    exactly zero. A zero residual is a synthetic trace and never a rendered one, and an
+    unbounded t would read as the strongest verdict the reader ever gave.
+
+    **Not a p-value.** Readings along a leg share the cue tail and the loop phase, so they
+    are autocorrelated, and a critical value's nominal level is not its false-positive
+    rate. ``tools/leg_replay`` measures that rate on legs whose route did not change.
+    """
+    xs = [float(x) for x in displacements]
+    ys = [float(y) for y in levels]
+    n = len(xs)
+    if n != len(ys):
+        raise ValueError(
+            "a leg needs one level per displacement: got {} displacement(s) and {} "
+            "level(s)".format(n, len(ys)))
+    if n < 3:
+        return None
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx <= 0.0:
+        return None
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / sxx
+    intercept = mean_y - slope * mean_x
+    rss = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    # "Exactly zero" means below what the levels can resolve: rounding in the sums
+    # leaves a perfect line a residual near 1e-18, not 0.0, and a t near 1e16. A rendered
+    # cue scatters at around 1e-3 of its level, far above this floor.
+    resolution = n * sys.float_info.epsilon * max(abs(y) for y in ys)
+    if math.sqrt(rss / (n - 2)) <= resolution:
+        return None
+    return slope / math.sqrt(rss / (n - 2) / sxx)
+
+
+def leg_verdict(t: Optional[float], *, t_leg: float) -> str:
+    """``LEG_LOUDER``, ``LEG_QUIETER`` or ``LEG_INCONCLUSIVE``, from ``leg_t``. Pure.
+
+    ``t_leg`` has no default, on purpose. ADR-0029 chooses it off-box, on three runs
+    already on disk, before the arm runs once. A default here would be a threshold set
+    before the measurement that sets it, and the base rate for those is 0 for 7 in this
+    repo (ADR-0025).
+
+    INCONCLUSIVE covers every case the reader cannot call, an undefined ``t`` included,
+    and it means "cast as today". So a reader that never clears ``t_leg`` leaves the arm
+    byte-identical to ``full``.
+    """
+    bar = float(t_leg)
+    if bar < 0.0:
+        raise ValueError(
+            "t_leg is a critical value and cannot be negative (got {}): below zero the "
+            "LOUDER and QUIETER regions overlap".format(t_leg))
+    if t is None:
+        return LEG_INCONCLUSIVE
+    if float(t) > bar:
+        return LEG_LOUDER
+    if float(t) < -bar:
+        return LEG_QUIETER
+    return LEG_INCONCLUSIVE
 
 
 def realizable_investigate_probe(action: str, pose: Pose, cfg: ControllerConfig) -> Xyz:
