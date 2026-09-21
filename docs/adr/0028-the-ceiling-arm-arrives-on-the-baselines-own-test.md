@@ -1,6 +1,6 @@
 # ADR-0028: the localization ceiling arm arrives on the baseline's own test
 
-Status: accepted, 2026-09-20.
+Status: accepted, 2026-09-20. **Measured 2026-09-20 (`oracle-2`): the first pre-registered branch fired** — see "The result" at the end.
 Adds `Localization.ORACLE_MATCHED`. Does not change `Localization.ORACLE`.
 
 `oracle-1` was the first `--localization oracle` run in the history of this repo.
@@ -114,3 +114,47 @@ It is still two axes, and a future detector whose confirm is not a distance test
 `realizable_action` is written in `step_controller`'s `if realizable:` branch, so every non-realizable arm is blind to it, `oracle_matched` as much as `oracle`.
 Matching on the name would have sent an `oracle_matched` run down "re-run to arm the check", which is a night spent arriving back at the same zero — the cost that branch exists to prevent.
 The test is now "no realizable episode in this run", and two oracle-family arms run together read as unarmable rather than merely mixed, because splitting them produces two unarmable halves.
+
+## The result
+
+`ablation_sweep.sh --tag oracle-2 --arms "full oracle-loc-matched"`, 19 HM3D val scenes, 15 episodes each, `n = 282` per arm, 3 h 36 m, exit 0, commit `66927ed`, every smoke gate green.
+
+| arm | source reached | **Find-SR@1m** | source SPL | steps/ep | SWS |
+|---|---|---|---|---|---|
+| `full` | 90 / 282 = 31.9% | **90 / 270 = 33.3%** | 0.253 | 192.2 | 0.102 |
+| `oracle-loc-matched` | 266 / 282 = 94.3% | **266 / 270 = 98.5%** | 0.926 | 178.4 | 0.266 |
+
+`episode_diff`: 282 paired, 90 both, 16 neither, **176 matched-only, 0 full-only**, exact McNemar p = 0.0000, gains in **19 of 19 scenes** against a sign-test threshold of 15.
+With every discordant pair on one side the p is arithmetic rather than estimated: two-sided exact is 0.5^175, about 2e-53.
+
+**The first branch fired: localization is the whole gap.**
+65.2 points of Find-SR@1m separate the baseline from a ceiling scored on the baseline's own criterion, in the same night, over the same episodes.
+The follower, the step budget, the navmesh and the arrival rule ran unchanged in both arms. Only the source coordinate differs, and it is worth everything between 33.3% and 98.5%.
+
+**The arm did what it was built to do, and the record proves it rather than the argument.**
+This ADR predicted that a 1.0 m geodesic confirm implies a 1.0 m horizontal reach, so every matched arrival lands inside the ring Find-SR scores.
+Measured: **266 reached and 266 Find-SR@1m**, the same identity `full` shows at 90 and 90.
+Both arms now report one number twice. The confound `oracle-1` carried is gone.
+
+**Tightening the ring cost nothing, and that settles what `oracle-1` measured.**
+`oracle-loc` at 1.5 m reached 266 of 282. `oracle-loc-matched` at the 1.0 m confirm reached 266 of 282.
+`detour_report --across-scenes` splits the 16 abandoned **identically** across the two runs — `5cdEh9F2hJL` 2, `mv2HUxq3B53` 3, `p53SfW6mjZe` 4, `qyAac8rV8Zk` 6, `wcojb4TFT35` 1 — with the same 12 unrouted and the same four routable failures (two each in `5cdEh9F2hJL` and `mv2HUxq3B53`).
+So the same episodes reach under either test; the 1.5 m arm stopped short of the ring and the 1.0 m arm walked the last half metre.
+`oracle-1`'s 2 of 270 was a measurement artefact and nothing else. It was never a harder task.
+The identity is at the scene grain, from two readouts; `episode_diff runs/oracle-1/oracle-loc runs/oracle-2/oracle-loc-matched` would put it at the episode grain and has not been run.
+
+**The arrival rule is spent.** `refused` 0 and `in-ring` 0 in every scene: no episode stood inside the ring and failed to arrive.
+**The structural ceiling is nearly attained.** 12 of 282 have no navmesh route to the source at any step, capping every arm at 270 of 282, 95.7%. The matched arm reads 266 of 282, 94.3%.
+
+**The baseline did not drift.** `full` at identical behaviour read 35.8% in `abl-2`, 33.0% in `oracle-1` and 31.9% here: 3.9 points over three sweeps, consistent with `repeat-1`'s 3.0-point flip noise.
+`oracle-2`'s code differs from `oracle-1`'s only in `oracle_arrived`, which returns `False` for `REALIZABLE` exactly as the inline expression did, and in `source_class` on the audit, which is a record field.
+So `episode_diff runs/oracle-1/full runs/oracle-2/full` is a free, current flip-rate measurement on the baseline of record, replacing `repeat-1`'s from the `arrive-2` era. It has not been run either.
+
+**What this does not show.** A ceiling bounds; it does not promise.
+Nothing here says a realizable method can approach 98.5%.
+The anomaly object's view-point list is seeded with the source position, so once the oracle agent arrives the confirm is near-certain. That is the design — it isolates "can the agent get there" from "does it know where there is" — and it means goal detection is not exercised in either arm, which is the oracle-STOP disclosure the smoke prints on every scene.
+
+**What the branch names next.** The cast-leg-endpoint change: compare level at leg endpoints 1 to 2 m apart instead of across one 0.25 m step.
+`detour_report`'s `sig/sc` of 1.94 over 1.66 m plateau spans says the cue is recoverable at that baseline, and `eps-1` proved that a smaller epsilon over one step cannot recover it.
+It is the first lever in this arc with a measured ceiling behind it, and it attacks the measured cause rather than a threshold.
+It is not booked here. It needs its own record and an off-box price first.
