@@ -128,7 +128,15 @@ python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/oracle-loc-match
 # the route: if the level follows the line, the pull goes there. Also NOT a gate. It
 # kept the pull too (2026-09-22), so THE SCAN, STANDING reads the change over one loop
 # where the agent turns in place, beside walking legs: a level that falls with time
-# falls standing, one that falls with motion does not. Also NOT a gate.
+# falls standing, one that falls with motion does not. Also NOT a gate. It read a fall
+# standing (2026-09-22), which the hold probe then could not reproduce on the box, so
+# THE SCANS THE SURGE CUT counts what that row never saw: a scan completes only if no
+# reading through its turns read as rising, so the first surge cuts it and the graded
+# population is selected against rises. It counts every cut by its reason and grades the
+# surge-cut scans on the readings they did take; a scan cut inside its first loop has no
+# same-phase pair and is counted as too short rather than dropped. A cut scan is cut
+# BECAUSE it read as rising, so those rows say which way the unread scans were going and
+# not what they would have read whole. Also NOT a gate.
 # Read-only, no GPU, minutes
 python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracle-2/full
 
