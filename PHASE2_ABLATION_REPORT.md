@@ -4602,3 +4602,42 @@ If it is true, every audio-driven result since the clean room ran on the same pr
 
 - **Read-only, minutes:** the scan. For its 6 turns the agent does not translate, so same-phase pairs inside the scan share both the position and the loop fold. A level that falls with time falls there too. A level that falls with motion does not, and under the hypothesis it rises as the renderer recovers.
 - **Causal, on the box, small:** render one scripted cast with `temporalCoherence` 0 and 1 over the same poses. That is the arm where the change is absent, and it is the only test that can put the pull on the preset.
+
+## The scan, standing (PR #155, same three runs, re-read 2026-09-22)
+
+The straight-line check left the level falling along a leg whatever the geometry.
+On a leg, time and displacement move together, so the fall was either a trend in time or something the motion does.
+Through the scan's 6 turns and the first leg's turn the agent does not translate, so `by_scan` reads the change over one loop there, with the loop cancelled, beside the same number on walking legs.
+**Not a gate.**
+1,535 scans started, 1,056 completed, 979 of those were read while the source sounded, and 453 of those stood within 1 cm of their first reading.
+
+| window | read | rose | fell | median change per loop |
+|---|---|---|---|---|
+| standing, first scan | 184 | 16.3% | 83.7% | −11.1% |
+| standing, later scans | 269 | 38.3% | 61.7% | −3.3% |
+| walking, sounding legs | 3010 | 23.3% | 76.7% | −9.0% |
+
+**THE LEVEL FALLS STANDING STILL.** The detour's first scan falls on 83.7% of reads, by a median 11.1% per loop, which is more than walking legs fall (76.7%, −9.0%).
+So the fall is not something the motion does. It is mostly a trend in time.
+That contradicts the motion hypothesis PR #154 recorded, which predicted a flat or rising level standing.
+The heading caveat cannot explain it: the scan turns toward the louder side, which if anything raises the level.
+
+**IT IS STRONGEST EARLY.** The first scan opens on the detour's first not-rising step, close to the onset, and falls −11.1% per loop.
+Later scans each follow a surge, so they come later in the detour, and fall −3.3%.
+Inference: a decay after the source starts, which eases with time.
+This section does not bin the change by time since onset, so the shape of that decay is not measured.
+
+**Two caveats bound the numbers:**
+
+- **Selection against rises.** A scan the level rose through is cut by a surge and never read. 479 of 1,535 scans did not complete, and the section does not say how many of those were surges. Legs lost 4.4% to surges. If first scans lost far more, part of their fall is selection.
+- **Only 453 of 979 complete sounding scans stood still.** The other 526 moved more than 1 cm while the rule was turning, and the section does not say how far. The recorded `realizable_action` is what the rule said, and the agent's own motion comes from the follower (ticket 26), so a scan by the rule is not always a turn in place. The standing rows read a subset, which may differ from the rest.
+
+**Why it matters, inference:** a level that falls over time at a fixed pose makes every 5-against-5 comparison `is_rising` draws lean toward "not rising", whatever the direction.
+That fits `pilot-2`'s 90 to 99% of detour steps plateaued, and nothing here tests the link.
+
+**What is measured next.** A controlled probe on the box: hold the agent still with the source sounding for 60 steps, and record the cue level on every step, with `temporalCoherence` 1 (the shipped preset) and 0.
+It has no selection and no heading change.
+
+- **Falls with 1 and not with 0:** the preset is the cause.
+- **Falls with both:** the cause is in the pipeline after the renderer. The tail's steady-state tests hold its level fixed under a fixed IR, which bounds where to look.
+- **Flat with both:** the fall in these runs comes from the episodes, through the selection or the heading above, and the surge count is the next read-only check.
