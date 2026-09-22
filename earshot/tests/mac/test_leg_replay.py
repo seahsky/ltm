@@ -57,6 +57,7 @@ from earshot.tools.leg_replay import (
     Leg,
     SCAN_READINGS,
     RunReplay,
+    by_cut_scan,
     by_line,
     by_scan,
     by_sounding,
@@ -624,6 +625,83 @@ class TestTheScanStanding(unittest.TestCase):
         self.assertIn("THE SCAN, STANDING. NOT A GATE", text)
         self.assertIn("standing still: 1", text)
         self.assertIn("loop period: 5 steps on 1", text)
+
+
+class TestTheScansTheSurgeCut(unittest.TestCase):
+    """What the standing rows never saw. A scan completes only if no reading through its
+    turns read as rising, so `by_scan` grades a population selected against rises."""
+
+    def _scans(self, **kwargs):
+        for key, value in (("offset_at", 30), ("loop", RING), ("folds", FOLDS)):
+            kwargs.setdefault(key, value)
+        return replay(episode(THREE_LEGS, **kwargs))
+
+    def _runs(self, *results):
+        return [RunReplay("r{}/full".format(i), "r/full", 1, 1, r.legs, 0, 0, 0, (),
+                          r.scans)
+                for i, r in enumerate(results)]
+
+    def test_a_complete_scan_names_itself_and_keeps_its_change(self):
+        (scan,) = self._scans().scans
+        self.assertEqual((scan.outcome, scan.n_readings), (COMPLETED, SCAN_READINGS))
+        self.assertIsNotNone(scan.change)
+        self.assertIsNone(scan.cut_change)
+
+    def test_a_surge_cuts_the_scan_and_the_reading_it_cut_on_counts(self):
+        """The record is written at render time and the action follows it, so the agent
+        was still standing in the scan when the cutting reading was taken."""
+        first, later = self._scans(surge_at=6).scans[:2]
+        self.assertEqual((first.complete, first.outcome, first.n_readings),
+                         (False, CUT_BY_SURGE, 7))
+        self.assertIsNone(first.change)
+        self.assertIsNotNone(first.cut_change)
+        self.assertGreater(first.cut_change, 0.0)  # a surge is a rise, and it reads as one
+        self.assertEqual((later.first, later.complete), (False, True))
+
+    def test_a_scan_cut_inside_its_first_loop_has_no_pair_and_is_not_invented(self):
+        # The level steps up at detour step 3 and the 5-against-5 window reads it at 4,
+        # so the scan keeps five readings: one short of the pair a loop needs.
+        (first, *_rest) = self._scans(surge_at=3).scans
+        self.assertEqual((first.outcome, first.n_readings), (CUT_BY_SURGE, 5))
+        self.assertIsNone(first.cut_change)
+
+    def test_a_confirm_is_a_stop_and_a_tampered_record_is_unverified(self):
+        self.assertEqual(self._scans(stop_at=2).scans[0].outcome, CUT_BY_STOP)
+        self.assertEqual(self._scans(tamper_at=2).scans[0].outcome, UNVERIFIED)
+
+    def test_a_scan_the_detour_ran_out_under_is_cut_by_the_end(self):
+        audit = episode(THREE_LEGS, offset_at=30, loop=RING, folds=FOLDS)
+        (first, *_rest) = replay(replace(audit, steps=audit.steps[:PRE + 4])).scans
+        self.assertEqual((first.outcome, first.n_readings), (CUT_BY_END, 4))
+
+    def test_the_section_counts_every_cut_and_grades_the_surges(self):
+        entry = by_cut_scan(self._runs(self._scans(), self._scans(surge_at=6)))
+        counts = entry["outcomes"]["first"]
+        self.assertEqual((counts[COMPLETED], counts[CUT_BY_SURGE]), (1, 1))
+        self.assertEqual(sum(counts.values()), 2)
+        self.assertEqual(entry["rows"]["first_complete"]["n"], 1)
+        self.assertEqual(entry["rows"]["first_surge"]["n"], 1)
+        self.assertEqual(entry["rows"]["first_surge"]["rose"], 1.0)
+        self.assertEqual(entry["n_too_short"]["first"], 0)
+        self.assertEqual(entry["median_readings"]["first"], 7)
+
+    def test_a_scan_cut_too_early_is_counted_and_never_graded(self):
+        """The forced failure: a cut with no whole loop in it must not reach a row."""
+        entry = by_cut_scan(self._runs(self._scans(surge_at=3)))
+        self.assertEqual(entry["outcomes"]["first"][CUT_BY_SURGE], 1)
+        self.assertEqual(entry["rows"]["first_surge"]["n"], 0)
+        self.assertIsNone(entry["rows"]["first_surge"]["median_change"])
+        self.assertEqual(entry["n_too_short"]["first"], 1)
+        self.assertIsNone(entry["median_readings"]["first"])
+
+    def test_the_section_says_it_is_not_a_gate_and_prints_both_populations(self):
+        runs = self._runs(self._scans(), self._scans(surge_at=6))
+        gate = evaluate_gate({run.label: run.legs for run in runs})
+        text = format_report(runs, gate, display_t_leg=2.5, display_why="test")
+        self.assertIn("THE SCANS THE SURGE CUT. NOT A GATE", text)
+        self.assertIn("first, cut by a surge", text)
+        self.assertIn("too short to grade: first 0", text)
+        self.assertIn("surge 1", text)
 
 
 class TestTheRunsOnDisk(unittest.TestCase):

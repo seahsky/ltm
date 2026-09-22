@@ -194,6 +194,8 @@ __all__ = [
     "STATIC_TOLERANCE_M",
     "same_phase_change",
     "by_scan",
+    "by_cut_scan",
+    "SCAN_OUTCOMES",
     "format_report",
     "main",
 ]
@@ -301,10 +303,15 @@ class Scan:
     """One scan the detour started: its turns and the first leg's turn, in one place.
 
     ``complete`` means all ``SCAN_STEPS + 1`` turns ran, each agreeing with the record,
-    before a surge, a STOP or the detour's end. The rest is set on complete scans only.
-    ``static`` is whether every reading stood within ``STATIC_TOLERANCE_M`` of the first,
-    and ``change`` is ``same_phase_change`` over the readings, set only on a static scan
-    read while the source sounded.
+    before a surge, a STOP or the detour's end, and ``outcome`` says which of those
+    stopped it. ``static`` is whether every reading stood within ``STATIC_TOLERANCE_M``
+    of the first, and ``change`` is ``same_phase_change`` over the readings of a COMPLETE
+    scan, set only when it stood still while the source sounded.
+
+    A cut scan keeps the ``n_readings`` it did take, and ``cut_change`` grades those the
+    same way under the same rules. The two are separate fields because ``change`` is what
+    the gate-era readers and ``hold_probe``'s pose selection already mean by a scan's
+    change, and a cut scan is a different population: it is the one the reader never saw.
     """
 
     run: str
@@ -317,6 +324,9 @@ class Scan:
     sounding: Optional[str] = None
     phase_folds: Optional[int] = None
     change: Optional[float] = None
+    outcome: Optional[str] = None
+    n_readings: int = 0
+    cut_change: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -445,19 +455,16 @@ def _scan(
     recorded: Sequence[Optional[str]], agree: Sequence[bool],
     window: Optional[SoundingWindowRecord], period: Optional[int],
 ) -> Scan:
-    """The scan opened at ``start``, read if its turns all ran. Pure.
+    """The scan opened at ``start``, read if its turns all ran, and why it stopped. Pure.
 
-    The turns are the scan's ``SCAN_STEPS`` and the first leg's, so the readings are the
-    ``SCAN_READINGS`` from ``start``: every one is taken before the first forward. A
-    surge, a STOP or a disagreement at any of those turns means the agent did something
-    else there, and the scan is left incomplete.
+    The turns are the scan's ``SCAN_STEPS`` and the first leg's, so a complete scan's
+    readings are the ``SCAN_READINGS`` from ``start``: every one is taken before the
+    first forward. A surge, a STOP, a disagreement or the detour's end at any of those
+    turns means the agent did something else there, and the scan is left incomplete --
+    holding the readings it did take, which ``cut_change`` grades the same way.
     """
-    turns = range(start, start + SCAN_STEPS + 1)
-    last = start + SCAN_READINGS - 1
-    if last >= len(rows) or any(
-            flags[i] or recorded[i] == ACT_STOP or not agree[i] for i in turns):
-        return scan
-    readings = rows[start : last + 1]
+    outcome, n_readings = _scan_outcome(start, rows, flags, recorded, agree)
+    readings = rows[start : start + n_readings]
     positions = [r.position for r in readings]
     if any(p is None for p in positions):
         raise ValueError(
@@ -468,11 +475,40 @@ def _scan(
         math.hypot(p.x - positions[0].x, p.z - positions[0].z) <= STATIC_TOLERANCE_M
         for p in positions)
     sounding = sounding_state(readings[0].step, readings[-1].step, window)
+    change = (
+        same_phase_change([r.measured_rms for r in readings], lag=period)
+        if static and sounding == SOUNDING and period is not None else None)
+    complete = outcome == COMPLETED
     return replace(
-        scan, complete=True, static=static, sounding=sounding, phase_folds=period,
-        change=(
-            same_phase_change([r.measured_rms for r in readings], lag=period)
-            if static and sounding == SOUNDING and period is not None else None))
+        scan, complete=complete, outcome=outcome, n_readings=n_readings,
+        static=static, sounding=sounding, phase_folds=period,
+        change=change if complete else None,
+        cut_change=None if complete else change)
+
+
+def _scan_outcome(
+    start: int, rows: Sequence[Any], flags: Sequence[bool],
+    recorded: Sequence[Optional[str]], agree: Sequence[bool],
+) -> Tuple[str, int]:
+    """How the scan opened at ``start`` ended, and how many readings it took. Pure.
+
+    The reading at the step that cut it COUNTS: a record is written at render time and
+    the action follows it, so the agent was still standing in the scan when that reading
+    was taken. One step is read in ``_leg_outcome``'s order, so a step that both confirms
+    and reads as rising is a STOP to both readers rather than a surge to one of them.
+    """
+    for index in range(start, start + SCAN_STEPS + 1):
+        if index >= len(rows):
+            break
+        if recorded[index] == ACT_STOP:
+            return CUT_BY_STOP, index - start + 1
+        if not agree[index]:
+            return UNVERIFIED, index - start + 1
+        if flags[index]:
+            return CUT_BY_SURGE, index - start + 1
+    if start + SCAN_READINGS - 1 >= len(rows):
+        return CUT_BY_END, len(rows) - start
+    return COMPLETED, SCAN_READINGS
 
 
 def _leg_outcome(
@@ -1387,6 +1423,111 @@ def _scan_lines(entry: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+SCAN_OUTCOMES = (COMPLETED, CUT_BY_SURGE, CUT_BY_STOP, UNVERIFIED, CUT_BY_END)
+
+
+def by_cut_scan(runs: Sequence[RunReplay]) -> Dict[str, Any]:
+    """The scans the reader never saw, and which way they were going. Pure.
+
+    **Not a gate.** ``by_scan`` grades a scan only if it completed, and ``_scan_outcome``
+    completes a scan only if no reading through its turns read as rising: the first surge
+    cuts it. That population is therefore selected against rises, which is the caveat the
+    scan section printed and did not measure. The hold probe (``tools/hold_probe.py``)
+    then rendered those same first scans again on the box with nothing cut, and read them
+    FLAT in both arms against a recorded -11.0% per loop, so the selection is no longer a
+    caveat on the number: it is the leading candidate for the whole of it.
+
+    This counts the cuts by reason and grades the surge-cut scans on the readings they
+    do have, under ``by_scan``'s own rules. One same-phase pair needs more than
+    ``phase_folds`` readings, so a scan cut inside its first loop cannot be graded at
+    all and is counted as too short rather than dropped silently.
+
+    **What it cannot say.** A cut scan is cut BECAUSE the level read as rising, so its
+    rows are not an estimate of what a complete scan would have read. They answer one
+    question: were the scans that were never read going the other way?
+    """
+    scans = [scan for run in runs for scan in run.scans]
+    groups = {"first": [s for s in scans if s.first],
+              "later": [s for s in scans if not s.first]}
+    outcomes: Dict[str, Dict[str, int]] = {}
+    rows: Dict[str, Dict[str, Any]] = {}
+    too_short: Dict[str, int] = {}
+    readings: Dict[str, Optional[float]] = {}
+    for name, group in groups.items():
+        outcomes[name] = {
+            outcome: sum(1 for s in group if s.outcome == outcome)
+            for outcome in SCAN_OUTCOMES}
+        graded = [s for s in group
+                  if s.outcome == CUT_BY_SURGE and s.cut_change is not None]
+        rows[name + "_complete"] = _changes(
+            [float(s.change) for s in group if s.complete and s.change is not None])
+        rows[name + "_surge"] = _changes([float(s.cut_change) for s in graded])
+        too_short[name] = sum(
+            1 for s in group if s.outcome == CUT_BY_SURGE and s.cut_change is None)
+        readings[name] = (
+            statistics.median([s.n_readings for s in graded]) if graded else None)
+    return {
+        "n_scans": len(scans),
+        "outcomes": outcomes,
+        "rows": rows,
+        "n_too_short": too_short,
+        "median_readings": readings,
+    }
+
+
+_CUT_ROWS = (("first_complete", "first, completed"),
+             ("first_surge", "first, cut by a surge"),
+             ("later_complete", "later, completed"),
+             ("later_surge", "later, cut by a surge"))
+_CUT_ROW = "  {:<23} {:>7} {:>7} {:>7}  {:>22}"
+
+
+def _cut_lines(entry: Mapping[str, Any]) -> List[str]:
+    lines = [
+        "",
+        "THE SCANS THE SURGE CUT. NOT A GATE: added after the hold probe read SELECTION.",
+        "A scan is graded above only if it completed, and it completes only if no reading "
+        "through",
+        "its turns read as rising -- the first surge cuts it. So those rows are a "
+        "population",
+        "selected against rises. This counts what was cut and grades the cut scans on the "
+        "readings",
+        "they did take. A scan cut inside its first loop has no same-phase pair and is "
+        "counted as",
+        "too short. A cut scan is cut BECAUSE it read as rising, so these rows say which "
+        "way the",
+        "unread scans were going and not what they would have read whole.",
+    ]
+    for name in ("first", "later"):
+        counts = entry["outcomes"][name]
+        lines.append("  {:<6} scans: {:>5}   {}".format(
+            name, sum(counts.values()),
+            "   ".join("{} {}".format(outcome.replace("cut_by_", "").replace("_", " "),
+                                      counts[outcome])
+                       for outcome in SCAN_OUTCOMES)))
+    lines.append(_CUT_ROW.format("window", "read", "rose", "fell",
+                                 "median change per loop"))
+    for key, name in _CUT_ROWS:
+        row = entry["rows"][key]
+        median = row["median_change"]
+        lines.append(_CUT_ROW.format(
+            name, row["n"], _pct(row["rose"]), _pct(row["fell"]),
+            "n/a" if median is None
+            else "{:+.1f}%".format(round(100.0 * median, 1) or 0.0)))
+    lines.append("  too short to grade: first {}, later {}".format(
+        entry["n_too_short"]["first"], entry["n_too_short"]["later"]))
+    lines.append("  readings in a graded cut scan, median: first {}, later {} (a whole "
+                 "scan is {})".format(
+                     _count(entry["median_readings"]["first"]),
+                     _count(entry["median_readings"]["later"]), SCAN_READINGS))
+    return lines
+
+
+def _count(value: Optional[float]) -> str:
+    """A median count, as a number or ``n/a``. Pure."""
+    return "n/a" if value is None else "{:g}".format(value)
+
+
 def format_report(
     runs: Sequence[RunReplay],
     gate: Mapping[str, Any],
@@ -1408,6 +1549,7 @@ def format_report(
     lines += _loop_lines(loop_removed(runs))
     lines += _line_lines(by_line(runs))
     lines += _scan_lines(by_scan(runs))
+    lines += _cut_lines(by_cut_scan(runs))
     if field is not None:
         lines += _field_lines(field)
     lines += [
