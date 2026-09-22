@@ -149,6 +149,8 @@ The full readout is in `PHASE2_ABLATION_REPORT.md` under "leg replay".
 - **The loop is not the pull (PR #151, not a gate).** A reader that pairs each reading with the one a whole loop later cancels the loop, and the pull grows: 63.7% of approaching sounding legs and 92.6% of receding ones get quieter.
   The loop was the 9-reading fit's noise: median t on receding legs goes from −1.38 to −6.86 once it is cancelled.
   The cause of the pull is open. Grading the same legs on straight-line distance to the source is the next read-only check.
+- **The grading axis is not the pull either (PR #153, not a gate).** Graded on the horizontal straight line, 88.4% of legs that opened it and about two thirds of legs that closed it got quieter. Route and line agree on 92.8% of legs.
+  The level falls along a leg whatever the geometry. The render preset ships `temporalCoherence: 1`, which ticket 01 flagged for discrete motion and nothing has A/B'd against a leg. That is a hypothesis, not a finding. `PHASE2_ABLATION_REPORT.md` names the two checks that test it.
 
 The night below is not booked.
 

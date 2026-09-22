@@ -4563,3 +4563,42 @@ Nothing here tests that link.
 It is read-only and takes minutes.
 If legs that closed the straight line read up about as often as legs that opened it read down, the pull is the grader's axis and the field is sound.
 If they still read down, the level falls along a leg whatever the geometry, and a trend in time or in the render is the next suspect.
+
+## By straight line (PR #153, same three runs, re-read 2026-09-22)
+
+The loop check left about three quarters of informative sounding legs quieter along the leg, whichever way they walked by route.
+The next suspect was the grading axis: legs are graded on the route, and the level can follow the straight line through walls instead.
+`by_line` grades the same sounding legs, with both readers, on the change in horizontal distance to `source_xyz`, at the route's own 0.5 m bar.
+**Not a gate.**
+2,059 sounding legs are informative on the line, and both readers are defined on all of them: 1,247 closed the line and 812 opened it.
+
+| reader | median t, closed | median t, opened | closed read up | opened read down |
+|---|---|---|---|---|
+| 9-reading fit | −0.51 | −1.27 | 38.9% | 87.3% |
+| same phase | −2.33 | −6.50 | 34.3% | 88.4% |
+
+**THE GRADING AXIS IS NOT THE PULL.** Graded on the line, the same-phase reader reads up on 34.3% of legs that closed it, and reads down on 88.4% of legs that opened it.
+That is the same pull as on the route, and about three quarters of the legs still got quieter.
+
+**THE TWO AXES RARELY DISAGREE OVER ONE LEG.** Route and line agree on the direction of 1,631 of the 1,758 legs informative on both, 92.8%.
+The pull is on about two thirds of the legs that closed either axis, so it cannot be hiding in the 7% where the axes disagree.
+The line does not read direction better than the route either.
+
+**THE LEVEL FALLS ALONG A LEG, WHATEVER THE GEOMETRY.** Two candidates remain: a trend in time, or the render under motion.
+
+**A FACT FOUND WHILE LOOKING, VERIFIED IN THE TREE.** `spec.ACOUSTICS_PRESET` ships `temporalCoherence: 1`.
+Ticket 01 called it a risk knob: the SoundSpaces docs warn it is inappropriate for non-continuous motion, and our 0.25 m steps and 30° turns are that case, so "A/B it against the gradient-climb behaviour before trusting it".
+Ticket 06 adopted it for about 10% of the render cost.
+Its admissibility check was the preset as a whole: Spearman rho −0.98 and −0.99 between energy and distance over ~20-step navmesh walks toward the source, with 16.8 and 24.2 dB of range.
+No A/B of `temporalCoherence` against a climb or a cast leg is in `docs/`, `.scratch/`, `CONTEXT.md` or this report.
+Inference: a rank test over a 6 m approach with 17 to 24 dB of range is unlikely to see a per-step fall of the size measured here.
+
+**Hypothesis, not measured.** With temporal coherence on, the renderer reuses paths from earlier frames. A 0.25 m jump is the non-continuous motion the docs warn about.
+If each jump drops cached paths faster than new rays replace them, the level falls while the agent walks and recovers while it stands, whichever way it walks.
+The `.so` is closed, so the tree cannot say what the renderer does.
+If it is true, every audio-driven result since the clean room ran on the same preset, and the climb reads the same fall.
+
+**What is measured next.**
+
+- **Read-only, minutes:** the scan. For its 6 turns the agent does not translate, so same-phase pairs inside the scan share both the position and the loop fold. A level that falls with time falls there too. A level that falls with motion does not, and under the hypothesis it rises as the renderer recovers.
+- **Causal, on the box, small:** render one scripted cast with `temporalCoherence` 0 and 1 over the same poses. That is the arm where the change is absent, and it is the only test that can put the pull on the preset.
