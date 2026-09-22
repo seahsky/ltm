@@ -81,6 +81,27 @@ class TestConfigMapping(unittest.TestCase):
             if key != "indirectRayCount":
                 self.assertEqual(acoustics[key], value, key)
 
+    def test_temporal_coherence_is_overridable_from_the_config(self):
+        """The knob `tools/hold_probe.py` A/Bs. Both values, because the shipped value is
+        1 and a test of 1 alone could not tell an applied override from the preset."""
+        for wanted in (False, True):
+            acoustics = audio_config_mapping(
+                AudioConfig(temporal_coherence=wanted), fakes.BINAURAL)["acousticsConfig"]
+            self.assertEqual(acoustics["temporalCoherence"], int(wanted))
+            for key, value in ACOUSTICS_PRESET.items():
+                if key != "temporalCoherence":
+                    self.assertEqual(acoustics[key], value, key)
+        self.assertEqual(ACOUSTICS_PRESET["temporalCoherence"], 1,
+                         "the override must not write through to the module constant")
+
+    def test_temporal_coherence_off_reaches_the_spec(self):
+        """Through the one configuration path, post-conditions and all."""
+        configured = audio_sensor_spec(
+            fakes.FakeAudioSensorSpec(), AudioConfig(temporal_coherence=False),
+            fakes.BINAURAL)
+        self.assertEqual(configured.acousticsConfig.temporalCoherence, 0)
+        self.assertEqual(configured.acousticsConfig.indirectRayCount, 500)
+
     def test_the_config_override_wins_over_an_explicit_preset(self):
         """`acoustics` replaces the base wholesale; the config field then overrides one
         key of whatever base is in force, so a run's ray count is always the number
