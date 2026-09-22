@@ -55,8 +55,10 @@ from earshot.tools.leg_replay import (
     STOP,
     UNVERIFIED,
     Leg,
+    SCAN_READINGS,
     RunReplay,
     by_line,
+    by_scan,
     by_sounding,
     episode_legs,
     evaluate_gate,
@@ -64,6 +66,7 @@ from earshot.tools.leg_replay import (
     load_run,
     loop_removed,
     main,
+    same_phase_change,
     same_phase_t,
     score,
     sounding_state,
@@ -98,7 +101,7 @@ def cast_xs(x0, headings, n):
 
 def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=None,
             routed=True, scatter=EPS, arm=None, offset_at=None, tail=3, loop=(),
-            folds=None, route=abs):
+            folds=None, route=abs, drift=0.0, walk_loss=0.0):
     """An audit whose detour `realizable_action` the controller wrote, tick by tick.
 
     ``gain`` is how much louder the cue gets per metre nearer; negative is a field that
@@ -111,15 +114,23 @@ def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=No
     detour's first, repeating: the clip's loop. ``folds`` is the period the record states.
     ``route`` maps a position's x to its route length. The default is the straight line,
     and anything else is a house whose walls make the walk differ from the line.
+    ``drift`` moves the level per detour step whatever the agent does: a trend in time.
+    ``walk_loss`` takes it down per forward walked and never while standing: a fall
+    that motion causes.
     """
     offset = None if offset_at is None else PRE + offset_at
     levels, rows, plateau = [], [], 0
     eps = climb_eps(scatter)  # what the runner hands the rule, fallback included
+    walked = [0]  # forwards taken before each detour reading
+    for a, b in zip(xs, xs[1:]):
+        walked.append(walked[-1] + int(round(abs(b - a) / 0.25)))
     for i, x in enumerate([xs[0]] * PRE + list(xs)):
         k = i - PRE
         level = 0.1 - gain * x + NOISE[i % len(NOISE)]
         if loop and k >= 0:
             level += loop[k % len(loop)]
+        if k >= 0:
+            level += drift * k - walk_loss * walked[k]
         if offset is not None and i >= offset:
             level = 0.02 + NOISE[i % len(NOISE)]  # the bed: no source, no gradient
         if surge_at is not None and k >= surge_at:
@@ -539,6 +550,82 @@ class TestTheStraightLine(unittest.TestCase):
         self.assertIn("route and line agree on 0 of the 2 legs", text)
 
 
+class TestTheScanStanding(unittest.TestCase):
+    """Does the level fall with time, or only while the agent walks? The scan's readings
+    are all taken in one place, so the change over one loop there is time alone."""
+
+    def test_the_change_over_a_loop_is_read_through_the_loop(self):
+        levels = [1.0 + 0.01 * j + RING[j % FOLDS] for j in range(SCAN_READINGS)]
+        self.assertAlmostEqual(same_phase_change(levels, lag=FOLDS),
+                               0.05 / (sum(levels) / len(levels)))
+
+    def test_a_loop_alone_changes_nothing(self):
+        levels = [0.1 + RING[j % FOLDS] for j in range(SCAN_READINGS)]
+        self.assertEqual(same_phase_change(levels, lag=FOLDS), 0.0)
+
+    def test_no_pair_is_none_and_no_period_is_refused(self):
+        self.assertIsNone(same_phase_change([0.1] * SCAN_READINGS, lag=SCAN_READINGS))
+        with self.assertRaises(ValueError):
+            same_phase_change([0.1] * SCAN_READINGS, lag=0)
+
+    def _scans(self, **kwargs):
+        for key, value in (("offset_at", 30), ("loop", RING), ("folds", FOLDS)):
+            kwargs.setdefault(key, value)
+        return replay(episode(THREE_LEGS, **kwargs))
+
+    def test_the_scan_is_the_readings_before_the_first_forward(self):
+        (scan,) = self._scans().scans
+        self.assertEqual((scan.start_step, scan.first, scan.complete), (PRE, True, True))
+        self.assertEqual((scan.static, scan.sounding, scan.phase_folds),
+                         (True, SOUNDING, FOLDS))
+        self.assertIsNotNone(scan.change)
+
+    def _run(self, **kwargs):
+        # A flat field with no loop, so the one trend under test is the whole change.
+        result = self._scans(gain=0.0, loop=(), **kwargs)
+        return by_scan([RunReplay("r/full", "r/full", 1, 1, result.legs, 0, 0, 0, (),
+                                  result.scans)])
+
+    def test_a_level_that_falls_with_time_falls_standing_and_walking(self):
+        rows = self._run(drift=-0.002)["rows"]
+        self.assertEqual((rows["first_scan"]["n"], rows["first_scan"]["fell"]), (1, 1.0))
+        self.assertEqual(rows["walking"]["fell"], 1.0)
+
+    def test_a_level_that_falls_with_motion_falls_walking_only(self):
+        """The forced failure the check exists for: every leg falls, and the scan,
+        where the agent stood, reads no more than the noise."""
+        rows = self._run(walk_loss=0.002)["rows"]
+        self.assertEqual(rows["walking"]["fell"], 1.0)
+        self.assertLess(rows["walking"]["median_change"], -0.1)
+        self.assertLess(abs(rows["first_scan"]["median_change"]), 0.05)
+
+    def test_a_scan_that_moved_is_not_read(self):
+        audit = episode(THREE_LEGS, offset_at=30, loop=RING, folds=FOLDS)
+        rows = list(audit.steps)
+        rows[PRE + 3] = replace(rows[PRE + 3], position=Xyz(THREE_LEGS[3] + 0.25, 0.0, 0.0))
+        (scan,) = replay(replace(audit, steps=tuple(rows))).scans
+        self.assertEqual((scan.complete, scan.static, scan.change), (True, False, None))
+
+    def test_a_scan_the_source_stopped_under_is_not_read(self):
+        (scan,) = self._scans(offset_at=4).scans
+        self.assertEqual(scan.sounding, SPANS_OFFSET)
+        self.assertIsNone(scan.change)
+
+    def test_a_surge_cuts_the_scan_and_the_next_one_is_a_later_scan(self):
+        scans = self._scans(surge_at=3).scans
+        self.assertEqual((scans[0].first, scans[0].complete), (True, False))
+        self.assertEqual((scans[1].first, scans[1].complete), (False, True))
+
+    def test_the_section_says_it_is_not_a_gate(self):
+        result = self._scans()
+        run = RunReplay("r/full", "r/full", 1, 1, result.legs, 0, 0, 0, (), result.scans)
+        gate = evaluate_gate({run.label: run.legs})
+        text = format_report([run], gate, display_t_leg=2.5, display_why="test")
+        self.assertIn("THE SCAN, STANDING. NOT A GATE", text)
+        self.assertIn("standing still: 1", text)
+        self.assertIn("loop period: 5 steps on 1", text)
+
+
 class TestTheRunsOnDisk(unittest.TestCase):
     """Through the real writers, because that seam is where a replay that is right over
     injected legs finds nothing on disk and reports it as a finding."""
@@ -595,6 +682,9 @@ class TestTheRunsOnDisk(unittest.TestCase):
         self.assertEqual(payload["loop_removed"]["n_informative"], 0)
         self.assertEqual(payload["by_line"]["n_informative"], 0)
         self.assertIn("delta_line_m", payload["legs"][0])
+        # One scan per episode, opened on the detour's first step.
+        self.assertEqual(payload["by_scan"]["n_started"], 3)
+        self.assertEqual(len(payload["scans"]), 3)
 
     def test_an_oracle_arm_is_refused_by_name(self):
         """No `realizable_action` by construction, and not `full`'s rule."""
