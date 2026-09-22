@@ -118,10 +118,15 @@ def audio_config_mapping(
     # is what a run sets, because it is the only preset entry that trades accuracy for
     # speed rather than speed alone — see `AudioConfig.indirect_ray_count` for the
     # measurement that made it a knob. Applied after, so it wins over either base and a
-    # run's ray count is always the number `run_config` records.
+    # run's ray count is always the number `run_config` records. `config.temporal_coherence`
+    # is the second such key, on the same terms.
     base = dict(ACOUSTICS_PRESET if acoustics is None else acoustics)
     if config.indirect_ray_count is not None:
         base["indirectRayCount"] = int(config.indirect_ray_count)
+    # An int, as the preset writes it, so the post-condition in `audio_sensor_spec`
+    # compares like with like whichever way the binding reads the field back.
+    if config.temporal_coherence is not None:
+        base["temporalCoherence"] = int(bool(config.temporal_coherence))
     return {
         "enableMaterials": False,
         "channelLayout": {"type": binaural_layout, "channelCount": 2},

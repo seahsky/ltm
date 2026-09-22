@@ -132,6 +132,21 @@ python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/oracle-loc-match
 # Read-only, no GPU, minutes
 python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracle-2/full
 
+# THE HOLD PROBE, ON THE BOX: does the cue fall while the agent stands still, and does
+# `temporalCoherence` make it? Renders the standing first scans `leg_replay` read again,
+# one pose per episode, at the runs' own recorded audio config, once with the preset's
+# TC 1 and once with TC 0 (`AudioConfig.temporal_coherence`). Three sequences, each kind
+# in its own World so none inherits another's renders at the same pose: the RESCAN
+# replays the run's own walk-in and turns with nothing cut by a surge; the HOLD holds the
+# scan's first pose at a fixed heading for 60 readings; the TELEPORT holds it with no
+# walk-in. Every replayed position is checked against the record at 1 cm. FORCED (a known
+# fall, on the rescan and the hold) and FROZEN (the pipeline alone on a real IR) are the
+# instrument's own arms. Prints a branch pre-registered in `hold_probe.py`, reading the
+# hold before the turns: PIPELINE / RENDERER / PRESET / HEADING / SELECTION / MIXED, or
+# NOT_RUN (red, exit 2). Under an hour (estimate). `read` re-reads a tag off-box, seconds
+nrun bash earshot/tools/hold_probe.sh --tag <fresh-tag>
+python -m earshot.tools.hold_probe read runs/<tag>
+
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
 # it, so the run's own central quantity reached nobody.

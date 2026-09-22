@@ -159,6 +159,19 @@ class AudioConfig:
     # against the ray count that produced it.
     indirect_ray_count: Optional[int] = None
 
+    # `None` keeps `spec.ACOUSTICS_PRESET`'s `temporalCoherence: 1`. Overrides that one key
+    # and nothing else, on the same path as `indirect_ray_count`.
+    #
+    # **Why it is a knob.** Ticket 01 called it a risk knob: the SoundSpaces docs say it
+    # needs continuous motion, and 0.25 m steps and 30 degree turns are not continuous.
+    # Ticket 06 adopted it for about 10% of the render cost, and its admissibility test
+    # was a rank test over ~20-step approach walks, which cannot see a fall of a few
+    # percent per step. The leg replay (PRs #149 to #156) then measured the cue falling
+    # along about three quarters of sounding legs whichever way they walked, and falling
+    # in the scan too. `tools/hold_probe.py` renders the same held poses at both values,
+    # and it is the first consumer. Recorded through `run_config` like the ray count.
+    temporal_coherence: Optional[bool] = None
+
     # provenance: source — carried from the old tree's `--anomaly-clip` default. The
     # ESC-50 staging directory `clips.fetch_esc50_clips` writes and
     # `clips.resolve_anomaly_clip` reads.
