@@ -146,6 +146,9 @@ The full readout is in `PHASE2_ABLATION_REPORT.md` under "leg replay".
 - **The sounding split (PR #149, not a gate) keeps the STOP.** Restricted to legs read while the source sounded, LOUDER fires on 14.4% and QUIETER is 59.3% right, so neither branch passes.
   The gate's denominator counted 2,163 informative legs read on the bed alone, where the cue is constant and no reader can decide. That understated every decisive rate, and it did not change the branch.
 - **The windowed source explains only the 573 legs that span the offset**, which read QUIETER at chance. Sounding legs carry direction (median t −0.37 approaching, −1.38 receding) on top of a shift of about −0.9 that the offset does not explain. The loop phase is the candidate cause, and it is not measured.
+- **The loop is not the pull (PR #151, not a gate).** A reader that pairs each reading with the one a whole loop later cancels the loop, and the pull grows: 63.7% of approaching sounding legs and 92.6% of receding ones get quieter.
+  The loop was the 9-reading fit's noise: median t on receding legs goes from −1.38 to −6.86 once it is cancelled.
+  The cause of the pull is open. Grading the same legs on straight-line distance to the source is the next read-only check.
 
 The night below is not booked.
 
