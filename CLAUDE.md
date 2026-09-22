@@ -125,7 +125,10 @@ python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/oracle-loc-match
 # loop later, so the loop cancels: if it is what pulled those legs quieter, the pull
 # goes and the direction stays. Also NOT a gate. It kept the pull (2026-09-22), so BY
 # STRAIGHT LINE grades the same legs on horizontal distance to `source_xyz` in place of
-# the route: if the level follows the line, the pull goes there. Also NOT a gate.
+# the route: if the level follows the line, the pull goes there. Also NOT a gate. It
+# kept the pull too (2026-09-22), so THE SCAN, STANDING reads the change over one loop
+# where the agent turns in place, beside walking legs: a level that falls with time
+# falls standing, one that falls with motion does not. Also NOT a gate.
 # Read-only, no GPU, minutes
 python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracle-2/full
 

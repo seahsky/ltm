@@ -108,6 +108,16 @@ distance to ``source_xyz``, with both readers, and counts how often the route an
 line agree on a leg's direction. If the pull goes here, it was the axis. If it stays,
 the level falls along a leg whatever the geometry. **Not a gate.**
 
+The scan, standing, added after the straight-line check
+-------------------------------------------------------
+
+The pull stayed on the straight line too, so the level falls along a leg whatever the
+geometry. On a leg, time and displacement move together. Through the scan's turns and
+the first leg's turn the agent does not translate, so ``by_scan`` reads the change over
+one loop there, with the loop cancelled, beside the same number on walking legs. A level
+that falls with time falls standing too. One that falls with motion does not. **Not a
+gate.**
+
 Read-only, no GPU, seconds to minutes. A run that lacks ``realizable_action``,
 ``geodesic_to_source`` or ``CalibrationRecord.cue_render_scatter``, or that is not
 ``full``'s rule, is refused by name.
@@ -121,7 +131,7 @@ import math
 import pathlib
 import statistics
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from earshot.agent.controller import (
@@ -179,6 +189,11 @@ __all__ = [
     "same_phase_t",
     "loop_removed",
     "by_line",
+    "Scan",
+    "SCAN_READINGS",
+    "STATIC_TOLERANCE_M",
+    "same_phase_change",
+    "by_scan",
     "format_report",
     "main",
 ]
@@ -229,6 +244,15 @@ DISPLAY_T_LEG = 2.5
 # Read from the controller, never re-spelled.
 LEG_PERIOD = 1 + CAST_STEPS
 
+# A scan's readings, all taken before the first leg's first forward: the pose before each
+# of its turns, before the first leg's turn, and after it.
+SCAN_READINGS = SCAN_STEPS + 2
+
+# provenance: fake — how far a scan's readings may sit from its first and still count as
+# one place. A turn in place does not translate the agent, so a real scan reads 0.0; 1 cm
+# is headroom for float noise and is 4% of one 0.25 m forward.
+STATIC_TOLERANCE_M = 0.01
+
 # Net-displacement buckets for "is length what limits a verdict". A clear leg is
 # CAST_STEPS x 0.25 m = 2.0 m.
 LENGTH_EDGES_M = (0.0, 0.5, 1.0, 1.5)
@@ -267,6 +291,32 @@ class Leg:
     # change to the last: the axis the route was chosen over (see `by_line`).
     line_start_m: Optional[float] = None
     delta_line_m: Optional[float] = None
+    # `same_phase_change` over the leg, on SOUNDING legs: the walking reference `by_scan`
+    # sets the standing scans beside.
+    change_per_loop: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class Scan:
+    """One scan the detour started: its turns and the first leg's turn, in one place.
+
+    ``complete`` means all ``SCAN_STEPS + 1`` turns ran, each agreeing with the record,
+    before a surge, a STOP or the detour's end. The rest is set on complete scans only.
+    ``static`` is whether every reading stood within ``STATIC_TOLERANCE_M`` of the first,
+    and ``change`` is ``same_phase_change`` over the readings, set only on a static scan
+    read while the source sounded.
+    """
+
+    run: str
+    scene: str
+    episode: int
+    start_step: int
+    first: bool  # the detour's first scan; a later one follows a surge
+    complete: bool
+    static: Optional[bool] = None
+    sounding: Optional[str] = None
+    phase_folds: Optional[int] = None
+    change: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -278,6 +328,7 @@ class EpisodeReplay:
     n_steps_agree: int
     has_detour: bool
     eps_measured: bool
+    scans: Tuple[Scan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -293,6 +344,7 @@ class RunReplay:
     n_steps_agree: int
     n_eps_unmeasured: int
     refusals: Tuple[str, ...]
+    scans: Tuple[Scan, ...] = ()
 
 
 def _share(numerator: int, denominator: int) -> Optional[float]:
@@ -375,7 +427,52 @@ def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
                 leg, rows[start + 1 : start + LEG_PERIOD + 1], audit.sounding_window,
                 period, audit.source_xyz)
         legs.append(leg)
-    return EpisodeReplay(tuple(legs), checked, agreed, True, scatter is not None)
+
+    scans: List[Scan] = []
+    for start, (flag, count) in enumerate(zip(flags, counts)):
+        if flag or count or recorded[start] == ACT_STOP:
+            continue  # a scan opens on a plateau's first step, and a STOP there is none
+        scans.append(_scan(
+            Scan(run=run, scene=scene, episode=int(audit.episode_index),
+                 start_step=int(rows[start].step), first=not scans, complete=False),
+            start, rows, flags, recorded, agree, audit.sounding_window, period))
+    return EpisodeReplay(
+        tuple(legs), checked, agreed, True, scatter is not None, tuple(scans))
+
+
+def _scan(
+    scan: Scan, start: int, rows: Sequence[Any], flags: Sequence[bool],
+    recorded: Sequence[Optional[str]], agree: Sequence[bool],
+    window: Optional[SoundingWindowRecord], period: Optional[int],
+) -> Scan:
+    """The scan opened at ``start``, read if its turns all ran. Pure.
+
+    The turns are the scan's ``SCAN_STEPS`` and the first leg's, so the readings are the
+    ``SCAN_READINGS`` from ``start``: every one is taken before the first forward. A
+    surge, a STOP or a disagreement at any of those turns means the agent did something
+    else there, and the scan is left incomplete.
+    """
+    turns = range(start, start + SCAN_STEPS + 1)
+    last = start + SCAN_READINGS - 1
+    if last >= len(rows) or any(
+            flags[i] or recorded[i] == ACT_STOP or not agree[i] for i in turns):
+        return scan
+    readings = rows[start : last + 1]
+    positions = [r.position for r in readings]
+    if any(p is None for p in positions):
+        raise ValueError(
+            "episode {} of {}/{} has a detour step with no position. Every record since "
+            "yield-1 carries one, so this is a writer fault".format(
+                scan.episode, scan.run, scan.scene))
+    static = all(
+        math.hypot(p.x - positions[0].x, p.z - positions[0].z) <= STATIC_TOLERANCE_M
+        for p in positions)
+    sounding = sounding_state(readings[0].step, readings[-1].step, window)
+    return replace(
+        scan, complete=True, static=static, sounding=sounding, phase_folds=period,
+        change=(
+            same_phase_change([r.measured_rms for r in readings], lag=period)
+            if static and sounding == SOUNDING and period is not None else None))
 
 
 def _leg_outcome(
@@ -486,6 +583,24 @@ def same_phase_t(
     return slope / (sd / math.sqrt(suu))
 
 
+def same_phase_change(levels: Sequence[float], *, lag: int) -> Optional[float]:
+    """How much the level changed over one loop, as a fraction of its mean. Pure.
+
+    The mean difference between each reading and the one ``lag`` readings after it,
+    over the window's mean level. The loop cancels in each difference as it does in
+    ``same_phase_t``, and no displacement enters, so over readings taken in one place it
+    reads time alone. ``None`` with no pair, or with a mean level that is not positive.
+    """
+    ys = [float(y) for y in levels]
+    if int(lag) < 1:
+        raise ValueError("a loop's period is at least one reading, got {}".format(lag))
+    diffs = [ys[j + lag] - ys[j] for j in range(len(ys) - lag)]
+    mean = sum(ys) / len(ys) if ys else 0.0
+    if not diffs or mean <= 0.0:
+        return None
+    return (sum(diffs) / len(diffs)) / mean
+
+
 def _line_m(position: Xyz, source: Xyz) -> float:
     """Horizontal straight-line distance, the ``xz`` axis the audit's docstring names."""
     return math.hypot(position.x - source.x, position.z - source.z)
@@ -524,6 +639,9 @@ def _measured(
         delta_line_m=(
             None if source is None or line_start is None
             else _line_m(positions[-1], source) - line_start),
+        change_per_loop=(
+            same_phase_change(levels, lag=period)
+            if sounding == SOUNDING and period is not None else None),
     )
 
 
@@ -546,6 +664,7 @@ def load_run(arm_dir: str) -> RunReplay:
             "above it, <tag>/<arm>.".format(root),))
 
     legs: List[Leg] = []
+    scans: List[Scan] = []
     n_episodes = n_detours = checked = agreed = unmeasured = 0
     routed = scattered = False
     mismatched: Dict[Tuple[str, Optional[str]], int] = {}
@@ -565,6 +684,7 @@ def load_run(arm_dir: str) -> RunReplay:
                 n_detours += 1
                 unmeasured += 0 if replay.eps_measured else 1
             legs.extend(replay.legs)
+            scans.extend(replay.scans)
             checked += replay.n_steps_checked
             agreed += replay.n_steps_agree
 
@@ -592,7 +712,7 @@ def load_run(arm_dir: str) -> RunReplay:
                 "split, so its climb ran at a threshold this replay cannot rebuild")
     return RunReplay(
         label, str(root), n_episodes, n_detours, tuple(legs), checked, agreed,
-        unmeasured, tuple(refusals))
+        unmeasured, tuple(refusals), tuple(scans))
 
 
 def score(legs: Sequence[Leg], t_leg: float) -> Dict[str, Any]:
@@ -1173,6 +1293,100 @@ def _line_lines(entry: Mapping[str, Any]) -> List[str]:
     ] + _reader_rows(entry["readers"])
 
 
+def _changes(values: Sequence[float]) -> Dict[str, Any]:
+    """How many windows rose and fell over one loop, and the median change. Pure."""
+    return {
+        "n": len(values),
+        "rose": _share(sum(1 for v in values if v > 0), len(values)),
+        "fell": _share(sum(1 for v in values if v < 0), len(values)),
+        "median_change": statistics.median(values) if values else None,
+    }
+
+
+def by_scan(runs: Sequence[RunReplay]) -> Dict[str, Any]:
+    """The level over one loop while the agent stands, beside legs where it walks. Pure.
+
+    **Not a gate.** About three quarters of sounding legs got quieter along the leg on
+    both the route and the straight line. On a leg, time and displacement move together,
+    so that fall is either a trend in time or something the motion does. A scan's
+    readings are all taken in one place (``static`` checks it off the recorded
+    positions), so ``same_phase_change`` over them reads time alone.
+
+    Rows: the detour's first scan, later scans (each follows a surge), and every
+    completed sounding leg as the walking reference. A level that falls with time falls
+    standing about as it does walking. A level that falls only with motion does not.
+
+    **A rise standing is not by itself a renderer recovering.** The scan turns toward
+    the louder side, so its heading is steered and not random, and the two readings of
+    a pair are five turns apart.
+    """
+    scans = [scan for run in runs for scan in run.scans]
+    complete = [s for s in scans if s.complete]
+    sounding = [s for s in complete if s.sounding == SOUNDING]
+    static = [s for s in sounding if s.static]
+    periods: Dict[str, int] = {}
+    for scan in static:
+        key = "unrecorded" if scan.phase_folds is None else str(scan.phase_folds)
+        periods[key] = periods.get(key, 0) + 1
+    read = [s for s in static if s.change is not None]
+    walking = [
+        float(leg.change_per_loop) for run in runs for leg in run.legs
+        if leg.outcome == COMPLETED and leg.sounding == SOUNDING
+        and leg.change_per_loop is not None]
+    return {
+        "n_started": len(scans),
+        "n_complete": len(complete),
+        "n_sounding": len(sounding),
+        "n_static": len(static),
+        "periods": dict(sorted(periods.items())),
+        "rows": {
+            "first_scan": _changes([float(s.change) for s in read if s.first]),
+            "later_scans": _changes([float(s.change) for s in read if not s.first]),
+            "walking": _changes(walking),
+        },
+    }
+
+
+_SCAN_ROWS = (("first_scan", "standing, first scan"),
+              ("later_scans", "standing, later scans"),
+              ("walking", "walking, sounding legs"))
+_SCAN_ROW = "  {:<23} {:>7} {:>7} {:>7}  {:>22}"
+
+
+def _scan_lines(entry: Mapping[str, Any]) -> List[str]:
+    periods = ", ".join(
+        "{} on {}".format(
+            "unrecorded" if key == "unrecorded" else "{} steps".format(key), count)
+        for key, count in entry["periods"].items()) or "none"
+    lines = [
+        "",
+        "THE SCAN, STANDING. NOT A GATE: added after the straight-line check.",
+        "Through the scan's {} turns and the first leg's turn the agent stands in one "
+        "place, so its".format(SCAN_STEPS),
+        "{} readings share a position. Pairs a whole loop apart there share the loop too, "
+        "so the".format(SCAN_READINGS),
+        "change over one loop is time alone. A level that falls with time falls standing "
+        "as it",
+        "does walking; a level that falls with motion does not. The scan turns toward the "
+        "louder",
+        "side, so a rise standing may be the heading and is not by itself a renderer "
+        "recovering.",
+        "  scans started: {}; complete: {}; read while sounding: {}; standing still: {}".format(
+            entry["n_started"], entry["n_complete"], entry["n_sounding"], entry["n_static"]),
+        "  loop period: {}".format(periods),
+        _SCAN_ROW.format("window", "read", "rose", "fell", "median change per loop"),
+    ]
+    for key, name in _SCAN_ROWS:
+        row = entry["rows"][key]
+        median = row["median_change"]
+        # `or 0.0` turns a rounded -0.0 into 0.0, which prints as +0.0% and not -0.0%.
+        lines.append(_SCAN_ROW.format(
+            name, row["n"], _pct(row["rose"]), _pct(row["fell"]),
+            "n/a" if median is None
+            else "{:+.1f}%".format(round(100.0 * median, 1) or 0.0)))
+    return lines
+
+
 def format_report(
     runs: Sequence[RunReplay],
     gate: Mapping[str, Any],
@@ -1193,6 +1407,7 @@ def format_report(
     lines += _sounding_lines(by_sounding(runs))
     lines += _loop_lines(loop_removed(runs))
     lines += _line_lines(by_line(runs))
+    lines += _scan_lines(by_scan(runs))
     if field is not None:
         lines += _field_lines(field)
     lines += [
@@ -1255,14 +1470,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.json:
         print(json.dumps({
             "runs": [
-                {key: value for key, value in asdict(run).items() if key != "legs"}
+                {key: value for key, value in asdict(run).items()
+                 if key not in ("legs", "scans")}
                 for run in runs],
             "gate": gate,
             "by_sounding": by_sounding(runs),
             "loop_removed": loop_removed(runs),
             "by_line": by_line(runs),
+            "by_scan": by_scan(runs),
             "field": field,
             "legs": [asdict(leg) for run in runs for leg in run.legs],
+            "scans": [asdict(scan) for run in runs for scan in run.scans],
         }, indent=2))
     else:
         print(format_report(runs, gate, display_t_leg=display, display_why=why,
