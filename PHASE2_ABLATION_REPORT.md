@@ -4641,3 +4641,72 @@ It has no selection and no heading change.
 - **Falls with 1 and not with 0:** the preset is the cause.
 - **Falls with both:** the cause is in the pipeline after the renderer. The tail's steady-state tests hold its level fixed under a fixed IR, which bounds where to look.
 - **Flat with both:** the fall in these runs comes from the episodes, through the selection or the heading above, and the surge count is the next read-only check.
+
+## The hold probe (PRs #157 and #158, `hold-2`, run on the box 2026-09-22)
+
+The scan section above read a fall at a standing agent and called it a trend in time.
+Three things stood between that reading and a cause: the render preset (`temporalCoherence: 1`, never A/B'd against a leg), the scan's heading (its same-phase pairs are five turns apart, and each turn follows the louder side), and selection (a scan the level rose through is cut by a surge and never read).
+The probe renders those same first scans again, one pose per episode, at each run's own recorded audio configuration, with the preset on and with it off.
+Three sequences per pose, each in a simulator instance of its own: the RESCAN replays the run's own last 10 steps and the scan's turns with nothing cut; the HOLD stands at the scan's first pose on a fixed heading for 60 readings; the TELEPORT holds it with no walk-in.
+**Not a gate.** The branch was pre-registered in `hold_probe.py` before the run.
+
+76 poses, 18 scenes, both arms, 22m 38s.
+Every replayed position agreed with the record to within 1 cm: 0 poses diverged in either arm.
+
+| window | arm | read | rose | fell | median change per loop | sign p |
+|---|---|---|---|---|---|---|
+| recorded first scan, the run's own renders | run | 76 | 18.4% | 81.6% | −11.0% | 0.0000 |
+| rescan: the same walk-in and turns | tc1 | 76 | 38.2% | 61.8% | −2.6% | 0.0505 |
+| rescan: the same walk-in and turns | tc0 | 76 | 46.1% | 53.9% | −0.9% | 0.5666 |
+| hold: fixed heading, first 8 readings | tc1 | 76 | 46.1% | 53.9% | −1.2% | 0.5666 |
+| hold: fixed heading, first 8 readings | tc0 | 76 | 53.9% | 46.1% | +0.8% | 0.5666 |
+
+FALLS needs a sign-test p ≤ 0.01 and a median change of −3% per loop or worse, over 20 poses or more.
+Only the recorded row clears it.
+
+**The instrument works.** Both check arms read as the docstring requires.
+A forced 2% fall per reading was detected on the rescan (tc1 −12.5%, tc0 −10.7%) and on the hold (−11.1%, −9.0%), all at p < 0.0001.
+A frozen impulse response, folded again through the same pipeline for the whole hold, read flat in both arms (+0.0% and −0.0%): the processing after the renderer does not drift on a real IR.
+The recorded row reproduces the scan section's number (−11.0% here against −11.1% there) on this subset.
+
+**BRANCH: SELECTION.** The fall does not reproduce.
+The same poses, headings and turns, rendered again, are flat with the preset on and flat with it off.
+
+**What this rules out.**
+
+- **The preset is not the cause.** `temporalCoherence` 1 against 0 moves nothing that clears the bar. The A/B ticket 01 asked for has now been run against a real scan.
+- **The renderer does not drift at a fixed pose.** 60 readings standing still, both arms, flat.
+- **The pipeline after the renderer does not drift.** The frozen arm measures it on real IRs, not on a synthetic one.
+- **The heading is not the cause.** The rescan turns exactly as the run did and is flat; the hold holds one heading and is also flat.
+
+**A smaller effect the preset does have, inference, below the bar.**
+The median level profiles drift down with `temporalCoherence` on and not with it off: the hold reads 0.980 of its first loop after 11 loops with TC 1 against 1.006 with TC 0, and the teleport reads 0.936 against 0.999.
+That is roughly −0.2 to −0.6% per loop, against the −11% this chain is chasing.
+The teleport and whole-hold rows were pre-registered as deciding nothing, and this reading is an observation on medians, not a test.
+
+**What is still open.** The recorded scans fall, and the fall is not in the render at that pose.
+So it is in what the run's own accumulation buffer held at that moment, or in which scans the reader was given.
+Two candidates, both named before the run:
+
+- **The surge cut.** A scan the level rose through is cut and never read. 479 of 1,535 scans did not complete and the count of those cut by a surge is still not printed. Walking legs lost only 4.4% to surges, so this cannot be the whole story for them.
+- **A renderer memory longer than the walk-in.** The rescan gives each pose 10 steps of history; the run had the whole episode. `--walk-in` is the knob that tests it, and the hold against the teleport already says 10 steps against 0 makes no difference.
+
+**One hint in the table, worth a sentence.**
+The rescan is the only non-check row that leans: with the preset on it falls on 61.8% of poses by −2.6% per loop, p = 0.0505, and with it off on 53.9% by −0.9%, p = 0.57.
+The rescan is the only sequence that moves.
+So if the preset does anything, it needs motion, and 10 steps of it buys about a quarter of what the runs show.
+
+**Two explanations the code rules out, read off `tail.py`'s own measured constants.**
+
+- **It is not the accumulator filling after the source starts.** `CUE_RAMP_STEPS` is 1: the cue window is written whole by fold 1, which reads 0.9696 of the settled level, and folds 2 onward are inside 0.2% of it (`audio/tail.py:196-203`). That is a rise of 3% on one reading, not a fall of 11% per loop, and it biases a same-phase pair toward a rise.
+- **It is not the source stopping.** The cue is exactly zero at `cue_tail_steps` folds after the last sounding step, measured at 3 folds for a room IR (`audio/tail.py:317-331`). A scan that ran into the offset would go to zero, not drift down, and `sounding_state` reads a scan as SOUNDING only when its last reading is before `offset_step` (`tools/leg_replay.py:518-524`).
+
+**The two levels are the same quantity.** The runs record `measured_rms = rms(cue)` straight off `heard_step` (`task/runner.py:1338-1345`, `1793`), which is what the probe recomputes. So the recorded fall and the flat replay are not two different measurements of the same walk.
+
+**What is measured next.**
+
+1. **Grade the scans a surge cut (read-only, minutes).** The scan section reports 479 of 1,535 scans incomplete and never splits them. A cut scan still has its readings on the record, and one with a whole loop in it grades the same way. If the cut scans rose, selection is the answer for the scans and the standing fall is an artefact of which scans were read.
+2. **Re-render a walking leg, TC 1 against TC 0 (the box, about the cost of this run).** This is the number that matters for the controller: legs are what `is_rising` reads, scans are not, and legs lost only 4.4% to surges, so selection cannot explain their −9.0%. The probe's rescan is its only sequence that moves, and it is the only non-check row that leans, by −2.6% per loop with the preset on against −0.9% with it off. A fourth sequence that replays a whole recorded leg and reads the level along it, with the same 1 cm position check and the same two check arms, tests that directly.
+
+A longer walk-in is worth a run only if the leg arm comes back flat.
+The hold against the teleport already says 10 steps of standing history and none at all read the same, so a renderer memory would have to be one that motion fills, and deeper than 10 steps.
