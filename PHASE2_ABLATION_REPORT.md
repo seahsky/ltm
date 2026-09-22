@@ -4487,3 +4487,37 @@ It does not show that a two-metre leg carries no gradient. The direction signal 
 
 **What is measured next.** Split the legs by `source_playing`: sounding throughout, stopped mid-leg, silent throughout. It is read-only, it takes minutes, and it runs over the same three runs.
 It does not reopen the gate. It says whether the STOP is about the leg or about reading after the source stopped.
+
+## The sounding split (PR #149, same three runs, re-read 2026-09-21)
+
+The first readout found every leg pulled toward QUIETER, whichever way it walked. The windowed source was the hypothesis: 60 sounding steps against a 120-step detour.
+`leg_replay` now puts each completed leg in one state off the record's own window, with smoke criterion 4's fence posts. **Not a gate: the split was chosen after the STOP.**
+
+| state | completed | informative | approached | receded | median t, approached | median t, receded |
+|---|---|---|---|---|---|---|
+| sounding | 3010 | 2253 | 1335 | 918 | −0.37 | −1.38 |
+| spans offset | 573 | 401 | 208 | 193 | −1.70 | −1.74 |
+| silent | 3083 | 2163 | 1069 | 1094 | n/a | n/a |
+
+**46% OF COMPLETED LEGS WERE READ ON THE BED ALONE, AND NO READER CAN DECIDE ANY OF THEM.** 3,083 of 6,666 completed legs have every reading at or after `offset_step + cue_tail_steps - 1`.
+On every one of them the cue is constant to machine precision, so `leg_t` is undefined, no verdict fires, and the false-decisive rate is 0.0%. That also confirms smoke criterion 4's "exactly the bed" at scale.
+So for most of the second half of a detour that runs its budget, the cast walks with no cue at all, and so does `is_rising`: a gap of zero is never a rise.
+**It is not most of the 65-point gap.** `pilot-2` already priced the offset: `cont-alarm` 40.8% against `win-alarm` 34.2% source-reached, net −24 of 365, McNemar p = 0.0027. A source that never stops is worth about 6.6 points, not 65.
+
+**THE SOURCE STOPPING EXPLAINS THE LEGS THAT SPAN IT, AND ONLY THOSE.** The 573 spans-offset legs carry no direction at all: median t −1.70 approaching and −1.74 receding, and QUIETER is 190 of 372 right at T 1.0, 51.1%, which is chance. No LOUDER fires there.
+
+**THE SOUNDING LEGS CARRY DIRECTION, AND A PULL OF ABOUT THE SAME SIZE.** Median t is −0.37 on approaching legs and −1.38 on receding legs: 1.0 apart, which is the direction signal, and both shifted about −0.9 by something that is not the offset. Both are measured; the cause of the shift is not.
+All 324 LOUDER verdicts are in sounding legs.
+
+**THE STOP HOLDS ON SOUNDING LEGS ALONE.** The gate's denominator counted the 2,163 silent informative legs, which no reader can decide, so it understated every decisive rate.
+Restricted to sounding legs, LOUDER fires on 324 of 2,253, 14.4%, still under the 25% it needs, and QUIETER is 594 of 1,002 right at T 1.0, 59.3%, worst run 58.3%.
+Neither branch passes, so the post-hoc reading and the pre-registered one agree.
+
+**A candidate for the pull, not measured: the loop phase.** `full` plays `alarm` on a loop that repeats every `cue_phase_folds` steps, 5 at the shipped defaults. `pilot-2` measured an onset delay of 0 in all 1,095 of its episodes. If `full` matches it (not checked), every detour opens at the same point in the loop, and every leg ordinal reads the same slice of it in every episode.
+A 9-reading fit does not span whole periods, so the phase adds a slope, and on those assumptions that slope would be the same across episodes.
+`is_rising` is immune by construction, because its two windows are each one full period, the coincidence `controller.py` already names.
+Selection is unlikely to be the cause. Surges cut 339 of the 7,723 legs that started, 4.4%, and removing that small a tail barely moves a median.
+
+**What is measured next, if anything.** Split the sounding legs by loop phase at the leg's first reading, `(step - opens_at) mod cue_phase_folds`. It is read-only and takes minutes.
+If the phase is the cause, median t moves strongly with the phase while the direction gap inside each phase stays near 1. Then any leg reader has to span whole loop periods, and a phase-aware reader would need its own ADR and pre-registration.
+If median t does not move with the phase, the cause is still open and the leg lever stays closed as it is.
