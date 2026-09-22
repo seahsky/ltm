@@ -33,7 +33,7 @@ from earshot.audio.bed import bed_signal
 from earshot.audio.config import AudioConfig
 from earshot.config import RunConfig
 from earshot.report.agent import AgentReport
-from earshot.report.artifacts import write_env_report, write_episode
+from earshot.report.artifacts import write_env_report, write_episode, write_run_summary
 from earshot.tools.hold_probe import (
     ARM_ORDER,
     EXCLUDED_DUPLICATE,
@@ -279,6 +279,30 @@ class TestTheSelection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             selection = select_poses([write_arm(root, [walked_audit()], env=False)],
                                      walk_in=WALK_IN)
+        self.assertIn("env_report.json is missing", selection.refusals[0])
+
+    def test_a_zero_yield_scene_is_named_and_skipped(self):
+        """`run()` writes a summary of 0 episodes and raises before `env_report.json`.
+        hold-1 was refused on `mL8ThkuaVTM` for that missing file, in both runs."""
+        with tempfile.TemporaryDirectory() as root:
+            arm = write_arm(root, [walked_audit()])
+            write_run_summary(str(pathlib.Path(arm) / "ZZZbarren"), {"n_episodes": 0})
+            selection = select_poses([arm], walk_in=WALK_IN)
+            out = StringIO()
+            with redirect_stdout(out):
+                status = main(["select", arm, "--walk-in", str(WALK_IN)])
+        self.assertEqual(selection.refusals, ())
+        self.assertEqual(len(selection.poses), 1)
+        self.assertEqual(selection.zero_yield, ("tag/full/ZZZbarren",))
+        self.assertEqual(status, 0)
+        self.assertIn("zero-yield, no episode to probe: tag/full/ZZZbarren", out.getvalue())
+
+    def test_a_summary_with_episodes_does_not_excuse_a_missing_configuration(self):
+        with tempfile.TemporaryDirectory() as root:
+            arm = write_arm(root, [walked_audit()], env=False)
+            write_run_summary(str(pathlib.Path(arm) / "AAAscene"), {"n_episodes": 1})
+            selection = select_poses([arm], walk_in=WALK_IN)
+        self.assertEqual(selection.zero_yield, ())
         self.assertIn("env_report.json is missing", selection.refusals[0])
 
     def test_an_anechoic_run_is_refused(self):

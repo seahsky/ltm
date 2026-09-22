@@ -129,7 +129,13 @@ from earshot.audio.clips import as_binaural, rms
 from earshot.audio.config import AudioConfig
 from earshot.audio.tail import TailState, heard_step, hop_samples, open_tail, phase_folds
 from earshot.config import IrPolicy
-from earshot.report.artifacts import ENV_REPORT_NAME, episode_paths, read_audit, run_paths
+from earshot.report.artifacts import (
+    ENV_REPORT_NAME,
+    RUN_SUMMARY_NAME,
+    episode_paths,
+    read_audit,
+    run_paths,
+)
 from earshot.report.audit import EpisodeAudit
 from earshot.tools.funnel_diff import two_sided_exact_binomial
 from earshot.tools.leg_replay import (
@@ -458,6 +464,7 @@ class Selection:
     n_first_scans: int
     excluded: Mapping[str, int]
     refusals: Tuple[str, ...]
+    zero_yield: Tuple[str, ...]
 
 
 def _label(path: pathlib.Path) -> str:
@@ -469,6 +476,22 @@ def _is_read_first_scan(scan: Scan) -> bool:
     """The scans ``by_scan`` reads as "standing, first scan"."""
     return (scan.first and scan.complete and bool(scan.static)
             and scan.sounding == SOUNDING and scan.change is not None)
+
+
+def _is_zero_yield(scene_dir: pathlib.Path) -> bool:
+    """A scene the runner could place no episode in, as ``mL8ThkuaVTM`` in every sweep.
+
+    ``run()`` writes ``summary.json`` with ``n_episodes`` 0 and raises before it writes
+    ``env_report.json``, so the scene has no configuration and nothing to probe. A scene
+    with no configuration and no such summary is not this: it is a run that died, and it
+    is refused.
+    """
+    from earshot.task.smoke import episode_indices
+
+    path = scene_dir / RUN_SUMMARY_NAME
+    if not path.is_file() or episode_indices(str(scene_dir)):
+        return False
+    return int(json.loads(path.read_text(encoding="utf-8"))["n_episodes"]) == 0
 
 
 def _render_config(scene_dir: pathlib.Path) -> Tuple[Optional[RenderConfig], Optional[str]]:
@@ -499,7 +522,7 @@ def select_poses(
 
     One pose per episode: the first run named wins, and a later run's scan of the same
     ``(scene, episode)`` is counted as a duplicate. Every scene must have rendered with
-    one configuration, or the runs are refused.
+    one configuration, or the runs are refused. A zero-yield scene is named and skipped.
     """
     from earshot.task.smoke import episode_indices
 
@@ -510,6 +533,7 @@ def select_poses(
     config: Optional[RenderConfig] = None
     excluded: Dict[str, int] = {}
     refusals: List[str] = []
+    zero_yield: List[str] = []
     n_first = 0
 
     def exclude(why: str) -> None:
@@ -531,6 +555,9 @@ def select_poses(
         mismatched: Dict[Tuple[str, Optional[str]], int] = {}
         for scene_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             if wanted is not None and scene_dir.name not in wanted:
+                continue
+            if _is_zero_yield(scene_dir):
+                zero_yield.append("{}/{}".format(label, scene_dir.name))
                 continue
             scene_config, why = _render_config(scene_dir)
             if scene_config is None:
@@ -582,7 +609,7 @@ def select_poses(
                 ", ".join(members[:3]) + (" ..." if len(members) > 3 else "")
                 for members in configs.values())))
     return Selection(tuple(poses), config, n_first, dict(sorted(excluded.items())),
-                     tuple(refusals))
+                     tuple(refusals), tuple(zero_yield))
 
 
 def audio_config_of(recorded: Mapping[str, Any], *, temporal_coherence: bool) -> AudioConfig:
@@ -1338,6 +1365,9 @@ def _selection_lines(selection: Selection) -> List[str]:
         scenes[pose.scene] = scenes.get(pose.scene, 0) + 1
     lines.append("  scenes: {}   poses per scene: {}".format(
         len(scenes), " ".join("{} {}".format(s, n) for s, n in sorted(scenes.items()))))
+    if selection.zero_yield:
+        lines.append("  zero-yield, no episode to probe: {}".format(
+            " ".join(selection.zero_yield)))
     if selection.config is not None:
         lines.append("  rendering as the runs did: clip {} ({}), split {}".format(
             selection.config.anomaly_class, selection.config.anomaly_clip or "staged",
