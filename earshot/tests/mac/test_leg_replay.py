@@ -28,6 +28,7 @@ from earshot.agent.controller import (
     CAST_STEPS,
     SCAN_STEPS,
     climb_eps,
+    leg_t,
     next_plateau_steps,
     realizable_investigate_step,
 )
@@ -60,7 +61,9 @@ from earshot.tools.leg_replay import (
     evaluate_gate,
     format_report,
     load_run,
+    loop_removed,
     main,
+    same_phase_t,
     score,
     sounding_state,
 )
@@ -93,7 +96,8 @@ def cast_xs(x0, headings, n):
 
 
 def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=None,
-            routed=True, scatter=EPS, arm=None, offset_at=None, tail=3):
+            routed=True, scatter=EPS, arm=None, offset_at=None, tail=3, loop=(),
+            folds=None):
     """An audit whose detour `realizable_action` the controller wrote, tick by tick.
 
     ``gain`` is how much louder the cue gets per metre nearer; negative is a field that
@@ -102,6 +106,8 @@ def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=No
     ``tamper_at`` records the wrong action at that detour step, and nothing else changes.
     ``offset_at`` is the detour step the source stops on: from there the cue is a flat
     bed with no gradient, and the audit carries the window that says so.
+    ``loop`` is added to the level while the source sounds, one entry per step from the
+    detour's first, repeating: the clip's loop. ``folds`` is the period the record states.
     """
     offset = None if offset_at is None else PRE + offset_at
     levels, rows, plateau = [], [], 0
@@ -109,6 +115,8 @@ def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=No
     for i, x in enumerate([xs[0]] * PRE + list(xs)):
         k = i - PRE
         level = 0.1 - gain * x + NOISE[i % len(NOISE)]
+        if loop and k >= 0:
+            level += loop[k % len(loop)]
         if offset is not None and i >= offset:
             level = 0.02 + NOISE[i % len(NOISE)]  # the bed: no source, no gradient
         if surge_at is not None and k >= surge_at:
@@ -139,7 +147,9 @@ def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=No
         calibration=None if scatter is None else CalibrationRecord(
             onset_rms=0.01, bed_rms=0.001, separation_db=40.0, n_poses=16,
             global_volume=1.0, cue_render_scatter=scatter, cue_scatter_repeats=12),
-        steps=tuple(rows), **fields)
+        steps=tuple(rows),
+        metrics={} if folds is None else {"sounding_phase_folds": float(folds)},
+        **fields)
 
 
 # Three legs: toward the source, away from it, toward it again, over 30 detour steps.
@@ -381,6 +391,91 @@ class TestTheSoundingSplit(unittest.TestCase):
         self.assertNotIn("  unknown", text, "no unknown row when every leg is known")
 
 
+LEG_XS = [0.25 * j for j in range(PERIOD)]  # one clear leg's nine displacements
+FOLDS = 5  # the box's loop period
+RING = (2.0, 0.0, 0.0, 0.0, 0.0)  # a bursty clip: one fold in five rings
+SPIKES = [RING[j % FOLDS] for j in range(PERIOD)]  # rings at readings 0 and 5
+
+
+class TestTheLoopRemoved(unittest.TestCase):
+    """Is the pull on sounding legs the clip's loop? The same-phase reader pairs each
+    reading with the one a whole loop later, where the source emits the same fold."""
+
+    def _trend(self, gain, loop=()):
+        return [0.1 + gain * x + NOISE[j] + (loop[j] if loop else 0.0)
+                for j, x in enumerate(LEG_XS)]
+
+    def test_a_level_that_repeats_with_the_loop_cancels(self):
+        clean = same_phase_t(LEG_XS, self._trend(0.01), lag=FOLDS)
+        looped = same_phase_t(LEG_XS, self._trend(0.01, SPIKES), lag=FOLDS)
+        self.assertGreater(clean, 2.5)
+        self.assertAlmostEqual(looped, clean, places=6)
+
+    def test_the_same_loop_reverses_the_nine_reading_fit(self):
+        """The forced failure the reader exists for. The leg got louder, and the fit
+        reads it quieter because the loop rang on its first reading and its sixth."""
+        self.assertGreater(leg_t(LEG_XS, self._trend(0.01)), 2.5)
+        self.assertLess(leg_t(LEG_XS, self._trend(0.01, SPIKES)), 0.0)
+
+    def test_a_leg_that_got_quieter_still_reads_down(self):
+        self.assertLess(same_phase_t(LEG_XS, self._trend(-0.01, SPIKES), lag=FOLDS), -2.5)
+
+    def test_a_loop_alone_reads_nothing(self):
+        self.assertIsNone(same_phase_t(LEG_XS, [0.1 + s for s in SPIKES], lag=FOLDS))
+
+    def test_a_loop_too_long_for_the_leg_reads_nothing(self):
+        """Nine readings at a period of 8 leave one pair, and one pair has no residual."""
+        self.assertIsNone(same_phase_t(LEG_XS, self._trend(0.01), lag=8))
+
+    def test_malformed_input_is_refused(self):
+        with self.assertRaises(ValueError):
+            same_phase_t(LEG_XS, self._trend(0.01)[:-1], lag=FOLDS)
+        with self.assertRaises(ValueError):
+            same_phase_t(LEG_XS, self._trend(0.01), lag=0)
+
+    def _legs(self, **kwargs):
+        xs = cast_xs(6.0, [TOWARD] * 4, 40)
+        return replay(episode(xs, offset_at=20, loop=RING, **kwargs)).legs
+
+    def test_only_a_sounding_leg_gets_the_same_phase_reading(self):
+        legs = [l for l in self._legs(folds=FOLDS) if l.outcome == COMPLETED]
+        self.assertEqual([l.sounding for l in legs], [SOUNDING, SPANS_OFFSET, SILENT])
+        self.assertEqual({l.phase_folds for l in legs}, {FOLDS})
+        self.assertGreater(legs[0].t_same_phase, 2.5)
+        self.assertIsNone(legs[1].t_same_phase, "the loop stopped with the source")
+        self.assertIsNone(legs[2].t_same_phase)
+
+    def test_a_record_with_no_period_is_counted_as_unrecorded(self):
+        """Never read as a loop of some length: the section names it."""
+        run = RunReplay("r/full", "r/full", 1, 1, self._legs(), 0, 0, 0, ())
+        entry = loop_removed([run])
+        self.assertEqual(entry["periods"], {"unrecorded": 1})
+        self.assertEqual(entry["n_paired"], 0)
+        self.assertIn("loop period: unrecorded on 1", self._text(run))
+
+    def test_a_period_that_is_not_whole_steps_is_a_writer_fault(self):
+        audit = episode(THREE_LEGS)
+        broken = replace(audit, metrics={"sounding_phase_folds": 4.5})
+        with self.assertRaises(ValueError):
+            replay(broken)
+
+    def test_both_readers_are_read_over_the_same_legs(self):
+        run = RunReplay("r/full", "r/full", 1, 1, self._legs(folds=FOLDS), 0, 0, 0, ())
+        entry = loop_removed([run])
+        self.assertEqual((entry["n_informative"], entry["n_paired"]), (1, 1))
+        self.assertEqual(entry["periods"], {"5": 1})
+        same = entry["readers"]["same_phase"]
+        self.assertEqual(same["approached_read_up"], 1.0)
+        self.assertIsNone(same["receded_read_down"], "no receding leg is not 0%")
+        text = self._text(run)
+        self.assertIn("THE LOOP, REMOVED. NOT A GATE", text)
+        self.assertIn("loop period: 5 steps on 1", text)
+
+    def _text(self, run):
+        gate = evaluate_gate({run.label: run.legs})
+        return format_report([run], gate, display_t_leg=2.5, display_why="test")
+
+
 class TestTheRunsOnDisk(unittest.TestCase):
     """Through the real writers, because that seam is where a replay that is right over
     injected legs finds nothing on disk and reports it as a finding."""
@@ -434,6 +529,7 @@ class TestTheRunsOnDisk(unittest.TestCase):
         # These fixtures carry no window, so every completed leg is unknown, not sounding.
         self.assertEqual(payload["by_sounding"]["unknown"]["n_completed"], 2 + 2 + 3)
         self.assertEqual(payload["by_sounding"]["sounding"]["n_completed"], 0)
+        self.assertEqual(payload["loop_removed"]["n_informative"], 0)
 
     def test_an_oracle_arm_is_refused_by_name(self):
         """No `realizable_action` by construction, and not `full`'s rule."""

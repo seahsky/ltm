@@ -120,7 +120,10 @@ python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/oracle-loc-match
 # legs were walked under blind alternation. Refuses any run that is not `full`'s rule.
 # It read STOP on 2026-09-21 (ADR-0029). BY SOUNDING STATE splits the legs by where the
 # source was, off each record's window: before the offset, across it, or on the bed
-# alone. That split is NOT a gate, because it was chosen after the STOP.
+# alone. That split is NOT a gate, because it was chosen after the STOP. THE LOOP,
+# REMOVED re-reads the sounding legs with each reading paired to the one a whole clip
+# loop later, so the loop cancels: if it is what pulled those legs quieter, the pull
+# goes and the direction stays. Also NOT a gate.
 # Read-only, no GPU, minutes
 python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracle-2/full
 
