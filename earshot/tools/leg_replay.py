@@ -86,6 +86,18 @@ record's own window: read before the offset, spanning it, or read on the bed alo
 ``by_sounding`` then prints the grid and the median ``t`` per state. **It is not a
 gate**, because the split was chosen after the result.
 
+The loop, removed, added after the sounding split
+-------------------------------------------------
+
+The sounding split left legs read while the source sounded pulled quieter whichever way
+they walked. The candidate it named is the clip's loop. The source loops every
+``sounding_phase_folds`` steps, and a nine-reading fit spans no whole number of loops,
+so the loop can put a slope into a leg. ``same_phase_t`` asks ``leg_t``'s question of
+readings one whole loop apart, which cancels any level that repeats with the loop,
+wherever the clip's energy sits in it. ``loop_removed`` prints both readers over the
+same sounding legs. If the loop is the pull, it goes from the same-phase reader and the
+direction stays. **It is not a gate** either.
+
 Read-only, no GPU, seconds to minutes. A run that lacks ``realizable_action``,
 ``geodesic_to_source`` or ``CalibrationRecord.cue_render_scatter``, or that is not
 ``full``'s rule, is refused by name.
@@ -98,6 +110,7 @@ import json
 import math
 import pathlib
 import statistics
+import sys
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -153,6 +166,8 @@ __all__ = [
     "SOUNDING_STATES",
     "sounding_state",
     "by_sounding",
+    "same_phase_t",
+    "loop_removed",
     "format_report",
     "main",
 ]
@@ -233,6 +248,10 @@ class Leg:
     route_start_m: Optional[float] = None
     delta_route_m: Optional[float] = None
     sounding: Optional[str] = None
+    # The loop's period in steps, off the record, and the same-phase reader's t. That t
+    # is set on SOUNDING legs only: where the source stopped, the loop stopped with it.
+    phase_folds: Optional[int] = None
+    t_same_phase: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -324,6 +343,7 @@ def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
     ]
     checked = sum(1 for rec in recorded if rec != ACT_STOP)
     agreed = sum(1 for rec, ok in zip(recorded, agree) if rec != ACT_STOP and ok)
+    period = _loop_period(audit)
 
     legs: List[Leg] = []
     for start, (flag, count) in enumerate(zip(flags, counts)):
@@ -337,7 +357,8 @@ def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
             start_step=int(rows[start].step), outcome=outcome)
         if outcome == COMPLETED:
             leg = _measured(
-                leg, rows[start + 1 : start + LEG_PERIOD + 1], audit.sounding_window)
+                leg, rows[start + 1 : start + LEG_PERIOD + 1], audit.sounding_window,
+                period)
         legs.append(leg)
     return EpisodeReplay(tuple(legs), checked, agreed, True, scatter is not None)
 
@@ -391,8 +412,68 @@ def sounding_state(
     return SPANS_OFFSET
 
 
+def _loop_period(audit: EpisodeAudit) -> Optional[int]:
+    """The clip loop's period in steps, ``metrics["sounding_phase_folds"]``, or None.
+
+    None where the record does not carry it. A value that is not a whole number of steps
+    is a writer fault, because ``tail.phase_folds`` is an integer by construction.
+    """
+    value = audit.metrics.get("sounding_phase_folds")
+    if value is None:
+        return None
+    period = float(value)
+    if period < 1.0 or period != math.floor(period):
+        raise ValueError(
+            "episode {} records sounding_phase_folds {}. The loop's period is a whole "
+            "number of steps, at least 1, so this is a writer fault".format(
+                audit.episode_index, value))
+    return int(period)
+
+
+def same_phase_t(
+    displacements: Sequence[float], levels: Sequence[float], *, lag: int
+) -> Optional[float]:
+    """``leg_t``'s question asked of readings one loop apart, as a t-statistic. Pure.
+
+    Each pair is a reading and the one ``lag`` readings after it. A sounding source
+    emits the same fold of its loop at both, so any level that repeats every ``lag``
+    readings cancels in the pair's difference, whatever the clip's envelope. The slope is
+    the least-squares fit of the level differences on the displacement differences,
+    through the origin, over ``m`` pairs with ``m - 1`` degrees of freedom. Nine readings
+    at a period of 5 give four pairs, and no reading is in two of them.
+
+    ``None`` where ``leg_t`` would give none: fewer than two pairs, no travel within any
+    pair, or a residual below what the levels can resolve.
+    """
+    xs = [float(x) for x in displacements]
+    ys = [float(y) for y in levels]
+    if len(xs) != len(ys):
+        raise ValueError(
+            "a leg needs one level per displacement: got {} displacement(s) and {} "
+            "level(s)".format(len(xs), len(ys)))
+    if int(lag) < 1:
+        raise ValueError("a loop's period is at least one reading, got {}".format(lag))
+    pairs = [(xs[j + lag] - xs[j], ys[j + lag] - ys[j]) for j in range(len(xs) - lag)]
+    m = len(pairs)
+    if m < 2:
+        return None
+    suu = sum(u * u for u, _ in pairs)
+    if suu <= 0.0:
+        return None
+    slope = sum(u * d for u, d in pairs) / suu
+    rss = sum((d - slope * u) ** 2 for u, d in pairs)
+    # The floor `leg_t` uses, on the levels themselves: a difference of two readings
+    # carries their rounding, not its own.
+    resolution = len(ys) * sys.float_info.epsilon * max(abs(y) for y in ys)
+    sd = math.sqrt(rss / (m - 1))
+    if sd <= resolution:
+        return None
+    return slope / (sd / math.sqrt(suu))
+
+
 def _measured(
-    leg: Leg, readings: Sequence[Any], window: Optional[SoundingWindowRecord]
+    leg: Leg, readings: Sequence[Any], window: Optional[SoundingWindowRecord],
+    period: Optional[int],
 ) -> Leg:
     """A completed leg's verdict inputs, off the readings the controller would hold."""
     positions = [r.position for r in readings]
@@ -402,16 +483,22 @@ def _measured(
             "yield-1 carries one, so this is a writer fault, and a leg without positions "
             "has no axis to fit along".format(leg.episode, leg.run, leg.scene))
     displacements, length = _along_leg(positions)
+    levels = [r.measured_rms for r in readings]
     first = readings[0].geodesic_to_source
     last = readings[-1].geodesic_to_source
+    sounding = sounding_state(readings[0].step, readings[-1].step, window)
     return Leg(
         run=leg.run, scene=leg.scene, episode=leg.episode, start_step=leg.start_step,
         outcome=leg.outcome,
-        t=leg_t(displacements, [r.measured_rms for r in readings]),
+        t=leg_t(displacements, levels),
         length_m=length,
         route_start_m=None if first is None else float(first),
         delta_route_m=None if first is None or last is None else float(last) - float(first),
-        sounding=sounding_state(readings[0].step, readings[-1].step, window),
+        sounding=sounding,
+        phase_folds=period,
+        t_same_phase=(
+            same_phase_t(displacements, levels, lag=period)
+            if sounding == SOUNDING and period is not None else None),
     )
 
 
@@ -907,6 +994,93 @@ def _sounding_lines(states: Mapping[str, Mapping[str, Any]]) -> List[str]:
     return lines
 
 
+# The two readers `loop_removed` compares, as (key, the Leg field holding its t).
+_LOOP_READERS = (("fit", "t"), ("same_phase", "t_same_phase"))
+
+
+def _reader(legs: Sequence[Leg], attr: str) -> Dict[str, Any]:
+    """One reader's medians and sign shares over informative legs. Pure."""
+    approached = [float(getattr(l, attr)) for l in legs if l.delta_route_m < 0]
+    receded = [float(getattr(l, attr)) for l in legs if l.delta_route_m > 0]
+    return {
+        "median_t_approached": statistics.median(approached) if approached else None,
+        "median_t_receded": statistics.median(receded) if receded else None,
+        "approached_read_up": _share(sum(1 for t in approached if t > 0), len(approached)),
+        "receded_read_down": _share(sum(1 for t in receded if t < 0), len(receded)),
+    }
+
+
+def loop_removed(runs: Sequence[RunReplay]) -> Dict[str, Any]:
+    """The 9-reading fit and the same-phase reader, over the same legs. Pure. **Not a gate.**
+
+    Informative SOUNDING legs only: where the source stopped, the loop stopped with it,
+    and a silent leg has no cue. ``periods`` counts those legs by the loop period their
+    record carries, ``"unrecorded"`` included, so a run that never wrote the period
+    shows as such and never as a loop of some length. Both readers are then read over
+    the legs where both are defined, so a difference between them is the reader's and
+    not the population's.
+
+    **The question is whether the pull goes and the direction stays.** A reader with no
+    pull reads up on about as many approaching legs as it reads down on receding ones.
+    A pull quieter shows as more receding legs read down than approaching legs read up,
+    and as both medians negative.
+    """
+    informative = [
+        leg for run in runs for leg in run.legs
+        if leg.outcome == COMPLETED and leg.sounding == SOUNDING
+        and leg.delta_route_m is not None
+        and abs(leg.delta_route_m) >= INFORMATIVE_ROUTE_M]
+    periods: Dict[str, int] = {}
+    for leg in informative:
+        key = "unrecorded" if leg.phase_folds is None else str(leg.phase_folds)
+        periods[key] = periods.get(key, 0) + 1
+    paired = [l for l in informative if l.t is not None and l.t_same_phase is not None]
+    return {
+        "n_informative": len(informative),
+        "periods": dict(sorted(periods.items())),
+        "n_paired": len(paired),
+        "n_approached": sum(1 for l in paired if l.delta_route_m < 0),
+        "n_receded": sum(1 for l in paired if l.delta_route_m > 0),
+        "readers": {key: _reader(paired, attr) for key, attr in _LOOP_READERS},
+    }
+
+
+_READER_NAMES = {"fit": "9-reading fit", "same_phase": "same phase"}
+_READER_ROW = "  {:<14} {:>20} {:>8}  {:>18}  {:>17}"
+
+
+def _loop_lines(entry: Mapping[str, Any]) -> List[str]:
+    periods = ", ".join(
+        "{} on {}".format(
+            "unrecorded" if key == "unrecorded" else "{} steps".format(key), count)
+        for key, count in entry["periods"].items()) or "none"
+    lines = [
+        "",
+        "THE LOOP, REMOVED. NOT A GATE: added after the sounding split, sounding legs "
+        "only.",
+        "The source loops every sounding_phase_folds steps, and 9 readings span no whole "
+        "number",
+        "of loops. The same-phase reader fits each reading against the one a whole loop "
+        "later,",
+        "which cancels any level that repeats with the loop. If the loop is the pull, it "
+        "goes from",
+        "that reader and the direction stays.",
+        "  informative sounding legs: {}; loop period: {}".format(
+            entry["n_informative"], periods),
+        "  both readers defined on {}: {} approached, {} receded".format(
+            entry["n_paired"], entry["n_approached"], entry["n_receded"]),
+        _READER_ROW.format("reader", "median t: approached", "receded",
+                           "approached read up", "receded read down"),
+    ]
+    for key, _ in _LOOP_READERS:
+        reader = entry["readers"][key]
+        lines.append(_READER_ROW.format(
+            _READER_NAMES[key], _t_cell(reader["median_t_approached"]),
+            _t_cell(reader["median_t_receded"]), _pct(reader["approached_read_up"]),
+            _pct(reader["receded_read_down"])))
+    return lines
+
+
 def format_report(
     runs: Sequence[RunReplay],
     gate: Mapping[str, Any],
@@ -925,6 +1099,7 @@ def format_report(
     lines += _gate_lines(gate)
     lines += _breakdown_lines(legs, display_t_leg, display_why)
     lines += _sounding_lines(by_sounding(runs))
+    lines += _loop_lines(loop_removed(runs))
     if field is not None:
         lines += _field_lines(field)
     lines += [
@@ -991,6 +1166,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for run in runs],
             "gate": gate,
             "by_sounding": by_sounding(runs),
+            "loop_removed": loop_removed(runs),
             "field": field,
             "legs": [asdict(leg) for run in runs for leg in run.legs],
         }, indent=2))
