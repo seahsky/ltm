@@ -123,7 +123,9 @@ python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/oracle-loc-match
 # alone. That split is NOT a gate, because it was chosen after the STOP. THE LOOP,
 # REMOVED re-reads the sounding legs with each reading paired to the one a whole clip
 # loop later, so the loop cancels: if it is what pulled those legs quieter, the pull
-# goes and the direction stays. Also NOT a gate.
+# goes and the direction stays. Also NOT a gate. It kept the pull (2026-09-22), so BY
+# STRAIGHT LINE grades the same legs on horizontal distance to `source_xyz` in place of
+# the route: if the level follows the line, the pull goes there. Also NOT a gate.
 # Read-only, no GPU, minutes
 python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracle-2/full
 
