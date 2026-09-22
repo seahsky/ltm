@@ -147,6 +147,25 @@ python -m earshot.tools.leg_replay runs/abl-2/full runs/oracle-1/full runs/oracl
 nrun bash earshot/tools/hold_probe.sh --tag <fresh-tag>
 python -m earshot.tools.hold_probe read runs/<tag>
 
+# THE LEG PROBE, ON THE BOX: the same question while the agent WALKS, which is the one
+# the controller reads -- `is_rising` compares five readings against five along a leg.
+# `hold-2` read the standing scans FLAT in both arms against a recorded -11.0% per loop,
+# which ruled the preset, the renderer at a fixed pose, the pipeline and the heading out
+# for a STANDING agent only. Its one moving sequence was also its one leaning row (-2.6%
+# with the preset on against -0.9% with it off, p 0.05). This walks the recorded legs
+# again, one per episode (the first COMPLETED leg read while the source sounded), at the
+# runs' own recorded audio config, with TC 1 and TC 0. Seated `--walk-in` steps before
+# the leg, heading rebuilt from the record, every position checked at 1 cm; the leg's 9
+# readings are graded by `same_phase_change` at the run's own loop period, which is what
+# the recorded number is. ONE World per scene: one sequence a pose, unlike the hold
+# probe. FORCED (a known fall along the same walk) and the RECORDED legs are the two
+# check arms; FROZEN is not repeated, `hold-2` measured the pipeline flat on real IRs.
+# Prints a branch pre-registered in `leg_probe.py`: RENDERER / PRESET / MIXED /
+# SELECTION, or NOT_RUN (red, exit 2). Under half an hour (estimate). `read` re-reads a
+# tag off-box, seconds
+nrun bash earshot/tools/leg_probe.sh --tag <fresh-tag>
+python -m earshot.tools.leg_probe read runs/<tag>
+
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
 # it, so the run's own central quantity reached nobody.
