@@ -4521,3 +4521,45 @@ Selection is unlikely to be the cause. Surges cut 339 of the 7,723 legs that sta
 **What is measured next, if anything.** Split the sounding legs by loop phase at the leg's first reading, `(step - opens_at) mod cue_phase_folds`. It is read-only and takes minutes.
 If the phase is the cause, median t moves strongly with the phase while the direction gap inside each phase stays near 1. Then any leg reader has to span whole loop periods, and a phase-aware reader would need its own ADR and pre-registration.
 If median t does not move with the phase, the cause is still open and the leg lever stays closed as it is.
+
+## The loop, removed (PR #151, same three runs, re-read 2026-09-22)
+
+The sounding split named the clip's loop as the candidate cause of the pull.
+`same_phase_t` pairs each reading with the one `sounding_phase_folds` readings later, where the source plays the same part of its loop, so any level that repeats with the loop cancels.
+At the period of 5, nine readings give four pairs that share no reading.
+**Not a gate.**
+All 2,253 informative sounding legs recorded a period of 5, and both readers are defined on all of them.
+
+| reader | median t, approached | median t, receded | approached read up | receded read down |
+|---|---|---|---|---|
+| 9-reading fit | −0.37 | −1.38 | 42.2% | 91.2% |
+| same phase | −2.09 | −6.86 | 36.3% | 92.6% |
+
+**THE LOOP IS NOT THE PULL.** With the loop cancelled, the pull stays and grows.
+Approaching legs read up on 36.3%, down from 42.2%, so 63.7% of the legs that closed the route by 0.5 m or more got quieter.
+Receding legs read down on 92.6%.
+About three quarters of all informative sounding legs got quieter along the leg, whichever way they walked.
+The sign shares do not depend on the loop adding to the level: a loop that scales the level changes the size of each pair's difference, not its sign.
+
+**THE LOOP WAS THE FIT'S NOISE.** Once the loop is cancelled, the same legs read with a larger |t|: −6.86 against −1.38 on receding legs, from 4 pairs and 3 degrees of freedom against 9 readings and 7.
+Inference, not measured directly: the loop put much more into the 9-reading fit's residual than the render scatter did.
+So any later leg reader must cancel the loop, or its critical values price the loop and not the field.
+
+**THE DIRECTION IS STILL THERE.** Receding legs fall much harder than approaching ones: median −6.86 against −2.09, and read down 92.6% against 63.7%.
+The route changes how far the level falls, and on most legs not whether it falls.
+
+**The cause of the pull is open. Two candidates, neither measured:**
+
+- **The grading axis.** Legs are graded on the route, and the level can follow the straight line through walls instead.
+  2,234 of the 4,817 informative legs started 8 m or more from the source by route, where the two differ most.
+  Positions and `source_xyz` are on every record, so grading the same legs on the change in straight-line distance is read-only.
+- **A trend in time.** Inside a leg, time and displacement move together, so a level that falls with time at a fixed pose reads as a leg that got quieter.
+
+**Why it matters beyond ADR-0029, inference:** if the level falls along most straight walks whatever their direction, the climb walks into the same fall.
+`pilot-2` measured 90 to 99% of detour steps plateaued, and this would be one reason.
+Nothing here tests that link.
+
+**What is measured next, if anything.** Grade the same sounding legs on the change in straight-line distance to the source.
+It is read-only and takes minutes.
+If legs that closed the straight line read up about as often as legs that opened it read down, the pull is the grader's axis and the field is sound.
+If they still read down, the level falls along a leg whatever the geometry, and a trend in time or in the render is the next suspect.
