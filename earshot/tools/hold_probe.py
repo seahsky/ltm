@@ -113,6 +113,7 @@ from typing import (
     Callable,
     ContextManager,
     Dict,
+    Iterable,
     Iterator,
     List,
     Mapping,
@@ -142,6 +143,7 @@ from earshot.tools.leg_replay import (
     FULL_ARM,
     SCAN_READINGS,
     SOUNDING,
+    EpisodeReplay,
     Scan,
     episode_legs,
     same_phase_change,
@@ -181,6 +183,8 @@ __all__ = [
     "PoseResult",
     "ProbeIO",
     "plan_pose",
+    "plan_window",
+    "read_first_scans",
     "select_poses",
     "audio_config_of",
     "trace_rescan",
@@ -361,40 +365,69 @@ def _horizontal(a: Xyz, b: Xyz) -> Tuple[float, float]:
 def plan_pose(
     audit: EpisodeAudit, scan: Scan, *, walk_in: int
 ) -> Tuple[Optional[ProbePose], Optional[str]]:
-    """The pose for one recorded scan, or why it cannot be one. Pure.
+    """The pose for one recorded scan, or why it cannot be one. Pure."""
+    if scan.phase_folds is None or scan.change is None:
+        raise ValueError(
+            "scan {} of episode {} of {}/{} was not read: plan only the scans by_scan "
+            "reads".format(scan.start_step, scan.episode, scan.run, scan.scene))
+    return plan_window(
+        audit, run=scan.run, scene=scan.scene, episode=int(scan.episode),
+        start_step=int(scan.start_step), first_step=int(scan.start_step),
+        n_readings=SCAN_READINGS, walk_in=walk_in, period=int(scan.phase_folds),
+        recorded_change=float(scan.change), what="scan {}".format(scan.start_step))
+
+
+def plan_window(
+    audit: EpisodeAudit,
+    *,
+    run: str,
+    scene: str,
+    episode: int,
+    start_step: int,
+    first_step: int,
+    n_readings: int,
+    walk_in: int,
+    period: int,
+    recorded_change: float,
+    what: str,
+) -> Tuple[Optional[ProbePose], Optional[str]]:
+    """The pose for ``n_readings`` read from ``first_step``, or why it cannot be one. Pure.
 
     The heading comes from the walk-in's first clean forward: habitat moves the agent
     along ``(-sin yaw, 0, -cos yaw)`` (the frame ``audio/lateral.py`` states), so a clean
     step's displacement gives the yaw at that step, and the recorded turns before it give
-    the yaw at the seat.
+    the yaw at the seat. A scan and a walking leg differ only in where the readings start
+    and how many there are, and the heading is the part that must not differ: a pose
+    built two ways is a replay checked against the record two ways.
     """
     if int(walk_in) < 1:
         raise ValueError("walk_in is at least one step, got {}".format(walk_in))
+    if int(n_readings) < 2:
+        raise ValueError("a window is at least two readings, got {}".format(n_readings))
     rows = audit.steps
     index = {int(r.step): i for i, r in enumerate(rows)}
-    start = index[int(scan.start_step)]
-    first, end = start - int(walk_in), start + SCAN_READINGS
+    start = index[int(first_step)]
+    first, end = start - int(walk_in), start + int(n_readings)
     if first < 0:
         return None, EXCLUDED_SHORT
     window = rows[first:end]
-    if len(window) != int(walk_in) + SCAN_READINGS or any(
+    if len(window) != int(walk_in) + int(n_readings) or any(
             int(r.step) != int(rows[first].step) + k for k, r in enumerate(window)):
         raise ValueError(
-            "episode {} of {}/{}: the steps around scan {} are not consecutive. The "
+            "episode {} of {}/{}: the steps around {} are not consecutive. The "
             "runner records every step, so this is a writer fault".format(
-                scan.episode, scan.run, scan.scene, scan.start_step))
+                episode, run, scene, what))
     positions = [r.position for r in window]
     if any(p is None for p in positions):
         raise ValueError(
-            "episode {} of {}/{} has a step with no position near scan {}. Every record "
+            "episode {} of {}/{} has a step with no position near {}. Every record "
             "since yield-1 carries one, so this is a writer fault".format(
-                scan.episode, scan.run, scan.scene, scan.start_step))
+                episode, run, scene, what))
     actions = [r.action for r in window[:-1]]
     if ACT_STOP in actions:
         raise ValueError(
-            "episode {} of {}/{} recorded a STOP before scan {} ended. A scan opens on a "
-            "plateau and a STOP ends the detour, so the scan cannot have completed".format(
-                scan.episode, scan.run, scan.scene, scan.start_step))
+            "episode {} of {}/{} recorded a STOP before {} ended. A STOP ends the "
+            "detour, so it cannot have completed".format(episode, run, scene, what))
     anchor = None
     for k in range(int(walk_in)):
         if actions[k] != ACT_FORWARD or window[k].collided:
@@ -408,31 +441,27 @@ def plan_pose(
     dx, dz = _horizontal(positions[anchor], positions[anchor + 1])
     seat_yaw = math.atan2(-dx, -dz) - sum(_turn_rad(a) for a in actions[:anchor])
     scan_yaw = seat_yaw + sum(_turn_rad(a) for a in actions[: int(walk_in)])
-    scan_rows = window[int(walk_in):]
+    read_rows = window[int(walk_in):]
     source = audit.source_xyz
     if source is None:
         raise ValueError(
             "episode {} of {}/{} records no source_xyz, and a pose with no source has "
-            "nothing to render".format(scan.episode, scan.run, scan.scene))
-    if scan.phase_folds is None or scan.change is None:
-        raise ValueError(
-            "scan {} of episode {} of {}/{} was not read: plan only the scans by_scan "
-            "reads".format(scan.start_step, scan.episode, scan.run, scan.scene))
+            "nothing to render".format(episode, run, scene))
     return ProbePose(
-        run=scan.run,
-        scene=scan.scene,
-        episode=int(scan.episode),
-        start_step=int(scan.start_step),
+        run=run,
+        scene=scene,
+        episode=int(episode),
+        start_step=int(start_step),
         source_class=audit.source_class,
-        period=int(scan.phase_folds),
+        period=int(period),
         walk_in=int(walk_in),
         source=source,
         seat_yaw=seat_yaw,
         scan_yaw=scan_yaw,
         positions=tuple(positions),
         actions=tuple(actions),
-        recorded_rms=tuple(float(r.measured_rms) for r in scan_rows),
-        recorded_change=float(scan.change),
+        recorded_rms=tuple(float(r.measured_rms) for r in read_rows),
+        recorded_change=float(recorded_change),
     ), None
 
 
@@ -515,14 +544,34 @@ def _render_config(scene_dir: pathlib.Path) -> Tuple[Optional[RenderConfig], Opt
     ), None
 
 
+def read_first_scans(
+    audit: EpisodeAudit, replay: EpisodeReplay, *, walk_in: int
+) -> Iterator[Tuple[Optional[ProbePose], Optional[str]]]:
+    """One plan per scan ``by_scan`` reads as "standing, first scan". Pure."""
+    for scan in replay.scans:
+        if _is_read_first_scan(scan):
+            yield plan_pose(audit, scan, walk_in=walk_in)
+
+
 def select_poses(
-    arm_dirs: Sequence[str], *, walk_in: int, scenes: Optional[Sequence[str]] = None
+    arm_dirs: Sequence[str],
+    *,
+    walk_in: int,
+    scenes: Optional[Sequence[str]] = None,
+    candidates: Callable[..., Iterable[Tuple[Optional[ProbePose], Optional[str]]]] =
+    read_first_scans,
 ) -> Selection:
     """The poses under each ``full`` arm directory, ``<tag>/full``. Reads only.
 
-    One pose per episode: the first run named wins, and a later run's scan of the same
-    ``(scene, episode)`` is counted as a duplicate. Every scene must have rendered with
-    one configuration, or the runs are refused. A zero-yield scene is named and skipped.
+    One pose per episode: the first run named wins, and a later run's candidate from the
+    same ``(scene, episode)`` is counted as a duplicate. Every scene must have rendered
+    with one configuration, or the runs are refused. A zero-yield scene is named and
+    skipped.
+
+    ``candidates`` is what an episode offers, in order, already planned: the read first
+    scans by default. A sibling probe passes its own and gets this selection, these
+    refusals and this de-duplication unchanged, because what may be compared across two
+    arms is a property of the runs and not of the sequence rendered at a pose.
     """
     from earshot.task.smoke import episode_indices
 
@@ -581,18 +630,16 @@ def select_poses(
                             label, scene_dir.name, index, audit.source_class,
                             scene_config.anomaly_class))
                 replay = episode_legs(audit, run=label, scene=scene_dir.name)
-                for scan in replay.scans:
-                    if not _is_read_first_scan(scan):
-                        continue
+                for pose, why in candidates(audit, replay, walk_in=int(walk_in)):
                     n_first += 1
-                    if (scene_dir.name, int(scan.episode)) in posed:
+                    key = (scene_dir.name, int(audit.episode_index))
+                    if key in posed:
                         exclude(EXCLUDED_DUPLICATE)
                         continue
-                    pose, why = plan_pose(audit, scan, walk_in=walk_in)
                     if pose is None:
                         exclude(str(why))
                         continue
-                    posed[(scene_dir.name, int(scan.episode))] = label
+                    posed[key] = label
                     poses.append(pose)
         if not n_episodes:
             refusals.append("no episode records under {}".format(root))
@@ -936,9 +983,10 @@ def render_arm(
     selection: Selection,
     hold: int,
     data_root: str,
+    probe: Callable[..., List[Any]] = probe_scene,
     progress: Callable[[str], None] = print,
 ) -> int:
-    """Render every pose in one arm, three Worlds per scene. The box half.
+    """Render every pose in one arm, through ``probe``, one scene at a time. The box half.
 
     Habitat is imported inside, for ``runner.run``'s reason: ``sim/world.py`` imports
     habitat_sim, so a module-level import would make this file uncollectable on a Mac.
@@ -1044,8 +1092,8 @@ def render_arm(
                 finally:
                     world.close()
 
-            results = probe_scene(scene_poses, fresh, clip=clip, bed_cue=bed_cue, hop=hop,
-                                  hold=hold, progress=progress)
+            results = probe(scene_poses, fresh, clip=clip, bed_cue=bed_cue, hop=hop,
+                            hold=hold, progress=progress)
         except Exception as exc:  # noqa: BLE001 -- one scene must not cost the rest
             error = "{}: {}".format(type(exc).__name__, exc)
             results = []
@@ -1245,9 +1293,14 @@ def readout(
     }
 
 
-def read_tag(tag_dir: str) -> Tuple[Dict[str, Dict[Tuple[str, str, int, int], PoseResult]],
-                                    Dict[str, Any], List[str]]:
-    """Every arm's results under ``<tag>/<arm>/``, their headers, and every scene error."""
+def read_tag(
+    tag_dir: str, *, result_type: Any = PoseResult
+) -> Tuple[Dict[str, Dict[Tuple[str, str, int, int], Any]], Dict[str, Any], List[str]]:
+    """Every arm's results under ``<tag>/<arm>/``, their headers, and every scene error.
+
+    ``result_type`` is what one pose's entry deserialises to, so a sibling probe that
+    writes the same envelope with a different sequence reads back through this.
+    """
     root = pathlib.Path(tag_dir)
     arms: Dict[str, Dict[Tuple[str, str, int, int], PoseResult]] = {}
     headers: Dict[str, Any] = {}
@@ -1272,7 +1325,7 @@ def read_tag(tag_dir: str) -> Tuple[Dict[str, Dict[Tuple[str, str, int, int], Po
             if payload.get("error"):
                 errors.append("{} {}: {}".format(arm, payload["scene"], payload["error"]))
             for entry in payload["poses"]:
-                result = PoseResult.from_dict(entry)
+                result = result_type.from_dict(entry)
                 results[result.pose.key] = result
         arms[arm] = results
     holds = {int(h["hold"]) for h in headers.values()}

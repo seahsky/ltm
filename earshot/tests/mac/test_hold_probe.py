@@ -582,7 +582,6 @@ class TestTheTagOnDisk(unittest.TestCase):
         self.assertIn("SCENE ERROR tc1 BBBscene: RuntimeError: boom", text)
         self.assertEqual(headers["hold"], HOLD)
         self.assertEqual(len(errors), 2)
-        print(text)
 
     def test_a_header_that_disagrees_with_its_arm_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
