@@ -98,6 +98,16 @@ wherever the clip's energy sits in it. ``loop_removed`` prints both readers over
 same sounding legs. If the loop is the pull, it goes from the same-phase reader and the
 direction stays. **It is not a gate** either.
 
+By straight line, added after the loop check
+--------------------------------------------
+
+The pull stayed with the loop cancelled. The next suspect is the grader's axis: a leg
+is graded on the route, and the level may follow the straight line through the walls
+instead. ``by_line`` grades the same sounding legs on the change in horizontal
+distance to ``source_xyz``, with both readers, and counts how often the route and the
+line agree on a leg's direction. If the pull goes here, it was the axis. If it stays,
+the level falls along a leg whatever the geometry. **Not a gate.**
+
 Read-only, no GPU, seconds to minutes. A run that lacks ``realizable_action``,
 ``geodesic_to_source`` or ``CalibrationRecord.cue_render_scatter``, or that is not
 ``full``'s rule, is refused by name.
@@ -168,6 +178,7 @@ __all__ = [
     "by_sounding",
     "same_phase_t",
     "loop_removed",
+    "by_line",
     "format_report",
     "main",
 ]
@@ -252,6 +263,10 @@ class Leg:
     # is set on SOUNDING legs only: where the source stopped, the loop stopped with it.
     phase_folds: Optional[int] = None
     t_same_phase: Optional[float] = None
+    # Horizontal straight-line distance to the source at the leg's first reading, and its
+    # change to the last: the axis the route was chosen over (see `by_line`).
+    line_start_m: Optional[float] = None
+    delta_line_m: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -358,7 +373,7 @@ def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
         if outcome == COMPLETED:
             leg = _measured(
                 leg, rows[start + 1 : start + LEG_PERIOD + 1], audit.sounding_window,
-                period)
+                period, audit.source_xyz)
         legs.append(leg)
     return EpisodeReplay(tuple(legs), checked, agreed, True, scatter is not None)
 
@@ -471,9 +486,14 @@ def same_phase_t(
     return slope / (sd / math.sqrt(suu))
 
 
+def _line_m(position: Xyz, source: Xyz) -> float:
+    """Horizontal straight-line distance, the ``xz`` axis the audit's docstring names."""
+    return math.hypot(position.x - source.x, position.z - source.z)
+
+
 def _measured(
     leg: Leg, readings: Sequence[Any], window: Optional[SoundingWindowRecord],
-    period: Optional[int],
+    period: Optional[int], source: Optional[Xyz],
 ) -> Leg:
     """A completed leg's verdict inputs, off the readings the controller would hold."""
     positions = [r.position for r in readings]
@@ -487,6 +507,7 @@ def _measured(
     first = readings[0].geodesic_to_source
     last = readings[-1].geodesic_to_source
     sounding = sounding_state(readings[0].step, readings[-1].step, window)
+    line_start = None if source is None else _line_m(positions[0], source)
     return Leg(
         run=leg.run, scene=leg.scene, episode=leg.episode, start_step=leg.start_step,
         outcome=leg.outcome,
@@ -499,6 +520,10 @@ def _measured(
         t_same_phase=(
             same_phase_t(displacements, levels, lag=period)
             if sounding == SOUNDING and period is not None else None),
+        line_start_m=line_start,
+        delta_line_m=(
+            None if source is None or line_start is None
+            else _line_m(positions[-1], source) - line_start),
     )
 
 
@@ -998,10 +1023,13 @@ def _sounding_lines(states: Mapping[str, Mapping[str, Any]]) -> List[str]:
 _LOOP_READERS = (("fit", "t"), ("same_phase", "t_same_phase"))
 
 
-def _reader(legs: Sequence[Leg], attr: str) -> Dict[str, Any]:
-    """One reader's medians and sign shares over informative legs. Pure."""
-    approached = [float(getattr(l, attr)) for l in legs if l.delta_route_m < 0]
-    receded = [float(getattr(l, attr)) for l in legs if l.delta_route_m > 0]
+def _reader(legs: Sequence[Leg], attr: str, delta: str = "delta_route_m") -> Dict[str, Any]:
+    """One reader's medians and sign shares over legs informative on ``delta``. Pure.
+
+    "Approached" means the grading axis fell over the leg, and "receded" that it rose.
+    """
+    approached = [float(getattr(l, attr)) for l in legs if getattr(l, delta) < 0]
+    receded = [float(getattr(l, attr)) for l in legs if getattr(l, delta) > 0]
     return {
         "median_t_approached": statistics.median(approached) if approached else None,
         "median_t_receded": statistics.median(receded) if receded else None,
@@ -1072,13 +1100,77 @@ def _loop_lines(entry: Mapping[str, Any]) -> List[str]:
         _READER_ROW.format("reader", "median t: approached", "receded",
                            "approached read up", "receded read down"),
     ]
+    return lines + _reader_rows(entry["readers"])
+
+
+def _reader_rows(readers: Mapping[str, Mapping[str, Any]]) -> List[str]:
+    lines = []
     for key, _ in _LOOP_READERS:
-        reader = entry["readers"][key]
+        reader = readers[key]
         lines.append(_READER_ROW.format(
             _READER_NAMES[key], _t_cell(reader["median_t_approached"]),
             _t_cell(reader["median_t_receded"]), _pct(reader["approached_read_up"]),
             _pct(reader["receded_read_down"])))
     return lines
+
+
+def by_line(runs: Sequence[RunReplay]) -> Dict[str, Any]:
+    """Both readers over the sounding legs again, graded on the straight line. Pure.
+
+    **Not a gate.** The loop check left about three quarters of informative sounding
+    legs quieter along the leg, whichever way they walked by route. The route was chosen
+    over the straight line because past a few metres in a house the two come apart and
+    the sound was taken to follow the walk (``StepRecord.geodesic_to_source``). Nothing
+    measured that choice. If the level follows the straight line instead, legs that
+    shortened the route while lengthening the line read quieter, and the pull is the
+    grader's axis rather than the field.
+
+    A leg is informative on the line when the horizontal distance to ``source_xyz``
+    changed by at least ``INFORMATIVE_ROUTE_M``, the route's own bar. The route is not
+    needed, so legs with no route at one end are read here too. ``n_both`` and
+    ``n_agree`` count the legs informative on both axes and those where the two agree
+    on the direction, which says how far the two gradings can differ at all.
+    """
+    informative = [
+        leg for run in runs for leg in run.legs
+        if leg.outcome == COMPLETED and leg.sounding == SOUNDING
+        and leg.delta_line_m is not None
+        and abs(leg.delta_line_m) >= INFORMATIVE_ROUTE_M]
+    paired = [l for l in informative if l.t is not None and l.t_same_phase is not None]
+    both = [
+        l for l in informative
+        if l.delta_route_m is not None and abs(l.delta_route_m) >= INFORMATIVE_ROUTE_M]
+    return {
+        "n_informative": len(informative),
+        "n_paired": len(paired),
+        "n_approached": sum(1 for l in paired if l.delta_line_m < 0),
+        "n_receded": sum(1 for l in paired if l.delta_line_m > 0),
+        "n_both": len(both),
+        "n_agree": sum(1 for l in both if (l.delta_line_m < 0) == (l.delta_route_m < 0)),
+        "readers": {
+            key: _reader(paired, attr, "delta_line_m") for key, attr in _LOOP_READERS},
+    }
+
+
+def _line_lines(entry: Mapping[str, Any]) -> List[str]:
+    return [
+        "",
+        "BY STRAIGHT LINE. NOT A GATE: added after the loop check, sounding legs only.",
+        "The same two readers, graded on the horizontal straight-line distance to the "
+        "source in",
+        "place of the route. If the level follows the line and not the route, the pull "
+        "goes here:",
+        "legs that closed the line read up about as often as legs that opened it read down.",
+        "  informative on the line (|change| >= {:.2f} m): {}".format(
+            INFORMATIVE_ROUTE_M, entry["n_informative"]),
+        "  both readers defined on {}: {} closed, {} opened".format(
+            entry["n_paired"], entry["n_approached"], entry["n_receded"]),
+        "  route and line agree on {} of the {} legs informative on both ({})".format(
+            entry["n_agree"], entry["n_both"],
+            _pct(_share(entry["n_agree"], entry["n_both"])).strip()),
+        _READER_ROW.format("reader", "median t: closed", "opened", "closed read up",
+                           "opened read down"),
+    ] + _reader_rows(entry["readers"])
 
 
 def format_report(
@@ -1100,6 +1192,7 @@ def format_report(
     lines += _breakdown_lines(legs, display_t_leg, display_why)
     lines += _sounding_lines(by_sounding(runs))
     lines += _loop_lines(loop_removed(runs))
+    lines += _line_lines(by_line(runs))
     if field is not None:
         lines += _field_lines(field)
     lines += [
@@ -1167,6 +1260,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "gate": gate,
             "by_sounding": by_sounding(runs),
             "loop_removed": loop_removed(runs),
+            "by_line": by_line(runs),
             "field": field,
             "legs": [asdict(leg) for run in runs for leg in run.legs],
         }, indent=2))

@@ -56,6 +56,7 @@ from earshot.tools.leg_replay import (
     UNVERIFIED,
     Leg,
     RunReplay,
+    by_line,
     by_sounding,
     episode_legs,
     evaluate_gate,
@@ -97,7 +98,7 @@ def cast_xs(x0, headings, n):
 
 def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=None,
             routed=True, scatter=EPS, arm=None, offset_at=None, tail=3, loop=(),
-            folds=None):
+            folds=None, route=abs):
     """An audit whose detour `realizable_action` the controller wrote, tick by tick.
 
     ``gain`` is how much louder the cue gets per metre nearer; negative is a field that
@@ -108,6 +109,8 @@ def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=No
     bed with no gradient, and the audit carries the window that says so.
     ``loop`` is added to the level while the source sounds, one entry per step from the
     detour's first, repeating: the clip's loop. ``folds`` is the period the record states.
+    ``route`` maps a position's x to its route length. The default is the straight line,
+    and anything else is a house whose walls make the walk differ from the line.
     """
     offset = None if offset_at is None else PRE + offset_at
     levels, rows, plateau = [], [], 0
@@ -133,7 +136,7 @@ def episode(xs, *, gain=0.01, index=0, surge_at=None, stop_at=None, tamper_at=No
         rows.append(StepRecord(
             step=i, measured_rms=level, lateral_sign=-1, position=Xyz(x, 0.0, 0.0),
             source_playing=i >= PRE and (offset is None or i < offset),
-            displacement_m=0.25, geodesic_to_source=abs(x) if routed else None,
+            displacement_m=0.25, geodesic_to_source=route(x) if routed else None,
             realizable_action=recorded))
         if action == ACT_STOP:
             break
@@ -476,6 +479,66 @@ class TestTheLoopRemoved(unittest.TestCase):
         return format_report([run], gate, display_t_leg=2.5, display_why="test")
 
 
+def around_a_wall(x):
+    """A route that lengthens as the straight line shortens: the door is behind."""
+    return 20.0 - x
+
+
+class TestTheStraightLine(unittest.TestCase):
+    """Is the pull the grader's axis? The same legs, graded on the horizontal straight
+    line to the source in place of the route."""
+
+    def _run(self, **kwargs):
+        xs = cast_xs(6.0, [TOWARD, AWAY, TOWARD, AWAY], 40)
+        audit = episode(xs, offset_at=30, loop=RING, folds=FOLDS, **kwargs)
+        return RunReplay("r/full", "r/full", 1, 1, replay(audit).legs, 0, 0, 0, ())
+
+    def test_a_leg_carries_its_line_distance(self):
+        leg = replay(episode(THREE_LEGS)).legs[0]
+        self.assertAlmostEqual(leg.line_start_m, THREE_LEGS[SCAN_STEPS + 1])
+        self.assertAlmostEqual(leg.delta_line_m, -2.0)
+
+    def test_a_record_with_no_source_has_no_line(self):
+        audit = replace(episode(THREE_LEGS), source_xyz=None)
+        leg = replay(audit).legs[0]
+        self.assertIsNone(leg.delta_line_m)
+        self.assertIsNotNone(leg.delta_route_m)
+
+    def test_a_field_on_the_line_reads_right_there_and_wrong_on_the_route(self):
+        """Both arms on one house. The cue follows the line, and the route runs the
+        other way round a wall. Graded on the route, every leg reads wrong; graded on
+        the line, every leg reads right."""
+        run = self._run(route=around_a_wall)
+        line = by_line([run])
+        self.assertEqual((line["n_approached"], line["n_receded"]), (1, 1))
+        self.assertEqual((line["n_both"], line["n_agree"]), (2, 0))
+        on_line = line["readers"]["same_phase"]
+        self.assertEqual((on_line["approached_read_up"], on_line["receded_read_down"]),
+                         (1.0, 1.0))
+        on_route = loop_removed([run])["readers"]["same_phase"]
+        self.assertEqual((on_route["approached_read_up"], on_route["receded_read_down"]),
+                         (0.0, 0.0))
+
+    def test_where_route_and_line_agree_the_two_gradings_agree(self):
+        run = self._run()
+        line, route = by_line([run]), loop_removed([run])
+        self.assertEqual((line["n_both"], line["n_agree"]), (2, 2))
+        self.assertEqual(line["readers"], route["readers"])
+
+    def test_a_leg_with_no_route_is_still_graded_on_the_line(self):
+        run = self._run(routed=False)
+        self.assertEqual(loop_removed([run])["n_informative"], 0)
+        self.assertEqual(by_line([run])["n_informative"], 2)
+        self.assertEqual(by_line([run])["n_both"], 0)
+
+    def test_the_section_says_it_is_not_a_gate(self):
+        run = self._run(route=around_a_wall)
+        gate = evaluate_gate({run.label: run.legs})
+        text = format_report([run], gate, display_t_leg=2.5, display_why="test")
+        self.assertIn("BY STRAIGHT LINE. NOT A GATE", text)
+        self.assertIn("route and line agree on 0 of the 2 legs", text)
+
+
 class TestTheRunsOnDisk(unittest.TestCase):
     """Through the real writers, because that seam is where a replay that is right over
     injected legs finds nothing on disk and reports it as a finding."""
@@ -530,6 +593,8 @@ class TestTheRunsOnDisk(unittest.TestCase):
         self.assertEqual(payload["by_sounding"]["unknown"]["n_completed"], 2 + 2 + 3)
         self.assertEqual(payload["by_sounding"]["sounding"]["n_completed"], 0)
         self.assertEqual(payload["loop_removed"]["n_informative"], 0)
+        self.assertEqual(payload["by_line"]["n_informative"], 0)
+        self.assertIn("delta_line_m", payload["legs"][0])
 
     def test_an_oracle_arm_is_refused_by_name(self):
         """No `realizable_action` by construction, and not `full`'s rule."""
