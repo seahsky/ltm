@@ -186,7 +186,13 @@ python -m earshot.tools.leg_probe read runs/<tag>
 # so it moves the climb's bar (`climb_eps`, the trace's own scatter) as well as the rise:
 # a NULL is not "the rise does not matter". `window_report` prints each arm's floor;
 # `leg_replay` over `no-tc`'s legs separates rise from bar, and is NOT ADR-0029's gate.
-# ONE ARM PER `leg_replay` CALL: it pools every run it is handed into one branch
+# ONE ARM PER `leg_replay` CALL: it pools every run it is handed into one branch.
+# `no-tc` RAN 2026-09-23: Find-SR A NULL (98 vs 102 of 270, 22/26, p 0.67), the preset
+# buys NO speed (0.0348 vs 0.0350 s/step), and THE PULL IS THE PRESET: with it off the
+# sounding legs read +1.56 approaching / -1.91 receding, and ADR-0029's grid reads BUILD
+# at T 1.0 (LOUDER 95.8%, QUIETER 79.9%) where `full` that night reads STOP. ONE render,
+# chosen after the STOP, so NOT the gate: re-gating on the preset off needs its own
+# pre-registration and three renders
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> --arms "full no-tc"
 python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/no-tc
 python -m earshot.tools.leg_replay runs/<tag>/no-tc

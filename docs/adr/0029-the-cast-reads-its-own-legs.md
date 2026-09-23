@@ -154,6 +154,9 @@ The full readout is in `PHASE2_ABLATION_REPORT.md` under "leg replay".
 - **The level falls standing still (PR #155, not a gate).** In the detour's first scan, where the agent turns in place, 83.7% of 184 reads fall, by a median 11.1% per loop, against 76.7% and −9.0% on walking legs.
   So the fall is mostly a trend in time, not motion, and the motion hypothesis above is contradicted. Two caveats are open: complete scans exclude those a surge cut, and only 453 of 979 complete sounding scans stood still.
   A controlled probe on the box, standing still with `temporalCoherence` 1 and 0, is the next check.
+- **The pull is `temporalCoherence` (`no-tc`, 2026-09-23, not a gate).** `full` and `full` with the preset key off ran on the same night over the same 282 episodes. With it off, sounding legs read +1.56 approaching and −1.91 receding (same phase: 84.6% of approaching legs read up), and the pull is gone. `full` on that night read −0.41 and −1.29 again.
+  This grid over the `no-tc` legs reads **BUILD at T 1.0**: LOUDER 95.8%, QUIETER 79.9%, decisive on 32.9%. `full` on the same night reads STOP, with QUIETER at 55.9%.
+  **This is not the gate.** It is one render against the three this ADR names, and the arm was chosen after the STOP. Reading these thresholds on legs rendered with the preset off is a new pre-registration. Find-SR did not move (98 against 102 of 270, p 0.67), which is what a controller that does not read legs predicts. `PHASE2_ABLATION_REPORT.md` has the tables.
 
 The night below is not booked.
 
