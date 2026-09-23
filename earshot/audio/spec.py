@@ -76,7 +76,19 @@ AUDIO_SENSOR_UUID = "audio_sensor"
 #   threadCount          1 -> 4     ~2.4x on the box's 4 cores — a real lever, but not
 #                                   the order of magnitude the map's "free speed knob"
 #                                   framing implied (ticket 04 called that correction)
-#   temporalCoherence    0 -> 1     defaults OFF, so enabling it gives up nothing
+#   temporalCoherence    0 -> 1     entered as free, and it is NOT. `walk-1` (2026-09-23)
+#                                   re-rendered 254 recorded cast legs with it on and off.
+#                                   Off, the legs that CLOSED on the source rose +16.2%
+#                                   per loop and the legs that opened fell -15.6%. On, at
+#                                   the same poses along the same walks, +3.1% and -12.1%:
+#                                   the rise is cut about fivefold, the fall is left
+#                                   nearly whole. `ir_walk` carries it, so it is here and
+#                                   not in the cue pipeline. Ticket 06's gradient check
+#                                   could not have caught this -- a monotone rho over
+#                                   static poses is not the change along a walking leg,
+#                                   which is the quantity `agent.controller.is_rising` reads.
+#                                   UNPRICED END TO END: no sweep has run with it off.
+#                                   PHASE2_ABLATION_REPORT.md has the table.
 #
 # NOT in the set, deliberately: `maxIRLength` and `directRayCount` are not cost knobs at
 # all (the IR cap bounds the output buffer, not the tracing), and `transmission` /
