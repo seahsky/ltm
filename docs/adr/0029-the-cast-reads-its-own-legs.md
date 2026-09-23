@@ -4,6 +4,7 @@ Status: **accepted**, 2026-09-21 (PR #146), with the gate's thresholds as propos
 Amends ADR-0016's cast. The surge, the scan, the arrival rule and `is_rising` carry unchanged.
 **Gated on an off-box replay.** No controller code ships and no night is booked until the replay's pre-registered branch says so.
 **The gate ran on 2026-09-21 and read STOP.** `READ_LEGS` does not ship; see "The result".
+**ADR-0030 re-reads this gate on legs rendered with `temporalCoherence` off**, over three renders, with the thresholds above unchanged.
 
 `oracle-2` measured the headroom: Find-SR@1m is 33.3% for `full` and 98.5% for the same controller handed the source coordinate, on the same criterion, over the same episodes (ADR-0028).
 The follower, the budget, the navmesh and the arrival rule ran unchanged in both arms, so the 65.2 points are localization.

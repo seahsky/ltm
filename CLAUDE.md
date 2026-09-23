@@ -197,6 +197,19 @@ nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> --arms "full no-tc"
 python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/no-tc
 python -m earshot.tools.leg_replay runs/<tag>/no-tc
 
+# ADR-0030's RE-GATE: ADR-0029's gate re-read on legs rendered with the key off, over
+# `runs/no-tc/no-tc` and two FRESH renders, thresholds unchanged. Pooling several renders
+# of ONE arm is what the gate is for; never mix arms in one call. The second read is the
+# guard: ignore the verdict it prints for itself and read its grid at the three-render
+# T_LEG. Run the renders BEFORE the preset flip lands, which removes the `no-tc` name, and
+# at the same code: `git diff 8e6f16d <commit> -- earshot/` comments only, else NOT_RUN.
+# 0 discordant pairs between any two renders is NOT_RUN too. ~1 h 52 m each
+nrun bash earshot/tools/ablation_sweep.sh --tag regate-a --arms no-tc
+nrun bash earshot/tools/ablation_sweep.sh --tag regate-b --arms no-tc
+python -m earshot.tools.leg_replay runs/no-tc/no-tc runs/regate-a/no-tc runs/regate-b/no-tc
+python -m earshot.tools.leg_replay runs/regate-a/no-tc runs/regate-b/no-tc
+python -m earshot.tools.episode_diff runs/regate-a/no-tc runs/regate-b/no-tc   # TC-0 flip rate
+
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
 # it, so the run's own central quantity reached nobody.
