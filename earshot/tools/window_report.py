@@ -111,6 +111,11 @@ class ArmReading:
     # mixed sweep, which is the thing a paired diff must not be handed.
     ablation_arms: Tuple[str, ...]
     n_arms_unrecorded: int
+    # `CalibrationRecord.cue_render_scatter`, the floor `is_rising`'s bar cannot go
+    # below (`climb_eps`), one per episode that measured it. An arm that changes the
+    # renderer moves this floor as well as the cue, so it is printed beside the SR.
+    cue_render_scatters: Tuple[float, ...]
+    n_cue_render_scatter_absent: int
 
     @property
     def reached_rate(self) -> Optional[float]:
@@ -224,6 +229,8 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
             n_dtg_source_final_absent=0,
             ablation_arms=(),
             n_arms_unrecorded=0,
+            cue_render_scatters=(),
+            n_cue_render_scatter_absent=0,
         )
 
     steps = [float(len(audit.steps)) for audit in audits]
@@ -269,6 +276,11 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
         and _metric(audit, "source_find_sr_1m")
     )
     labels = [_arm_label(audit) for audit in audits]
+    scatters = tuple(
+        float(audit.calibration.cue_render_scatter)
+        for audit in audits
+        if audit.calibration is not None and audit.calibration.cue_render_scatter is not None
+    )
 
     return ArmReading(
         arm=arm,
@@ -315,6 +327,8 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
         n_dtg_source_final_absent=n_dtg_absent,
         ablation_arms=tuple(sorted({label for label in labels if label is not None})),
         n_arms_unrecorded=sum(1 for label in labels if label is None),
+        cue_render_scatters=scatters,
+        n_cue_render_scatter_absent=len(audits) - len(scatters),
     )
 
 
@@ -362,6 +376,32 @@ def format_arm(reading: ArmReading) -> List[str]:
             reading.max_step_audio_s or 0.0,
         ),
     ]
+    if reading.cue_render_scatters:
+        lines.append(
+            "  {:11s}   THE CLIMB'S FLOOR (cue_render_scatter, the eps `is_rising` "
+            "clears): n={} of {}   median {:.3e} min {:.3e} max {:.3e}".format(
+                "",
+                len(reading.cue_render_scatters),
+                reading.n_episodes,
+                statistics.median(reading.cue_render_scatters),
+                min(reading.cue_render_scatters),
+                max(reading.cue_render_scatters),
+            )
+        )
+        if reading.n_cue_render_scatter_absent:
+            lines.append(
+                "  {:11s}     UNMEASURED on {} of {}: those climbs ran at the "
+                "UNMEASURED_EPS fallback, a different bar".format(
+                    "", reading.n_cue_render_scatter_absent, reading.n_episodes
+                )
+            )
+    else:
+        lines.append(
+            "  {:11s}   THE CLIMB'S FLOOR: UNMEASURED on all {} episode(s). Every climb "
+            "ran at the UNMEASURED_EPS fallback. ABSENT, not 0.0.".format(
+                "", reading.n_episodes
+            )
+        )
 
     tally = reading.tally
     if reading.sws_refused is not None:

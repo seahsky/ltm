@@ -63,6 +63,32 @@
 #              0.112 — a well-powered null whose comparison is CONFOUNDED BY SOUND CLASS.
 #              This arm asks the same question with class held fixed.
 #
+# `no-tc` IS NOT A COMPONENT OF THE AGENT, and it is here because it has to pair against
+# `full`. It is `--temporal-coherence off`: the renderer's one preset key that entered as
+# a free speed knob (ticket 06, about 10% of render cost) and is not free. `walk-1`
+# (2026-09-23) re-rendered 254 recorded cast legs at the same poses both ways. Off, the
+# legs that closed on the source rose +16.2% per loop; on, +3.1%. `is_rising` reads that
+# rise. So the arm asks what the preset costs END TO END, which no sweep has measured.
+#
+#   READ IT AS `full -> no-tc`, paired, both tests. A gain says the preset has been
+#   costing `full` finds. A NULL DOES NOT SAY THE RISE IS IRRELEVANT, for the reason below.
+#
+#   IT CHANGES EVERY RENDER, NOT ONLY THE CAST'S, AND SO THE BAR AS WELL AS THE RISE.
+#   The calibration sweep renders through the same spec, so `onset_rms` moves. So does
+#   `cue_render_scatter`, which `climb_eps` makes the floor of `is_rising`'s bar; the
+#   bar's other term is the trace's own dispersion, and that moves too. The preset
+#   reuses render history, so turning it off plausibly makes both noisier (inferred,
+#   not measured). A larger rise read through a higher bar can net to nothing. The arm
+#   prices the PRESET end to end and is one variable; it does not price the cue alone.
+#   `window_report` prints each arm's floor beside its SR. The read that separates rise
+#   from bar is `leg_replay` over this arm's legs: it checks the controller rule and not
+#   the audio config, so it reads them, and it grades their direction as the controller
+#   would. That is a follow-up and NOT ADR-0029's gate, which read STOP on `full`. Hand
+#   it `no-tc` ALONE: it pools every run it is given into one branch.
+#
+#   THE FLIP RATE WAS MEASURED WITH THE PRESET ON. Whether render history adds to the
+#   run-to-run flips is not measured, so the MDE `power.py` prints is `full`'s.
+#
 # `oracle-loc` AND `oracle-loc-matched` ARE NOT ABLATIONS, and they are in this list so
 # nobody reads them as ones. Every arm above REMOVES a component. These two ADD the source
 # coordinate, so they are CEILINGS: what the navmesh follower and the scan/cast sweep
@@ -495,13 +521,14 @@ if [ "$DREAM_KNOBS_NOMEM" = "$DREAM_KNOBS" ]; then
   exit 2
 fi
 
-ARM_NAMES=(full no-climb no-cue scan-only anechoic oracle-loc oracle-loc-matched dream dream-nomem)
+ARM_NAMES=(full no-climb no-cue scan-only anechoic no-tc oracle-loc oracle-loc-matched dream dream-nomem)
 ARM_FLAGS=(
   ""
   "--climb-rule off"
   "--lateral-cue off"
   "--cast-policy scan_only"
   "--ir-policy anechoic"
+  "--temporal-coherence off"
   # THE ONLY ARM THAT ADDS INFORMATION INSTEAD OF REMOVING A COMPONENT, and the only one
   # whose flag is already on the command line above. `--localization realizable` is
   # passed explicitly at the invocation and `${ARM_FLAGS[$i]}` is word-split AFTER it, so
@@ -524,6 +551,7 @@ ARM_WHY=(
   "R2 the interaural sign is ambiguous — loudness without binaural localization"
   "R3 every dead step turns instead of walking a leg — the pre-eps-1 control"
   "R5 flat IRs at all three render sites — does the reverb tail buy any SWS"
+  "THE RENDER PRESET, not an agent component: temporalCoherence off. walk-1 measured it hiding the approach along a leg; this prices it on Find-SR"
   "THE CEILING ON ITS OWN CRITERION, not an ablation: HANDED the source coordinate and arriving at 1.5 m. oracle-1 measured 94.3% source-reached and 2 of 270 Find-SR@1m out of this arm, so DO NOT difference it against full — read the arrival caveat in the header and use oracle-loc-matched"
   "THE CEILING ON THE BASELINE'S CRITERION (ADR-0028): handed the source coordinate and arriving on the realizable arm's own detector confirm, so it differs from full in INFORMATION ALONE. This is the arm a localization ceiling is quoted from"
   "DREAM: M^S, consolidation, a three-level M^L that GROWS across this arm's episodes, and memory-weighted planning"

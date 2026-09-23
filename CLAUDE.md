@@ -89,8 +89,9 @@ nrun bash earshot/tools/window_pilot.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag>
 
 # THE OVERNIGHT SWEEP: the paper's HM3D baseline and the ablation table, in one run.
-# NINE arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
-# `no-cue`, `scan-only` and `anechoic` each remove one component; `dream` and
+# TEN arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
+# `no-cue`, `scan-only` and `anechoic` each remove one component; `no-tc` turns the
+# render preset's `temporalCoherence` off and is not an agent component; `dream` and
 # `dream-nomem` are the memory pair (ADR-0025) and differ in `lambda_memory` alone.
 # `oracle-loc` and `oracle-loc-matched` are CEILINGS and not ablations -- they ADD the
 # source coordinate. Difference only the MATCHED one against `full`: `oracle-1` measured
@@ -178,6 +179,17 @@ python -m earshot.tools.hold_probe read runs/<tag>
 # which `--walk-in` tests and this run did not
 nrun bash earshot/tools/leg_probe.sh --tag <fresh-tag>
 python -m earshot.tools.leg_probe read runs/<tag>
+
+# WHAT THE PRESET COSTS END TO END, after `walk-1`. `no-tc` is `full` with
+# `--temporal-coherence off` and every other knob the same. `full` runs in the same
+# night as the control. The arm changes every render, the calibration sweep included,
+# so it moves the climb's bar (`climb_eps`, the trace's own scatter) as well as the rise:
+# a NULL is not "the rise does not matter". `window_report` prints each arm's floor;
+# `leg_replay` over `no-tc`'s legs separates rise from bar, and is NOT ADR-0029's gate.
+# ONE ARM PER `leg_replay` CALL: it pools every run it is handed into one branch
+nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> --arms "full no-tc"
+python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/no-tc
+python -m earshot.tools.leg_replay runs/<tag>/no-tc
 
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print

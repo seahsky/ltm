@@ -322,6 +322,55 @@ class TestTheCli(unittest.TestCase):
         self._reject(["--run-dir", "runs/x", "--anomaly-class", "thunder"])
 
 
+class TestTheTemporalCoherenceFlag(unittest.TestCase):
+    """`--temporal-coherence`, the flag `ablation_sweep.sh`'s `no-tc` arm passes.
+
+    Read through to the render key rather than stopped at the config field: `walk-1`
+    measured the preset hiding the approach, and a flag that set the field while the
+    mapping still sent the preset's 1 would run the arm as `full` and report a null.
+    Both values are asserted, because the preset is 1 and a test of `on` alone could not
+    tell an applied override from the preset.
+    """
+
+    def _acoustics(self, argv):
+        from earshot.audio.spec import audio_config_mapping
+
+        config = config_from_args(build_parser().parse_args(["--run-dir", "runs/x"] + argv))
+        mapping = audio_config_mapping(config.audio, binaural_layout=None)
+        return config, mapping["acousticsConfig"]
+
+    def test_absent_keeps_the_preset(self):
+        config, acoustics = self._acoustics([])
+        self.assertIsNone(config.audio.temporal_coherence)
+        self.assertEqual(acoustics["temporalCoherence"], 1)
+
+    def test_off_reaches_the_render_key_and_nothing_else(self):
+        config, acoustics = self._acoustics(["--temporal-coherence", "off"])
+        self.assertIs(config.audio.temporal_coherence, False)
+        self.assertEqual(acoustics["temporalCoherence"], 0)
+        self.assertEqual(
+            dataclasses.replace(config.audio, temporal_coherence=None),
+            RunConfig(run_dir="runs/x").audio,
+        )
+        print("--temporal-coherence off -> acousticsConfig.temporalCoherence {}".format(
+            acoustics["temporalCoherence"]))
+
+    def test_on_reaches_the_render_key(self):
+        config, acoustics = self._acoustics(["--temporal-coherence", "on"])
+        self.assertIs(config.audio.temporal_coherence, True)
+        self.assertEqual(acoustics["temporalCoherence"], 1)
+
+    def test_it_is_recorded_on_the_run_config(self):
+        """`hold_probe` and `leg_probe` read the knob back off `run_config.audio`."""
+        config, _ = self._acoustics(["--temporal-coherence", "off"])
+        self.assertIs(config.as_dict()["audio"]["temporal_coherence"], False)
+
+    def test_any_other_value_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                build_parser().parse_args(["--run-dir", "runs/x", "--temporal-coherence", "0"])
+
+
 class TestMemoryKwargsFromArgs(unittest.TestCase):
     """``memory_kwargs_from_args`` — the seam ``MemoryCondition``'s own docstring asks
     for: the matrix cell is not a ``RunConfig`` field, so this is a second, separate

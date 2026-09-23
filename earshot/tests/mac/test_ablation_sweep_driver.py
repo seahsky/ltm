@@ -16,6 +16,7 @@ The function text is EXTRACTED FROM THE SCRIPT and run by bash. A copy of the pr
 pasted into this file would pass forever after someone edited the driver.
 """
 
+import dataclasses
 import json
 import os
 import pathlib
@@ -392,17 +393,7 @@ class TestTheMatchedOracleArmIsSelectableAndIsNotThePrefixArm(unittest.TestCase)
         cls.text = DRIVER.read_text()
 
     def _select(self, wanted: str):
-        """The driver's own `--arms` block, over its own arrays, for one selection."""
-        arrays = self.text[self.text.index("ARM_NAMES=("):self.text.index("N_SCENES=")]
-        script = 'WANTED_ARMS="{}"\n{}\nfor i in "${{!ARM_NAMES[@]}}"; do\n'.format(
-            wanted, arrays
-        ) + '  printf "%s\\t%s\\n" "${ARM_NAMES[$i]}" "${ARM_FLAGS[$i]}"\ndone\n'
-        done = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, check=True
-        )
-        return [
-            tuple(line.split("\t")) for line in done.stdout.splitlines() if line.strip()
-        ]
+        return _select_arms(self.text, wanted)
 
     def test_the_arm_carries_exactly_the_enums_own_value(self):
         """A renamed enum member must break HERE and not at 11pm on the box, where the
@@ -441,6 +432,80 @@ class TestTheMatchedOracleArmIsSelectableAndIsNotThePrefixArm(unittest.TestCase)
         a night to difference an arm against itself -- `dream-2`'s shape exactly."""
         both = dict(self._select("oracle-loc oracle-loc-matched"))
         self.assertEqual(len(set(both.values())), 2, both)
+
+
+class TestTheNoTcArmChangesTheRenderPresetAndNothingElse(unittest.TestCase):
+    """`no-tc` prices `temporalCoherence` end to end, so it must differ from `full` in
+    that one key and must reach the render.
+
+    Both failures are silent and point the same way. A flag that set the config field
+    while the mapping still sent the preset's 1 runs the arm as `full`; a flag string
+    that also moved another knob runs a two-variable contrast, which is `dream-2`'s
+    shape. Either finishes green and reports a number that is not the preset's price.
+    So the arm's own flag string, selected by the driver's own block, is put to the
+    real parser and read through to the render key, beside `full` as the other arm.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("bash") is None:
+            raise unittest.SkipTest("no bash on PATH")
+        cls.text = DRIVER.read_text()
+        cls.flags = dict(_select_arms(cls.text, "full no-tc"))
+
+    def _config(self, arm: str):
+        from earshot.__main__ import build_parser, config_from_args
+
+        argv = ["--run-dir", "runs/x"] + self.flags[arm].split()
+        return config_from_args(build_parser().parse_args(argv))
+
+    def _render_key(self, arm: str) -> int:
+        from earshot.audio.spec import audio_config_mapping
+
+        mapping = audio_config_mapping(self._config(arm).audio, binaural_layout=None)
+        return mapping["acousticsConfig"]["temporalCoherence"]
+
+    def test_selecting_it_gives_the_flag_and_nothing_else(self):
+        self.assertEqual(
+            _select_arms(self.text, "no-tc"), [("no-tc", "--temporal-coherence off")]
+        )
+
+    def test_the_arm_renders_with_it_off_and_the_control_with_it_on(self):
+        self.assertEqual(self._render_key("no-tc"), 0)
+        self.assertEqual(self._render_key("full"), 1)
+        print("temporalCoherence: full {}, no-tc {}".format(
+            self._render_key("full"), self._render_key("no-tc")))
+
+    def test_the_two_configs_differ_in_that_one_field(self):
+        full, no_tc = self._config("full"), self._config("no-tc")
+        self.assertNotEqual(full, no_tc)
+        self.assertEqual(
+            dataclasses.replace(no_tc, audio=dataclasses.replace(
+                no_tc.audio, temporal_coherence=full.audio.temporal_coherence)),
+            full,
+        )
+
+    def test_no_other_arm_touches_the_preset(self):
+        """Every other row in the table is quoted against `full` at the preset. An arm
+        that turned it off as well would carry two changes under one name."""
+        every = _select_arms(self.text, "")
+        carrying = [name for name, flags in every if "--temporal-coherence" in flags]
+        self.assertEqual(carrying, ["no-tc"])
+
+
+def _select_arms(text: str, wanted: str):
+    """The driver's own `--arms` block, over its own arrays, for one selection. An empty
+    `wanted` is the driver's default: every arm."""
+    arrays = text[text.index("ARM_NAMES=("):text.index("N_SCENES=")]
+    script = 'WANTED_ARMS="{}"\n{}\nfor i in "${{!ARM_NAMES[@]}}"; do\n'.format(
+        wanted, arrays
+    ) + '  printf "%s\\t%s\\n" "${ARM_NAMES[$i]}" "${ARM_FLAGS[$i]}"\ndone\n'
+    done = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=True
+    )
+    return [
+        tuple(line.split("\t")) for line in done.stdout.splitlines() if line.strip()
+    ]
 
 
 def _count_array_entries(text: str, opener: str) -> int:

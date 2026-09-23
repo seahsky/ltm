@@ -53,6 +53,11 @@ from earshot.task.plan import PlanWeights
 
 __all__ = ["build_parser", "config_from_args", "memory_kwargs_from_args", "main"]
 
+# Words on the command line, a bool on `AudioConfig`. The flag's absence is `None`, which
+# keeps `spec.ACOUSTICS_PRESET`'s value, so a run without the flag is the same experiment
+# as every run before it existed.
+TEMPORAL_COHERENCE = {"on": True, "off": False}
+
 
 def build_parser() -> argparse.ArgumentParser:
     """The CLI. Defaults come from ``RunConfig``, so there is one home for each number."""
@@ -203,6 +208,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the acoustics preset's indirectRayCount (default 500). The one "
              "knob that trades RENDER ACCURACY for speed: two runs of the same scene at "
              "500 disagreed on 4 of 20 episode outcomes. Roughly linear in cost",
+    )
+    parser.add_argument(
+        "--temporal-coherence",
+        choices=sorted(TEMPORAL_COHERENCE),
+        default=None,
+        help="override the acoustics preset's temporalCoherence (default on). `walk-1` "
+             "measured it cutting the level rise along legs that close on the source "
+             "about fivefold, so it is not a free speed knob. Omit to keep the preset",
     )
     parser.add_argument(
         "--overwrite",
@@ -446,6 +459,8 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
             RunConfig(run_dir="").audio,
             indirect_ray_count=(None if args.indirect_ray_count is None
                                 else int(args.indirect_ray_count)),
+            temporal_coherence=(None if args.temporal_coherence is None
+                                else TEMPORAL_COHERENCE[args.temporal_coherence]),
         ),
         overwrite=bool(args.overwrite),
     )
