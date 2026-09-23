@@ -166,7 +166,16 @@ python -m earshot.tools.hold_probe read runs/<tag>
 # them. Prints a branch pre-registered in `leg_probe.py`: RENDERER (falls in both arms
 # and on the approaching legs) / GEOMETRY (falls in both arms, not on those) / PRESET /
 # MIXED / SELECTION, or NOT_RUN (red, exit 2). Refuses a population under 20 poses BEFORE
-# rendering. Under half an hour (estimate). `read` re-reads a tag off-box, seconds
+# rendering. Under half an hour (estimate). `read` re-reads a tag off-box, seconds.
+# `walk-1` RAN 2026-09-23: BRANCH MIXED, because tc0 ROSE and no branch named that. THE
+# CUE KNOWS DIRECTION AND THE PRESET HIDES IT: with TC off the legs that closed on the
+# source rose +16.2% per loop and the legs that opened fell -15.6%; with the shipped
+# preset on, the same walks at the same poses read +3.1% and -12.1%. The rise is cut
+# about fivefold and the fall is left nearly whole. `ir_walk` tracks it, so it is the
+# renderer and not the pipeline. `spec.py`'s "temporalCoherence 0 -> 1 ... gives up
+# nothing" is measured and WRONG. The recorded -9.6% still does not reproduce (tc1 reads
+# -1.3% over the same 254 legs, 0 diverged): what is left is DEPTH OF RENDER HISTORY,
+# which `--walk-in` tests and this run did not
 nrun bash earshot/tools/leg_probe.sh --tag <fresh-tag>
 python -m earshot.tools.leg_probe read runs/<tag>
 

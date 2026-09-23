@@ -139,6 +139,8 @@ echo "  readout: $OUT_DIR/readout.txt"
 echo
 echo "  READ THE BRANCH LINE. The walk rows say whether the recorded fall survives a"
 echo "  re-render of the same leg, and the two arms whether temporalCoherence makes it."
-echo "  The CHECK row must read FALLS in both arms, or the branch is NOT_RUN."
+echo "  The CHECK row must read FALLS in every arm whose walk row does not RISE, or the"
+echo "  branch is NOT_RUN. An arm that rises can swallow a forced fall of the size it"
+echo "  injects: read the CHECK row against that arm's own walk row, not against zero."
 
 exit "$STATUS"

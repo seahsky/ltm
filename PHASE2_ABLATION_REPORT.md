@@ -4762,3 +4762,68 @@ Selection of this kind cannot account for that, and the legs are the population 
 
 **What is measured next.** The leg probe (PR #161, fixed in #162), which walks the recorded legs again with `temporalCoherence` on and off, and splits them by whether the agent closed on the source or opened from it.
 That is the last population in this chain that has not been re-rendered.
+
+## The walking legs, re-rendered: `temporalCoherence` hides the approach (`walk-1`, 2026-09-23)
+
+`nrun bash earshot/tools/leg_probe.sh --tag walk-1`, commit 1349515, 9m 32s, exit 0.
+254 legs, one per episode, off `oracle-2/full` and `oracle-1/full`.
+Every replayed position was checked against the record at 1 cm: 0 diverged in either arm, and both arms rendered all 254.
+
+| row | arm | read | rose | median change per loop | sign p | reads |
+|---|---|---|---|---|---|---|
+| recorded leg, the run's own renders | run | 254 | 27.2% | −9.6% | 0.0000 | FALLS |
+| walk: the same walk-in and leg | tc1 | 254 | 45.7% | −1.3% | 0.1875 | FLAT |
+| | tc0 | 254 | 62.2% | +8.8% | 0.0001 | RISES |
+| walk, legs that closed on the source | tc1 | 136 | 59.6% | +3.1% | 0.0317 | FLAT |
+| | tc0 | 136 | 84.6% | +16.2% | 0.0000 | RISES |
+| walk, legs that opened from it | tc1 | 45 | 22.2% | −12.1% | 0.0002 | FALLS |
+| | tc0 | 45 | 17.8% | −15.6% | 0.0000 | FALLS |
+| CHECK forced fall, the walk | tc1 | 254 | 24.8% | −11.4% | 0.0000 | FALLS |
+| | tc0 | 254 | 49.2% | −0.5% | 0.8507 | FLAT |
+| IR level: the walk | tc1 | 254 | 46.5% | −1.6% | 0.2861 | FLAT |
+| | tc0 | 254 | 62.2% | +9.8% | 0.0001 | RISES |
+
+**BRANCH: MIXED.**
+The pre-registration expected an arm to fall or to be flat.
+`tc0` rose, which no branch named, so `decide` refused to pick one and said so.
+Read the table.
+
+**THE CUE KNOWS WHICH WAY THE SOURCE IS, AND THE SHIPPED PRESET HIDES IT.**
+With `temporalCoherence` off, 84.6% of the legs that closed on the source rose and 82.2% of the legs that opened from it fell: +16.2% per loop against −15.6%.
+That is the signal `is_rising` exists to read, and it is in the render.
+Turn the preset on, at the same poses along the same walks, and the closing legs collapse from +16.2% to +3.1% while the opening legs barely move (−15.6% to −12.1%).
+The preset attenuates the rise by about a factor of five and leaves the fall nearly intact.
+
+The IR row says where it happens: `ir_walk` tracks the walk row in both arms (−1.6% and +9.8%), and that row is the renderer's own output with no clip, no loop and no pipeline after it.
+This is the renderer, not the cue pipeline.
+
+**THE PRESET ENTERED AS A SPEED KNOB.** `earshot/audio/spec.py` still carries the line it entered with:
+
+```
+#   temporalCoherence    0 -> 1     defaults OFF, so enabling it gives up nothing
+```
+
+Ticket 06 measured the four knobs for cost and checked the energy gradient held (Spearman rho −0.98/−0.99).
+A monotone gradient over static poses is not the same quantity as the change along a walking leg, which is what the controller reads, so nothing in that check would have caught this.
+**The line is now measured and it is wrong.**
+
+**THE INSTRUMENT ANSWERED IN BOTH ARMS.** The forced fall moves the median by about 10 points in `tc1` (−1.3 to −11.4) and about 9 in `tc0` (+8.8 to −0.5).
+`tc0`'s CHECK row reads FLAT only because a +8.8% baseline swallows a fall of that size.
+`decide` anticipated it: the NOT_RUN gate exempts an arm whose walk RISES (`leg_probe.py:341`), which is why this is MIXED and not red.
+The driver's closing line ("The CHECK row must read FALLS in both arms, or the branch is NOT_RUN") is stronger than the gate it describes, and is corrected with this entry.
+
+**WHAT IS STILL UNEXPLAINED: THE RECORDED −9.6%.**
+The same 254 legs, at the same preset, at positions verified to 1 cm, read −1.3% when walked again.
+The run's own renders of those legs fall.
+Two things still differ between them:
+
+- **Depth of render history.** The run reached each leg with a whole episode of renders behind it; the probe seats 10 walk-in steps and no more. `temporalCoherence` is a state the renderer carries between steps, so this is the candidate `SELECTION` named before the run, and `--walk-in` is the flag built to test it.
+- **Selection.** `leg_replay` grades only COMPLETED legs, and a surge cuts a leg the level rose through. This is weak for legs: 4.4% were cut, against 47.6% of first scans (PR #160).
+
+The walk-in readings are already on disk. `Trace.cue` holds every render including the walk-in, and `read_from` only slices them off at read time, so whether the renderer had settled by step 10 is a read-only question against `runs/walk-1` and needs no second night.
+
+**Three things this cannot say.**
+
+- The two arms walk the same path, so nothing here separates "the renderer behaves differently under motion" from "the level followed the distance" for the pooled row. The direction split is what separates them, and it says the direction signal is present in both arms.
+- 73 of the 254 legs neither closed nor opened by the 0.5 m bar and are in the pooled row alone.
+- The recorded row and the walk rows are the same legs but not the same renders. Any difference between them is history, selection, or renderer non-determinism, and this run does not weigh the third.
