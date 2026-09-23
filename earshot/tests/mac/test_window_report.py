@@ -21,6 +21,7 @@ from _interpreter import assert_interpreter  # noqa: F401
 from earshot.report.agent import AgentReport
 from earshot.report.artifacts import write_episode
 from earshot.report.audit import (
+    CalibrationRecord,
     EpisodeAudit,
     FunnelStage,
     SoundingWindowRecord,
@@ -493,6 +494,62 @@ class TestTheAblationArmsAreReadOffTheRecord(unittest.TestCase):
         self.assertEqual(reading.n_source_spl_absent, 0,
                          "0 of 0 absent is not 0 absences to explain")
         self.assertIn("NOT_RUN", format_arm(reading)[0])
+
+
+def calibration(scatter):
+    return CalibrationRecord(
+        onset_rms=0.02, bed_rms=0.001, separation_db=12.0, n_poses=16,
+        global_volume=1.0, cue_render_scatter=scatter,
+    )
+
+
+class TestTheClimbFloorIsReadOffTheCalibration(unittest.TestCase):
+    """`cue_render_scatter` per arm. `no-tc` changes the renderer, so it moves the floor
+    `is_rising` clears as well as the cue, and a Find-SR delta read without the floor
+    beside it cannot say which one moved. Both arms: measured, and absent."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def arm_with(self, episodes, name="no-tc"):
+        arm = pathlib.Path(self.root) / name
+        write_scene(arm, "sceneA", episodes)
+        return read_arm(str(arm), arm=name)
+
+    def test_the_measured_floor_is_read_and_printed(self):
+        reading = self.arm_with([
+            dict(episode(), calibration=calibration(value))
+            for value in (2e-3, 4e-3, 9e-3)
+        ])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.cue_render_scatters, (2e-3, 4e-3, 9e-3))
+        self.assertEqual(reading.n_cue_render_scatter_absent, 0)
+        self.assertIn("THE CLIMB'S FLOOR", lines)
+        self.assertIn("n=3 of 3   median 4.000e-03 min 2.000e-03 max 9.000e-03", lines)
+        self.assertNotIn("UNMEASURED", lines)
+        print(next(line for line in lines.splitlines() if "FLOOR" in line).strip())
+
+    def test_an_unmeasured_episode_is_counted_and_named_not_averaged_in(self):
+        reading = self.arm_with([
+            dict(episode(), calibration=calibration(3e-3)),
+            dict(episode(), calibration=calibration(None)),
+            episode(),
+        ])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.cue_render_scatters, (3e-3,))
+        self.assertEqual(reading.n_cue_render_scatter_absent, 2)
+        self.assertIn("UNMEASURED on 2 of 3", lines)
+
+    def test_an_arm_that_measured_none_says_absent_rather_than_zero(self):
+        reading = self.arm_with([episode(), episode()])
+        lines = "\n".join(format_arm(reading))
+
+        self.assertEqual(reading.cue_render_scatters, ())
+        self.assertIn("UNMEASURED on all 2 episode(s)", lines)
+        self.assertIn("ABSENT, not 0.0", lines)
 
 
 class TestTheDriverUsesThisReader(unittest.TestCase):

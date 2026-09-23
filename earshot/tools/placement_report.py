@@ -78,8 +78,9 @@ ANCHOR_METRIC = "source_at_class_anchor"
 # reason: it ADDS the source coordinate rather than removing a component, so it is a
 # ceiling and not an ablation -- but placement is a property of the EPISODE, and the arm
 # pairs by episode against `full`, so the anchored/geometric split reads identically.
+# `no-tc` changes the renderer and not the episode, so the split reads identically there too.
 ABLATION_ARMS = (
-    "full", "no-climb", "no-cue", "scan-only", "anechoic", "oracle-loc",
+    "full", "no-climb", "no-cue", "scan-only", "anechoic", "no-tc", "oracle-loc",
     "oracle-loc-matched", "dream", "dream-nomem",
 )
 
