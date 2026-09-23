@@ -41,6 +41,12 @@ Every render goes through the run's own ``heard_step``, with the run's clip and 
 the audio configuration the runs recorded in ``env_report.json``, and the source
 sounding throughout.
 
+**The readout splits the poses by direction**, because two arms cannot. Both arms walk
+the same path, so the preset question is controlled by construction; a fall that survives
+BOTH arms is in the render, and "the renderer misbehaves while the agent moves" and "the
+level falls because the agent walked away" are then still the same row. The legs that
+closed on the source separate them, and ``DIRECTION_BAR_M`` is ``leg_replay``'s own bar.
+
 **One World per scene**, with ``place_source`` between poses, which is the structure the
 run itself has. A pose's own walk-in stands between it and the previous pose's renders.
 The hold probe needed one World per sequence KIND because it rendered three sequences at
@@ -66,25 +72,35 @@ under ``-MIN_CHANGE`` per loop, over at least ``MIN_POSES`` poses. Read in this 
 
 1. **NOT_RUN** -- a population is UNREAD, the recorded legs do not fall, or FORCED does
    not fall in an arm whose walk does not rise. The instrument did not answer.
-2. **RENDERER** -- the walk falls with the preset on and with it off. The renderer's
-   behaviour under motion is the cause, and it is not a preset knob: the next question is
-   the renderer's own configuration (ray count, IR length), measured the same way.
-3. **PRESET** -- the walk falls with ``temporalCoherence`` on only. The A/B ticket 01
-   asked for, answered on a leg. The next run is ``full`` with the preset off beside
-   ``full``, which is a sweep and not a probe.
-4. **MIXED** -- the walk falls with the preset off only, or rises in either arm. Read the
+2. **RENDERER** -- the walk falls with the preset on and with it off, AND it falls on
+   the legs that closed on the source. Two arms walking the same path cannot tell the
+   renderer from the walk's own distance, and the legs that approached can: there the
+   distance says the level should rise. The cause is the renderer under motion and it is
+   not a preset knob, so the next question is the renderer's own configuration (ray
+   count, IR length), measured the same way.
+3. **GEOMETRY** -- the walk falls in both arms but NOT on the legs that closed. The
+   pooled fall is the walk's own distance, which is what a level does. The record is then
+   what is unexplained, because there the approaching legs fell too (PR #152).
+   A fall that cannot be split -- too few legs closed to read -- is MIXED and says so.
+4. **PRESET** -- the walk falls with ``temporalCoherence`` on only. Direction does not
+   enter: both arms walk the same path, so the distance cancels between them. The A/B
+   ticket 01 asked for, answered on a leg. The next run is ``full`` with the preset off
+   beside ``full``, which is a sweep and not a probe.
+5. **MIXED** -- the walk falls with the preset off only, or rises in either arm. Read the
    table before anything else; one of the two arms is not doing what its name says.
-5. **SELECTION** -- flat in both arms. The legs' fall does not reproduce either, so
-   neither the scans' fall nor the legs' is in the render. What both populations share is
-   that ``is_rising`` decides which of them is read: a leg the level rose through is cut
-   by a surge and never graded, exactly as a scan is. The next check is read-only and
-   already built for the scans (``leg_replay.by_cut_scan``): grade the legs the surge
-   cut, off ``_leg_outcome``'s own CUT_BY_SURGE.
+6. **SELECTION** -- flat in both arms. The legs' fall does not reproduce either, so
+   neither the scans' fall nor the legs' is in the render. Two candidates, both named
+   here before the first run. ``is_rising`` decides which of them is read: a leg the
+   level rose through is cut by a surge and never graded, exactly as a scan is, and
+   ``leg_replay.by_cut_scan`` already grades the cut scans off ``_leg_outcome``'s own
+   CUT_BY_SURGE. The other is a renderer that remembers further back than the walk-in,
+   which ``--walk-in`` tests.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Dict, Iterator, List, Mapping, Optional
@@ -93,11 +109,14 @@ from typing import Sequence, Tuple
 import numpy as np
 
 from earshot.report.audit import EpisodeAudit
+from earshot.types import Xyz
 from earshot.tools.hold_probe import (
     ARM_ORDER,
     ARMS,
     DEFAULT_WALK_IN,
     FALLS,
+    MIN_CHANGE,
+    MIN_POSES,
     MIN_WALK_IN,
     MIXED,
     NOT_RUN,
@@ -105,6 +124,7 @@ from earshot.tools.hold_probe import (
     RENDERER,
     RISES,
     SELECTION,
+    SIGN_ALPHA,
     UNREAD,
     ProbeIO,
     ProbePose,
@@ -118,6 +138,7 @@ from earshot.tools.hold_probe import (
 )
 from earshot.tools.leg_replay import (
     COMPLETED,
+    INFORMATIVE_ROUTE_M,
     LEG_PERIOD,
     SOUNDING,
     EpisodeReplay,
@@ -126,6 +147,7 @@ from earshot.tools.leg_replay import (
 )
 
 __all__ = [
+    "GEOMETRY",
     "LEG_ROWS",
     "LegResult",
     "plan_leg",
@@ -140,12 +162,21 @@ __all__ = [
     "main",
 ]
 
-# The rows the readout prints. The first three decide the branch; the level of the
-# room's own impulse response decides nothing and is printed because a walk that reads
-# flat at the ears while the room's level moves is a different finding from both arms
-# being flat.
-LEG_ROWS: Tuple[str, ...] = ("walk", "walk_forced", "ir_walk")
+# The rows the readout prints. `walk` and `walk_forced` decide the branch, and
+# `walk_closed` splits a fall that survives both arms (below). The level of the room's
+# own impulse response decides nothing and is printed because a walk that reads flat at
+# the ears while the room's level moves is a different finding from both arms being flat.
+LEG_ROWS: Tuple[str, ...] = (
+    "walk", "walk_closed", "walk_opened", "walk_forced", "ir_walk")
 _DECIDING = ("walk", "walk_forced")
+
+# A leg counts as closing on the source, or opening from it, when its straight-line
+# distance to the source moved by at least this much between its first reading and its
+# last: `leg_replay`'s own bar for an informative leg.
+DIRECTION_BAR_M = INFORMATIVE_ROUTE_M
+
+# The branch for a fall that survives both arms but follows the walk's own distance.
+GEOMETRY = "GEOMETRY"
 
 # `hold` is the hold probe's header field and a walk has none: a leg's length is the
 # record's, `LEG_PERIOD` readings. It is written as zero so one reader serves both.
@@ -196,18 +227,20 @@ def plan_leg(
 def sounding_legs(
     audit: EpisodeAudit, replay: EpisodeReplay, *, walk_in: int
 ) -> Iterator[Tuple[Optional[ProbePose], Optional[str]]]:
-    """The episode's FIRST completed sounding leg, planned. Pure.
+    """Every completed sounding leg of the episode, in step order, planned. Pure.
 
-    One leg per episode and not every leg: the sign test counts poses as independent,
-    and two legs of one episode share a room, a source and most of a walk. The first is
-    taken rather than the longest or the loudest, because any rule that reads the levels
-    would choose the poses by the quantity under test.
+    ``select_poses`` poses the FIRST of these that plans and counts the rest, so one
+    episode gives one leg: the sign test counts poses as independent, and two legs of one
+    episode share a room, a source and most of a walk. Earliest rather than longest or
+    loudest, because any rule that read the levels would choose the poses by the quantity
+    under test. The later legs are yielded and not withheld: an episode's first leg has
+    the scan's turns behind it and can fail to plan, and stopping there would cost a
+    sample that the next leg gives on the same terms.
     """
     for leg in replay.legs:
         if (leg.outcome == COMPLETED and leg.sounding == SOUNDING
                 and leg.change_per_loop is not None and leg.phase_folds is not None):
             yield plan_leg(audit, leg, walk_in=walk_in)
-            return
 
 
 def select_legs(
@@ -251,14 +284,39 @@ def render_legs(
                       data_root=data_root, probe=probe_legs, progress=progress)
 
 
+def _line_m(position: Xyz, source: Xyz) -> float:
+    """Horizontal distance to the source, as ``leg_replay.by_line`` measures it. Pure."""
+    return math.hypot(position.x - source.x, position.z - source.z)
+
+
+def _delta_line_m(pose: ProbePose) -> float:
+    """How much the straight line to the source changed over the leg's readings. Pure."""
+    read = list(pose.positions)[int(pose.walk_in):]
+    return _line_m(read[-1], pose.source) - _line_m(read[0], pose.source)
+
+
 def _per_pose(result: LegResult) -> Dict[str, Optional[float]]:
-    """Every row's change at one pose in one arm."""
+    """Every row's change at one pose in one arm.
+
+    ``walk_closed`` and ``walk_opened`` are the same number as ``walk``, kept only for
+    the legs that closed on the source or opened from it. A level that falls while the
+    agent walks AWAY is what distance does; the same fall while it walks TOWARD the
+    source is not, and that is the split the pooled row cannot make.
+    """
     trace, lag = result.walk, int(result.pose.period)
-    read = slice(int(trace.read_from), None)
+    read = list(trace.cue)[int(trace.read_from):]
+    if len(read) <= lag:
+        return {row: None for row in LEG_ROWS}
+    walk = same_phase_change(read, lag=lag)
+    delta = _delta_line_m(result.pose)
     return {
-        "walk": same_phase_change(list(trace.cue)[read], lag=lag),
-        "walk_forced": same_phase_change(list(trace.forced)[read], lag=lag),
-        "ir_walk": same_phase_change(list(trace.ir_level)[read], lag=lag),
+        "walk": walk,
+        "walk_closed": walk if delta <= -DIRECTION_BAR_M else None,
+        "walk_opened": walk if delta >= DIRECTION_BAR_M else None,
+        "walk_forced": same_phase_change(
+            list(trace.forced)[int(trace.read_from):], lag=lag),
+        "ir_walk": same_phase_change(
+            list(trace.ir_level)[int(trace.read_from):], lag=lag),
     }
 
 
@@ -269,7 +327,7 @@ def decide(verdicts: Mapping[str, Mapping[str, str]]) -> Tuple[str, str]:
     The order is the module docstring's and was fixed before the first run.
     """
     unread = [
-        "{} {}".format(arm, row) for row in ("recorded",) + _DECIDING
+        "{} {}".format(row, arm) for row in ("recorded",) + _DECIDING
         for arm, verdict in verdicts[row].items() if verdict == UNREAD]
     if unread:
         return NOT_RUN, (
@@ -290,11 +348,30 @@ def decide(verdicts: Mapping[str, Mapping[str, str]]) -> Tuple[str, str]:
     falls = [arm for arm in ARM_ORDER if verdicts["walk"][arm] == FALLS]
     rises = [arm for arm in ARM_ORDER if verdicts["walk"][arm] == RISES]
     if len(falls) == len(ARM_ORDER):
-        return RENDERER, (
-            "the level falls along the leg with temporalCoherence on AND off, at "
-            "positions checked against the record. The preset is not the cause and the "
-            "renderer under motion is. Next is the renderer's own configuration -- ray "
-            "count and IR length -- measured this way, not a preset knob")
+        # A pooled fall that survives both arms is in the render, and the two arms do not
+        # tell it from the walk's own distance: both walk the same path. The legs that
+        # CLOSED on the source do: there the distance says the level should rise.
+        closed = verdicts["walk_closed"]
+        if any(closed[arm] == UNREAD for arm in ARM_ORDER):
+            return MIXED, (
+                "the level falls along the leg in both arms, and the fall cannot be split "
+                "by direction: too few legs closed on the source to read. The renderer "
+                "under motion and the walk's own distance are both still standing, and "
+                "the table cannot separate them. More runs, or a wider `--from`")
+        if all(closed[arm] == FALLS for arm in ARM_ORDER):
+            return RENDERER, (
+                "the level falls along the leg with temporalCoherence on AND off, at "
+                "positions checked against the record, AND it falls on the legs that "
+                "closed on the source, where the distance says it should rise. The preset "
+                "is not the cause and the renderer under motion is. Next is the "
+                "renderer's own configuration -- ray count and IR length -- measured this "
+                "way, not a preset knob")
+        return GEOMETRY, (
+            "the level falls along the leg in both arms, but NOT on the legs that closed "
+            "on the source: the pooled fall follows the walk's own distance, which is "
+            "what a level does. What is then unexplained is the record, where the legs "
+            "that closed fell too (PR #152). Read the recorded row against the closed row "
+            "before anything else")
     if falls == ["tc1"]:
         return PRESET, (
             "the level falls along the leg with temporalCoherence ON and not with it "
@@ -309,10 +386,12 @@ def decide(verdicts: Mapping[str, Mapping[str, str]]) -> Tuple[str, str]:
     return SELECTION, (
         "the recorded legs fall and the same legs walked again are FLAT with "
         "temporalCoherence on and FLAT with it off. Neither the scans' fall (hold-2) nor "
-        "the legs' is in the render. What both share is that `is_rising` chooses which "
-        "of them is read: a leg the level rose through is cut by a surge and never "
-        "graded, as a scan is. The next check is read-only -- grade the legs the surge "
-        "cut, the way `leg_replay.by_cut_scan` grades the scans")
+        "the legs' is in the render. Two candidates, both named before this ran: "
+        "`is_rising` chooses which of them is read, and a leg the level rose through is "
+        "cut by a surge and never graded, as a scan is -- grade those, read-only, the way "
+        "`leg_replay.by_cut_scan` grades the cut scans. The other is a renderer that "
+        "remembers further back than the walk-in, which `--walk-in` tests and this run "
+        "did not")
 
 
 def readout(
@@ -356,6 +435,8 @@ def read_walk(tag_dir: str) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
 
 _ROWS = (("recorded", "recorded leg, the run's own renders"),
          ("walk", "walk: the same walk-in and leg"),
+         ("walk_closed", "walk, legs that closed on the source"),
+         ("walk_opened", "walk, legs that opened from it"),
          ("walk_forced", "CHECK forced fall, the walk"),
          ("ir_walk", "IR level: the walk"))
 _ROW = "  {:<38} {:>5} {:>5} {:>7} {:>7} {:>9} {:>8}  {}"
@@ -401,9 +482,10 @@ def format_readout(
         "",
         "  Pre-registered in leg_probe.py before the first box run. FALLS needs a "
         "sign-test",
-        "  p <= 0.01 and a median change <= -3% per loop over >= 20 poses. The IR level "
-        "row",
-        "  decides nothing.",
+        "  p <= {:g} and a median change <= {:+.0f}% per loop over >= {} poses. The IR "
+        "level row".format(SIGN_ALPHA, -100.0 * MIN_CHANGE, MIN_POSES),
+        "  decides nothing, and the two direction rows are read only where the pooled "
+        "walk falls in both arms.",
     ]
     return "\n".join(lines)
 
@@ -456,6 +538,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     if args.command == "select":
         return 0
+    # Refused BEFORE the renders, not after them: a population under `MIN_POSES` reads
+    # UNREAD, which is NOT_RUN, and a night spent earning NOT_RUN is a night spent. A
+    # `--scenes` subset is a deliberate narrowing, so it warns instead of refusing.
+    if len(selection.poses) < MIN_POSES:
+        if not args.scenes:
+            print("FATAL: {} pose(s) is under the {} a verdict needs. The readout would "
+                  "read UNREAD, which is NOT_RUN. Name more runs in --from, or lower "
+                  "--walk-in".format(len(selection.poses), MIN_POSES))
+            return 2
+        print("WARNING: {} pose(s) under --scenes is below the {} a verdict needs. This "
+              "run cannot be read as a measurement".format(
+                  len(selection.poses), MIN_POSES))
     rendered = render_legs(out_dir=args.out, arm=args.arm, selection=selection,
                            data_root=args.data_root)
     print("arm {}: {} of {} scene(s) rendered".format(
