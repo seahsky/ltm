@@ -87,8 +87,13 @@ AUDIO_SENSOR_UUID = "audio_sensor"
 #                                   could not have caught this -- a monotone rho over
 #                                   static poses is not the change along a walking leg,
 #                                   which is the quantity `agent.controller.is_rising` reads.
-#                                   UNPRICED END TO END: no sweep has run with it off.
-#                                   PHASE2_ABLATION_REPORT.md has the table.
+#                                   PRICED by `no-tc` (2026-09-23), same 282 episodes:
+#                                   Find-SR 98 against 102 of 270, p 0.67, a null; render
+#                                   cost 0.0348 against 0.0350 s/step, so it buys NO speed
+#                                   here; and with it off the recorded legs read direction
+#                                   (the pull of PRs #149-#160 is gone). Kept at 1 only
+#                                   because every number since the clean room ran at 1.
+#                                   PHASE2_ABLATION_REPORT.md has the tables.
 #
 # NOT in the set, deliberately: `maxIRLength` and `directRayCount` are not cost knobs at
 # all (the IR cap bounds the output buffer, not the tracing), and `transmission` /

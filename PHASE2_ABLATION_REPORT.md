@@ -4827,3 +4827,101 @@ The walk-in readings are already on disk. `Trace.cue` holds every render includi
 - The two arms walk the same path, so nothing here separates "the renderer behaves differently under motion" from "the level followed the distance" for the pooled row. The direction split is what separates them, and it says the direction signal is present in both arms.
 - 73 of the 254 legs neither closed nor opened by the 0.5 m bar and are in the pooled row alone.
 - The recorded row and the walk rows are the same legs but not the same renders. Any difference between them is history, selection, or renderer non-determinism, and this run does not weigh the third.
+
+## The preset, priced end to end: `no-tc` (2026-09-23)
+
+`nrun bash earshot/tools/ablation_sweep.sh --tag no-tc --arms "full no-tc"`, commit 8e6f16d (the merge of PR #165), riftvm, 3 h 43 m, exit 0, every gate GREEN.
+`no-tc` is `full` with `--temporal-coherence off` and nothing else, and the two arms pair on all 282 episodes.
+
+### Find-SR: a null
+
+| | full | no-tc |
+|---|---|---|
+| Find-SR@1m | 102 of 270 | 98 of 270 |
+| source reached | 102 of 282 (36.2%) | 98 of 282 (34.8%) |
+
+Paired: 22 gained, 26 lost, net −4, exact McNemar p = 0.6655.
+Scenes: 7 up, 10 down, 2 flat, sign test p 0.629 (computed off the printed table with `funnel_diff.two_sided_exact_binomial`).
+48 of 282 pairs disagree, 17.0%, which is the byte-identical rerun level (`repeat-1` 16.2%).
+
+Conditioned on both arms reaching INVESTIGATE (`--given-stage INVESTIGATE_ENTERED`): 272 pairs, the same 22 and 26, p 0.6655.
+The drop counts differ (full 0, no-tc 10), which the tool names as the sign that the gate is not upstream of the arms' difference.
+Here it removes nothing that matters: the 10 dropped pairs were all reached in neither arm, so the discordant pairs are the same set.
+
+### What turning it off changed
+
+| | full | no-tc |
+|---|---|---|
+| climb floor, `cue_render_scatter` median | 1.712e-02 | 2.090e-02 (+22%) |
+| climb floor, max | 3.519e-02 | 5.665e-02 |
+| onset never heard (censored) | 0 | 10 |
+| SWS | 37 of 278 = 0.133 | 27 of 273 = 0.099 |
+| audio render, s per step | 0.0350 | 0.0348 |
+| worst single step, s | 0.3508 | 0.2878 |
+
+**TC BUYS NO SPEED AT THIS PRESET.** 6.83 audio s over 195.0 steps against 6.52 over 187.1.
+Ticket 06's "about 10%" was measured against the stock settings (5000 rays, depth 200), and at 500 rays it is gone.
+Speed was the preset key's only reason to be in the preset.
+
+### The legs: the pull is `temporalCoherence`
+
+`leg_replay` over each arm ALONE (it pools every run it is handed into one branch).
+The two arms walked the same episodes on the same night, so these rows differ in the preset key and in nothing else.
+
+| sounding legs | full | no-tc |
+|---|---|---|
+| informative | 732 | 516 |
+| median t, approached / receded (9-reading fit) | −0.41 / −1.29 | **+1.56 / −1.91** |
+| median t, approached / receded (same phase) | −2.65 / −6.33 | **+2.24 / −2.47** |
+| approached read up (same phase) | 36.7% | **84.6%** |
+| receded read down (same phase) | 92.2% | 86.8% |
+| on the line: closed read up (same phase) | 33.6% | 78.5% |
+| walking, median change per loop | −9.0% (76.6% fell) | +3.1% (45.5% fell) |
+| standing first scan, median change per loop | −11.3% | −4.6% |
+
+**THE PULL IS GONE WITH THE PRESET OFF.** Every row the chain read since PR #149 as "a shift of about −0.9 on top of the direction" is symmetric in `no-tc`: approaching legs read up, receding legs read down, by about the same amount.
+In `full`, on the same night, the pull is there again (−9.0% per loop, the figure PR #156 first read on the three older runs).
+That settles the cause of the walking fall. `walk-1` could not reproduce it (−1.3% on the same legs at the same preset), and the depth of render history the run carries and the probe's 10-step walk-in does not is still the candidate for why. That part is not measured.
+
+| the field, `detour_report` plateau windows | full | no-tc |
+|---|---|---|
+| windows | 417 | 493 |
+| median sig/sc | 1.49 | 2.22 |
+| louder nearer the source | 71.9% | 86.2% |
+
+### ADR-0029's grid on each arm
+
+| T_LEG 1.0 | full | no-tc |
+|---|---|---|
+| LOUDER right | 98/105, 93.3% | 203/212, 95.8% |
+| QUIETER right | 254/454, **55.9%** | 203/254, **79.9%** |
+| decisive, of informative legs | 35.9% | 32.9% |
+| false-decisive | 21.3% | 16.0% |
+| the tool's branch | STOP | **BUILD** |
+
+`no-tc` also passes at T 1.5 (97.1% and 82.0%, decisive 27.1%, false-decisive 11.4%) and fails the decisive-rate test from T 2.0.
+Restricted to sounding legs, `no-tc` at T 1.0 is 95.7% LOUDER and 92.4% QUIETER, decisive on 69.0% with a false-decisive rate of 36.5%.
+
+**A FINISHED CAST LEG KNOWS WHICH WAY THE SOURCE IS, ONCE THE PRESET STOPS HIDING IT.**
+QUIETER, the verdict that reverses the agent and the one ADR-0029's STOP rested on, goes from chance to 79.9%.
+
+**IT IS NOT THE GATE, FOR TWO REASONS.**
+
+- ADR-0029's gate is three independent renders, each at 70% or better. This is one.
+- The gate was written for `full`'s legs. The `no-tc` arm was chosen after the gate read STOP, so reading the same thresholds on it is a new pre-registration, which ADR-0029 says a reopening needs.
+
+**One selection effect runs against the finding, not for it.** A surge cut 208 of 2,362 `no-tc` legs (8.8%) against 121 of 2,543 in `full` (4.8%), and a leg is cut because it read as rising.
+So `no-tc`'s completed legs are more selected against rises, and they still read LOUDER right 95.8% of the time. (Inference: the direction of the bias is structural; its size is not measured.)
+
+### Why Find-SR did not move
+
+The controller does not read legs.
+It casts by blind alternation and climbs on `is_rising`, a step-wise test against a floor that `no-tc` raised by 22%.
+`leg_replay` counts 744 completed `no-tc` legs that walked 0.5 m or more toward the source with no surge: `is_rising` said "not rising" at every step of each.
+The direction is now in the cue, and nothing in `full`'s controller acts on it at the end of a leg. That is what `READ_LEGS` was designed to add.
+
+**Three things this cannot say.**
+
+- The legs were walked under blind alternation. A reader that acts on them changes which legs get walked, so the grid prices the verdict, not the sweep.
+- One render. The 70%-in-every-run test has not been run.
+- Whether turning the preset off moves Find-SR under a controller that reads legs. Under today's controller, which does not read them, it does not.
