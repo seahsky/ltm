@@ -4710,3 +4710,55 @@ So if the preset does anything, it needs motion, and 10 steps of it buys about a
 
 A longer walk-in is worth a run only if the leg arm comes back flat.
 The hold against the teleport already says 10 steps of standing history and none at all read the same, so a renderer memory would have to be one that motion fills, and deeper than 10 steps.
+
+## The scans the surge cut (PR #160, same three runs, re-read 2026-09-23)
+
+The hold probe read SELECTION: the recorded first scans fall by a median 11.0% per loop, and the same poses and turns rendered again are flat in both arms.
+The candidate it named was the surge cut, and the scan section had never counted it.
+This counts it, off the same records, read-only.
+
+A scan is graded only if it completed, and `_scan_outcome` completes a scan only if no reading through its turns read as rising: the first surge cuts it.
+So the standing rows are a population selected against rises.
+**Not a gate.**
+
+| population | started | completed | cut by a surge | by a STOP | unverified | by the detour's end |
+|---|---|---|---|---|---|---|
+| first scans | 829 | 431 | **395 (47.6%)** | 0 | 0 | 3 |
+| later scans | 706 | 625 | 74 (10.5%) | 0 | 0 | 7 |
+| cast legs, for contrast | 7,723 | 6,666 | 339 (4.4%) | 0 | 0 | 718 |
+
+**NEARLY HALF THE FIRST SCANS NEVER REACHED THE READER, AND THEY WERE CUT FOR RISING.**
+The 184 first scans the scan section graded come out of 431 that completed, out of 829 that started.
+The 395 that a surge cut are, by construction, the ones where the level read as rising.
+
+| window | read | rose | fell | median change per loop |
+|---|---|---|---|---|
+| first, completed | 184 | 16.3% | 83.7% | −11.1% |
+| first, cut by a surge | 2 | 100.0% | 0.0% | +8.3% |
+| later, completed | 269 | 38.3% | 61.7% | −3.3% |
+| later, cut by a surge | 16 | 100.0% | 0.0% | +17.7% |
+
+Where a cut scan can be graded at all it rose, 18 times out of 18.
+That is thin evidence and the count is the finding: only 18 of 469 cut scans had a whole loop in them, because 393 first scans and 58 later ones were cut inside their first loop.
+A graded cut scan has a median of 6.5 readings (first) and 6 (later), against 8 for a whole one.
+
+**THE STANDING FALL IS SELECTION.** Two independent lines now say so.
+The hold probe re-rendered those poses with nothing cut and read them flat in both arms.
+This says what was cut: half the population, for rising.
+PR #156's reading — "the level falls standing still, so the pull is a trend in time" — does not survive either of them, and it is withdrawn.
+
+**IT ALSO EXPLAINS "STRONGEST EARLY".** First scans lose 47.6% to surges and later scans 10.5%.
+The detour's first scan opens right after the onset, where the level is most likely to be rising, so it is the window the cut takes most of — and it is the window that read the steepest fall (−11.1% against −3.3%).
+The gradient in the fall follows the gradient in the selection.
+
+**WHAT IT DOES NOT TOUCH: THE LEGS.** Legs lose 4.4% to a surge, a tenth of what the first scans lose, and they fall by a median 9.0% per loop over 3,010 readings.
+Selection of this kind cannot account for that, and the legs are the population the controller reads: `is_rising` compares five readings against five along a leg.
+
+**Three things this cannot say.**
+
+- A cut scan is cut *because* it read as rising, so its rows are not an estimate of what it would have read whole. They say which way the unread scans were going.
+- `is_rising`'s window spans five readings against five and reaches back before the scan's first turn, so "read as rising" is a statement about a window straddling the scan's start, not about the scan's own readings alone.
+- 451 of the 469 cut scans could not be graded at all. Their direction is unmeasured.
+
+**What is measured next.** The leg probe (PR #161, fixed in #162), which walks the recorded legs again with `temporalCoherence` on and off, and splits them by whether the agent closed on the source or opened from it.
+That is the last population in this chain that has not been re-rendered.
