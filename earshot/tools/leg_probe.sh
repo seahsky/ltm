@@ -17,18 +17,21 @@
 #
 # WHAT IT RUNS, IN ORDER.
 #   1. preflight: one directory is one run, checked first, then `git pull --ff-only`.
-#   2. select: the legs off the runs named by --from. Read-only, seconds, and it refuses
-#      before any render if a run is not `full`'s rule.
+#   2. select: the legs off the runs named by --from. Read-only, seconds. It refuses
+#      before any render if a run is not `full`'s rule, and refuses a population under
+#      the 20 poses a verdict needs: a night that can only end in NOT_RUN is not run.
 #   3. render tc1: the shipped preset, first, so a crash later still leaves the arm every
 #      run used.
 #   4. render tc0: `temporalCoherence` off, in its own process.
 #   5. read: the table and the branch.
 #
 # THE BRANCH, PRE-REGISTERED IN leg_probe.py BEFORE THIS FIRST RAN. Read `BRANCH:` at the
-# end. RENDERER: the level falls along the leg whatever the preset. PRESET: it falls with
-# TC 1 alone, and the next run is a sweep. MIXED: read the table. SELECTION: the legs'
-# fall does not reproduce either, and `is_rising`'s own cut is what both populations
-# share. NOT_RUN is red and exits nonzero.
+# end. RENDERER: the level falls whatever the preset AND on the legs that closed on the
+# source, where the distance says it should rise. GEOMETRY: it falls in both arms but not
+# on those legs, so the pooled fall is the walk's own distance. PRESET: it falls with TC 1
+# alone, and the next run is a sweep. MIXED: read the table. SELECTION: the legs' fall
+# does not reproduce either, and `is_rising`'s own cut and the walk-in's depth are what is
+# left. NOT_RUN is red and exits nonzero.
 #
 # THE DEFAULT RUNS. `oracle-2/full` then `oracle-1/full`: `full` at identical behaviour.
 # One leg per episode, the episode's first completed sounding one, and the first run

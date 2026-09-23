@@ -35,6 +35,7 @@ from test_leg_replay import FOLDS, PRE, RING, THREE_LEGS, episode
 from earshot.agent.controller import ACT_FORWARD, ACT_TURN_LEFT, ACT_TURN_RIGHT
 from earshot.tools.hold_probe import (
     EXCLUDED_DUPLICATE,
+    EXCLUDED_LATER,
     EXCLUDED_SHORT,
     FALLS,
     FLAT,
@@ -50,6 +51,7 @@ from earshot.tools.hold_probe import (
     scene_payload,
 )
 from earshot.tools.leg_probe import (
+    GEOMETRY,
     LegResult,
     decide,
     format_readout,
@@ -109,6 +111,20 @@ def a_pose(audit=None, **overrides):
     return replace(pose, **overrides) if overrides else pose
 
 
+def closing_pose(**overrides):
+    """A pose whose source lies beyond the end of its own walk, so the leg CLOSES on it.
+
+    Placed off the pose's own first and last read positions rather than at a fixed point:
+    the fixture's heading comes out of the controller's turns, so where the leg walks is
+    not something the test should assume.
+    """
+    pose = a_pose(**overrides)
+    read = list(pose.positions)[pose.walk_in:]
+    first, last = read[0], read[-1]
+    beyond = Xyz(2.0 * last.x - first.x, 0.0, 2.0 * last.z - first.z)
+    return replace(pose, source=beyond)
+
+
 def walks(make_world=FakeWorld, poses=None):
     return probe_legs(poses or [a_pose()], factory(make_world), clip=CLIP, bed_cue=BED,
                       hop=HOP, progress=lambda line: None)
@@ -152,13 +168,34 @@ class TestThePoseIsTheRecordedLeg(unittest.TestCase):
 
 
 class TestTheSelection(unittest.TestCase):
-    def test_one_leg_an_episode_and_it_is_the_first(self):
+    def test_every_sounding_leg_is_offered_in_step_order(self):
+        """All of them, so an episode whose first leg cannot be planned still gives one.
+        `select_poses` takes the first that plans and counts the rest."""
         audit = legged_audit()
         replay = episode_legs(audit, run="tag/full", scene="AAAscene")
-        self.assertGreater(sum(1 for leg in replay.legs if leg.outcome == COMPLETED), 1)
+        qualifying = [leg for leg in replay.legs
+                      if leg.outcome == COMPLETED and leg.sounding == SOUNDING]
+        self.assertGreater(len(qualifying), 1)
         planned = list(sounding_legs(audit, replay, walk_in=WALK_IN))
-        self.assertEqual(len(planned), 1)
-        self.assertEqual(planned[0][0].start_step, replay.legs[0].start_step)
+        self.assertEqual([p.start_step for p, _why in planned],
+                         [leg.start_step for leg in qualifying])
+
+    def test_one_leg_an_episode_reaches_the_selection(self):
+        with tempfile.TemporaryDirectory() as root:
+            arm = write_arm(root, [legged_audit(0), legged_audit(1)])
+            selection = select_legs([arm], walk_in=WALK_IN)
+        self.assertEqual([p.episode for p in selection.poses], [0, 1])
+        self.assertEqual(dict(selection.excluded), {EXCLUDED_LATER: 2})
+
+    def test_an_episode_whose_first_leg_cannot_be_planned_gives_its_second(self):
+        """The walk-in reaches back past the scan's turns for the first leg and not for
+        a leg that follows one, so a walk-in this long plans only the later leg."""
+        audit = legged_audit()
+        replay = episode_legs(audit, run="tag/full", scene="AAAscene")
+        planned = list(sounding_legs(audit, replay, walk_in=14))
+        self.assertIsNone(planned[0][0])
+        self.assertEqual(planned[0][1], EXCLUDED_SHORT)
+        self.assertIsNotNone(planned[1][0])
 
     def test_a_leg_the_source_stopped_under_is_no_candidate(self):
         audit = legged_audit(offset_at=4)
@@ -172,7 +209,8 @@ class TestTheSelection(unittest.TestCase):
             selection = select_legs([first, second], walk_in=WALK_IN)
         self.assertEqual(selection.refusals, ())
         self.assertEqual([p.run for p in selection.poses], ["a/full"])
-        self.assertEqual(dict(selection.excluded), {EXCLUDED_DUPLICATE: 1})
+        self.assertEqual(dict(selection.excluded),
+                         {EXCLUDED_LATER: 1, EXCLUDED_DUPLICATE: 2})
 
     def test_select_prints_the_legs_and_exits_zero(self):
         with tempfile.TemporaryDirectory() as root:
@@ -181,11 +219,25 @@ class TestTheSelection(unittest.TestCase):
             with redirect_stdout(out):
                 status = main(["select", arm, "--walk-in", str(WALK_IN)])
         self.assertEqual(status, 0)
-        self.assertIn("legs offered by the runs: 2   poses: 2", out.getvalue())
+        self.assertIn("legs offered by the runs: 4   poses: 2", out.getvalue())
+        self.assertIn("excluded 2: {}".format(EXCLUDED_LATER), out.getvalue())
 
     def test_a_walk_in_too_short_to_settle_is_refused(self):
         with redirect_stdout(StringIO()):
             self.assertEqual(main(["select", "runs/none/full", "--walk-in", "2"]), 2)
+
+    def test_too_few_poses_to_read_is_refused_before_any_render(self):
+        """A night that can only end in NOT_RUN is refused at the selection, where it
+        costs seconds. `--scenes` is a deliberate narrowing, so it warns instead."""
+        with tempfile.TemporaryDirectory() as root:
+            arm = write_arm(root, [legged_audit(0)])
+            out = StringIO()
+            with redirect_stdout(out):
+                status = main(["render", arm, "--walk-in", str(WALK_IN), "--arm", "tc1",
+                               "--out", str(pathlib.Path(root) / "out")])
+            self.assertEqual(status, 2)
+            self.assertIn("under the {} a verdict needs".format(MIN_POSES), out.getvalue())
+            self.assertEqual(main(["select", arm, "--walk-in", str(WALK_IN)]), 0)
 
 
 class TestTheWalk(unittest.TestCase):
@@ -216,9 +268,13 @@ def fading(n, yaw):
     return 0.98 ** n
 
 
-def arm_results(make_world, n=MIN_POSES + 5, change=-0.1):
-    """``n`` legs walked in one arm, in one world from ``make_world``."""
-    base = a_pose(recorded_change=change)
+def arm_results(make_world, n=MIN_POSES + 5, change=-0.1, pose=None):
+    """``n`` legs walked in one arm, in one world from ``make_world``.
+
+    The default pose closes on its source, so the direction rows the branch reads are
+    populated; a walk that opens from the source is the caller's to ask for.
+    """
+    base = pose or closing_pose(recorded_change=change)
     poses = [replace(base, episode=k) for k in range(n)]
     return {r.pose.key: r for r in probe_legs(
         poses, factory(make_world), clip=CLIP, bed_cue=BED, hop=HOP,
@@ -226,16 +282,33 @@ def arm_results(make_world, n=MIN_POSES + 5, change=-0.1):
 
 
 def verdicts(recorded=FALLS, walk=(FLAT, FLAT), walk_forced=(FALLS, FALLS),
-             ir_walk=(FLAT, FLAT)):
-    rows = {"walk": walk, "walk_forced": walk_forced, "ir_walk": ir_walk}
+             ir_walk=(FLAT, FLAT), walk_closed=(FALLS, FALLS),
+             walk_opened=(FLAT, FLAT)):
+    rows = {"walk": walk, "walk_forced": walk_forced, "ir_walk": ir_walk,
+            "walk_closed": walk_closed, "walk_opened": walk_opened}
     out = {"recorded": {"run": recorded}}
     out.update({row: dict(zip(("tc1", "tc0"), value)) for row, value in rows.items()})
     return out
 
 
 class TestTheBranch(unittest.TestCase):
-    def test_a_fall_in_both_arms_is_the_renderer(self):
-        self.assertEqual(decide(verdicts(walk=(FALLS, FALLS)))[0], RENDERER)
+    def test_a_fall_in_both_arms_that_survives_the_approach_is_the_renderer(self):
+        branch, why = decide(verdicts(walk=(FALLS, FALLS)))
+        self.assertEqual(branch, RENDERER)
+        self.assertIn("closed on the source", why)
+
+    def test_a_fall_that_the_approaching_legs_do_not_have_is_the_geometry(self):
+        """The forced failure for the cause it names: a level that falls only where the
+        agent walks away is distance, and the branch must not call that the renderer."""
+        branch, why = decide(verdicts(walk=(FALLS, FALLS), walk_closed=(FLAT, FLAT),
+                                      walk_opened=(FALLS, FALLS)))
+        self.assertEqual(branch, GEOMETRY)
+        self.assertIn("PR #152", why)
+
+    def test_a_fall_that_cannot_be_split_by_direction_is_mixed(self):
+        branch, why = decide(verdicts(walk=(FALLS, FALLS), walk_closed=(UNREAD, FALLS)))
+        self.assertEqual(branch, MIXED)
+        self.assertIn("too few legs closed", why)
 
     def test_a_fall_with_coherence_on_alone_is_the_preset(self):
         branch, why = decide(verdicts(walk=(FALLS, FLAT)))
@@ -248,10 +321,11 @@ class TestTheBranch(unittest.TestCase):
     def test_a_rise_in_either_arm_is_mixed(self):
         self.assertEqual(decide(verdicts(walk=(RISES, FLAT)))[0], MIXED)
 
-    def test_flat_in_both_arms_is_selection_and_names_the_next_check(self):
+    def test_flat_in_both_arms_is_selection_and_names_both_candidates(self):
         branch, why = decide(verdicts())
         self.assertEqual(branch, SELECTION)
         self.assertIn("by_cut_scan", why)
+        self.assertIn("--walk-in", why)
 
     def test_an_unread_population_is_not_run(self):
         self.assertEqual(decide(verdicts(walk=(UNREAD, FLAT)))[0], NOT_RUN)
@@ -283,10 +357,21 @@ class TestTheReadout(unittest.TestCase):
         self.assertEqual(result["branch"], SELECTION, result["why"])
         self.assertEqual(result["rows"]["walk_forced"]["tc1"]["verdict"], FALLS)
 
-    def test_a_fall_in_both_arms_is_the_renderer(self):
+    def test_a_fall_in_both_arms_on_approaching_legs_is_the_renderer(self):
         result = readout({"tc1": arm_results(lambda: FakeWorld(gain=fading)),
                           "tc0": arm_results(lambda: FakeWorld(gain=fading))})
         self.assertEqual(result["branch"], RENDERER, result["why"])
+        self.assertEqual(result["rows"]["walk_closed"]["tc1"]["n"], MIN_POSES + 5)
+        self.assertEqual(result["rows"]["walk_opened"]["tc1"]["n"], 0)
+
+    def test_a_fall_on_legs_that_only_open_from_the_source_is_the_geometry(self):
+        opening = a_pose(recorded_change=-0.1)  # the fixture walks away from its source
+        arms = {arm: arm_results(lambda: FakeWorld(gain=fading), pose=opening)
+                for arm in ("tc1", "tc0")}
+        result = readout(arms)
+        self.assertEqual(result["rows"]["walk_closed"]["tc1"]["n"], 0)
+        self.assertEqual(result["branch"], MIXED, result["why"])
+        self.assertIn("too few legs closed", result["why"])
 
     def test_diverged_legs_are_not_read(self):
         tc0 = arm_results(lambda: FakeWorld(step=0.3))
@@ -328,6 +413,8 @@ class TestTheTagOnDisk(unittest.TestCase):
         result = readout({"tc1": arm_results(FakeWorld), "tc0": arm_results(FakeWorld)})
         text = format_readout(result, tag="runs/walk-1", errors=[])
         self.assertIn("CHECK forced fall, the walk", text)
+        self.assertIn("walk, legs that closed on the source", text)
+        self.assertIn("p <= 0.01 and a median change <= -3% per loop over >= 20", text)
         self.assertIn("recorded leg, the run's own renders", text)
         self.assertIn("Pre-registered in leg_probe.py before the first box run", text)
 

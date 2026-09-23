@@ -267,9 +267,13 @@ MIXED = "MIXED"
 HEADING = "HEADING"
 
 # Why a first scan was not made a pose. Counted, never silent.
-EXCLUDED_SHORT = "fewer than walk_in steps before the scan"
+EXCLUDED_SHORT = "fewer than walk_in steps before the window"
 EXCLUDED_NO_HEADING = "no clean forward in the walk-in to rebuild the heading from"
 EXCLUDED_DUPLICATE = "episode already posed from an earlier run"
+# The same episode offering a second candidate to the same run: a later leg, where a
+# scan offers only one. Counted apart from the cross-run duplicate, because "two runs
+# hold this episode" and "this episode had more than one leg" are different facts.
+EXCLUDED_LATER = "a later window in an episode already posed"
 
 
 # ----------------------------------------------------------------------
@@ -428,8 +432,13 @@ def plan_window(
         raise ValueError(
             "episode {} of {}/{} recorded a STOP before {} ended. A STOP ends the "
             "detour, so it cannot have completed".format(episode, run, scene, what))
+    # Any clean forward in the window anchors the heading, not only one in the walk-in:
+    # the turns between it and the seat are recorded, and the sum below walks the yaw
+    # back through them whatever the anchor's index. Restricting the search to the
+    # walk-in cost poses for nothing, and it costs most where the walk-in is turns --
+    # a leg whose walk-in is the scan that preceded it has three candidate steps in ten.
     anchor = None
-    for k in range(int(walk_in)):
+    for k in range(len(actions)):
         if actions[k] != ACT_FORWARD or window[k].collided:
             continue
         dx, dz = _horizontal(positions[k], positions[k + 1])
@@ -571,7 +580,12 @@ def select_poses(
     ``candidates`` is what an episode offers, in order, already planned: the read first
     scans by default. A sibling probe passes its own and gets this selection, these
     refusals and this de-duplication unchanged, because what may be compared across two
-    arms is a property of the runs and not of the sequence rendered at a pose.
+    arms is a property of the runs and not of the sequence rendered at a pose. An episode
+    offering several candidates gets the first that PLANS, and the rest are counted.
+
+    A duplicate's record is planned before it is dropped, so a writer fault in a second
+    run's copy of an episode is still raised rather than skipped: a record that cannot be
+    read is a fault wherever it sits.
     """
     from earshot.task.smoke import episode_indices
 
@@ -634,7 +648,8 @@ def select_poses(
                     n_first += 1
                     key = (scene_dir.name, int(audit.episode_index))
                     if key in posed:
-                        exclude(EXCLUDED_DUPLICATE)
+                        exclude(EXCLUDED_DUPLICATE if posed[key] != label
+                                else EXCLUDED_LATER)
                         continue
                     if pose is None:
                         exclude(str(why))
