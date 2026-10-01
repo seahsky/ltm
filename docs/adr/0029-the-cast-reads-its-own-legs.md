@@ -186,6 +186,22 @@ DREAM's arc is the reason: its memory term was the first lever in this repo prov
 - **The reversal needs checking on the fake world before the box.** A rule turn becomes a probe offset, and the follower, not the rule, turns the body. So the realized heading change of "reverse" has to be asserted as 180° in a test, not assumed.
 - `oracle-2` inferred that the run-to-run noise enters through the audio-driven steering. A reader that acts on more of the audio may add variance, which is a second reason the repeat runs in the same night.
 
+## How it was built (2026-10-01)
+
+ADR-0030's re-gate read BUILD at T_LEG 1.0. Building the arm forced six details this ADR left open. Each is fixed in the code before the night, and none was chosen by looking at a night.
+
+- **The verdict reads the gate's leg.** At a leg's opening, the controller fits the last `1 + CAST_STEPS` readings and the positions they were taken at. While the plateau runs unbroken, those are the leg's readings from the one after its turn through the opening tick, which is `leg_replay`'s `rows[start + 1 : start + LEG_PERIOD + 1]`. The runner hands the controller this tick's `measured_rms` and `position`, the values the record keeps. `along_leg` moved from `leg_replay` into `agent/controller.py`, and the replay imports it. A fake-world run checks that the replay, rebuilt over the arm's own record, reaches the arm's verdict on every leg it read.
+- **QUIETER is a new action, `ACT_REVERSE`, and the reversed leg holds its heading.** The probe is placed afresh every tick from the body's yaw, and the follower turns the body 30° a tick. A reverse probe placed once is lost on the next tick. So the reversed leg's forwards aim along the reversed heading until the leg ends, and the follower turns the body round. On the fake world the walk after a reversal points 180° from the leg before it.
+- **The leg a reversal opened is not read.** Turning round takes about six of its nine readings, which mixes turns with forwards: the shape this ADR built the reader to avoid, and not one the gate graded. Its opening records `unread` and casts as today.
+- **LOUDER is a forward at the body's yaw.** At a leg's end, the body faces along the leg it walked.
+- **The verdict goes on the record.** `StepRecord.leg_verdict` is set on the tick a verdict chose the action, and `detour_report.rule_action` takes it, so a replay rebuilds a READ_LEGS run exactly. `leg_replay.load_run` still refuses any run that is not `full`'s rule: legs walked under a reader are not the gate's population.
+- **`T_LEG` is `controller.READ_LEGS_T_LEG = 1.0`**, a constant with no flag. A test pins it to the gate's grid.
+- **The arm refuses any render but `temporalCoherence` off, said explicitly.** That value was chosen on legs rendered without it, and on legs rendered with it the gate read STOP. `runner.check_read_legs_render` raises before the environment probe, so a `read-legs` run on the old preset, or on a record whose value is `null`, fails in seconds and never reaches a night.
+
+**Liveness.** Each READ_LEGS episode records `legs_read`, `legs_louder`, `legs_quieter`, `legs_inconclusive` and `legs_unread` (the names this ADR's night section gives as `n_*`). `window_report` prints them per arm and exits 2 if a reading arm said louder or quieter on no leg. The driver reads that exit code, so the night ends red rather than quoting a reader that did not act.
+
+**The arms.** `read-legs` is `--cast-policy read_legs`. `full-b` and `read-legs-b` carry exactly their originals' flags, and `full-b` keeps the baseline's per-scene smoke bar.
+
 ## We chose this over
 
 - **A smaller epsilon.** Rejected by measurement (`eps-1`).

@@ -148,6 +148,19 @@ def _steps():
     )
 
 
+class TestTheLegVerdictIsRecorded(unittest.TestCase):
+    """ADR-0029's verdict on the record, both ways: carried when set, absent as `None`."""
+
+    def test_it_round_trips(self):
+        row = StepRecord(15, 2e-3, realizable_action="reverse", leg_verdict="quieter")
+        self.assertEqual(StepRecord.from_dict(row.as_dict()), row)
+
+    def test_a_record_written_before_it_reads_as_none(self):
+        data = StepRecord(15, 2e-3).as_dict()
+        del data["leg_verdict"]
+        self.assertIsNone(StepRecord.from_dict(data).leg_verdict)
+
+
 class TestTheDerivedSeries(unittest.TestCase):
     def test_source_is_visible_history_comes_from_the_step_rows(self):
         """§5.2's history, derived so it cannot disagree with §3.2's per-step record."""

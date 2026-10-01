@@ -141,6 +141,7 @@ from earshot.agent.controller import (
     LEG_LOUDER,
     LEG_QUIETER,
     SCAN_STEPS,
+    along_leg,
     climb_eps,
     leg_t,
     leg_verdict,
@@ -379,23 +380,6 @@ def _detour(audit: EpisodeAudit) -> List[int]:
     return indices
 
 
-def _along_leg(positions: Sequence[Xyz]) -> Tuple[List[float], float]:
-    """Each position's displacement along the leg's net heading, and the leg's length.
-
-    Horizontal only. Zero length gives zero displacements, which ``leg_t`` reads as no
-    spread and so as no verdict.
-    """
-    first, last = positions[0], positions[-1]
-    dx, dz = last.x - first.x, last.z - first.z
-    length = math.hypot(dx, dz)
-    if length <= 0.0:
-        return [0.0 for _ in positions], 0.0
-    return (
-        [((p.x - first.x) * dx + (p.z - first.z) * dz) / length for p in positions],
-        length,
-    )
-
-
 def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
     """Every cast leg the episode's detour started, classified and measured. Pure."""
     detour = _detour(audit)
@@ -415,7 +399,8 @@ def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
     # from the check by name rather than counted as agreement.
     agree = [
         rec == ACT_STOP
-        or rule_action(flag, r.lateral_sign, plateau_steps=count) == rec
+        or rule_action(flag, r.lateral_sign, plateau_steps=count,
+                       leg_verdict=r.leg_verdict) == rec
         for r, flag, count, rec in zip(rows, flags, counts, recorded)
     ]
     checked = sum(1 for rec in recorded if rec != ACT_STOP)
@@ -653,7 +638,7 @@ def _measured(
             "episode {} of {}/{} has a detour step with no position. Every record since "
             "yield-1 carries one, so this is a writer fault, and a leg without positions "
             "has no axis to fit along".format(leg.episode, leg.run, leg.scene))
-    displacements, length = _along_leg(positions)
+    displacements, length = along_leg(positions)
     levels = [r.measured_rms for r in readings]
     first = readings[0].geodesic_to_source
     last = readings[-1].geodesic_to_source

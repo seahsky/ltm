@@ -81,7 +81,7 @@ ANCHOR_METRIC = "source_at_class_anchor"
 # `tc-on` changes the renderer and not the episode, so the split reads identically there too.
 ABLATION_ARMS = (
     "full", "no-climb", "no-cue", "scan-only", "anechoic", "tc-on", "oracle-loc",
-    "oracle-loc-matched", "dream", "dream-nomem",
+    "oracle-loc-matched", "dream", "dream-nomem", "read-legs", "full-b", "read-legs-b",
 )
 
 # The label for an episode whose audit carries no `scene_id`. Not a scene, and not folded

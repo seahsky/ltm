@@ -290,7 +290,11 @@ def plateau_index(flags: Sequence[bool]) -> List[int]:
 
 
 def rule_action(
-    rising: bool, lateral_sign: Optional[int], *, plateau_steps: int = 0
+    rising: bool,
+    lateral_sign: Optional[int],
+    *,
+    plateau_steps: int = 0,
+    leg_verdict: Optional[str] = None,
 ) -> str:
     """What the carried rule answers, given ``rising`` and the lateral sign. Pure.
 
@@ -308,7 +312,14 @@ def rule_action(
     # The un-cued branch is `cast_action`, imported rather than re-spelled: it scans, then
     # commits forwards, then alternates, and a replay that still answered "turn" here
     # would disagree with the agent on most of every plateau.
-    return cast_action(int(plateau_steps), 0 if lateral_sign is None else int(lateral_sign))
+    #
+    # `leg_verdict` is the one input a READ_LEGS run adds, and the record carries it
+    # (`StepRecord.leg_verdict`), so the rebuild stays exact on that arm too. `None` on
+    # every other arm leaves `cast_action` as it was.
+    return cast_action(
+        int(plateau_steps), 0 if lateral_sign is None else int(lateral_sign),
+        leg_verdict=leg_verdict,
+    )
 
 
 def plateau_windows(flags: Sequence[bool]) -> List[Tuple[int, int]]:
@@ -697,7 +708,8 @@ def trace_one(
     row["n_rule_checked"] = len(checkable)
     row["n_rule_agree"] = sum(
         1 for r, f, i in checkable
-        if rule_action(f, r.lateral_sign, plateau_steps=i) == r.realizable_action)
+        if rule_action(f, r.lateral_sign, plateau_steps=i, leg_verdict=r.leg_verdict)
+        == r.realizable_action)
     # Never re-derivable from the two above: the rule's STOP needs `visual_confirm`,
     # which no record carries, so these steps are excluded from the check by name.
     row["n_rule_stop"] = stops

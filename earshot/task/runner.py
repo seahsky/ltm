@@ -55,6 +55,11 @@ from earshot.agent.config import PlannerConfig
 from earshot.agent.controller import (
     ACT_STOP,
     CAST_STEPS,
+    LEG_INCONCLUSIVE,
+    LEG_LOUDER,
+    LEG_QUIETER,
+    LEG_UNREAD,
+    READ_LEGS_T_LEG,
     RISING_WINDOW,
     SCAN_STEPS,
     ControllerState,
@@ -153,6 +158,7 @@ from earshot.task.prior_build import anchor_of_run_class
 from earshot.types import NoRouteError, Pose, Xyz
 
 __all__ = [
+    "check_read_legs_render",
     "EpisodeResult",
     "RunSummary",
     "SilentPhaseTally",
@@ -1047,6 +1053,25 @@ def _choose_waypoint(
 # ----------------------------------------------------------------------
 
 
+def check_read_legs_render(cfg: RunConfig) -> None:
+    """Refuse ``CastPolicy.READ_LEGS`` on any render but ``temporalCoherence`` off.
+
+    ``READ_LEGS_T_LEG`` was chosen on legs rendered with the key off (ADR-0030). On legs
+    rendered with it on, the same gate read STOP: QUIETER 55.9% right on `full`'s legs,
+    the night `no-tc` ran. So the reader at that value is only licensed on the render it
+    was priced on, and the record has to say so EXPLICITLY. ``None`` is the
+    pre-ADR-0030 preset, which rendered with the key on, so it is refused too.
+    """
+    if cfg.cast_policy is CastPolicy.READ_LEGS and cfg.audio.temporal_coherence is not False:
+        raise ValueError(
+            "cast_policy read_legs needs temporalCoherence OFF, explicitly (got {!r}). "
+            "READ_LEGS_T_LEG was chosen on legs rendered without it (ADR-0030); with it "
+            "on, the gate read STOP. Pass --temporal-coherence off, or run after "
+            "ADR-0030's preset flip, which makes off the default".format(
+                cfg.audio.temporal_coherence)
+        )
+
+
 def run_episode(
     world: Any,
     handle: Any,
@@ -1105,7 +1130,11 @@ def run_episode(
     # at all.
     climb_enabled = cfg.climb_rule is ClimbRule.LIVE
     lateral_cue_enabled = cfg.lateral_cue is LateralCue.LIVE
-    cast_steps = CAST_STEPS if cfg.cast_policy is CastPolicy.CAST else 0
+    cast_steps = 0 if cfg.cast_policy is CastPolicy.SCAN_ONLY else CAST_STEPS
+    # ADR-0029's reader runs on the READ_LEGS arm alone, at the critical value the gate
+    # chose. `None` is every other arm, and the controller is then unchanged.
+    t_leg = READ_LEGS_T_LEG if cfg.cast_policy is CastPolicy.READ_LEGS else None
+    check_read_legs_render(cfg)
     labeler = room_labeler if room_labeler is not None else NullRoomLabeler()
     say = progress if progress is not None else (lambda _message: None)
 
@@ -1577,6 +1606,7 @@ def run_episode(
             scan_steps=SCAN_STEPS,
             climb_enabled=climb_enabled,
             lateral_cue_enabled=lateral_cue_enabled,
+            t_leg=t_leg,
         )
         # SWS's numerator, captured here and NOT in the controller. `state.investigated`
         # flips exactly once, in both localization arms, and the runner already holds the
@@ -1816,6 +1846,9 @@ def run_episode(
                 # analyst able to recompute the rule but with nothing to check the
                 # recomputation against.
                 realizable_action=decision.realizable_action,
+                # ADR-0029's verdict, on the tick it chose the action. Without it a
+                # replay of a READ_LEGS run could not rebuild the rule it is checking.
+                leg_verdict=decision.leg_verdict,
             )
         )
         # `a_{t-1}` for the NEXT step's `e_t` (eq. 5). Set here rather than beside the
@@ -1999,6 +2032,16 @@ def run_episode(
     # one hop can keep the cue near silence.
     metrics["sounding_cue_tail_steps"] = float(tail.cue_tail_steps)
     metrics["sounding_phase_folds"] = float(tail.phase_folds)
+    if t_leg is not None:
+        # ADR-0029's liveness, so a night can say the reader fired before anyone reads a
+        # delta. DREAM is why (ADR-0025): two nulls came back about a mechanism that never
+        # ran. Absent on every arm that does not read legs, and absent is not zero.
+        verdicts = [row.leg_verdict for row in steps if row.leg_verdict is not None]
+        metrics["legs_read"] = float(sum(1 for v in verdicts if v != LEG_UNREAD))
+        metrics["legs_louder"] = float(verdicts.count(LEG_LOUDER))
+        metrics["legs_quieter"] = float(verdicts.count(LEG_QUIETER))
+        metrics["legs_inconclusive"] = float(verdicts.count(LEG_INCONCLUSIVE))
+        metrics["legs_unread"] = float(verdicts.count(LEG_UNREAD))
     if onset.fired and onset.onset_step is not None:
         # THE NUMBER ADR-0017'S OPEN DURATION QUESTION IS DECIDED ON. A window has to
         # outlast this delay or the episode can never hear the source at all, so one
@@ -2530,6 +2573,9 @@ def run(
     populated and measures nothing.
     """
     say = progress if progress is not None else print
+    # Before the probes and the scene load, so a wrong render costs seconds and not a
+    # night's first scene.
+    check_read_legs_render(cfg)
 
     # A DREAM run needs BOTH encoders, so it needs both probes. `--clip` was built in
     # PR #114 and this is its first caller: a staged model nothing probes is the shape
