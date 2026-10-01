@@ -16,7 +16,7 @@ a cause, and this probe renders a sequence for each:
   turn follows the lateral sign, so the scan ends facing the source, and a binaural
   level depends on where the source is relative to the head. The probe holds the same
   position at a fixed heading beside the turning replay.
-- **The renderer.** The preset ships ``temporalCoherence: 1``, which reuses paths from
+- **The renderer.** The preset shipped ``temporalCoherence: 1`` until ADR-0030, reusing paths from
   earlier frames, and nothing has A/B'd it against a leg or a scan. Every sequence is
   rendered once with it on and once with it off, each arm in its own process, and
   nothing else changes.
@@ -203,8 +203,8 @@ __all__ = [
     "main",
 ]
 
-# The two arms, by the value of `temporalCoherence` each renders at. `tc1` is the shipped
-# preset and comes first, so a crash in `tc0` still leaves the arm every run used.
+# The two arms, by the value of `temporalCoherence` each renders at. `tc1` is the
+# pre-ADR-0030 preset and comes first, so a crash in `tc0` still leaves the arm every run used.
 ARMS: Dict[str, bool] = {"tc1": True, "tc0": False}
 ARM_ORDER: Tuple[str, ...] = ("tc1", "tc0")
 
@@ -1379,7 +1379,7 @@ def format_readout(result: Mapping[str, Any], *, tag: str, errors: Sequence[str]
     """The readout as text."""
     lines = [
         "hold probe  {}".format(tag),
-        "  arms: tc1 = temporalCoherence on (the shipped preset), tc0 = off",
+        "  arms: tc1 = temporalCoherence on (the pre-ADR-0030 preset), tc0 = off",
         "  poses in both arms: {}   only in tc1: {}   only in tc0: {}".format(
             result["n_paired"], result["only_in"]["tc1"], result["only_in"]["tc0"]),
         "  diverged from the record: tc1 {}, tc0 {}   READ: {}".format(

@@ -22,6 +22,7 @@ from _interpreter import assert_interpreter  # noqa: F401
 from earshot.tools.power import (
     HISTORICAL_EFFECT,
     MEASURED_FLIP_RATE,
+    TC0_FLIP_RATE,
     episodes_for_mde,
     main,
     mde_between_cells,
@@ -150,12 +151,18 @@ class TestTheCliPricesTheSweepInFrontOfIt(unittest.TestCase):
     def test_paired_n_prints_the_sweeps_own_mde_and_not_only_the_historic_one(self):
         out = self._run("--n-per-cell", "285", "--paired-n", "285")
         self.assertIn("THIS SWEEP, paired at n=285", out)
-        # 6.68 points is what `ablation_sweep.sh`'s header claims at 15 episodes over 19
-        # scenes. If this moves, that header is wrong and this test is how it is found.
-        self.assertIn("MDE {:.2f} points".format(100 * mde_paired(285)), out)
-        self.assertIn("6.68", out)
+        # 7.26 points is what `ablation_sweep.sh`'s header claims at 15 episodes over 19
+        # scenes, at the flip rate of today's render (ADR-0030). If this moves, that
+        # header is wrong and this test is how it is found.
+        self.assertIn("MDE {:.2f} points".format(100 * mde_paired(285, TC0_FLIP_RATE)), out)
+        self.assertIn("7.26", out)
         # The historic reference stays, and stays labelled as the other thing.
         self.assertIn("n=365", out)
+
+    def test_the_sweeps_rate_is_the_three_tc0_renders_pooled(self):
+        """162 discordant of 846 over `no-tc`, `regate-a` and `regate-b` (ADR-0030)."""
+        self.assertAlmostEqual(TC0_FLIP_RATE, 0.1915, places=4)
+        self.assertGreater(TC0_FLIP_RATE, MEASURED_FLIP_RATE)
 
     def test_the_paired_block_is_silent_about_this_sweep_when_not_asked(self):
         out = self._run("--n-per-cell", "285")

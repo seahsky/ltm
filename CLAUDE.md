@@ -90,9 +90,10 @@ python -m earshot.tools.window_report runs/<tag>
 
 # THE OVERNIGHT SWEEP: the paper's HM3D baseline and the ablation table, in one run.
 # TEN arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
-# `no-cue`, `scan-only` and `anechoic` each remove one component; `no-tc` turns the
-# render preset's `temporalCoherence` off and is not an agent component; `dream` and
-# `dream-nomem` are the memory pair (ADR-0025) and differ in `lambda_memory` alone.
+# `no-cue`, `scan-only` and `anechoic` each remove one component; `tc-on` turns the
+# render preset's `temporalCoherence` back on (the pre-ADR-0030 render) and is not an
+# agent component; `dream` and `dream-nomem` are the memory pair (ADR-0025) and differ
+# in `lambda_memory` alone.
 # `oracle-loc` and `oracle-loc-matched` are CEILINGS and not ablations -- they ADD the
 # source coordinate. Difference only the MATCHED one against `full`: `oracle-1` measured
 # the other at 94.3% source-reached and 2 of 270 Find-SR@1m out of one arm, because it
@@ -180,6 +181,8 @@ python -m earshot.tools.hold_probe read runs/<tag>
 nrun bash earshot/tools/leg_probe.sh --tag <fresh-tag>
 python -m earshot.tools.leg_probe read runs/<tag>
 
+# HISTORY: ADR-0030 turned the key OFF in the preset. `full` now renders without it and
+# the `no-tc` arm is gone; `tc-on` is the old render. The commands below now read:
 # WHAT THE PRESET COSTS END TO END, after `walk-1`. `no-tc` is `full` with
 # `--temporal-coherence off` and every other knob the same. `full` runs in the same
 # night as the control. The arm changes every render, the calibration sweep included,
@@ -193,9 +196,9 @@ python -m earshot.tools.leg_probe read runs/<tag>
 # at T 1.0 (LOUDER 95.8%, QUIETER 79.9%) where `full` that night reads STOP. ONE render,
 # chosen after the STOP, so NOT the gate: re-gating on the preset off needs its own
 # pre-registration and three renders
-nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> --arms "full no-tc"
-python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/no-tc
-python -m earshot.tools.leg_replay runs/<tag>/no-tc
+nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> --arms "full tc-on"
+python -m earshot.tools.episode_diff runs/<tag>/full runs/<tag>/tc-on
+python -m earshot.tools.leg_replay runs/<tag>/tc-on
 
 # ADR-0030's RE-GATE: ADR-0029's gate re-read on legs rendered with the key off, over
 # `runs/no-tc/no-tc` and two FRESH renders, thresholds unchanged. Pooling several renders
@@ -207,6 +210,8 @@ python -m earshot.tools.leg_replay runs/<tag>/no-tc
 # RAN 2026-09-24/25 at 32d3989, read 2026-10-01: BUILD AT T_LEG 1.0. Three renders LOUDER
 # 94.0% / QUIETER 77.2% (worst run 91.6 / 74.4), decisive 33.8%; the guard passes with
 # QUIETER at 75.8%, 0.8 points clear. Flip rate at TC 0 is 19.1%, MDE 7.30 pts at n=282
+# HISTORY: the `no-tc` arm name was removed by the flip; these commands re-read the runs
+# on disk and cannot launch new ones.
 nrun bash earshot/tools/ablation_sweep.sh --tag regate-a --arms no-tc
 nrun bash earshot/tools/ablation_sweep.sh --tag regate-b --arms no-tc
 python -m earshot.tools.leg_replay runs/no-tc/no-tc runs/regate-a/no-tc runs/regate-b/no-tc

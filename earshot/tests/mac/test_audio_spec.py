@@ -31,7 +31,7 @@ class TestConfigMapping(unittest.TestCase):
                 "indirectRayCount": 500,
                 "indirectRayDepth": 50,
                 "threadCount": 4,
-                "temporalCoherence": 1,
+                "temporalCoherence": 0,
             },
         )
 
@@ -82,8 +82,8 @@ class TestConfigMapping(unittest.TestCase):
                 self.assertEqual(acoustics[key], value, key)
 
     def test_temporal_coherence_is_overridable_from_the_config(self):
-        """The knob `tools/hold_probe.py` A/Bs. Both values, because the shipped value is
-        1 and a test of 1 alone could not tell an applied override from the preset."""
+        """The knob `tools/hold_probe.py` A/Bs. Both values, because the preset value is
+        0 and a test of 0 alone could not tell an applied override from the preset."""
         for wanted in (False, True):
             acoustics = audio_config_mapping(
                 AudioConfig(temporal_coherence=wanted), fakes.BINAURAL)["acousticsConfig"]
@@ -91,15 +91,17 @@ class TestConfigMapping(unittest.TestCase):
             for key, value in ACOUSTICS_PRESET.items():
                 if key != "temporalCoherence":
                     self.assertEqual(acoustics[key], value, key)
-        self.assertEqual(ACOUSTICS_PRESET["temporalCoherence"], 1,
+        self.assertEqual(ACOUSTICS_PRESET["temporalCoherence"], 0,
                          "the override must not write through to the module constant")
 
-    def test_temporal_coherence_off_reaches_the_spec(self):
-        """Through the one configuration path, post-conditions and all."""
+    def test_temporal_coherence_on_reaches_the_spec(self):
+        """Through the one configuration path, post-conditions and all.
+
+        The preset is now 0, so only `on` can show an applied override."""
         configured = audio_sensor_spec(
-            fakes.FakeAudioSensorSpec(), AudioConfig(temporal_coherence=False),
+            fakes.FakeAudioSensorSpec(), AudioConfig(temporal_coherence=True),
             fakes.BINAURAL)
-        self.assertEqual(configured.acousticsConfig.temporalCoherence, 0)
+        self.assertEqual(configured.acousticsConfig.temporalCoherence, 1)
         self.assertEqual(configured.acousticsConfig.indirectRayCount, 500)
 
     def test_the_config_override_wins_over_an_explicit_preset(self):
@@ -133,7 +135,7 @@ class TestAudioSensorSpec(unittest.TestCase):
         self.assertEqual(configured.acousticsConfig.indirectRayCount, 500)
         self.assertEqual(configured.acousticsConfig.indirectRayDepth, 50)
         self.assertEqual(configured.acousticsConfig.threadCount, 4)
-        self.assertEqual(configured.acousticsConfig.temporalCoherence, 1)
+        self.assertEqual(configured.acousticsConfig.temporalCoherence, 0)
         self.assertEqual(configured.acousticsConfig.sampleRate, 44100.0)
         self.assertIs(configured.channelLayout.type, fakes.BINAURAL)
         self.assertEqual(configured.channelLayout.channelCount, 2)
