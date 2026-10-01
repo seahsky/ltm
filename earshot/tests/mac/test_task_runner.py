@@ -71,6 +71,7 @@ from earshot.task.runner import (
     _funnel_stage,
     calibrate_episode,
     calibration_poses,
+    check_read_legs_render,
     make_detector,
     oracle_arrived,
     run_episode,
@@ -614,6 +615,196 @@ class TestTheStallTurnsTowardTheSource(unittest.TestCase):
         self.assertGreaterEqual(
             self.result.audit.funnel_stage, FunnelStage.SOURCE_REACHED
         )
+
+
+class _LoudestAtTheStart(FakeAudioSensorHandle):
+    """The level peaks where the agent starts and falls with distance whichever way it
+    walks. No facing or lateral term, so turning in place changes nothing: the only thing
+    that moves the level is where the agent stands. The detector's source is elsewhere,
+    so arriving never ends the detour this test is about."""
+
+    def __init__(self, world, source, peak, gain=0.5):
+        super().__init__(world, source, gain=gain)
+        self.peak = peak
+
+    def audio_of(self, observation):
+        del observation
+        here = self.world.pose().position
+        distance = math.hypot(here.x - self.peak.x, here.z - self.peak.z)
+        impulse = np.zeros((2, self.IR_LENGTH), dtype=np.float32)
+        impulse[0, 0] = impulse[1, 0] = self.gain / (1.0 + distance)
+        return impulse
+
+
+class _LouderTowardPlusZ(_LoudestAtTheStart):
+    """A field that climbs along +z everywhere, so any leg walked that way gets louder.
+    The scan turns the body round and leg 0 then heads mostly +z, which is what makes a
+    LOUDER verdict reachable on the fake without scripting the walk."""
+
+    def audio_of(self, observation):
+        del observation
+        here = self.world.pose().position
+        impulse = np.zeros((2, self.IR_LENGTH), dtype=np.float32)
+        impulse[0, 0] = impulse[1, 0] = self.gain * 0.1 * math.exp(here.z)
+        return impulse
+
+
+class TestTheReadLegsArmEndToEnd(unittest.TestCase):
+    """ADR-0029's reader through the real loop, on the fake world and its follower.
+
+    Two things only a run can show. **The reversal is REALIZED**: the rule names a probe
+    and the follower turns the body 30 degrees a tick, so "QUIETER turns round" is a claim
+    about where the agent then walks, measured off the recorded positions. And **the arm
+    reads the leg the gate graded**: `tools/leg_replay` rebuilt over this run's own record
+    must reach the verdict the controller recorded, leg by leg.
+    """
+
+    SOURCE = Xyz(0.0, 0.0, 15.0)
+
+    @classmethod
+    def _run(cls, calibration, cast_policy=CastPolicy.READ_LEGS, field=_LoudestAtTheStart):
+        start = Xyz(0.0, 0.0, 0.0)
+        world = FakeWorld(start=start, yaw=0.0)
+        handle = field(world, cls.SOURCE, peak=start)
+        episode = make_anomaly_episode(source=cls.SOURCE, t_anom=0)
+        # THE RENDER THE READER WAS PRICED ON, said explicitly: `check_read_legs_render`
+        # refuses READ_LEGS on any other, and `None` is the pre-ADR-0030 preset.
+        cfg = make_config(max_steps=150, t_anom=0, cast_policy=cast_policy,
+                          audio=AudioConfig(step_seconds=0.01, temporal_coherence=False))
+        return run(world, handle, episode, cfg, calibration=calibration)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result = cls._run(CALIBRATION)
+        cls.steps = cls.result.audit.steps
+        # A climb whose floor no step on this fixture can clear, so a leg that climbs
+        # COMPLETES instead of surging. That is the only way the fake reaches a LOUDER
+        # verdict: on a noiseless climb `is_rising` fires first, by construction.
+        cls.loud = cls._run(dataclasses.replace(CALIBRATION, cue_render_scatter=1.0),
+                            field=_LouderTowardPlusZ)
+
+    def _reversals(self):
+        from earshot.agent.controller import ACT_REVERSE, LEG_QUIETER
+
+        return [i for i, row in enumerate(self.steps)
+                if row.leg_verdict == LEG_QUIETER and row.realizable_action == ACT_REVERSE]
+
+    def test_the_reader_read_legs_and_said_so(self):
+        metrics = self.result.audit.metrics
+        print("READ_LEGS on the fake world: read {:.0f}, louder {:.0f}, quieter {:.0f}, "
+              "inconclusive {:.0f}, unread {:.0f}".format(
+                  *(metrics[key] for key in ("legs_read", "legs_louder", "legs_quieter",
+                                             "legs_inconclusive", "legs_unread"))))
+        self.assertGreater(metrics["legs_read"], 0)
+        self.assertGreater(metrics["legs_quieter"], 0)
+        self.assertEqual(self.result.audit.cast_policy, "read_legs")
+
+    def test_a_quieter_leg_turns_the_agent_round(self):
+        """The leg before the reversal and the walk after it point opposite ways."""
+        from earshot.tools.leg_replay import LEG_PERIOD
+
+        reversals = self._reversals()
+        self.assertTrue(reversals, "no leg read QUIETER, so nothing was reversed")
+        at = reversals[0]
+        before = self.steps[at - LEG_PERIOD + 1].position, self.steps[at].position
+        after = self.steps[at].position, self.steps[at + LEG_PERIOD].position
+        vx, vz = before[1].x - before[0].x, before[1].z - before[0].z
+        wx, wz = after[1].x - after[0].x, after[1].z - after[0].z
+        cosine = (vx * wx + vz * wz) / (math.hypot(vx, vz) * math.hypot(wx, wz))
+        print("reversal at step {}: leg before {:.2f} m, walk after {:.2f} m, angle {:.0f} "
+              "degrees".format(self.steps[at].step, math.hypot(vx, vz), math.hypot(wx, wz),
+                               math.degrees(math.acos(max(-1.0, min(1.0, cosine))))))
+        self.assertLess(cosine, -0.95)
+
+    def test_the_leg_a_reversal_opened_is_not_read(self):
+        from earshot.agent.controller import LEG_UNREAD
+        from earshot.tools.leg_replay import LEG_PERIOD
+
+        at = self._reversals()[0]
+        self.assertLess(at + LEG_PERIOD, len(self.steps),
+                        "the run ended inside the reversed leg; lengthen the fixture")
+        self.assertEqual(self.steps[at + LEG_PERIOD].leg_verdict, LEG_UNREAD)
+
+    def _replay_agrees(self, result, label):
+        from earshot.agent.controller import LEG_UNREAD, READ_LEGS_T_LEG, leg_verdict
+        from earshot.tools.leg_replay import COMPLETED, LEG_PERIOD, episode_legs
+
+        replay = episode_legs(result.audit, run="fake/" + label, scene="fake")
+        self.assertEqual(replay.n_steps_agree, replay.n_steps_checked)
+        by_end = {leg.start_step + LEG_PERIOD: leg for leg in replay.legs}
+        compared = 0
+        for row in result.audit.steps:
+            if row.leg_verdict is None or row.leg_verdict == LEG_UNREAD:
+                continue
+            leg = by_end[row.step]
+            self.assertEqual(leg.outcome, COMPLETED, row.step)
+            self.assertEqual(leg_verdict(leg.t, t_leg=READ_LEGS_T_LEG), row.leg_verdict,
+                             row.step)
+            compared += 1
+        print("{}: replay agrees with the arm on {} read leg(s), {} of {} steps "
+              "rebuilt".format(label, compared, replay.n_steps_agree,
+                               replay.n_steps_checked))
+        self.assertGreater(compared, 0)
+
+    def test_the_replay_rebuilds_the_rule_and_reaches_the_same_verdicts(self):
+        self._replay_agrees(self.result, "read-legs")
+
+    def test_a_louder_leg_keeps_its_heading_through_the_loop(self):
+        """LOUDER end to end: the record, the follower and the replay. The leg after a
+        LOUDER verdict carries on the way the finished one went."""
+        from earshot.agent.controller import ACT_FORWARD, LEG_LOUDER
+        from earshot.tools.leg_replay import LEG_PERIOD
+
+        steps = self.loud.audit.steps
+        louder = [i for i, row in enumerate(steps)
+                  if row.leg_verdict == LEG_LOUDER and i + LEG_PERIOD < len(steps)]
+        self.assertTrue(louder, "no leg read LOUDER on the climbing fixture")
+        at = louder[0]
+        self.assertEqual(steps[at].realizable_action, ACT_FORWARD)
+        vx = steps[at].position.x - steps[at - LEG_PERIOD + 1].position.x
+        vz = steps[at].position.z - steps[at - LEG_PERIOD + 1].position.z
+        wx = steps[at + LEG_PERIOD].position.x - steps[at].position.x
+        wz = steps[at + LEG_PERIOD].position.z - steps[at].position.z
+        cosine = (vx * wx + vz * wz) / (math.hypot(vx, vz) * math.hypot(wx, wz))
+        print("louder at step {}: the next leg goes {:.0f} degrees off the last".format(
+            steps[at].step, math.degrees(math.acos(max(-1.0, min(1.0, cosine))))))
+        self.assertGreater(cosine, 0.95)
+        self._replay_agrees(self.loud, "read-legs, climbing")
+
+    def test_the_cast_arm_records_no_verdict_and_no_liveness(self):
+        """The other arm of the record: `full` must not grow either field."""
+        result = self._run(CALIBRATION, cast_policy=CastPolicy.CAST)
+        self.assertTrue(all(row.leg_verdict is None for row in result.audit.steps))
+        self.assertNotIn("legs_read", result.audit.metrics)
+
+
+class TestReadLegsRefusesTheRenderItWasNotPricedOn(unittest.TestCase):
+    """`check_read_legs_render`, both arms. READ_LEGS_T_LEG was chosen with
+    `temporalCoherence` off; on legs rendered with it on the gate read STOP."""
+
+    def _cfg(self, cast_policy, temporal_coherence):
+        return make_config(cast_policy=cast_policy, audio=AudioConfig(
+            step_seconds=0.01, temporal_coherence=temporal_coherence))
+
+    def test_off_said_explicitly_is_the_one_render_it_runs_on(self):
+        check_read_legs_render(self._cfg(CastPolicy.READ_LEGS, False))
+
+    def test_on_and_the_pre_adr_0030_null_are_refused(self):
+        for value in (True, None):
+            with self.assertRaises(ValueError):
+                check_read_legs_render(self._cfg(CastPolicy.READ_LEGS, value))
+
+    def test_no_other_arm_is_touched(self):
+        for policy in (CastPolicy.CAST, CastPolicy.SCAN_ONLY):
+            for value in (True, None, False):
+                check_read_legs_render(self._cfg(policy, value))
+
+    def test_the_episode_loop_refuses_it_too(self):
+        world = FakeWorld(start=Xyz(0.0, 0.0, 0.0), yaw=0.0)
+        handle = FakeAudioSensorHandle(world, Xyz(0.0, 0.0, -5.0))
+        with self.assertRaises(ValueError):
+            run(world, handle, make_anomaly_episode(), self._cfg(CastPolicy.READ_LEGS, None),
+                calibration=CALIBRATION)
 
 
 class TestTheOracleArm(unittest.TestCase):

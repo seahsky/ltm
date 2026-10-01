@@ -136,6 +136,11 @@ class StepRecord:
     # by the runner because only `sim/` can query a navmesh (ADR-0013); `None` on a record
     # written before this existed, which reads as *unknown* and never as zero.
     geodesic_to_source: Optional[float] = None
+    # ADR-0029's verdict on the leg that ended at this step, on the step it chose the
+    # action: `louder`, `quieter`, `inconclusive`, or `unread` for the leg a reversal
+    # opened. `None` everywhere else, and on every arm that does not read legs. With it a
+    # replay rebuilds a READ_LEGS run's rule exactly, as `realizable_action` lets it check.
+    leg_verdict: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -151,6 +156,7 @@ class StepRecord:
             "displacement_m": self.displacement_m,
             "position": None if self.position is None else list(self.position.as_tuple()),
             "realizable_action": self.realizable_action,
+            "leg_verdict": self.leg_verdict,
         }
 
     @classmethod
@@ -176,6 +182,7 @@ class StepRecord:
             # record from a step where the carried rule genuinely did not run.
             realizable_action=data.get("realizable_action"),
             geodesic_to_source=data.get("geodesic_to_source"),
+            leg_verdict=data.get("leg_verdict"),
         )
 
 

@@ -70,6 +70,7 @@ __all__ = [
     "ACT_TURN_LEFT",
     "ACT_TURN_RIGHT",
     "ACT_STOP",
+    "ACT_REVERSE",
     "NavMode",
     "InvestigationEvent",
     "ControllerState",
@@ -87,6 +88,10 @@ __all__ = [
     "LEG_LOUDER",
     "LEG_QUIETER",
     "LEG_INCONCLUSIVE",
+    "LEG_UNREAD",
+    "READ_LEGS_T_LEG",
+    "leg_opening",
+    "along_leg",
     "leg_t",
     "leg_verdict",
     "realizable_investigate_step",
@@ -111,6 +116,10 @@ ACT_FORWARD = "move_forward"
 ACT_TURN_LEFT = "turn_left"
 ACT_TURN_RIGHT = "turn_right"
 ACT_STOP = "stop"
+# ADR-0029's QUIETER verdict: turn the cast round. Not a simulator action. Since ticket 26
+# every action here names a heading for the probe and none reaches `World.step`, and this
+# one names the heading behind the agent.
+ACT_REVERSE = "reverse"
 
 
 # How many readings each side of the comparison averages. One (the original behaviour)
@@ -285,8 +294,13 @@ def realizable_investigate_step(
     scan_steps: int = SCAN_STEPS,
     climb_enabled: bool = True,
     lateral_cue_enabled: bool = True,
+    leg_verdict: Optional[str] = None,
 ) -> str:
     """One step of realizable anomaly-source localization (ADR-0011): SURGE, or CAST.
+
+    ``leg_verdict`` is ADR-0029's reading of the leg that just finished, forwarded to
+    ``cast_action``. ``None`` is the arm that does not read legs, and the rule below is
+    then exactly what it was.
 
     **ADR-0018's three controller arms land here, as injected parameters, never as a
     config object** (``agent/`` cannot import ``config``; see the module docstring).
@@ -463,7 +477,8 @@ def realizable_investigate_step(
     if rising:
         return ACT_FORWARD  # surge
     sign = int(lateral_sign) if lateral_cue_enabled else 0
-    return cast_action(plateau_steps, sign, cast_steps=cast_steps, scan_steps=scan_steps)
+    return cast_action(plateau_steps, sign, cast_steps=cast_steps, scan_steps=scan_steps,
+                       leg_verdict=leg_verdict)
 
 
 def _turn_toward(lateral_sign: int) -> str:
@@ -478,6 +493,7 @@ def cast_action(
     *,
     cast_steps: int = CAST_STEPS,
     scan_steps: int = SCAN_STEPS,
+    leg_verdict: Optional[str] = None,
 ) -> str:
     """Where in the scan-then-cast cycle ``plateau_steps`` puts the agent. Pure.
 
@@ -495,6 +511,12 @@ def cast_action(
     ``cast_steps = 0`` collapses phases 2 and 3 into a turn on every dead step, which is
     the pre-`eps-1` behaviour and the control arm the next sweep needs. That is why both
     lengths are arguments rather than constants read from module scope.
+
+    ``leg_verdict`` is ADR-0029's reader, and it acts at one place only: the opening of a
+    leg that follows a finished one. ``LEG_LOUDER`` keeps the heading (a forward, no
+    turn) and ``LEG_QUIETER`` turns the cast round (``ACT_REVERSE``). Anything else, and
+    every first leg, opens with the turn below. The alternation count is not touched, so
+    a reader that never decides leaves this function exactly as it was.
     """
     index = max(0, int(plateau_steps))
     if index < int(scan_steps):
@@ -503,6 +525,11 @@ def cast_action(
     period = 1 + int(cast_steps)
     if index % period:
         return ACT_FORWARD  # running the leg
+    if int(cast_steps) and index // period >= 1:
+        if leg_verdict == LEG_LOUDER:
+            return ACT_FORWARD
+        if leg_verdict == LEG_QUIETER:
+            return ACT_REVERSE
     # Starting one. The lateral sign steers the first leg and the alternation steers the
     # rest; see the rule's docstring for why a stable sign must not steer them all.
     #
@@ -554,6 +581,52 @@ def next_plateau_steps(
 LEG_LOUDER = "louder"
 LEG_QUIETER = "quieter"
 LEG_INCONCLUSIVE = "inconclusive"
+# Not a verdict: the leg a reversal opened, which is not read. The follower turns the
+# body 30 degrees a tick, so a reversed leg spends about six of its nine readings turning
+# in place. That mixes turns with forwards, which is the leg shape ADR-0029 built the
+# reader to avoid and not one the gate graded. It casts as today.
+LEG_UNREAD = "unread"
+
+# provenance: box -- ADR-0029's critical value, chosen by the gate and not by hand.
+# ADR-0030's re-gate read BUILD at 1.0 over three renders with `temporalCoherence` off
+# (`no-tc`, `regate-a`, `regate-b`): LOUDER 94.0% and QUIETER 77.2% right, decisive on
+# 33.8% of informative legs, and the guard held on the two fresh renders. A constant and
+# not a flag, because ADR-0029 fixes it before the night and the base rate for thresholds
+# retuned after a result is 0 for 7 in this repo (ADR-0025).
+READ_LEGS_T_LEG = 1.0
+
+
+def leg_opening(
+    plateau_steps: int, *, cast_steps: int = CAST_STEPS, scan_steps: int = SCAN_STEPS
+) -> Optional[int]:
+    """Which cast leg this dead-cue step opens, counting from 0, or ``None``. Pure.
+
+    The same arithmetic ``cast_action`` uses to start a leg, so the reader and the cycle
+    cannot disagree about where a leg begins. ``cast_steps = 0`` has no legs at all.
+    """
+    index = max(0, int(plateau_steps)) - int(scan_steps)
+    if int(cast_steps) <= 0 or index < 0:
+        return None
+    period = 1 + int(cast_steps)
+    return None if index % period else index // period
+
+
+def along_leg(positions: Sequence[Xyz]) -> Tuple[Tuple[float, ...], float]:
+    """Each position's displacement along the leg's net heading, and the leg's length.
+
+    ``leg_t``'s ``displacements``. Horizontal only. Zero length gives zero displacements,
+    which ``leg_t`` reads as no spread and so as no verdict. It lives here and
+    ``tools/leg_replay`` imports it, so the arm reads a leg the way the gate graded it.
+    """
+    first, last = positions[0], positions[-1]
+    dx, dz = last.x - first.x, last.z - first.z
+    length = math.hypot(dx, dz)
+    if length <= 0.0:
+        return tuple(0.0 for _ in positions), 0.0
+    return (
+        tuple(((p.x - first.x) * dx + (p.z - first.z) * dz) / length for p in positions),
+        length,
+    )
 
 
 def leg_t(displacements: Sequence[float], levels: Sequence[float]) -> Optional[float]:
@@ -631,7 +704,9 @@ def leg_verdict(t: Optional[float], *, t_leg: float) -> str:
     return LEG_INCONCLUSIVE
 
 
-def realizable_investigate_probe(action: str, pose: Pose, cfg: ControllerConfig) -> Xyz:
+def realizable_investigate_probe(
+    action: str, pose: Pose, cfg: ControllerConfig, *, heading_rad: Optional[float] = None
+) -> Xyz:
     """Where the realizable detour routes to next, given the carried rule's answer.
 
     **Ticket 26's structural fix, and the one change to how the realizable arm moves.**
@@ -653,6 +728,14 @@ def realizable_investigate_probe(action: str, pose: Pose, cfg: ControllerConfig)
     The carried rule is the single source of the decision — this reads its action rather
     than re-deriving the cue, so there is one copy of ADR-0011's logic. ``ACT_STOP`` never
     arrives here: arrival is terminal and handled before a probe is wanted.
+
+    **``ACT_REVERSE`` and ``heading_rad`` are ADR-0029's reversal.** The probe is placed
+    afresh every tick from the body's yaw, and the follower turns the body 30 degrees a
+    tick. So a reverse probe placed once would be lost on the next tick: the next forward
+    would aim along a body that has turned 30 degrees, not 180. ``heading_rad`` holds the
+    reversed heading for the forwards of the leg the reversal opened, and the follower
+    turns the body round over the ticks it needs. ``None`` is the body's own yaw, which is
+    every forward outside a reversed leg.
     """
     if action == ACT_STOP:
         raise ValueError(
@@ -665,7 +748,9 @@ def realizable_investigate_probe(action: str, pose: Pose, cfg: ControllerConfig)
     elif action == ACT_TURN_RIGHT:
         heading = pose.yaw_rad - offset
     elif action == ACT_FORWARD:
-        heading = pose.yaw_rad
+        heading = pose.yaw_rad if heading_rad is None else float(heading_rad)
+    elif action == ACT_REVERSE:
+        heading = pose.yaw_rad + math.pi
     else:
         raise ValueError("unknown realizable action {!r}".format(action))
     dx, dz = forward_xz(heading)
@@ -676,7 +761,10 @@ def realizable_investigate_probe(action: str, pose: Pose, cfg: ControllerConfig)
 
 
 def _probe_for(
-    action: Optional[str], pose: Optional[Pose], cfg: ControllerConfig
+    action: Optional[str],
+    pose: Optional[Pose],
+    cfg: ControllerConfig,
+    heading_rad: Optional[float] = None,
 ) -> Optional[Xyz]:
     """``realizable_investigate_probe``, guarded for the two cases that have no probe.
 
@@ -693,7 +781,7 @@ def _probe_for(
             "detour has no waypoint and falls back to stepping blind, which is the "
             "livelock ticket 26 measured"
         )
-    return realizable_investigate_probe(action, pose, cfg)
+    return realizable_investigate_probe(action, pose, cfg, heading_rad=heading_rad)
 
 
 class NavMode(Enum):
@@ -747,6 +835,15 @@ class ControllerState:
     resumed: bool = False  # re-entered SEARCH after the interrupt
     n_benign_ignored: int = 0
     investigation_event: Optional[InvestigationEvent] = None
+    # ADR-0029's leg reader, kept only when the arm reads legs (`t_leg` given). The last
+    # `1 + cast_steps` readings and the positions they were taken at, which at a leg's
+    # opening are exactly the leg `tools/leg_replay` graded. State for the reason
+    # `plateau_steps` is: the runner trims `energy_history`, and a leg is longer than it.
+    leg_levels: Tuple[float, ...] = ()
+    leg_positions: Tuple[Xyz, ...] = ()
+    # The heading a reversed leg holds, so its forwards keep pointing back while the
+    # follower turns the body round. `None` outside a reversed leg.
+    leg_heading_rad: Optional[float] = None
 
     @classmethod
     def for_episode(cls, primary_goal: Optional[str]) -> "ControllerState":
@@ -782,6 +879,10 @@ class ControllerDecision:
     investigate_waypoint: Optional[Xyz] = None
     investigate_probe: Optional[Xyz] = None
     realizable_action: Optional[str] = None
+    # ADR-0029's verdict on the leg that finished at this tick, set only on a tick where it
+    # chose the action: a leg's opening, on an arm that reads legs. The record carries it
+    # so a replay rebuilds the rule exactly and the night can show the reader was live.
+    leg_verdict: Optional[str] = None
     force_requery: bool = False
     save_primary_state: bool = False
     restore_primary_state: bool = False
@@ -797,6 +898,53 @@ def is_diverting(mode: NavMode) -> bool:
     primary success outright.
     """
     return mode in (NavMode.INVESTIGATE, NavMode.CHECK, NavMode.RESUME)
+
+
+def _leg_buffer(
+    levels: Tuple[float, ...],
+    positions: Tuple[Xyz, ...],
+    energy_history: Optional[Sequence[float]],
+    pose: Optional[Pose],
+    *,
+    period: int,
+) -> Tuple[Tuple[float, ...], Tuple[Xyz, ...]]:
+    """The reader's buffer with this tick's reading added, the last ``period`` kept. Pure.
+
+    A tick with no reading or no pose EMPTIES it rather than skipping. The buffer must be
+    one entry per tick for its last ``period`` entries to be the leg, and a gap would
+    shift the window onto readings from before the leg began.
+    """
+    history = [float(e) for e in (energy_history or []) if e is not None]
+    if not history or pose is None:
+        return (), ()
+    return (levels + (history[-1],))[-period:], (positions + (pose.position,))[-period:]
+
+
+def _read_leg(
+    state: ControllerState,
+    levels: Tuple[float, ...],
+    positions: Tuple[Xyz, ...],
+    *,
+    t_leg: float,
+    cast_steps: int,
+    scan_steps: int,
+) -> Optional[str]:
+    """ADR-0029's verdict on the leg that ends at this tick, or ``None`` if none ends. Pure.
+
+    A leg ends at the opening of the next one. The plateau has run unbroken since the
+    last opening, or the leg would have been cut by a surge, so the buffer's last
+    ``1 + cast_steps`` entries are that leg's: the reading after its turn through this
+    one, which is ``tools/leg_replay``'s ``rows[start + 1 : start + LEG_PERIOD + 1]``.
+    """
+    leg = leg_opening(state.plateau_steps, cast_steps=cast_steps, scan_steps=scan_steps)
+    if leg is None or leg < 1:
+        return None
+    if state.leg_heading_rad is not None:
+        return LEG_UNREAD
+    if len(levels) < 1 + int(cast_steps):
+        return LEG_INCONCLUSIVE
+    displacements, _length = along_leg(positions)
+    return leg_verdict(leg_t(displacements, levels), t_leg=t_leg)
 
 
 def step_controller(
@@ -820,8 +968,12 @@ def step_controller(
     scan_steps: int = SCAN_STEPS,
     climb_enabled: bool = True,
     lateral_cue_enabled: bool = True,
+    t_leg: Optional[float] = None,
 ) -> Tuple[ControllerState, ControllerDecision]:
     """Advance the machine one tick. Returns ``(next_state, decision)``.
+
+    ``t_leg`` is ``CastPolicy.READ_LEGS`` (ADR-0029): the critical value the leg reader
+    runs at, or ``None`` for an arm that does not read legs, which is then unchanged.
 
     ``onset_fired`` and ``is_anomaly`` come from the audio layer: ``is_anomaly`` is True
     (anomalous, interrupt), False (benign, ignore and count it), or None (nothing
@@ -888,6 +1040,13 @@ def step_controller(
                     nxt = replace(nxt, plateau_steps=next_plateau_steps(
                         energy_history or [], eps=rising_eps, plateau_steps=0,
                         climb_enabled=climb_enabled))
+                    if t_leg is not None:
+                        # A fresh detour starts a fresh reader. This tick opens the scan
+                        # or surges, so it ends no leg and nothing is read yet.
+                        levels, positions = _leg_buffer(
+                            (), (), energy_history, pose, period=1 + int(cast_steps))
+                        nxt = replace(nxt, leg_levels=levels, leg_positions=positions,
+                                      leg_heading_rad=None)
                     return nxt, ControllerDecision(
                         mode=NavMode.INVESTIGATE,
                         active_goal=goal,
@@ -915,14 +1074,24 @@ def step_controller(
         # Compute the realizable action first, so a STOP both transitions to CHECK and is
         # not also handed to the runner to apply.
         action = None
+        verdict: Optional[str] = None
         if realizable:
+            if t_leg is not None:
+                levels, positions = _leg_buffer(
+                    state.leg_levels, state.leg_positions, energy_history, pose,
+                    period=1 + int(cast_steps))
+                verdict = _read_leg(state, levels, positions, t_leg=float(t_leg),
+                                    cast_steps=cast_steps, scan_steps=scan_steps)
+                state = replace(state, leg_levels=levels, leg_positions=positions)
             action = realizable_investigate_step(
                 energy_history or [], lateral_sign, visual_confirm, eps=rising_eps,
                 plateau_steps=state.plateau_steps,
                 cast_steps=cast_steps, scan_steps=scan_steps,
                 climb_enabled=climb_enabled,
                 lateral_cue_enabled=lateral_cue_enabled,
+                leg_verdict=verdict,
             )
+            before = state.plateau_steps
             # Advanced whatever the action was, including a forward mid-leg: the count is
             # of dead-cue STEPS, not of turns, and resetting it on the leg's own forwards
             # would restart the cycle every other tick.
@@ -930,6 +1099,19 @@ def step_controller(
                 energy_history or [], eps=rising_eps,
                 plateau_steps=state.plateau_steps,
                 climb_enabled=climb_enabled))
+            if t_leg is not None:
+                # The cast chose this action only if the plateau ran on and nothing
+                # STOPped. A surge or an arrival acted first: no verdict was used, and a
+                # held heading ends with the leg it belonged to.
+                cast_path = action != ACT_STOP and state.plateau_steps == before + 1
+                heading = state.leg_heading_rad
+                if not cast_path:
+                    verdict, heading = None, None
+                elif leg_opening(before, cast_steps=cast_steps,
+                                 scan_steps=scan_steps) is not None:
+                    heading = (pose.yaw_rad + math.pi
+                               if action == ACT_REVERSE and pose is not None else None)
+                state = replace(state, leg_heading_rad=heading)
         arrived = (action == ACT_STOP) if realizable else bool(arrived_at_source)
 
         if arrived:
@@ -967,8 +1149,11 @@ def step_controller(
             return state, ControllerDecision(
                 mode=NavMode.INVESTIGATE,
                 active_goal=state.active_goal,
-                investigate_probe=_probe_for(action, pose, cfg),
+                investigate_probe=_probe_for(
+                    action, pose, cfg,
+                    heading_rad=state.leg_heading_rad if action == ACT_FORWARD else None),
                 realizable_action=action,
+                leg_verdict=verdict,
                 # The probe moves with the cue, so the pool is re-proposed every tick of
                 # the detour rather than on the planner's decision period. A stale probe
                 # is a place the energy reading that chose it no longer supports, and the

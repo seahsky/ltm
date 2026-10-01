@@ -493,6 +493,58 @@ class TestTheTcOnArmChangesTheRenderPresetAndNothingElse(unittest.TestCase):
         self.assertEqual(carrying, ["tc-on"])
 
 
+class TestTheReadLegsNight(unittest.TestCase):
+    """ADR-0029's four arms: `full`, `read-legs`, and each again under a second name.
+
+    The `-b` arms are the night's own repeat, so each must carry EXACTLY its original's
+    flags: a repeat that differed in anything would be a second contrast, not noise. And
+    `read-legs` must reach the runner as `CastPolicy.READ_LEGS` through the real parser,
+    differing from `full` in that one field.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("bash") is None:
+            raise unittest.SkipTest("no bash on PATH")
+        cls.text = DRIVER.read_text()
+        cls.flags = dict(_select_arms(cls.text, "full read-legs full-b read-legs-b"))
+
+    def _config(self, arm):
+        from earshot.__main__ import build_parser, config_from_args
+
+        argv = ["--run-dir", "runs/x"] + self.flags[arm].split()
+        return config_from_args(build_parser().parse_args(argv))
+
+    def test_the_four_arms_select_in_order(self):
+        self.assertEqual(list(self.flags), ["full", "read-legs", "full-b", "read-legs-b"])
+
+    def test_each_repeat_carries_exactly_its_originals_flags(self):
+        self.assertEqual(self.flags["full-b"], self.flags["full"])
+        self.assertEqual(self.flags["read-legs-b"], self.flags["read-legs"])
+
+    def test_read_legs_differs_from_full_in_the_cast_policy_alone(self):
+        from earshot.config import CastPolicy
+
+        full, read_legs = self._config("full"), self._config("read-legs")
+        self.assertIs(read_legs.cast_policy, CastPolicy.READ_LEGS)
+        self.assertEqual(dataclasses.replace(read_legs, cast_policy=full.cast_policy), full)
+        print("read-legs reaches the runner as {}".format(read_legs.cast_policy))
+
+    def test_the_repeat_of_the_baseline_keeps_the_baselines_bar(self):
+        """`gate_verdict` excuses an ablation arm a criterion-5 scene. `full-b` is the
+        baseline, so a scene where it never closed the loop stays red, as for `full`."""
+        function = extract_function(self.text, "gate_verdict")
+        only_5 = "task spec §8 — acceptance criteria over 15 episode(s):\n  ...\nRED — criteria 5"
+
+        def verdict(arm):
+            return subprocess.call(
+                ["bash", "-c", 'set -uo pipefail\n{}\ngate_verdict "$1" "$2" "$3"'.format(
+                    function), "_", arm, "1", only_5])
+
+        self.assertEqual(verdict("full-b"), 2)
+        self.assertEqual(verdict("read-legs"), 1)
+
+
 def _select_arms(text: str, wanted: str):
     """The driver's own `--arms` block, over its own arrays, for one selection. An empty
     `wanted` is the driver's default: every arm."""

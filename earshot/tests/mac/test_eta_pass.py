@@ -234,7 +234,10 @@ class TestTheControlArmDiffersInExactlyOneKnob(unittest.TestCase):
         self.assertIn("--dream-lambda-memory 0.0}", self.text)
 
     def test_both_arms_are_named_and_carry_the_same_knob_string_otherwise(self):
-        self.assertIn("dream dream-nomem)", self.text)
+        line = next(row for row in self.text.splitlines() if row.startswith("ARM_NAMES=("))
+        names = line[len("ARM_NAMES=("):].rstrip(")").split()
+        self.assertIn("dream", names)
+        self.assertIn("dream-nomem", names)
         self.assertIn('"--clap $DREAM_KNOBS"', self.text)
         self.assertIn('"--clap $DREAM_KNOBS_NOMEM"', self.text)
 

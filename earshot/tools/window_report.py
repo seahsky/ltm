@@ -116,6 +116,16 @@ class ArmReading:
     # renderer moves this floor as well as the cue, so it is printed beside the SR.
     cue_render_scatters: Tuple[float, ...]
     n_cue_render_scatter_absent: int
+    # ADR-0029's liveness, summed over the arm: legs read, louder, quieter, inconclusive,
+    # and legs left unread after a reversal. `None` on an arm whose episodes carry none of
+    # it, which is every arm that does not read legs.
+    leg_counts: Optional[Tuple[int, int, int, int, int]]
+
+    @property
+    def reader_never_decided(self) -> bool:
+        """A leg-reading arm whose reader said LOUDER or QUIETER nowhere. NOT_RUN: a null
+        out of it is a reader that did not act, not a reader that did not help."""
+        return self.leg_counts is not None and self.leg_counts[1] + self.leg_counts[2] == 0
 
     @property
     def reached_rate(self) -> Optional[float]:
@@ -231,6 +241,7 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
             n_arms_unrecorded=0,
             cue_render_scatters=(),
             n_cue_render_scatter_absent=0,
+            leg_counts=None,
         )
 
     steps = [float(len(audit.steps)) for audit in audits]
@@ -329,7 +340,22 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
         n_arms_unrecorded=sum(1 for label in labels if label is None),
         cue_render_scatters=scatters,
         n_cue_render_scatter_absent=len(audits) - len(scatters),
+        leg_counts=_leg_counts(audits),
     )
+
+
+LEG_KEYS = ("legs_read", "legs_louder", "legs_quieter", "legs_inconclusive", "legs_unread")
+
+
+def _leg_counts(audits: Sequence[EpisodeAudit]) -> Optional[Tuple[int, int, int, int, int]]:
+    """``LEG_KEYS`` summed over the episodes that carried them, or ``None`` if none did."""
+    carrying = [audit for audit in audits if "legs_read" in audit.metrics]
+    if not carrying:
+        return None
+    read, louder, quieter, inconclusive, unread = (
+        sum(int(_metric(audit, key) or 0) for audit in carrying) for key in LEG_KEYS
+    )
+    return read, louder, quieter, inconclusive, unread
 
 
 def read_sweep(root: str, *, arms: Sequence[str] = PILOT_ARMS) -> Tuple[ArmReading, ...]:
@@ -517,6 +543,19 @@ def format_arm(reading: ArmReading) -> List[str]:
             "no final pose had a route to the source. ABSENT, not 0.0.".format("", n)
         )
 
+    if reading.leg_counts is not None:
+        read, louder, quieter, inconclusive, unread = reading.leg_counts
+        lines.append(
+            "  {:11s}   THE LEG READER (ADR-0029): {} leg(s) read, louder {}, quieter {}, "
+            "inconclusive {}; {} left unread after a reversal".format(
+                "", read, louder, quieter, inconclusive, unread
+            )
+        )
+        if reading.reader_never_decided:
+            lines.append(
+                "  {:11s}     NOT_RUN: the reader said louder or quieter on no leg, so this "
+                "arm cast exactly as `full`. A null here is not a result".format("")
+            )
     if reading.ablation_arms:
         lines.append(
             "  {:11s}   arms: {}".format("", "; ".join(reading.ablation_arms))
@@ -569,7 +608,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(format_report(readings))
     # Nonzero when NOTHING was read. A reader that exits 0 over an empty sweep is how
     # `pilot-1` announced three dead arms and let the driver print its summary anyway.
-    return 0 if any(reading.n_episodes for reading in readings) else 1
+    if not any(reading.n_episodes for reading in readings):
+        return 1
+    # And when a leg-reading arm never decided: NOT_RUN is red, and the driver reads this
+    # exit code, so the night ends red rather than quoting that arm's delta.
+    return 2 if any(reading.reader_never_decided for reading in readings) else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

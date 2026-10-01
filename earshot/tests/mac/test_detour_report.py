@@ -240,6 +240,21 @@ class TestTheRulesOwnPredicate(unittest.TestCase):
         self.assertEqual(rule_action(False, 0), ACT_TURN_LEFT)
         self.assertEqual(rule_action(False, None), ACT_TURN_LEFT)
 
+    def test_a_recorded_leg_verdict_rebuilds_a_read_legs_opening(self):
+        """READ_LEGS adds one input to the rule, and the record carries it. Without it
+        the rebuild would call every verdict-driven opening a disagreement."""
+        from earshot.agent.controller import (
+            ACT_REVERSE, CAST_STEPS, LEG_LOUDER, LEG_QUIETER, LEG_UNREAD, SCAN_STEPS,
+        )
+
+        opening = SCAN_STEPS + 1 + CAST_STEPS
+        self.assertEqual(rule_action(False, 1, plateau_steps=opening,
+                                     leg_verdict=LEG_LOUDER), ACT_FORWARD)
+        self.assertEqual(rule_action(False, 1, plateau_steps=opening,
+                                     leg_verdict=LEG_QUIETER), ACT_REVERSE)
+        self.assertEqual(rule_action(False, 1, plateau_steps=opening, leg_verdict=LEG_UNREAD),
+                         rule_action(False, 1, plateau_steps=opening))
+
     def test_the_reconstruction_matches_the_rule_it_reconstructs(self):
         """Both halves against the real function, not against a copy of its body."""
         history = [0.05, 0.05, 0.06]

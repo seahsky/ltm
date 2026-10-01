@@ -11,6 +11,8 @@ So the loading seam is exercised here rather than mocked, for the reason
 and never finds the files on disk prints a clean, confident "nothing here".
 """
 
+import contextlib
+import io
 import pathlib
 import shutil
 import tempfile
@@ -501,6 +503,50 @@ def calibration(scatter):
         onset_rms=0.02, bed_rms=0.001, separation_db=12.0, n_poses=16,
         global_volume=1.0, cue_render_scatter=scatter,
     )
+
+
+def legs(read, louder, quieter, inconclusive, unread=0):
+    return {"legs_read": read, "legs_louder": louder, "legs_quieter": quieter,
+            "legs_inconclusive": inconclusive, "legs_unread": unread}
+
+
+class TestTheLegReaderIsLiveOrRed(unittest.TestCase):
+    """ADR-0029's liveness. Both arms: a reader that decided is printed, and a reader
+    that never said louder or quieter is NOT_RUN and turns the readout's exit red."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def arm_with(self, episodes, name="read-legs"):
+        arm = pathlib.Path(self.root) / name
+        write_scene(arm, "sceneA", episodes)
+        return read_arm(str(arm), arm=name)
+
+    def test_a_live_reader_is_summed_and_printed(self):
+        reading = self.arm_with([episode(metrics=legs(5, 2, 1, 2, 1)),
+                                 episode(metrics=legs(4, 0, 2, 2))])
+        lines = "\n".join(format_arm(reading))
+        self.assertEqual(reading.leg_counts, (9, 2, 3, 4, 1))
+        self.assertFalse(reading.reader_never_decided)
+        self.assertIn("9 leg(s) read, louder 2, quieter 3, inconclusive 4; 1 left unread",
+                      lines)
+        self.assertNotIn("the reader said louder or quieter on no leg", lines)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main([self.root, "--arms", "read-legs"]), 0)
+
+    def test_a_reader_that_never_decided_is_not_run_and_red(self):
+        reading = self.arm_with([episode(metrics=legs(6, 0, 0, 6))])
+        lines = "\n".join(format_arm(reading))
+        self.assertTrue(reading.reader_never_decided)
+        self.assertIn("NOT_RUN: the reader said louder or quieter on no leg", lines)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main([self.root, "--arms", "read-legs"]), 2)
+
+    def test_an_arm_that_does_not_read_legs_says_nothing_about_them(self):
+        reading = self.arm_with([episode()], name="full")
+        self.assertIsNone(reading.leg_counts)
+        self.assertNotIn("LEG READER", "\n".join(format_arm(reading)))
 
 
 class TestTheClimbFloorIsReadOffTheCalibration(unittest.TestCase):

@@ -130,6 +130,20 @@
 #   reconstruction NEITHER oracle arm can validate (`tools/detour_report.py` says so now),
 #   which is its own reason to run these arms BESIDE `full` rather than alone.
 #
+# `read-legs` IS ADR-0029's READER: `--cast-policy read_legs`, which is `full`'s cast with
+# one change at the opening of each leg after the first. The leg that just finished keeps
+# its heading if it got louder and turns round if it got quieter, at the critical value
+# ADR-0030's re-gate chose (`controller.READ_LEGS_T_LEG`). A reader that never decides
+# casts exactly as `full`, so the contrast is one variable.
+#
+#   `full-b` AND `read-legs-b` ARE THE SAME FLAGS UNDER A SECOND NAME, so the night
+#   measures its own repeat (ADR-0029): `full -> full-b` is tonight's noise, and the
+#   contrast is read against it rather than against a flip rate from another night.
+#
+#   LIVENESS BEFORE ANY DELTA. Every read-legs episode records `legs_read`, `legs_louder`,
+#   `legs_quieter`, `legs_inconclusive` and `legs_unread`. `window_report` prints them and
+#   exits 2 if a reading arm said louder or quieter on no leg, which turns this sweep red.
+#
 # NO MEMORY ARM IS IN THIS SWEEP, deliberately. ADR-0018's four cells need the stores
 # wired into the runner and a prior pass that has run; neither exists yet, and four
 # identical arms named after four conditions is worse than no table. This sweep is the
@@ -285,11 +299,13 @@ clear_scene_dir() {
 gate_verdict() {
   local arm="$1" rc="$2" out="$3"
   [ "$rc" -eq 0 ] && return 0
+  # `full-b` is the baseline under a second name (ADR-0029's in-run repeat), so it keeps
+  # the baseline's per-scene bar rather than the ablation allowance.
   # A glob on the captured string, never `| grep -q`: under pipefail a matching grep
   # exits early and SIGPIPEs its producer, which is the footgun line 182 already names.
   # The match is ANCHORED at the end, so "criteria 5, 7" is red -- an arm that also
   # failed the audio or hermeticity criteria must not ride through on this allowance.
-  if [ "$arm" != "full" ] && [[ "$out" == *"criteria 5" ]]; then
+  if [ "$arm" != "full" ] && [ "$arm" != "full-b" ] && [[ "$out" == *"criteria 5" ]]; then
     return 1
   fi
   return 2
@@ -515,7 +531,7 @@ if [ "$DREAM_KNOBS_NOMEM" = "$DREAM_KNOBS" ]; then
   exit 2
 fi
 
-ARM_NAMES=(full no-climb no-cue scan-only anechoic tc-on oracle-loc oracle-loc-matched dream dream-nomem)
+ARM_NAMES=(full no-climb no-cue scan-only anechoic tc-on oracle-loc oracle-loc-matched dream dream-nomem read-legs full-b read-legs-b)
 ARM_FLAGS=(
   ""
   "--climb-rule off"
@@ -538,6 +554,9 @@ ARM_FLAGS=(
   "--localization oracle_matched"
   "--clap $DREAM_KNOBS"
   "--clap $DREAM_KNOBS_NOMEM"
+  "--cast-policy read_legs"
+  ""
+  "--cast-policy read_legs"
 )
 ARM_WHY=(
   "the BASELINE: the complete system, and the row every other one is quoted against"
@@ -550,6 +569,9 @@ ARM_WHY=(
   "THE CEILING ON THE BASELINE'S CRITERION (ADR-0028): handed the source coordinate and arriving on the realizable arm's own detector confirm, so it differs from full in INFORMATION ALONE. This is the arm a localization ceiling is quoted from"
   "DREAM: M^S, consolidation, a three-level M^L that GROWS across this arm's episodes, and memory-weighted planning"
   "THE CONTROL for the arm above: identical in every knob but lambda_memory = 0.0, so the difference is eq. 26's memory term and nothing else"
+  "ADR-0029's reader: a finished leg that got louder keeps its heading and one that got quieter turns round, at READ_LEGS_T_LEG. Never deciding is full"
+  "full under a second name: tonight's own repeat, so the read-legs contrast is read against tonight's noise"
+  "read-legs under a second name: the repeat of the arm above"
 )
 
 if [ -n "$WANTED_ARMS" ]; then
@@ -866,7 +888,9 @@ if [ "$FAILED_RUNS" -ne 0 ]; then
 fi
 if [ "$READ_FAILED" -ne 0 ]; then
   echo ""
-  echo "RED: the readout found no episode under an arm this sweep was ASKED to run."
+  echo "RED: the readout found no episode under an arm this sweep was ASKED to run,"
+  echo "     OR a read-legs arm whose leg reader never said louder or quieter. The"
+  echo "     readout above names which: look for NOT_RUN under THE LEG READER."
   echo "     Runs that produced nothing and a reader that cannot find what they produced"
   echo "     look identical from here: check $OUT_DIR/<arm>/<scene>/episodes/."
   echo "     An arm that was never requested is NOT this: --arms without \`full\` is a"

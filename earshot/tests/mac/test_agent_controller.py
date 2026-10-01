@@ -14,6 +14,7 @@ consumes the cue **without a compensation term** — the grid era's
 for.
 """
 
+import math
 import unittest
 
 from _interpreter import assert_interpreter  # noqa: F401
@@ -21,6 +22,7 @@ from _interpreter import assert_interpreter  # noqa: F401
 from earshot.agent.config import ControllerConfig
 from earshot.agent.controller import (
     ACT_FORWARD,
+    ACT_REVERSE,
     ACT_STOP,
     ACT_TURN_LEFT,
     ACT_TURN_RIGHT,
@@ -28,12 +30,17 @@ from earshot.agent.controller import (
     LEG_INCONCLUSIVE,
     LEG_LOUDER,
     LEG_QUIETER,
+    LEG_UNREAD,
+    READ_LEGS_T_LEG,
     SCAN_STEPS,
     SOURCE_PSEUDO_GOAL,
     ControllerState,
     NavMode,
+    along_leg,
+    cast_action,
     is_diverting,
     is_rising,
+    leg_opening,
     leg_t,
     leg_verdict,
     next_plateau_steps,
@@ -41,6 +48,7 @@ from earshot.agent.controller import (
     realizable_investigate_step,
     step_controller,
 )
+from earshot.agent.occupancy import forward_xz
 from earshot.types import Pose, Xyz
 
 CFG = ControllerConfig(investigate_max_steps=4)
@@ -953,3 +961,198 @@ class TestTheLegReader(unittest.TestCase):
 
         parameter = inspect.signature(leg_verdict).parameters["t_leg"]
         self.assertIs(parameter.default, inspect.Parameter.empty)
+
+
+# ADR-0029's reader inside the controller. The drive below is the runner's: the
+# SEARCH-entry tick, then one INVESTIGATE tick per reading. A tick's index is the plateau
+# count it starts with, so the scan is ticks 0-5, leg 0 opens at 6 and walks 7-14, and
+# leg 1 opens at 15 with leg 0's nine readings (ticks 7-15) behind it.
+LEG0_OPEN = SCAN_STEPS
+LEG1_OPEN = SCAN_STEPS + 1 + CAST_STEPS
+LEG2_OPEN = LEG1_OPEN + 1 + CAST_STEPS
+WIDE = ControllerConfig(investigate_max_steps=200)
+ORIGIN = Xyz(0.0, 0.0, 0.0)
+
+
+def _along(tick_index):
+    """Metres walked on leg 0 by a tick: none through the scan and the turn, then 0.25 m
+    a tick through its eight forwards, and no further."""
+    return 0.25 * min(max(tick_index - (LEG0_OPEN + 1), 0), CAST_STEPS)
+
+
+def _walk(tick_index, *, yaw=0.0):
+    dx, dz = forward_xz(yaw)
+    along = _along(tick_index)
+    return Pose(position=Xyz(dx * along, 0.0, dz * along), yaw_rad=yaw)
+
+
+def _level(tick_index, slope):
+    return 0.05 + slope * _along(tick_index) + SCATTER[tick_index % len(SCATTER)]
+
+
+def drive(n_ticks, *, slope, t_leg, poses=None):
+    """Every decision of one dead-cue detour, and the state after each.
+
+    `energy_history` repeats the tick's reading, so `is_rising` sees no gap and the cue
+    stays dead whatever the leg's level does. The reader takes the latest reading, which
+    is how the runner hands it over: `energy[-1]` is this tick's `measured_rms`.
+    """
+    poses = poses or _walk
+    state, decision = step_controller(
+        searching(), WIDE, onset_fired=True, is_anomaly=True, primary_goal_reached=False,
+        pose=poses(0), energy_history=[_level(0, slope)] * 2, t_leg=t_leg,
+    )
+    decisions, states = [decision], [state]
+    for k in range(1, n_ticks):
+        state, decision = step_controller(
+            state, WIDE, onset_fired=False, is_anomaly=None, primary_goal_reached=False,
+            pose=poses(k), energy_history=[_level(k, slope)] * 2, t_leg=t_leg,
+        )
+        decisions.append(decision)
+        states.append(state)
+    return decisions, states
+
+
+class TestTheReaderActsOnlyWhereALegOpens(unittest.TestCase):
+    """`cast_action`'s one new branch. ADR-0014's two arms: the verdict changes the
+    opening of a leg after the first, and changes nothing anywhere else."""
+
+    def test_louder_keeps_the_heading_and_quieter_turns_round(self):
+        self.assertEqual(cast_action(LEG1_OPEN, 1, leg_verdict=LEG_LOUDER), ACT_FORWARD)
+        self.assertEqual(cast_action(LEG1_OPEN, 1, leg_verdict=LEG_QUIETER), ACT_REVERSE)
+
+    def test_anything_else_opens_with_todays_turn(self):
+        today = cast_action(LEG1_OPEN, 1)
+        self.assertIn(today, (ACT_TURN_LEFT, ACT_TURN_RIGHT))
+        for verdict in (None, LEG_INCONCLUSIVE, LEG_UNREAD):
+            self.assertEqual(cast_action(LEG1_OPEN, 1, leg_verdict=verdict), today)
+
+    def test_the_first_leg_and_mid_leg_steps_ignore_it(self):
+        for verdict in (LEG_LOUDER, LEG_QUIETER):
+            self.assertEqual(cast_action(LEG0_OPEN, 1, leg_verdict=verdict),
+                             cast_action(LEG0_OPEN, 1))
+            self.assertEqual(cast_action(LEG1_OPEN + 3, 1, leg_verdict=verdict),
+                             ACT_FORWARD)
+
+    def test_scan_only_has_no_legs_to_read(self):
+        for verdict in (LEG_LOUDER, LEG_QUIETER):
+            self.assertIn(cast_action(LEG1_OPEN, 1, cast_steps=0, leg_verdict=verdict),
+                          (ACT_TURN_LEFT, ACT_TURN_RIGHT))
+        self.assertIsNone(leg_opening(LEG1_OPEN, cast_steps=0))
+
+    def test_leg_opening_counts_the_legs_cast_action_opens(self):
+        self.assertIsNone(leg_opening(0))
+        self.assertEqual(leg_opening(LEG0_OPEN), 0)
+        self.assertIsNone(leg_opening(LEG0_OPEN + 1))
+        self.assertEqual(leg_opening(LEG1_OPEN), 1)
+        self.assertEqual(leg_opening(LEG2_OPEN), 2)
+
+
+class TestTheReaderInsideTheController(unittest.TestCase):
+    """`step_controller` with `t_leg`: the buffer, the verdict and the held heading."""
+
+    def test_a_leg_that_got_louder_keeps_its_heading(self):
+        decisions, _ = drive(LEG1_OPEN + 1, slope=0.01, t_leg=READ_LEGS_T_LEG)
+        opening = decisions[LEG1_OPEN]
+        self.assertEqual(opening.leg_verdict, LEG_LOUDER)
+        self.assertEqual(opening.realizable_action, ACT_FORWARD)
+        here = _walk(LEG1_OPEN).position
+        dx, dz = forward_xz(0.0)
+        self.assertAlmostEqual(opening.investigate_probe.x, here.x + 2.0 * dx, places=9)
+        self.assertAlmostEqual(opening.investigate_probe.z, here.z + 2.0 * dz, places=9)
+
+    def test_a_leg_that_got_quieter_turns_round_and_holds_it(self):
+        """The follower turns the body 30 degrees a tick, so the reversed leg's forwards
+        must keep aiming back while the yaw swings round. Here the yaw turns 30 degrees a
+        tick after the reversal, as the fake follower does, and every probe of the leg
+        still lies 2 m behind where the reversal was decided."""
+        def poses(k):
+            if k <= LEG1_OPEN:
+                return _walk(k)
+            turned = math.radians(30.0) * min(k - LEG1_OPEN, 6)
+            return Pose(position=_walk(LEG1_OPEN).position, yaw_rad=turned)
+
+        decisions, states = drive(LEG2_OPEN + 1, slope=-0.01, t_leg=READ_LEGS_T_LEG,
+                                  poses=poses)
+        opening = decisions[LEG1_OPEN]
+        self.assertEqual(opening.leg_verdict, LEG_QUIETER)
+        self.assertEqual(opening.realizable_action, ACT_REVERSE)
+        back_x, back_z = forward_xz(math.pi)
+        here = _walk(LEG1_OPEN).position
+        for k in range(LEG1_OPEN, LEG2_OPEN):
+            probe = decisions[k].investigate_probe
+            self.assertAlmostEqual(probe.x, here.x + 2.0 * back_x, places=9, msg=k)
+            self.assertAlmostEqual(probe.z, here.z + 2.0 * back_z, places=9, msg=k)
+        print("reversed leg: probe held 2 m behind for {} ticks while the yaw turned 180 "
+              "degrees".format(LEG2_OPEN - LEG1_OPEN))
+        self.assertEqual(decisions[LEG2_OPEN].leg_verdict, LEG_UNREAD)
+        self.assertIn(decisions[LEG2_OPEN].realizable_action,
+                      (ACT_TURN_LEFT, ACT_TURN_RIGHT))
+        self.assertIsNone(states[LEG2_OPEN].leg_heading_rad)
+
+    def test_only_the_tick_that_used_a_verdict_records_one(self):
+        decisions, _ = drive(LEG1_OPEN + 3, slope=0.01, t_leg=READ_LEGS_T_LEG)
+        marked = [k for k, d in enumerate(decisions) if d.leg_verdict is not None]
+        self.assertEqual(marked, [LEG1_OPEN])
+
+    def test_a_reader_that_never_decides_is_the_cast_tick_for_tick(self):
+        """ADR-0029's one-variable claim, put to the controller. An infinite bar decides
+        nothing, and every action and every probe must then be the cast's."""
+        for slope in (0.01, -0.01, 0.0):
+            cast, _ = drive(LEG2_OPEN + 4, slope=slope, t_leg=None)
+            blind, _ = drive(LEG2_OPEN + 4, slope=slope, t_leg=float("inf"))
+            self.assertEqual([d.realizable_action for d in cast],
+                             [d.realizable_action for d in blind])
+            self.assertEqual([d.investigate_probe for d in cast],
+                             [d.investigate_probe for d in blind])
+            self.assertTrue(all(d.leg_verdict is None for d in cast))
+
+    def test_a_surge_ends_the_held_heading(self):
+        _, states = drive(LEG1_OPEN + 1, slope=-0.01, t_leg=READ_LEGS_T_LEG)
+        self.assertIsNotNone(states[LEG1_OPEN].leg_heading_rad)
+        state, decision = step_controller(
+            states[LEG1_OPEN], WIDE, onset_fired=False, is_anomaly=None,
+            primary_goal_reached=False, pose=_walk(LEG1_OPEN),
+            energy_history=[0.01] * 5 + [0.5] * 5, t_leg=READ_LEGS_T_LEG,
+        )
+        self.assertEqual(decision.realizable_action, ACT_FORWARD)
+        self.assertEqual(state.plateau_steps, 0)
+        self.assertIsNone(state.leg_heading_rad)
+        self.assertIsNone(decision.leg_verdict)
+
+
+class TestTheReverseProbe(unittest.TestCase):
+    def test_reverse_points_behind_the_body(self):
+        at_origin = Pose(position=ORIGIN, yaw_rad=0.3)
+        probe = realizable_investigate_probe(ACT_REVERSE, at_origin, CFG)
+        dx, dz = forward_xz(0.3 + math.pi)
+        self.assertAlmostEqual(probe.x, dx * CFG.investigate_probe_m, places=9)
+        self.assertAlmostEqual(probe.z, dz * CFG.investigate_probe_m, places=9)
+
+    def test_a_held_heading_steers_a_forward(self):
+        at_origin = Pose(position=ORIGIN, yaw_rad=0.0)
+        held = realizable_investigate_probe(ACT_FORWARD, at_origin, CFG, heading_rad=1.0)
+        dx, dz = forward_xz(1.0)
+        self.assertAlmostEqual(held.x, dx * CFG.investigate_probe_m, places=9)
+        self.assertAlmostEqual(held.z, dz * CFG.investigate_probe_m, places=9)
+
+
+class TestTheReaderIsTheGatesReader(unittest.TestCase):
+    """The arm runs at the gate's value and reads the gate's leg."""
+
+    def test_the_critical_value_is_the_one_the_re_gate_chose(self):
+        from earshot.tools.leg_replay import T_LEG_GRID
+
+        self.assertEqual(READ_LEGS_T_LEG, 1.0)
+        self.assertIn(READ_LEGS_T_LEG, T_LEG_GRID)
+
+    def test_a_leg_is_as_long_as_the_replays(self):
+        from earshot.tools.leg_replay import LEG_PERIOD
+
+        self.assertEqual(1 + CAST_STEPS, LEG_PERIOD)
+
+    def test_the_replay_measures_a_leg_with_this_modules_axis(self):
+        import earshot.tools.leg_replay as replay
+
+        self.assertIs(replay.along_leg, along_leg)
+        self.assertFalse(hasattr(replay, "_along_leg"))

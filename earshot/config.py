@@ -132,10 +132,15 @@ class CastPolicy(Enum):
     ``SCAN_ONLY`` collapses the cast leg to zero steps, which is the pre-``eps-1``
     behaviour and a control arm: every dead step turns instead of walking a leg.
     ``CAST`` is what ships today.
+    ``READ_LEGS`` is ``CAST`` plus ADR-0029's reader: at the opening of each leg after the
+    first, the leg that just finished keeps its heading if it got louder and turns round
+    if it got quieter, at ``controller.READ_LEGS_T_LEG``. A reader that never decides is
+    ``CAST``.
     """
 
     CAST = "cast"
     SCAN_ONLY = "scan_only"
+    READ_LEGS = "read_legs"
 
 
 class IrPolicy(Enum):
