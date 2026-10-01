@@ -434,12 +434,12 @@ class TestTheMatchedOracleArmIsSelectableAndIsNotThePrefixArm(unittest.TestCase)
         self.assertEqual(len(set(both.values())), 2, both)
 
 
-class TestTheNoTcArmChangesTheRenderPresetAndNothingElse(unittest.TestCase):
-    """`no-tc` prices `temporalCoherence` end to end, so it must differ from `full` in
+class TestTheTcOnArmChangesTheRenderPresetAndNothingElse(unittest.TestCase):
+    """`tc-on` reproduces the pre-ADR-0030 render, so it must differ from `full` in
     that one key and must reach the render.
 
     Both failures are silent and point the same way. A flag that set the config field
-    while the mapping still sent the preset's 1 runs the arm as `full`; a flag string
+    while the mapping still sent the preset's 0 runs the arm as `full`; a flag string
     that also moved another knob runs a two-variable contrast, which is `dream-2`'s
     shape. Either finishes green and reports a number that is not the preset's price.
     So the arm's own flag string, selected by the driver's own block, is put to the
@@ -451,7 +451,7 @@ class TestTheNoTcArmChangesTheRenderPresetAndNothingElse(unittest.TestCase):
         if shutil.which("bash") is None:
             raise unittest.SkipTest("no bash on PATH")
         cls.text = DRIVER.read_text()
-        cls.flags = dict(_select_arms(cls.text, "full no-tc"))
+        cls.flags = dict(_select_arms(cls.text, "full tc-on"))
 
     def _config(self, arm: str):
         from earshot.__main__ import build_parser, config_from_args
@@ -467,30 +467,30 @@ class TestTheNoTcArmChangesTheRenderPresetAndNothingElse(unittest.TestCase):
 
     def test_selecting_it_gives_the_flag_and_nothing_else(self):
         self.assertEqual(
-            _select_arms(self.text, "no-tc"), [("no-tc", "--temporal-coherence off")]
+            _select_arms(self.text, "tc-on"), [("tc-on", "--temporal-coherence on")]
         )
 
-    def test_the_arm_renders_with_it_off_and_the_control_with_it_on(self):
-        self.assertEqual(self._render_key("no-tc"), 0)
-        self.assertEqual(self._render_key("full"), 1)
-        print("temporalCoherence: full {}, no-tc {}".format(
-            self._render_key("full"), self._render_key("no-tc")))
+    def test_the_arm_renders_with_it_on_and_the_control_with_it_off(self):
+        self.assertEqual(self._render_key("tc-on"), 1)
+        self.assertEqual(self._render_key("full"), 0)
+        print("temporalCoherence: full {}, tc-on {}".format(
+            self._render_key("full"), self._render_key("tc-on")))
 
     def test_the_two_configs_differ_in_that_one_field(self):
-        full, no_tc = self._config("full"), self._config("no-tc")
-        self.assertNotEqual(full, no_tc)
+        full, tc_on = self._config("full"), self._config("tc-on")
+        self.assertNotEqual(full, tc_on)
         self.assertEqual(
-            dataclasses.replace(no_tc, audio=dataclasses.replace(
-                no_tc.audio, temporal_coherence=full.audio.temporal_coherence)),
+            dataclasses.replace(tc_on, audio=dataclasses.replace(
+                tc_on.audio, temporal_coherence=full.audio.temporal_coherence)),
             full,
         )
 
     def test_no_other_arm_touches_the_preset(self):
         """Every other row in the table is quoted against `full` at the preset. An arm
-        that turned it off as well would carry two changes under one name."""
+        that turned it on as well would carry two changes under one name."""
         every = _select_arms(self.text, "")
         carrying = [name for name, flags in every if "--temporal-coherence" in flags]
-        self.assertEqual(carrying, ["no-tc"])
+        self.assertEqual(carrying, ["tc-on"])
 
 
 def _select_arms(text: str, wanted: str):

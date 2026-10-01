@@ -323,12 +323,12 @@ class TestTheCli(unittest.TestCase):
 
 
 class TestTheTemporalCoherenceFlag(unittest.TestCase):
-    """`--temporal-coherence`, the flag `ablation_sweep.sh`'s `no-tc` arm passes.
+    """`--temporal-coherence`, the flag `ablation_sweep.sh`'s `tc-on` arm passes.
 
     Read through to the render key rather than stopped at the config field: `walk-1`
     measured the preset hiding the approach, and a flag that set the field while the
-    mapping still sent the preset's 1 would run the arm as `full` and report a null.
-    Both values are asserted, because the preset is 1 and a test of `on` alone could not
+    mapping still sent the preset's 0 would run the arm as `full` and report a null.
+    Both values are asserted, because the preset is 0 and a test of `off` alone could not
     tell an applied override from the preset.
     """
 
@@ -339,17 +339,18 @@ class TestTheTemporalCoherenceFlag(unittest.TestCase):
         mapping = audio_config_mapping(config.audio, binaural_layout=None)
         return config, mapping["acousticsConfig"]
 
-    def test_absent_keeps_the_preset(self):
+    def test_absent_is_off_and_recorded_as_false(self):
         config, acoustics = self._acoustics([])
-        self.assertIsNone(config.audio.temporal_coherence)
-        self.assertEqual(acoustics["temporalCoherence"], 1)
+        self.assertIs(config.audio.temporal_coherence, False)
+        self.assertEqual(acoustics["temporalCoherence"], 0)
+        self.assertIs(config.as_dict()["audio"]["temporal_coherence"], False)
 
     def test_off_reaches_the_render_key_and_nothing_else(self):
         config, acoustics = self._acoustics(["--temporal-coherence", "off"])
         self.assertIs(config.audio.temporal_coherence, False)
         self.assertEqual(acoustics["temporalCoherence"], 0)
         self.assertEqual(
-            dataclasses.replace(config.audio, temporal_coherence=None),
+            dataclasses.replace(config.audio, temporal_coherence=False),
             RunConfig(run_dir="runs/x").audio,
         )
         print("--temporal-coherence off -> acousticsConfig.temporalCoherence {}".format(
@@ -359,11 +360,15 @@ class TestTheTemporalCoherenceFlag(unittest.TestCase):
         config, acoustics = self._acoustics(["--temporal-coherence", "on"])
         self.assertIs(config.audio.temporal_coherence, True)
         self.assertEqual(acoustics["temporalCoherence"], 1)
+        self.assertEqual(
+            dataclasses.replace(config.audio, temporal_coherence=False),
+            RunConfig(run_dir="runs/x").audio,
+        )
 
     def test_it_is_recorded_on_the_run_config(self):
         """`hold_probe` and `leg_probe` read the knob back off `run_config.audio`."""
-        config, _ = self._acoustics(["--temporal-coherence", "off"])
-        self.assertIs(config.as_dict()["audio"]["temporal_coherence"], False)
+        config, _ = self._acoustics(["--temporal-coherence", "on"])
+        self.assertIs(config.as_dict()["audio"]["temporal_coherence"], True)
 
     def test_any_other_value_is_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()):

@@ -18,7 +18,7 @@
 #   1. preflight: one directory is one run, checked first, then `git pull --ff-only`.
 #   2. select: the poses off the runs named by --from. Read-only, seconds, and it refuses
 #      before any render if a run is not `full`'s rule.
-#   3. render tc1: the shipped preset. First, so a crash later still leaves the arm every
+#   3. render tc1: the pre-ADR-0030 preset. First, so a crash later still leaves the arm every
 #      run used.
 #   4. render tc0: `temporalCoherence` off, in its own process.
 #   5. read: the table and the branch.

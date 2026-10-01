@@ -76,24 +76,22 @@ AUDIO_SENSOR_UUID = "audio_sensor"
 #   threadCount          1 -> 4     ~2.4x on the box's 4 cores — a real lever, but not
 #                                   the order of magnitude the map's "free speed knob"
 #                                   framing implied (ticket 04 called that correction)
-#   temporalCoherence    0 -> 1     entered as free, and it is NOT. `walk-1` (2026-09-23)
-#                                   re-rendered 254 recorded cast legs with it on and off.
-#                                   Off, the legs that CLOSED on the source rose +16.2%
-#                                   per loop and the legs that opened fell -15.6%. On, at
-#                                   the same poses along the same walks, +3.1% and -12.1%:
-#                                   the rise is cut about fivefold, the fall is left
-#                                   nearly whole. `ir_walk` carries it, so it is here and
-#                                   not in the cue pipeline. Ticket 06's gradient check
-#                                   could not have caught this -- a monotone rho over
-#                                   static poses is not the change along a walking leg,
-#                                   which is the quantity `agent.controller.is_rising` reads.
-#                                   PRICED by `no-tc` (2026-09-23), same 282 episodes:
+#   temporalCoherence    1 -> 0     was 1 from ticket 06 until ADR-0030, entered as free,
+#                                   and it was NOT. `walk-1` (2026-09-23) re-rendered 254
+#                                   recorded cast legs with it on and off. Off, the legs
+#                                   that CLOSED on the source rose +16.2% per loop and the
+#                                   legs that opened fell -15.6%. On, at the same poses
+#                                   along the same walks, +3.1% and -12.1%: the rise is cut
+#                                   about fivefold, the fall is left nearly whole. `no-tc`
+#                                   (2026-09-23) priced it over the same 282 episodes:
 #                                   Find-SR 98 against 102 of 270, p 0.67, a null; render
-#                                   cost 0.0348 against 0.0350 s/step, so it buys NO speed
-#                                   here; and with it off the recorded legs read direction
-#                                   (the pull of PRs #149-#160 is gone). Kept at 1 only
-#                                   because every number since the clean room ran at 1.
-#                                   PHASE2_ABLATION_REPORT.md has the tables.
+#                                   cost 0.0348 against 0.0350 s/step, so it buys no speed
+#                                   here. ADR-0030's re-gate read BUILD on legs rendered
+#                                   without it. It is 0 now. A record whose
+#                                   `audio.temporal_coherence` is null ran before ADR-0030,
+#                                   at 1. `--temporal-coherence on` (sweep arm `tc-on`)
+#                                   reproduces that old render. PHASE2_ABLATION_REPORT.md
+#                                   has the tables.
 #
 # NOT in the set, deliberately: `maxIRLength` and `directRayCount` are not cost knobs at
 # all (the IR cap bounds the output buffer, not the tracing), and `transmission` /
@@ -105,7 +103,7 @@ ACOUSTICS_PRESET: Dict[str, Any] = {
     "indirectRayCount": 500,
     "indirectRayDepth": 50,
     "threadCount": 4,
-    "temporalCoherence": 1,
+    "temporalCoherence": 0,
 }
 
 

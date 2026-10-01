@@ -452,7 +452,7 @@ def format_readout(
     """The readout as text. Pure, so the branch's wording is Mac-testable."""
     lines = [
         "leg probe  {}".format(tag),
-        "  arms: tc1 = temporalCoherence on (the shipped preset), tc0 = off",
+        "  arms: tc1 = temporalCoherence on (the pre-ADR-0030 preset), tc0 = off",
         "  legs in both arms: {}   only in tc1: {}   only in tc0: {}".format(
             result["n_paired"], result["only_in"]["tc1"], result["only_in"]["tc0"]),
         "  diverged from the record: tc1 {}, tc0 {}   READ: {}".format(

@@ -20,7 +20,7 @@
 #   2. select: the legs off the runs named by --from. Read-only, seconds. It refuses
 #      before any render if a run is not `full`'s rule, and refuses a population under
 #      the 20 poses a verdict needs: a night that can only end in NOT_RUN is not run.
-#   3. render tc1: the shipped preset, first, so a crash later still leaves the arm every
+#   3. render tc1: the pre-ADR-0030 preset, first, so a crash later still leaves the arm every
 #      run used.
 #   4. render tc0: `temporalCoherence` off, in its own process.
 #   5. read: the table and the branch.
