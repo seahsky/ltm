@@ -545,6 +545,71 @@ class TestTheReadLegsNight(unittest.TestCase):
         self.assertEqual(verdict("read-legs"), 1)
 
 
+class TestTheNightReadsAsPreRegistered(unittest.TestCase):
+    """ADR-0029's six reads, printed one line each so they survive the emailed tail.
+
+    `no-tc`'s report reached Sky with no McNemar p in it: the per-arm loop prints the last
+    30 lines of `episode_diff`, and on a 19-scene sweep the p line is above them. So the
+    reads are run in bash off the driver's own `night_reads`, and the one-line summary is
+    put through the driver's own pipeline against real `episode_diff` output.
+    """
+
+    PIPELINE = "grep -E '^  net |exact McNemar' | tr -s ' ' | paste -sd' ' -"
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("bash") is None:
+            raise unittest.SkipTest("no bash on PATH")
+        cls.text = DRIVER.read_text()
+
+    def _reads(self):
+        function = extract_function(self.text, "night_reads")
+        done = subprocess.run(["bash", "-c", "{}\nnight_reads".format(function)],
+                              capture_output=True, text=True, check=True)
+        return [tuple(line.split()) for line in done.stdout.splitlines()]
+
+    def test_the_six_reads_in_the_pre_registered_order(self):
+        self.assertEqual(self._reads(), [
+            ("full", "read-legs", "-"),
+            ("full-b", "read-legs-b", "-"),
+            ("full", "full-b", "-"),
+            ("read-legs", "read-legs-b", "-"),
+            ("full", "read-legs", "INVESTIGATE_ENTERED"),
+            ("full-b", "read-legs-b", "INVESTIGATE_ENTERED"),
+        ])
+
+    def test_every_read_names_real_arms_and_a_real_stage(self):
+        from earshot.report.audit import FunnelStage
+
+        line = next(r for r in self.text.splitlines() if r.startswith("ARM_NAMES=("))
+        names = set(line[len("ARM_NAMES=("):].rstrip(")").split())
+        for left, right, given in self._reads():
+            self.assertIn(left, names)
+            self.assertIn(right, names)
+            if given != "-":
+                FunnelStage[given]
+
+    def test_the_summary_line_carries_the_net_and_the_p(self):
+        from earshot.tools.episode_diff import format_report, mcnemar, pair_episodes
+
+        self.assertIn(self.PIPELINE, self.text)
+
+        def arm(reached):
+            return {"sceneA": {i: {"reached": r, "source": (1.0, 0.0, 2.0),
+                                   "stage": "X", "stage_value": 5 if r else 4}
+                               for i, r in enumerate(reached)}}
+
+        pairing = pair_episodes(arm([True, True, False, False, False, False]),
+                                arm([False, True, True, True, True, False]))
+        report = format_report(pairing, mcnemar(pairing["pairs"]))
+        done = subprocess.run(["bash", "-c", self.PIPELINE], input=report,
+                              capture_output=True, text=True, check=True)
+        summary = done.stdout.strip()
+        print("night summary line: {}".format(summary))
+        self.assertIn("net +2 over 4 discordant pair(s)", summary)
+        self.assertIn("exact McNemar p =", summary)
+
+
 def _select_arms(text: str, wanted: str):
     """The driver's own `--arms` block, over its own arrays, for one selection. An empty
     `wanted` is the driver's default: every arm."""
