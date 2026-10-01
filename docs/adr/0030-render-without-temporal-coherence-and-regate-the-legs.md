@@ -1,6 +1,7 @@
 # ADR-0030: render without `temporalCoherence`, and re-gate the legs on that render
 
-Status: **proposed**, 2026-09-23.
+Status: **accepted**, 2026-09-23 (PR #167).
+**The re-gate ran and read BUILD at T_LEG 1.0, with the guard passing.** See "The result".
 Reopens ADR-0029's gate on legs rendered with the preset key off, under that ADR's thresholds.
 Changes `spec.ACOUSTICS_PRESET`, which ticket 06 set and which every run since the clean room has used.
 
@@ -127,3 +128,15 @@ No reader in the tree resolves a `null` today: `hold_probe` and `leg_probe` set 
 - The legs were walked under blind alternation. A reader that acts on them changes which legs get walked, so the gate prices the verdict and not the sweep. This is ADR-0029's caveat and it carries.
 - Why `walk-1` could not reproduce the recorded fall at TC 1: the run has a whole episode of render history behind each leg, and the probe had 10 walk-in steps. `no-tc` establishes the cause. It does not measure how the history depth enters.
 - Whether Find-SR moves at TC 0 under a controller that reads legs. `no-tc` measured it under one that does not.
+
+## The result
+
+`regate-a` and `regate-b` (2026-09-24 and 25, both at 32d3989), read 2026-10-01. `PHASE2_ABLATION_REPORT.md` has the tables.
+
+- **Every condition holds.** Same code (comments only against 8e6f16d). 44, 51 and 67 discordant pairs between the three renders, so none repeated another. 76,471 of 76,471 detour steps agree with the recorded rule.
+- **Three renders: BUILD at T_LEG 1.0.** LOUDER 94.0% pooled and 91.6% in the worst run, QUIETER 77.2% and 74.4%, decisive on 33.8% of informative legs.
+- **The guard passes.** Over `regate-a` and `regate-b` without the render read first: LOUDER 93.1%, QUIETER 75.8%, decisive 34.3%. QUIETER clears its 75% by 0.8 points.
+- **QUIETER is weakest on legs that span the offset** (59.4%), where the source stops whichever way the agent walks. The rule is not changed for it.
+- **The flip rate at TC 0 is 19.1%** over the three pairs (15.6% to 23.8%), so a 282-episode arm resolves 7.30 points on the night, not 6.35.
+
+**Decision 1 reads BUILD.** By this ADR's Order: the preset flip, then `READ_LEGS` at T_LEG 1.0, then ADR-0029's night with its branches written first.

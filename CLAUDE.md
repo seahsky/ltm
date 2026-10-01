@@ -203,7 +203,10 @@ python -m earshot.tools.leg_replay runs/<tag>/no-tc
 # guard: ignore the verdict it prints for itself and read its grid at the three-render
 # T_LEG. Run the renders BEFORE the preset flip lands, which removes the `no-tc` name, and
 # at the same code: `git diff 8e6f16d <commit> -- earshot/` comments only, else NOT_RUN.
-# 0 discordant pairs between any two renders is NOT_RUN too. ~1 h 52 m each
+# 0 discordant pairs between any two renders is NOT_RUN too. ~1 h 52 m each.
+# RAN 2026-09-24/25 at 32d3989, read 2026-10-01: BUILD AT T_LEG 1.0. Three renders LOUDER
+# 94.0% / QUIETER 77.2% (worst run 91.6 / 74.4), decisive 33.8%; the guard passes with
+# QUIETER at 75.8%, 0.8 points clear. Flip rate at TC 0 is 19.1%, MDE 7.30 pts at n=282
 nrun bash earshot/tools/ablation_sweep.sh --tag regate-a --arms no-tc
 nrun bash earshot/tools/ablation_sweep.sh --tag regate-b --arms no-tc
 python -m earshot.tools.leg_replay runs/no-tc/no-tc runs/regate-a/no-tc runs/regate-b/no-tc

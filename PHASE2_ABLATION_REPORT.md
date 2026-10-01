@@ -4925,3 +4925,88 @@ The direction is now in the cue, and nothing in `full`'s controller acts on it a
 - The legs were walked under blind alternation. A reader that acts on them changes which legs get walked, so the grid prices the verdict, not the sweep.
 - One render. The 70%-in-every-run test has not been run.
 - Whether turning the preset off moves Find-SR under a controller that reads legs. Under today's controller, which does not read them, it does not.
+
+## ADR-0030's re-gate: BUILD at T_LEG 1.0 (`regate-a`, `regate-b`, 2026-09-24 and 25)
+
+`nrun bash earshot/tools/ablation_sweep.sh --tag regate-a --arms no-tc` and the same with `--tag regate-b`, both at commit 32d3989 (`git diff 8e6f16d 32d3989 -- earshot/` changes one comment in `spec.py`), riftvm, about 1 h 50 m each.
+20 `summary.json` files per render, 19 scenes and the zero-yield `mL8ThkuaVTM`.
+Read 2026-10-01 under ADR-0030's pre-registration, with `leg_replay` unchanged since that ADR merged.
+
+### The conditions
+
+| condition (ADR-0030) | result |
+|---|---|
+| same code across renders | 32d3989 for both fresh renders; comments only against 8e6f16d |
+| renders independent: no pair with 0 discordant | 44, 51 and 67 discordant pairs |
+| every leg checked against the recorded rule | 76,471 of 76,471 detour steps agree |
+
+### The gate, three renders
+
+| T_LEG 1.0 | pooled | worst run | threshold |
+|---|---|---|---|
+| LOUDER right | 637/678 = 94.0% | 91.6% | 75% pooled, 70% per run |
+| QUIETER right | 583/755 = 77.2% | 74.4% | 75% pooled, 70% per run |
+| decisive, both together | 33.8% of 4,234 informative legs | | 25% |
+| false-decisive | 19.5% of uninformative legs | | not a test |
+
+**BUILD at T_LEG 1.0.** T 1.5 also passes (96.1% and 79.9%, decisive 27.6%); the gate takes the most decisive passing value, as ADR-0029 fixed before the first replay.
+
+### The guard, the two fresh renders without the one read first
+
+| T_LEG 1.0 | pooled over `regate-a` and `regate-b` | threshold |
+|---|---|---|
+| LOUDER right | 434/466 = 93.1% | 75% |
+| QUIETER right | 380/501 = **75.8%** | 75% |
+| decisive, both together | 34.3% of 2,819 informative legs | 25% |
+
+**The guard passes. QUIETER passes it by 0.8 points.**
+QUIETER is the verdict that reverses the agent, and it is the one with the least room.
+
+### Where QUIETER is weak
+
+| at T_LEG 1.0, three renders | QUIETER right |
+|---|---|
+| sounding legs | 399/445 = 89.7% |
+| legs that span the offset | 184/310 = **59.4%** |
+| route distance 8 m or more at the leg's start | 221/321 = 68.8% |
+| net displacement under 1 m | 60/91 = 65.9% |
+
+A leg across the offset gets quieter because the source stops, whichever way it walks. The agent cannot see the offset step, so the reader reverses on those legs about as often as not.
+This is inside the gate, which read every completed leg, and the rule is not changed for it: changing it now would be choosing the rule by the result.
+It is the first thing to look at if the night's QUIETER verdicts cost more than they buy.
+
+### The flip rate at TC 0
+
+| pair | discordant of 282 |
+|---|---|
+| `no-tc` render against `regate-a` | 44 = 15.6% (McNemar p 0.88) |
+| `no-tc` render against `regate-b` | 51 = 18.1% (p 0.26) |
+| `regate-a` against `regate-b` | 67 = 23.8% (p 0.46) |
+| pooled | 162 of 846 = **19.1%** |
+
+Source reached over the three renders: 98, 100 and 107 of 282 (34.8%, 35.5%, 37.9%). `full` at TC 1 read 102 on the `no-tc` night.
+At 19.1% the paired MDE for a 282-episode arm is **7.30 points** (`power.mde_paired`, 80% power, alpha 0.05), against 6.35 at `full`'s 14.5%.
+Whether TC 0 adds to the flip rate is not settled by three pairs whose spread is 15.6% to 23.8%. The night's MDE is computed from 19.1%.
+
+### A correction to PR #163: the standing fall needed the preset
+
+PR #163 concluded "the standing fall is selection": 47.6% of first scans were cut by a surge, so the completed ones were selected against rises.
+The same selection runs at TC 0, and the fall does not:
+
+| first scans | started | cut by a surge | completed, median change per loop |
+|---|---|---|---|
+| `abl-2`, `oracle-1`, `oracle-2` `full` (TC 1, PR #160) | 829 | 47.6% | −11.1% |
+| `no-tc` night, `full` (TC 1) | 275 | 46.2% | −11.3% |
+| `no-tc`, `regate-a`, `regate-b` (TC 0) | 788 | 48.9% | −0.2% |
+
+Equal selection, and the fall only where the preset is on.
+So selection does not explain the standing fall by itself, and the preset is the factor that differs. `hold-2` re-rendered those scans at TC 1 and read them flat; that run seated 10 walk-in steps, and render-history depth is the unmeasured difference (inference, as for `walk-1`).
+#163's withdrawal of #156's "time trend" stands. Its replacement, "selection", is withdrawn in turn: on this evidence the standing fall, like the walking one, is the preset.
+
+### What follows (ADR-0030, Order)
+
+1. The preset flip, Decision 2: the key to 0, an explicit record, `tc-on` in place of `no-tc`.
+2. `READ_LEGS` at T_LEG 1.0 (ADR-0029), on the flipped render.
+3. The night's branches into ADR-0029, with the MDE above, before the four-arm night is booked.
+
+**What this cannot say.** The legs were walked under blind alternation. The gate prices the verdict on legs a reader did not choose; the night prices the arm.
