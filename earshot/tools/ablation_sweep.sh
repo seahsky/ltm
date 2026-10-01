@@ -334,6 +334,18 @@ reference_arm() {
   echo "$first"
 }
 
+# ADR-0029's night, as `<before> <after> <given stage or ->` lines, in the order its
+# pre-registration reads them: the two contrasts, the two in-run repeats, then stage 4 -> 5
+# for each contrast. A function so a test can run it rather than read it.
+night_reads() {
+  echo "full read-legs -"
+  echo "full-b read-legs-b -"
+  echo "full full-b -"
+  echo "read-legs read-legs-b -"
+  echo "full read-legs INVESTIGATE_ENTERED"
+  echo "full-b read-legs-b INVESTIGATE_ENTERED"
+}
+
 # --- ONE DIRECTORY IS ONE RUN, before anything expensive ------------------
 if [ -d "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
   if [ "$FORCE" = 0 ]; then
@@ -850,6 +862,29 @@ else
     echo "  === $REFERENCE_ARM -> $arm ==="
     python -m earshot.tools.episode_diff "$REFERENCE_DIR" "$OUT_DIR/$arm" 2>&1 | tail -n 30
   done
+fi
+
+# ADR-0029's NIGHT, READ AS PRE-REGISTERED. Two contrasts, the two in-run repeats that are
+# their noise floor, and stage 4 -> 5 for each contrast. The loop above pairs every arm
+# against `full` alone, and its 30-line tail drops the McNemar line on a 19-scene sweep:
+# `no-tc`'s emailed report carried no p at all. So the six reads ADR-0029 names print
+# here, one line each, after everything else the readout says.
+if [ -d "$OUT_DIR/full" ] && [ -d "$OUT_DIR/read-legs" ] \
+    && [ -d "$OUT_DIR/full-b" ] && [ -d "$OUT_DIR/read-legs-b" ]; then
+  echo ""
+  echo "  --- ADR-0029's night: the six reads it pre-registers ---"
+  while read -r left right given; do
+    extra=""
+    label="$left -> $right"
+    if [ "$given" != "-" ]; then
+      extra="--given-stage $given"
+      label="$label, given $given"
+    fi
+    # shellcheck disable=SC2086
+    summary="$(python -m earshot.tools.episode_diff "$OUT_DIR/$left" "$OUT_DIR/$right" \
+        $extra 2>&1 | grep -E '^  net |exact McNemar' | tr -s ' ' | paste -sd' ' -)"
+    printf '  %-48s %s\n' "$label" "${summary:-NO READ: see the full episode_diff output}"
+  done < <(night_reads)
 fi
 
 echo ""

@@ -170,14 +170,51 @@ nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> --arms "full read-le
 
 **Four arms, the repeat measured in the same run**, about 7 h 12 m at `oracle-2`'s rate.
 `propose-1` is why: it was the first result in this arc to clear its own noise, because the repeat ran beside it.
-Two arms (about 3 h 36 m) would test against a flip rate from other nights, and the MDE at `n = 282` is **6.36 points** on the current 14.5% flip rate.
-`full-b` and `read-legs-b` are the same flags under a second name, which `ablation_sweep.sh` does not have yet.
+`full-b` and `read-legs-b` carry exactly their originals' flags (PR #170).
+The night renders with `temporalCoherence` off, the preset since ADR-0030, and `read-legs` refuses any other render.
 
-The primary outcome is **Find-SR@1m**. The secondary is stage 4 → 5 conversion (`episode_diff --given-stage INVESTIGATE_ENTERED`), because the reader acts inside the detour.
-The night's own branches are written into this ADR **after** the replay and **before** the night, because the replay's decisive rate says how large an effect is plausible.
-
-**Liveness before any null.** The audit carries `n_legs`, `n_louder`, `n_quieter` and `n_inconclusive` per episode, so the night can say whether the reader fired before anyone reads a delta.
+The primary outcome is **Find-SR@1m**: `episode_diff` at its default stage, `SOURCE_REACHED`, which under the oracle detector is the 1.0 m confirm. The secondary is stage 4 → 5 conversion (`--given-stage INVESTIGATE_ENTERED`), because the reader acts inside the detour.
+**Liveness before any null.** Each READ_LEGS episode records `legs_read`, `legs_louder`, `legs_quieter`, `legs_inconclusive` and `legs_unread`, and `window_report` prints them before anyone reads a delta.
 DREAM's arc is the reason: its memory term was the first lever in this repo proven live before its null (ADR-0025), after `dream-1` and `dream-2` had both returned nulls about a mechanism that never ran.
+
+### The night's pre-registration (2026-10-01, before booking)
+
+Written after ADR-0030's re-gate read BUILD and before the night is booked, as this section required.
+
+**What this n can resolve.** Each arm holds 282 paired episodes. At the 19.1% flip rate ADR-0030 measured at this render, the paired MDE is **7.30 points** per contrast (80% power, alpha 0.05, `power.mde_paired`). A smaller effect is not resolvable by this night, however it is read. The driver prints its own figure before it starts; that one is authoritative.
+
+**What the replay says is plausible, and what it does not.** At T_LEG 1.0 the reader decided on about 30% of completed legs over three renders (1,433 decisive verdicts on 4,234 informative legs, plus 19.5% of 1,263 uninformative ones). Silent legs, 3,144 of the 5,680 completed, never get a verdict. The replay prices verdicts on legs walked blind. It does not price how reach changes when the agent acts on them, which is what this night measures. No effect size is predicted here.
+
+**The six reads**, printed one line each at the end of the driver's readout (`night_reads` in `ablation_sweep.sh`):
+
+| # | read | what it is |
+|---|---|---|
+| 1 | `full -> read-legs` | contrast A |
+| 2 | `full-b -> read-legs-b` | contrast B, the repeat of A |
+| 3 | `full -> full-b` | the baseline against itself: tonight's noise |
+| 4 | `read-legs -> read-legs-b` | the reader against itself: tonight's noise with the reader on |
+| 5 | `full -> read-legs`, given INVESTIGATE_ENTERED | contrast A, stage 4 → 5 |
+| 6 | `full-b -> read-legs-b`, given INVESTIGATE_ENTERED | contrast B, stage 4 → 5 |
+
+Each contrast is an exact McNemar over its own 282 pairs, and each is read on its own. The two are not pooled: they share episodes, so pooling would count each episode twice. The scene-level sign test is reported beside every contrast and breaks no tie (ADR-0016).
+
+**The branches, fixed here.** They are checked in order, and the first that applies is the reading.
+
+| result | reading | what happens |
+|---|---|---|
+| **NOT_RUN.** `window_report` exits 2, or in either READ_LEGS arm LOUDER plus QUIETER is under 10% of `legs_read` | the reader barely acted, at about a third of the replay's rate or less | not a result about reading legs. Find why the live arm's legs differ from the replay's, and fix it, before any delta is read |
+| **GAIN.** Contrasts A and B both net positive, both exact p < 0.05, and each net larger than both repeat nets (reads 3 and 4) | acting on a finished leg converts the direction it carries into reach | `READ_LEGS` becomes `full`'s cast policy. The ablation table is re-run on the new baseline before any component is quoted against it |
+| **LOSS.** A and B both net negative, both exact p < 0.05 | wrong verdicts cost more than right ones buy. QUIETER is wrong on about 23% of its legs, and on 41% of legs that span the offset | `READ_LEGS` as built is retired. A LOUDER-only arm is the remaining shape, and it needs its own pre-registration |
+| **DIRECTION ONLY.** A and B have the same sign, and at least one misses p < 0.05 or does not clear the repeat nets | the sign reproduces, the size is not resolved at this n | not reported as a gain or a loss. Both contrasts and both repeats are reported as measured. A second night is Sky's call, not automatic |
+| **NULL.** Anything else: A and B disagree in sign, or both are inside the repeat nets | the leg knows the direction and acting on it does not move reach | `READ_LEGS` closes as a lever on Find-SR. The silent half of the detour is the next candidate (where was the sound loudest before it stopped), and it needs its own ADR |
+
+**The secondary reads (5 and 6) qualify a branch and never pick one.** They are only sound if the two arms drop about the same number of pairs for not reaching INVESTIGATE, because the reader acts after that stage. `episode_diff` prints both drop counts. A clear gap means the conditioning has failed, and only the unconditional reads are quoted.
+
+**Three things this night cannot say.**
+
+- Which verdict did the work. LOUDER and QUIETER act together. A per-verdict attribution needs a one-branch arm, and that is a separate night.
+- Whether the gain or loss lives in the sounding half of the detour. `legs_*` are per episode, not per sounding state.
+- Anything about TC 1. Every arm renders at TC 0, and so does `full`. The ablation table of record (`abl-2`) is at TC 1, and nothing tonight is quoted against it.
 
 ## Consequences
 

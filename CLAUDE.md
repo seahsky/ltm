@@ -89,11 +89,12 @@ nrun bash earshot/tools/window_pilot.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag>
 
 # THE OVERNIGHT SWEEP: the paper's HM3D baseline and the ablation table, in one run.
-# TEN arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
+# THIRTEEN arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
 # `no-cue`, `scan-only` and `anechoic` each remove one component; `tc-on` turns the
 # render preset's `temporalCoherence` back on (the pre-ADR-0030 render) and is not an
 # agent component; `dream` and `dream-nomem` are the memory pair (ADR-0025) and differ
-# in `lambda_memory` alone.
+# in `lambda_memory` alone; `read-legs` is ADR-0029's reader, and `full-b` and
+# `read-legs-b` are the same flags under a second name for its night's in-run repeat.
 # `oracle-loc` and `oracle-loc-matched` are CEILINGS and not ablations -- they ADD the
 # source coordinate. Difference only the MATCHED one against `full`: `oracle-1` measured
 # the other at 94.3% source-reached and 2 of 270 Find-SR@1m out of one arm, because it
@@ -217,6 +218,16 @@ nrun bash earshot/tools/ablation_sweep.sh --tag regate-b --arms no-tc
 python -m earshot.tools.leg_replay runs/no-tc/no-tc runs/regate-a/no-tc runs/regate-b/no-tc
 python -m earshot.tools.leg_replay runs/regate-a/no-tc runs/regate-b/no-tc
 python -m earshot.tools.episode_diff runs/regate-a/no-tc runs/regate-b/no-tc   # TC-0 flip rate
+
+# ADR-0029's NIGHT: READ_LEGS against `full`, each twice in the same run. ~7 h 12 m.
+# Pre-registered in ADR-0029 ("The night's pre-registration"): two contrasts read on their
+# own (not pooled; they share episodes), the two in-run repeats as the noise floor, and
+# five branches checked in order (NOT_RUN / GAIN / LOSS / DIRECTION ONLY / NULL). MDE 7.30
+# pts per contrast at the TC-0 flip rate. The readout ends with the six reads, one line
+# each, so they survive the emailed tail; LIVENESS first: `window_report` prints
+# THE LEG READER per arm and exits 2 if a reading arm never decided
+nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
+  --arms "full read-legs full-b read-legs-b"
 
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
