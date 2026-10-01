@@ -55,6 +55,13 @@ __all__ = [
 # (`repeat-1` against `arrive-2`, 2026-08-11). It prices the PAIRED comparison only.
 MEASURED_FLIP_RATE = 0.162
 
+# provenance: measured -- the same flip rate at the render every sweep uses since ADR-0030
+# turned `temporalCoherence` off: 162 discordant of 846 over the three byte-identical
+# renders `no-tc`, `regate-a` and `regate-b` (15.6%, 18.1% and 23.8% pair by pair). It
+# sizes THIS sweep's paired MDE. `MEASURED_FLIP_RATE` stays as `repeat-1`'s anchor, which
+# the n=365 reference line below and its tests are pinned to.
+TC0_FLIP_RATE = 162 / 846
+
 # provenance: measured -- the memory effect this project has previously seen (+0.171 SR, the M3
 # revisit headline). The matrix is being sized to detect something of that order.
 HISTORICAL_EFFECT = 0.171
@@ -240,13 +247,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # a paired sweep and the n=365 line below is then the historical reference rather
         # than the number in front of the reader.
         print(
-            "  THIS SWEEP, paired at n={} with the measured {:.3f} flip rate:".format(
-                args.paired_n, MEASURED_FLIP_RATE
-            )
+            "  THIS SWEEP, paired at n={} with the {:.3f} flip rate measured at today's "
+            "render (temporalCoherence off, ADR-0030):".format(args.paired_n, TC0_FLIP_RATE)
         )
         print(
             "    SD {:.1f} episodes, MDE {:.2f} points. An effect smaller than that is"
-            .format(sd_paired(args.paired_n), 100 * mde_paired(args.paired_n))
+            .format(sd_paired(args.paired_n, TC0_FLIP_RATE),
+                    100 * mde_paired(args.paired_n, TC0_FLIP_RATE))
         )
         print("    NOT resolvable by this sweep at {:.0f}% power, however it is read.".format(
             100 * args.power

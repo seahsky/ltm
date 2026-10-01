@@ -28,10 +28,11 @@
 #
 # WHAT IT CAN AND CANNOT RESOLVE, before it is started rather than after. At the default
 # 15 episodes per scene per arm over the 19 scenes that yield anything, each arm holds
-# 285 episodes and `tools/power.py` prices the paired MDE at 6.68 points (80% power,
-# alpha 0.05, the measured flip rate). 20 episodes a scene buys 5.78 points and costs
-# 12.8 hours instead of 9.6. Anything smaller than about 7 points this sweep cannot see,
-# and saying so here is cheaper than discovering it in the readout.
+# 285 episodes and `tools/power.py` prices the paired MDE at 7.26 points (80% power,
+# alpha 0.05, the 19.1% flip rate measured at today's render; it was 6.68 at TC 1's
+# 16.2%). 20 episodes a scene buys 6.29 points and costs a third more time. Anything
+# smaller than about 7 points this sweep cannot see, and saying so here is cheaper than
+# discovering it in the readout.
 #
 # THE SCENE-LEVEL TEST IS THE ONE THAT WILL DISAGREE. `sign_test_threshold(19)` is 15:
 # an arm has to move 15 of 19 scenes the same way to clear a scene-level sign test, and
