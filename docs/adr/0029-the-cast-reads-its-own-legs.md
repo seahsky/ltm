@@ -5,7 +5,8 @@ Amends ADR-0016's cast. The surge, the scan, the arrival rule and `is_rising` ca
 **Gated on an off-box replay.** No controller code ships and no night is booked until the replay's pre-registered branch says so.
 **The gate ran on 2026-09-21 and read STOP.** `READ_LEGS` does not ship; see "The result".
 **ADR-0030 re-reads this gate on legs rendered with `temporalCoherence` off**, over three renders, with the thresholds above unchanged.
-**That re-gate read BUILD at T_LEG 1.0 (2026-10-01), so `READ_LEGS` ships on the flipped render.** The night's branches below are still to be written before it is booked.
+**That re-gate read BUILD at T_LEG 1.0 (2026-10-01), so `READ_LEGS` was built on the flipped render.**
+**The night ran on 2026-10-01 (`legs-1`) and read NULL.** `READ_LEGS` closes as a lever on Find-SR, and `full`'s cast policy does not change; see "The night's result".
 
 `oracle-2` measured the headroom: Find-SR@1m is 33.3% for `full` and 98.5% for the same controller handed the source coordinate, on the same criterion, over the same episodes (ADR-0028).
 The follower, the budget, the navmesh and the arrival rule ran unchanged in both arms, so the 65.2 points are localization.
@@ -215,6 +216,28 @@ Each contrast is an exact McNemar over its own 282 pairs, and each is read on it
 - Which verdict did the work. LOUDER and QUIETER act together. A per-verdict attribution needs a one-branch arm, and that is a separate night.
 - Whether the gain or loss lives in the sounding half of the detour. `legs_*` are per episode, not per sounding state.
 - Anything about TC 1. Every arm renders at TC 0, and so does `full`. The ablation table of record (`abl-2`) is at TC 1, and nothing tonight is quoted against it.
+
+### The night's result (`legs-1`, 2026-10-01)
+
+Four arms at commit c8e2348, 282 episodes each over 19 scenes, 7 h 36 m, every gate green: **NULL**.
+The tables are in `PHASE2_ABLATION_REPORT.md` under "ADR-0029's night".
+
+- **The reader was live.** It said LOUDER or QUIETER on 439 of 1,620 legs in `read-legs` (27.1%) and on 447 of 1,619 in `read-legs-b` (27.6%), against a 10% floor and about 30% in the replay. NOT_RUN does not apply.
+- **The two contrasts differ in sign.** `full -> read-legs` is net +2 over 64 discordant pairs (exact McNemar p 0.90). `full-b -> read-legs-b` is net −2 over 52 (p 0.89).
+- **Both are inside the night's own noise.** `full -> full-b` is net +9 over 55 (p 0.28), and `read-legs -> read-legs-b` is net +5 over 55 (p 0.59).
+- **The scene level agrees with neither sign.** A is 7 scenes up and 6 down (exact sign test p 1.00), and B is 4 up and 9 down (p 0.27).
+- **The conditioned reads change nothing.** Given INVESTIGATE_ENTERED, both contrasts keep every discordant pair: +2 over 64 and −2 over 52, on 270 pairs. The drops are 12 against 11 and 12 against 10, so the conditioning is sound.
+- **Find-SR@1m** is 95, 97, 104 and 102 of 270 for `full`, `read-legs`, `full-b` and `read-legs-b`.
+- **The flip rate is 19.5%** in both repeats, against the 19.1% the MDE was computed from. The reader added no measurable variance.
+
+NULL is the last branch, and both of its conditions hold.
+**`READ_LEGS` closes as a lever on Find-SR.** `CastPolicy.READ_LEGS` stays in the tree as an arm, and `full` keeps the alternating cast.
+An effect under the 7.30-point MDE is not ruled out; the two estimates are +0.7 and −0.7 points.
+
+The gate and the night do not contradict each other.
+The replay priced the verdict at 94.0% and 77.2% on legs walked blind. The night priced what acting on it is worth, which is what the gate said it could not price.
+Why a correct verdict does not convert is not measured. LOUDER and QUIETER acted together, so one helping and the other costing would read as this null, and no arm here separates them.
+The next candidate is the one the NULL branch names: the silent half of the detour, under its own ADR.
 
 ## Consequences
 

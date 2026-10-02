@@ -5010,3 +5010,95 @@ So selection does not explain the standing fall by itself, and the preset is the
 3. The night's branches into ADR-0029, with the MDE above, before the four-arm night is booked.
 
 **What this cannot say.** The legs were walked under blind alternation. The gate prices the verdict on legs a reader did not choose; the night prices the arm.
+
+## ADR-0029's night: NULL (`legs-1`, 2026-10-01)
+
+`nrun bash earshot/tools/ablation_sweep.sh --tag legs-1 --arms "full read-legs full-b read-legs-b"` at commit c8e2348 (`main` after PR #171), riftvm, 7 h 36 m, exit 0, every gate green.
+282 episodes per arm over 19 scenes; `mL8ThkuaVTM` yielded zero in all four arms.
+Read under the pre-registration in ADR-0029 ("The night's pre-registration"), which merged before the run started.
+
+### Liveness: the reader acted
+
+| arm | legs read | LOUDER | QUIETER | inconclusive | decisive | unread after a reversal |
+|---|---|---|---|---|---|---|
+| `read-legs` | 1,620 | 246 | 193 | 1,181 | 439 = 27.1% | 190 |
+| `read-legs-b` | 1,619 | 237 | 210 | 1,172 | 447 = 27.6% | 204 |
+
+The NOT_RUN floor is 10% decisive. Both arms clear it, and the replay's rate was about 30%.
+`window_report` exited 0. NOT_RUN does not apply.
+
+### The arms
+
+| arm | source reached of 282 | Find-SR@1m of 270 | source SPL, mean | steps per episode | route to source at the final pose, median |
+|---|---|---|---|---|---|
+| `full` | 95 = 33.7% | 35.2% | 0.257 | 191.9 | 5.86 m |
+| `read-legs` | 97 = 34.4% | 35.9% | 0.269 | 189.1 | 5.94 m |
+| `full-b` | 104 = 36.9% | 38.5% | 0.278 | 195.0 | 6.39 m |
+| `read-legs-b` | 102 = 36.2% | 37.8% | 0.273 | 193.2 | 5.87 m |
+
+12 of 282 episodes have no navmesh route to the source in every arm, as before.
+
+### The six reads
+
+| # | read | gained | lost | net | discordant of 282 | exact McNemar p |
+|---|---|---|---|---|---|---|
+| 1 | `full -> read-legs` (contrast A) | 33 | 31 | **+2** (+0.7 pts) | 64 = 22.7% | 0.9007 |
+| 2 | `full-b -> read-legs-b` (contrast B) | 25 | 27 | **−2** (−0.7 pts) | 52 = 18.4% | 0.8899 |
+| 3 | `full -> full-b` (repeat) | 32 | 23 | +9 (+3.2 pts) | 55 = 19.5% | 0.2806 |
+| 4 | `read-legs -> read-legs-b` (repeat) | 30 | 25 | +5 (+1.8 pts) | 55 = 19.5% | 0.5901 |
+| 5 | contrast A, given INVESTIGATE_ENTERED | 33 | 31 | +2 | 64 of 270 | 0.9007 |
+| 6 | contrast B, given INVESTIGATE_ENTERED | 25 | 27 | −2 | 52 of 270 | 0.8899 |
+
+Net, discordant count and p are the driver's own lines.
+Gained and lost for reads 1, 2, 5 and 6 are `episode_diff`'s, re-run by hand on the box on 2026-10-02. For read 3 they are summed from the per-scene table the driver printed, and for read 4 they follow from the net and the count.
+
+### The scene level, and the conditioning
+
+The driver's one-line reads carry neither the scene table nor the drop counts, so reads 5 and 6 were re-run by hand on the box.
+Conditioning removes pairs and leaves every discordant pair in place (64 and 52 either way), so the scene tables below are the unconditional ones too.
+
+| contrast | scenes up | scenes down | scenes flat | exact sign test p |
+|---|---|---|---|---|
+| A | 7 | 6 | 6 | 1.00 |
+| B | 4 | 9 | 6 | 0.27 |
+
+The sign test p is computed from the printed tables with `funnel_diff.two_sided_exact_binomial`, the function that reproduces the tool's McNemar p on the same counts. `episode_diff` prints the table and not the test.
+The scenes do not agree between the contrasts either: `4ok3usBNeis` is −2 in A and +4 in B, and `q3zU7Yy5E5s` is +3 in A and −2 in B.
+
+| read | pairs kept | dropped for the baseline arm | dropped for the reading arm |
+|---|---|---|---|
+| 5 | 270 | 12 | 11 |
+| 6 | 270 | 12 | 10 |
+
+The drop counts are close, so the conditioning is sound, and it changes nothing: every discordant pair entered INVESTIGATE in both arms.
+All of this night's movement is between stage 4 and stage 5, which is where the reader acts.
+
+### The branch: NULL
+
+The branches are checked in order.
+
+| branch | applies | why |
+|---|---|---|
+| NOT_RUN | no | the reader decided on 27.1% and 27.6% of its legs |
+| GAIN | no | B is negative |
+| LOSS | no | A is positive |
+| DIRECTION ONLY | no | A and B differ in sign |
+| **NULL** | **yes** | A and B differ in sign, and both nets (2 and 2) are inside both repeat nets (9 and 5) |
+
+**The leg knows the direction, and acting on it did not move reach.**
+Each contrast is under one point. The same arm against itself, on the same night, moved by 3.2 and 1.8 points.
+The night's MDE was 7.30 points per contrast. An effect smaller than that is not ruled out. The two estimates are +0.7 and −0.7.
+
+The flip rate on this night is 19.5% in both repeats, against the 19.1% the MDE was computed from.
+ADR-0029 flagged that a reader acting on more of the audio could add variance. This night shows none: `read-legs` against itself flips 55 pairs, and so does `full`.
+
+### What follows (ADR-0029)
+
+`READ_LEGS` closes as a lever on Find-SR. `full`'s cast policy does not change, and the arm stays in the tree as built.
+The next candidate ADR-0029 names is the silent half of the detour: where the sound was loudest before it stopped. It needs its own ADR.
+
+**What this night cannot say**, as pre-registered:
+
+- Which verdict did what. LOUDER and QUIETER acted together, so a gain from one and a loss from the other would read as this null.
+- Whether anything moved in the sounding half of the detour. `legs_*` are per episode.
+- Anything about TC 1. All four arms render at TC 0.
