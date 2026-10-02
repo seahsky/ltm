@@ -225,7 +225,13 @@ python -m earshot.tools.episode_diff runs/regate-a/no-tc runs/regate-b/no-tc   #
 # five branches checked in order (NOT_RUN / GAIN / LOSS / DIRECTION ONLY / NULL). MDE 7.30
 # pts per contrast at the TC-0 flip rate. The readout ends with the six reads, one line
 # each, so they survive the emailed tail; LIVENESS first: `window_report` prints
-# THE LEG READER per arm and exits 2 if a reading arm never decided
+# THE LEG READER per arm and exits 2 if a reading arm never decided.
+# `legs-1` RAN 2026-10-01 at c8e2348: NULL. The reader was LIVE (decisive on 27.1% and
+# 27.6% of its legs) and reach did not move: `full -> read-legs` net +2 over 64 (p 0.90),
+# `full-b -> read-legs-b` net -2 over 52 (p 0.89), both inside the repeats (+9 and +5 over
+# 55 each, a 19.5% flip). READ_LEGS CLOSES AS A LEVER ON FIND-SR; `full` keeps its cast.
+# BOOK NO SECOND NIGHT OF THIS ARM. The next candidate is the silent half of the detour,
+# under its own ADR
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
   --arms "full read-legs full-b read-legs-b"
 
