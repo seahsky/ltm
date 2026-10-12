@@ -235,6 +235,18 @@ python -m earshot.tools.episode_diff runs/regate-a/no-tc runs/regate-b/no-tc   #
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
   --arms "full read-legs full-b read-legs-b"
 
+# ADR-0031's GATE, BEFORE ANY ARM: once the source stops, is the detour's loudest place
+# nearer the source than where silence found the agent, and is that worth a night? Runs
+# the arm's own tracker and offset detector (`loudest_place`, `back_at_bed` in
+# `agent/controller.py`, called by nothing in the rule yet) over `full`'s detours at TC 0,
+# each checked step by step against the recorded rule. Prices the return with a logistic
+# reach curve fitted on what the silent cast reached from each distance: OPTIMISTIC by
+# construction, so a price under the 7.30-pt MDE reads STOP. Branches NOT_RUN (exit 2) /
+# STOP / BUILD. Whichever it reads, THE SPLIT says whether the detour ever came near the
+# source while it sounded. Five renders, never mixed with another arm. Read-only, no GPU
+python -m earshot.tools.silent_replay runs/no-tc/no-tc runs/regate-a/no-tc \
+  runs/regate-b/no-tc runs/legs-1/full runs/legs-1/full-b
+
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
 # it, so the run's own central quantity reached nobody.

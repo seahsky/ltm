@@ -1,9 +1,9 @@
 # ADR-0031: in silence, the detour returns to where it was loudest
 
-Status: **proposed**, 2026-10-02.
+Status: **accepted**, 2026-10-12 (PR #173), with the gate's numbers as proposed.
 Amends ADR-0016's cast from the step the agent's own offset detector fires. Before that step the surge, the scan, the cast, the arrival rule and `is_rising` carry unchanged.
 **Gated on an off-box replay.** No arm ships and no night is booked until the replay's pre-registered branch says so.
-**The gate's numbers below are proposed and are Sky's to set before the replay reads a run.**
+**The replay is built** (`earshot/tools/silent_replay.py`) and has not read a run. See "The gate, operationalized before the replay read a run".
 
 `legs-1` read NULL (PR #172): a cast that acts on its finished legs does not move Find-SR.
 ADR-0029's NULL branch names the next candidate: the silent half of the detour, and where the sound was loudest before it stopped.
@@ -165,6 +165,37 @@ An accurate signal is necessary and it did not convert. So this gate has a reach
 **A reading the gate gives whichever branch it takes.** Report items 1 and 4 split the gap by half of the detour.
 If most eligible episodes have `d_min` far from the source, the detour never came near while the source sounded, and the loss is in the sounding half. No change to the silent half can reach those episodes.
 If `d_min` is near and `d_off` is far, the agent came near and left. That is the case this ADR is for.
+
+### The gate, operationalized before the replay read a run
+
+Building `silent_replay.py` fixed the details below. Each is in the commit that builds the tool, before it has read a run.
+
+- **The detour** is the steps that recorded `realizable_action`, as `leg_replay` reads it (`detour_steps`).
+  An arrival is not a detour step. The controller returns CHECK with no `realizable_action` on the arrival tick, and the runner sets `source_reached_step` on that tick.
+  So a detector that fires on a detour step always fires before the reach. The REACHED_FIRST status guards a record shape the runner does not write.
+- **Windows count detour readings from 1.** The first window is the detour's first `cue_phase_folds` readings.
+- **The eligibility checks run in this order**, and each failure is counted by name:
+  1. no detour;
+  2. no route at the detour's first step;
+  3. a detour step whose rebuilt action disagrees with the record (`leg_replay.episode_legs`);
+  4. no `pre_onset_rms`;
+  5. no offset step;
+  6. the detector did not fire;
+  7. it fired before one whole loop was kept;
+  8. the source was reached at or before the firing step;
+  9. no route at the firing step or at the loudest place.
+
+  Items 3 and 7 are not in the list above. Item 3 is the rule check this ADR states for every episode. Item 7 is a detector that fires before the tracker has a place.
+- **False fires** are counted over every episode the detector fired on, eligible or not.
+- **The 30 reaches** are counted on the episodes the curve is fitted on: eligible, and not false fires.
+- **A run's price** is in points of the run's own episode records. Each run holds 282 if none is missing, and the report prints the count.
+- **The curve's slope is checked.** A slope of zero or above is STOP, as "The price" states. The price alone would not always stop it: where the loudest place is farther, a rising curve prices the return as a gain.
+- **NOT_RUN also covers** three cases the table does not name:
+  - a number of runs other than five;
+  - a fit that does not settle in 100 Newton steps, which is what separated data do;
+  - a run refused because a scene with episodes has no `env_report.json`, records `temporal_coherence` other than false, or records no `pre_onset_rms_tol`.
+- **In silence the reading is exactly the bed.** PR #149 measured the cue constant to machine precision on every silent leg. So the 5% tolerance decides only how faint a sounding source must be to read as silent.
+- **The five runs carry every field, by the code that made them.** At 8e6f16d, 32d3989 and c8e2348 the runner writes `temporal_coherence: false` for these arms, `pre_onset_rms`, `cue_phase_folds`, the offset step and the four `FULL_ARM` fields. That is read off the code. The runs themselves are on the box, and the replay refuses any that lack them.
 
 ## The night, if the gate passes
 

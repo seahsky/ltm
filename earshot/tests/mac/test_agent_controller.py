@@ -33,16 +33,20 @@ from earshot.agent.controller import (
     LEG_UNREAD,
     READ_LEGS_T_LEG,
     SCAN_STEPS,
+    SILENT_RETURN_M,
     SOURCE_PSEUDO_GOAL,
     ControllerState,
+    LoudestPlace,
     NavMode,
     along_leg,
+    back_at_bed,
     cast_action,
     is_diverting,
     is_rising,
     leg_opening,
     leg_t,
     leg_verdict,
+    loudest_place,
     next_plateau_steps,
     realizable_investigate_probe,
     realizable_investigate_step,
@@ -1156,3 +1160,113 @@ class TestTheReaderIsTheGatesReader(unittest.TestCase):
 
         self.assertIs(replay.along_leg, along_leg)
         self.assertFalse(hasattr(replay, "_along_leg"))
+
+
+def _at(x):
+    return Xyz(float(x), 0.0, 0.0)
+
+
+class TestTheLoudestPlace(unittest.TestCase):
+    """ADR-0031's tracker: one whole loop's mean, its middle position, and ties kept."""
+
+    LOOP = 5
+
+    def test_no_window_until_one_whole_loop_is_read(self):
+        levels = [0.3, 0.3, 0.3, 0.3]
+        self.assertIsNone(loudest_place(None, levels, [_at(i) for i in range(4)],
+                                        last_step=10, folds=self.LOOP))
+
+    def test_the_first_whole_loop_is_kept_at_its_middle_step(self):
+        levels = [0.1, 0.2, 0.3, 0.4, 0.5]
+        kept = loudest_place(None, levels, [_at(i) for i in range(5)],
+                             last_step=14, folds=self.LOOP)
+        self.assertAlmostEqual(kept.mean, 0.3)
+        self.assertEqual(kept.position, _at(2))
+        self.assertEqual(kept.step, 12)  # steps 10..14, middle index 2
+
+    def test_only_the_last_loop_of_a_longer_history_is_the_window(self):
+        levels = [9.0, 0.1, 0.1, 0.1, 0.1, 0.1]
+        kept = loudest_place(None, levels, [_at(i) for i in range(6)],
+                             last_step=5, folds=self.LOOP)
+        self.assertAlmostEqual(kept.mean, 0.1)
+        self.assertEqual(kept.position, _at(3))
+
+    def test_a_louder_loop_replaces_and_a_quieter_or_equal_one_does_not(self):
+        kept = LoudestPlace(mean=0.3, position=_at(0), step=4)
+        louder = loudest_place(kept, [0.4] * 5, [_at(7)] * 5, last_step=9, folds=5)
+        self.assertEqual((louder.mean, louder.position, louder.step), (0.4, _at(7), 7))
+        self.assertIs(loudest_place(kept, [0.3] * 5, [_at(7)] * 5, last_step=9, folds=5),
+                      kept)
+        self.assertIs(loudest_place(kept, [0.2] * 5, [_at(7)] * 5, last_step=9, folds=5),
+                      kept)
+
+    def test_the_loop_cancels_in_the_window_mean(self):
+        """A quiet fold does not make a stretch read quieter than one that has none at
+        the same mean: the window is the whole loop, wherever the quiet fold falls."""
+        loop = [0.5, 0.5, 0.5, 0.5, 0.0]
+        rotated = loop[2:] + loop[:2]
+        a = loudest_place(None, loop, [_at(0)] * 5, last_step=4, folds=5)
+        b = loudest_place(None, rotated, [_at(0)] * 5, last_step=4, folds=5)
+        self.assertAlmostEqual(a.mean, b.mean)
+
+    def test_an_even_loop_takes_the_later_middle(self):
+        kept = loudest_place(None, [1.0] * 4, [_at(i) for i in range(4)],
+                             last_step=3, folds=4)
+        self.assertEqual((kept.position, kept.step), (_at(2), 2))
+
+    def test_malformed_input_is_refused(self):
+        with self.assertRaises(ValueError):
+            loudest_place(None, [1.0], [_at(0)], last_step=0, folds=0)
+        with self.assertRaises(ValueError):
+            loudest_place(None, [1.0, 1.0], [_at(0)], last_step=1, folds=1)
+
+
+class TestTheOffsetDetector(unittest.TestCase):
+    """ADR-0031's detector, both arms (ADR-0014): silence must read as silence, and a
+    faint far source that is still sounding must not."""
+
+    BED = 0.02
+    TOL = 0.05
+    LOOP = 5
+
+    def fires(self, levels, **kw):
+        args = dict(bed_level=self.BED, tolerance=self.TOL, folds=self.LOOP)
+        args.update(kw)
+        return back_at_bed(levels, **args)
+
+    def test_one_whole_loop_at_the_bed_fires(self):
+        self.assertTrue(self.fires([0.3, 0.2] + [self.BED] * 5))
+
+    def test_a_faint_far_source_does_not_fire(self):
+        """Under the onset threshold and still sounding. `onset_rms` sits between the bed
+        and the source's low level, so "under `onset_rms`" would call this silent."""
+        onset_rms = math.sqrt(self.BED * 0.1)
+        faint = [0.03] * 5
+        self.assertTrue(all(v < onset_rms for v in faint))
+        self.assertFalse(self.fires(faint))
+
+    def test_one_loud_fold_in_the_loop_does_not_fire(self):
+        self.assertFalse(self.fires([self.BED] * 4 + [0.3]))
+
+    def test_a_quiet_fold_of_a_sounding_clip_does_not_fire(self):
+        self.assertFalse(self.fires([0.3, 0.3, self.BED, 0.3, 0.3]))
+
+    def test_fewer_readings_than_a_loop_never_fire(self):
+        self.assertFalse(self.fires([self.BED] * 4))
+
+    def test_the_bound_is_relative_to_the_bed(self):
+        self.assertTrue(self.fires([self.BED * 1.049] * 5))
+        self.assertFalse(self.fires([self.BED * 1.051] * 5))
+
+    def test_a_zero_bed_reads_the_tolerance_as_absolute(self):
+        self.assertTrue(self.fires([0.01] * 5, bed_level=0.0))
+        self.assertFalse(self.fires([0.06] * 5, bed_level=0.0))
+
+    def test_malformed_input_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.fires([self.BED] * 5, folds=0)
+        with self.assertRaises(ValueError):
+            self.fires([self.BED] * 5, tolerance=-0.1)
+
+    def test_the_return_radius_is_adr_0031s(self):
+        self.assertEqual(SILENT_RETURN_M, 1.0)
