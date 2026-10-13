@@ -35,12 +35,16 @@ DISTANCES_M = (2.0, 4.0, 6.0, 8.0, 10.0)
 
 
 def walk(source, *, ear_legs, rng, right_share=1.0, ticks=SOUNDING_TICKS, silent=False):
-    """Ticks to arrive within the ring (or None), the path walked, and the actions."""
+    """Ticks to arrive within the ring (or None), the path walked, the actions, and the
+    nearest the walk came to the source."""
     pose = Pose(Xyz(0.0, 0.0, 0.0), 0.0)
     path, actions = 0.0, []
+    nearest = math.hypot(source.x, source.z)
     for k in range(ticks):
-        if math.hypot(pose.position.x - source.x, pose.position.z - source.z) <= RING_M:
-            return k, path, actions
+        here = math.hypot(pose.position.x - source.x, pose.position.z - source.z)
+        nearest = min(nearest, here)
+        if here <= RING_M:
+            return k, path, actions, nearest
         sign = 0 if silent else bearing_lateral_sign(pose, source)
         if rng.random() >= right_share:
             sign = -sign
@@ -56,7 +60,8 @@ def walk(source, *, ear_legs, rng, right_share=1.0, ticks=SOUNDING_TICKS, silent
         elif action == ACT_TURN_RIGHT:
             yaw -= TURN_RAD
         pose = Pose(Xyz(x, 0.0, z), yaw)
-    return None, path, actions
+    nearest = min(nearest, math.hypot(pose.position.x - source.x, pose.position.z - source.z))
+    return None, path, actions, nearest
 
 
 def sources(distance_m, rng):
@@ -66,17 +71,39 @@ def sources(distance_m, rng):
 
 
 def arrival_rate(distance_m, *, ear_legs, right_share, seed=7):
+    """The share of walks that arrive, and the path walked per metre of the gap closed.
+
+    The two arms share a seed, so each walk is paired: the same bearing and the same
+    draws. Path per metre closed is summed path over summed (start - nearest): a walk
+    that circles closes little for the path it walks. Every walk counts, arrived or not.
+    """
     rng = random.Random(seed)
     arrived = 0
-    walked = 0.0
+    walked = closed = 0.0
     for source in sources(distance_m, rng):
-        k, path, _ = walk(source, ear_legs=ear_legs, rng=rng, right_share=right_share)
+        k, path, _, nearest = walk(source, ear_legs=ear_legs, rng=rng,
+                                   right_share=right_share)
         arrived += k is not None
         walked += path
-    return arrived / TRIALS, walked / TRIALS
+        closed += distance_m - nearest
+    return arrived / TRIALS, (walked / closed if closed > 0 else math.inf)
 
 
 class TestTheEarHomes(unittest.TestCase):
+    def test_cast_passes_a_source_abeam_just_outside_the_ring(self):
+        """Why `full` never arrives from 4 m out with a right sign: its zigzag's mean
+        heading is the bisector of two headings 30 degrees apart, so it runs off the
+        scan's aim and passes the source outside the ring. Printed, and checked only
+        to be outside the ring."""
+        rng = random.Random(0)
+        source = Xyz(6.0, 0.0, 0.0)
+        _, _, _, cast_nearest = walk(source, ear_legs=False, rng=rng, ticks=120)
+        _, _, _, ear_nearest = walk(source, ear_legs=True, rng=rng, ticks=120)
+        print("6 m abeam, right sign, 120 ticks: full's nearest pass {:.2f} m, the ear's "
+              "{:.2f} m".format(cast_nearest, ear_nearest))
+        self.assertGreater(cast_nearest, RING_M)
+        self.assertLessEqual(ear_nearest, RING_M)
+
     def test_with_a_right_sign_the_ear_arrives_from_every_distance(self):
         for distance in DISTANCES_M:
             ear, _ = arrival_rate(distance, ear_legs=True, right_share=1.0)
@@ -86,23 +113,23 @@ class TestTheEarHomes(unittest.TestCase):
             self.assertEqual(ear, 1.0, distance)
 
     def test_a_noisy_ear_is_printed_beside_full(self):
-        """The ADR's circling check: arrival within the sounding window and the path
-        walked, both arms, at the ear's measured accuracy (71.8% pooled, 66.6% at 8 m
-        and over). Printed, not asserted."""
+        """The ADR's circling check: arrival within the sounding window, and the path
+        walked per metre of the gap closed, both arms, at the ear's measured accuracy
+        (71.8% pooled, 66.6% at 8 m and over). Printed, not asserted."""
         for share in (0.718, 0.666):
             for distance in DISTANCES_M:
-                ear, ear_path = arrival_rate(distance, ear_legs=True, right_share=share)
-                full, full_path = arrival_rate(distance, ear_legs=False, right_share=share)
+                ear, ear_ratio = arrival_rate(distance, ear_legs=True, right_share=share)
+                full, full_ratio = arrival_rate(distance, ear_legs=False, right_share=share)
                 print("sign right {:.1%}, {:4.1f} m: arrive ear {:6.1%} full {:6.1%}; "
-                      "mean path ear {:5.2f} m full {:5.2f} m".format(
-                          share, distance, ear, full, ear_path, full_path))
+                      "path per metre closed ear {:5.2f} full {:5.2f}".format(
+                          share, distance, ear, full, ear_ratio, full_ratio))
 
     def test_in_silence_the_ear_is_full_tick_for_tick(self):
         rng_a, rng_b = random.Random(3), random.Random(3)
         for distance in DISTANCES_M:
             source = Xyz(distance, 0.0, 0.0)
-            _, _, ear = walk(source, ear_legs=True, rng=rng_a, silent=True, ticks=120)
-            _, _, full = walk(source, ear_legs=False, rng=rng_b, silent=True, ticks=120)
+            _, _, ear, _ = walk(source, ear_legs=True, rng=rng_a, silent=True, ticks=120)
+            _, _, full, _ = walk(source, ear_legs=False, rng=rng_b, silent=True, ticks=120)
             self.assertEqual(ear, full, distance)
 
 

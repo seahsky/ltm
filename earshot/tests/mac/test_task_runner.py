@@ -4331,10 +4331,6 @@ class TestTheAblationArmsReachTheLoop(unittest.TestCase):
             swept.onset_rms, control.onset_rms))
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestTheEarLegsArmEndToEnd(unittest.TestCase):
     """ADR-0032's arm through the real loop, on the fake world, its follower and its
     interaural cue. The fake's lateral term is the source's agent-frame side, so the sign
@@ -4385,3 +4381,7 @@ class TestTheEarLegsArmEndToEnd(unittest.TestCase):
         as_cast = dataclasses.replace(self.ear.audit, cast_policy="cast")
         wrong = episode_legs(as_cast, run="fake/ear-legs", scene="fake")
         self.assertLess(wrong.n_steps_agree, wrong.n_steps_checked)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
