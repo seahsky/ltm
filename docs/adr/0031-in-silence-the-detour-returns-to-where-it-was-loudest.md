@@ -3,7 +3,7 @@
 Status: **accepted**, 2026-10-12 (PR #173), with the gate's numbers as proposed.
 Amends ADR-0016's cast from the step the agent's own offset detector fires. Before that step the surge, the scan, the cast, the arrival rule and `is_rising` carry unchanged.
 **Gated on an off-box replay.** No arm ships and no night is booked until the replay's pre-registered branch says so.
-**The replay is built** (`earshot/tools/silent_replay.py`) and has not read a run. See "The gate, operationalized before the replay read a run".
+**The gate ran on 2026-10-13 and read STOP.** The arm is not built and no night is booked. See "The result".
 
 `legs-1` read NULL (PR #172): a cast that acts on its finished legs does not move Find-SR.
 ADR-0029's NULL branch names the next candidate: the silent half of the detour, and where the sound was loudest before it stopped.
@@ -196,6 +196,21 @@ Building `silent_replay.py` fixed the details below. Each is in the commit that 
   - a run refused because a scene with episodes has no `env_report.json`, records `temporal_coherence` other than false, or records no `pre_onset_rms_tol`.
 - **In silence the reading is exactly the bed.** PR #149 measured the cue constant to machine precision on every silent leg. So the 5% tolerance decides only how faint a sounding source must be to read as silent.
 - **The five runs carry every field, by the code that made them.** At 8e6f16d, 32d3989 and c8e2348 the runner writes `temporal_coherence: false` for these arms, `pre_onset_rms`, `cue_phase_folds`, the offset step and the four `FULL_ARM` fields. That is read off the code. The runs themselves are on the box, and the replay refuses any that lack them.
+
+## The result
+
+`silent_replay` over the five renders, 2026-10-13: **STOP**.
+The tables are in `PHASE2_ABLATION_REPORT.md` under "ADR-0031's gate".
+
+- **The price is +1.68 points pooled** (runs +1.47 to +1.87), against 7.30. It fails by more than four times, and it is optimistic.
+- **The loudest place is nearer on 410 of 540 informative episodes, 75.9%**, and 70.3% in the worst run. Both pass, by 0.9 and 0.3 points.
+- **The detector works.** 942 fires, 3 of them on a sounding source, a median 5 steps after the offset step.
+- **The silent cast reaches little from anywhere.** 28% of 99 episodes from under 2 m, 5% of 358 from 8 m and over. From under 2 m the detour ends a median 2.53 m farther away. Moving its start nearer cannot buy much.
+- **THE SPLIT puts the loss in the sounding half.** Of 942 detours that had not arrived when the source stopped, 44.8% never came within 5 m of route before the detector fired. 62.6% were in the band of their nearest approach when it fired. Only 7.2% came within 2 m and were 3 m or more away by then, which is the case this ADR is for.
+
+The lever closes with no box time spent.
+`loudest_place` and `back_at_bed` stay in `agent/controller.py` as the replay's functions, with no caller in the rule.
+The next question is why most detours never came near the source while it sounded. It is read-only and comes before any ADR.
 
 ## The night, if the gate passes
 

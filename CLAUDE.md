@@ -244,6 +244,11 @@ nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
 # construction, so a price under the 7.30-pt MDE reads STOP. Branches NOT_RUN (exit 2) /
 # STOP / BUILD. Whichever it reads, THE SPLIT says whether the detour ever came near the
 # source while it sounded. Five renders, never mixed with another arm. Read-only, no GPU
+# RAN 2026-10-13: STOP. Price +1.68 pts against 7.30; the loudest place IS nearer (75.9%,
+# passing by 0.9) but the silent cast reaches 28% even from under 2 m and walks away from
+# there. THE SPLIT: of 942 detours not yet arrived when the source stopped, 44.8% never
+# came within 5 m of route; only 7.2% came within 2 m and left. THE LOSS IS IN THE
+# SOUNDING HALF. ADR-0031's arm is not built
 python -m earshot.tools.silent_replay runs/no-tc/no-tc runs/regate-a/no-tc \
   runs/regate-b/no-tc runs/legs-1/full runs/legs-1/full-b
 
