@@ -144,6 +144,14 @@
 #   `legs_quieter`, `legs_inconclusive` and `legs_unread`. `window_report` prints them and
 #   exits 2 if a reading arm said louder or quieter on no leg, which turns this sweep red.
 #
+# `ear-legs` IS ADR-0032's ARM: `--cast-policy ear_legs`, which is `full`'s cast without the
+# odd-leg flip when the ear names a side. An odd leg whose opening hears a side turns
+# toward it, where `full` turns away; a sign of 0 turns as `full` does, so the cast in
+# silence is `full`'s. `ear-legs-b` is its in-run repeat, beside `full-b`, as ADR-0029's
+# night ran. LIVENESS: every ear-legs episode records `ear_turns` and
+# `ear_turns_followed`, and `window_report` exits 2 if an ear arm never turned against
+# `full`'s rule or its record does not rebuild the rule step by step.
+#
 # NO MEMORY ARM IS IN THIS SWEEP, deliberately. ADR-0018's four cells need the stores
 # wired into the runner and a prior pass that has run; neither exists yet, and four
 # identical arms named after four conditions is worse than no table. This sweep is the
@@ -334,16 +342,18 @@ reference_arm() {
   echo "$first"
 }
 
-# ADR-0029's night, as `<before> <after> <given stage or ->` lines, in the order its
-# pre-registration reads them: the two contrasts, the two in-run repeats, then stage 4 -> 5
-# for each contrast. A function so a test can run it rather than read it.
+# A four-arm night's six reads, as `<before> <after> <given stage or ->` lines, in the order
+# ADR-0029's pre-registration reads them and ADR-0032's repeats: the two contrasts, the two
+# in-run repeats, then stage 4 -> 5 for each contrast. `$1` is the treatment arm, whose
+# repeat is `$1-b`. A function so a test can run it rather than read it.
 night_reads() {
-  echo "full read-legs -"
-  echo "full-b read-legs-b -"
+  local arm="$1"
+  echo "full $arm -"
+  echo "full-b $arm-b -"
   echo "full full-b -"
-  echo "read-legs read-legs-b -"
-  echo "full read-legs INVESTIGATE_ENTERED"
-  echo "full-b read-legs-b INVESTIGATE_ENTERED"
+  echo "$arm $arm-b -"
+  echo "full $arm INVESTIGATE_ENTERED"
+  echo "full-b $arm-b INVESTIGATE_ENTERED"
 }
 
 # --- ONE DIRECTORY IS ONE RUN, before anything expensive ------------------
@@ -543,7 +553,7 @@ if [ "$DREAM_KNOBS_NOMEM" = "$DREAM_KNOBS" ]; then
   exit 2
 fi
 
-ARM_NAMES=(full no-climb no-cue scan-only anechoic tc-on oracle-loc oracle-loc-matched dream dream-nomem read-legs full-b read-legs-b)
+ARM_NAMES=(full no-climb no-cue scan-only anechoic tc-on oracle-loc oracle-loc-matched dream dream-nomem read-legs full-b read-legs-b ear-legs ear-legs-b)
 ARM_FLAGS=(
   ""
   "--climb-rule off"
@@ -569,6 +579,8 @@ ARM_FLAGS=(
   "--cast-policy read_legs"
   ""
   "--cast-policy read_legs"
+  "--cast-policy ear_legs"
+  "--cast-policy ear_legs"
 )
 ARM_WHY=(
   "the BASELINE: the complete system, and the row every other one is quoted against"
@@ -584,6 +596,8 @@ ARM_WHY=(
   "ADR-0029's reader: a finished leg that got louder keeps its heading and one that got quieter turns round, at READ_LEGS_T_LEG. Never deciding is full"
   "full under a second name: tonight's own repeat, so the read-legs contrast is read against tonight's noise"
   "read-legs under a second name: the repeat of the arm above"
+  "ADR-0032: an odd leg whose opening hears a side turns toward it, where full turns away. A sign of 0 is full, so silence is full"
+  "ear-legs under a second name: its in-run repeat, read beside full-b"
 )
 
 if [ -n "$WANTED_ARMS" ]; then
@@ -864,15 +878,19 @@ else
   done
 fi
 
-# ADR-0029's NIGHT, READ AS PRE-REGISTERED. Two contrasts, the two in-run repeats that are
-# their noise floor, and stage 4 -> 5 for each contrast. The loop above pairs every arm
-# against `full` alone, and its 30-line tail drops the McNemar line on a 19-scene sweep:
-# `no-tc`'s emailed report carried no p at all. So the six reads ADR-0029 names print
-# here, one line each, after everything else the readout says.
-if [ -d "$OUT_DIR/full" ] && [ -d "$OUT_DIR/read-legs" ] \
-    && [ -d "$OUT_DIR/full-b" ] && [ -d "$OUT_DIR/read-legs-b" ]; then
+# A FOUR-ARM NIGHT, READ AS PRE-REGISTERED (ADR-0029 for read-legs, ADR-0032 for ear-legs).
+# Two contrasts, the two in-run repeats that are their noise floor, and stage 4 -> 5 for
+# each contrast. The loop above pairs every arm against `full` alone, and its 30-line tail
+# drops the McNemar line on a 19-scene sweep: `no-tc`'s emailed report carried no p at all.
+# So the six reads print here, one line each, after everything else the readout says.
+for night in "read-legs ADR-0029" "ear-legs ADR-0032"; do
+  read -r treated adr <<< "$night"
+  if ! { [ -d "$OUT_DIR/full" ] && [ -d "$OUT_DIR/$treated" ] \
+      && [ -d "$OUT_DIR/full-b" ] && [ -d "$OUT_DIR/$treated-b" ]; }; then
+    continue
+  fi
   echo ""
-  echo "  --- ADR-0029's night: the six reads it pre-registers ---"
+  echo "  --- $adr's night: the six reads it pre-registers ---"
   while read -r left right given; do
     extra=""
     label="$left -> $right"
@@ -884,8 +902,8 @@ if [ -d "$OUT_DIR/full" ] && [ -d "$OUT_DIR/read-legs" ] \
     summary="$(python -m earshot.tools.episode_diff "$OUT_DIR/$left" "$OUT_DIR/$right" \
         $extra 2>&1 | grep -E '^  net |exact McNemar' | tr -s ' ' | paste -sd' ' -)"
     printf '  %-48s %s\n' "$label" "${summary:-NO READ: see the full episode_diff output}"
-  done < <(night_reads)
-fi
+  done < <(night_reads "$treated")
+done
 
 echo ""
 echo "  logs:       $OUT_DIR/<arm>-<scene>.log"
@@ -924,8 +942,10 @@ fi
 if [ "$READ_FAILED" -ne 0 ]; then
   echo ""
   echo "RED: the readout found no episode under an arm this sweep was ASKED to run,"
-  echo "     OR a read-legs arm whose leg reader never said louder or quieter. The"
-  echo "     readout above names which: look for NOT_RUN under THE LEG READER."
+  echo "     OR a read-legs arm whose leg reader never said louder or quieter, OR an"
+  echo "     ear-legs arm that never turned against full's rule or does not rebuild."
+  echo "     The readout above names which: look for NOT_RUN under THE LEG READER or"
+  echo "     THE EAR."
   echo "     Runs that produced nothing and a reader that cannot find what they produced"
   echo "     look identical from here: check $OUT_DIR/<arm>/<scene>/episodes/."
   echo "     An arm that was never requested is NOT this: --arms without \`full\` is a"

@@ -1,6 +1,7 @@
 # ADR-0032: the cast steers by the ear
 
-Status: **proposed**, 2026-10-13.
+Status: **accepted**, 2026-10-13 (PR #178), with the night's numbers as proposed.
+**Built, and the fake-world checks pass** (2026-10-13). See "How it was built". The night is not yet booked.
 Amends ADR-0016's cast at one place: the odd legs' turn. The surge, the scan, the even legs, the arrival rule and `is_rising` carry unchanged.
 **Gated on fake-world checks, then a pre-registered night.** The night's numbers below are proposed and are Sky's to set before it is booked.
 
@@ -93,6 +94,31 @@ The secondary reads qualify a branch and never pick one, under ADR-0029's drop-c
 **The liveness rule, the 7.30, and the repeat-net rule are judgment carried from ADR-0029, not derivation.**
 
 **What the night cannot say.** Whether a larger turn, or a side voted over the whole leg, would do more: the arm changes the odd-leg flip and nothing else. Anything about TC 1.
+
+## How it was built (2026-10-13)
+
+- **The arm is one condition in `cast_action`.** The odd-leg flip is skipped when `ear_legs` is set and the sign is nonzero. `ear_overrides` names exactly the openings where that changes the answer, and a test checks it against `cast_action` over every opening and sign.
+- **The decision marks the ear's turn.** `ControllerDecision.ear_turn` is set on the tick the cast chose a turn that `ear_overrides` names, and never on a surge or an arrival. The runner counts these as `ear_turns`, and as `ear_turns_followed` when the follower's own action on that tick was the same turn.
+- **The record rebuilds the arm.** `detour_report.rule_action` takes `ear_legs`, and `leg_replay` and `detour_report` read it off the record's `cast_policy`. `window_report` runs `leg_replay.episode_legs` over each ear arm's episodes and prints THE EAR: the turns, the turns followed, and the steps rebuilt. It exits 2 if the arm never turned against `full`'s rule or a step does not rebuild.
+- **The driver** gains `ear-legs` and `ear-legs-b` (`--cast-policy ear_legs`), and its closing six reads run for whichever four-arm night is on disk.
+
+**The fake-world checks.**
+
+1. **Homing.** In open floor with a right sign, the arm arrives within 60 ticks from every one of 240 random bearings at 2, 4, 6, 8 and 10 m. `full` arrives from 2 m and from none further. Its zigzag runs about 15° off the scan's aim, the bisector of the two alternating headings, and passes the source just outside the ring (inference from the walks: at 6 m abeam its nearest pass is 1.04 m).
+2. **A noisy ear, printed** (sign errors drawn independently each tick, 240 bearings per row):
+
+   | sign right | arrives within 60 ticks from | 2 m | 4 m | 6 m | 8 m | 10 m |
+   |---|---|---|---|---|---|---|
+   | 71.8% | `ear-legs` | 45.8% | 36.7% | 34.6% | 33.3% | 28.3% |
+   | | `full` | 45.8% | 16.2% | 11.2% | 7.1% | 5.8% |
+   | 66.6% | `ear-legs` | 37.9% | 29.6% | 18.3% | 21.7% | 17.9% |
+   | | `full` | 37.9% | 16.2% | 12.1% | 5.0% | 6.2% |
+
+   The arm walks less path in every row from 4 m out, because more of its walks end at the ring. Circling is not measured separately here.
+3. **Silence is `full`.** With the sign 0, the arm's actions equal `full`'s for 120 ticks at every distance.
+4. **End to end on the fake world**, a source 8 m abeam: the arm made 2 ear turns, the follower followed both, and it reached the source at step 41. `full` came no nearer than 2.22 m. `leg_replay` rebuilds the arm's record at every step, and rebuilt as `full` it does not.
+
+**What these cannot say.** They have no walls, no climb and no surge. The errors are independent, while a real room's errors are likely tied to the pose. They price the cast's geometry, not the night.
 
 ## Consequences
 

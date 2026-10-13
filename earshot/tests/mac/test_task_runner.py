@@ -4333,3 +4333,55 @@ class TestTheAblationArmsReachTheLoop(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestTheEarLegsArmEndToEnd(unittest.TestCase):
+    """ADR-0032's arm through the real loop, on the fake world, its follower and its
+    interaural cue. The fake's lateral term is the source's agent-frame side, so the sign
+    is right here at every step: this checks the arm runs as specified, not what a
+    noisy ear buys (`test_ear_legs_kinematics` prints that)."""
+
+    SOURCE = Xyz(8.0, 0.0, 0.0)  # abeam, to the right of a start facing -z
+
+    @classmethod
+    def _run(cls, cast_policy):
+        world = FakeWorld(start=Xyz(0.0, 0.0, 0.0), yaw=0.0)
+        handle = FakeAudioSensorHandle(world, cls.SOURCE)
+        episode = make_anomaly_episode(source=cls.SOURCE, t_anom=0)
+        cfg = make_config(max_steps=150, t_anom=0, cast_policy=cast_policy)
+        # A climb floor no step clears, so the cast runs and no surge restarts the scan.
+        calibration = dataclasses.replace(CALIBRATION, cue_render_scatter=1.0)
+        return run(world, handle, episode, cfg, calibration=calibration)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ear = cls._run(CastPolicy.EAR_LEGS)
+        cls.full = cls._run(CastPolicy.CAST)
+
+    def _nearest(self, result):
+        return min(math.hypot(r.position.x - self.SOURCE.x, r.position.z - self.SOURCE.z)
+                   for r in result.audit.steps if r.position is not None)
+
+    def test_the_ear_turned_and_the_follower_followed(self):
+        metrics = self.ear.audit.metrics
+        print("EAR_LEGS on the fake world: {:.0f} ear turn(s), {:.0f} followed; nearest "
+              "{:.2f} m against full's {:.2f} m; reached {} against {}".format(
+                  metrics["ear_turns"], metrics["ear_turns_followed"],
+                  self._nearest(self.ear), self._nearest(self.full),
+                  self.ear.audit.source_reached_step, self.full.audit.source_reached_step))
+        self.assertEqual(self.ear.audit.cast_policy, "ear_legs")
+        self.assertGreater(metrics["ear_turns"], 0)
+        self.assertEqual(metrics["ear_turns_followed"], metrics["ear_turns"])
+
+    def test_an_arm_that_does_not_steer_by_the_ear_records_nothing_about_it(self):
+        self.assertNotIn("ear_turns", self.full.audit.metrics)
+
+    def test_the_record_rebuilds_the_arm_and_only_with_the_arm(self):
+        from earshot.tools.leg_replay import episode_legs
+
+        replay = episode_legs(self.ear.audit, run="fake/ear-legs", scene="fake")
+        self.assertGreater(replay.n_steps_checked, 0)
+        self.assertEqual(replay.n_steps_agree, replay.n_steps_checked)
+        as_cast = dataclasses.replace(self.ear.audit, cast_policy="cast")
+        wrong = episode_legs(as_cast, run="fake/ear-legs", scene="fake")
+        self.assertLess(wrong.n_steps_agree, wrong.n_steps_checked)

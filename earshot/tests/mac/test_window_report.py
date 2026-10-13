@@ -549,6 +549,62 @@ class TestTheLegReaderIsLiveOrRed(unittest.TestCase):
         self.assertNotIn("LEG READER", "\n".join(format_arm(reading)))
 
 
+class TestTheEarIsLiveOrRed(unittest.TestCase):
+    """ADR-0032's liveness. Both arms: an ear arm that turned against `full`'s rule is
+    printed, and one that never did, or whose record the rule does not rebuild, is NOT_RUN
+    and turns the readout's exit red."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def arm_with(self, episodes, name="ear-legs"):
+        arm = pathlib.Path(self.root) / name
+        write_scene(arm, "sceneA", episodes)
+        return read_arm(str(arm), arm=name)
+
+    def _exit(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return main([self.root, "--arms", "ear-legs"])
+
+    def test_a_live_ear_is_summed_and_printed(self):
+        reading = self.arm_with([episode(metrics={"ear_turns": 3, "ear_turns_followed": 2}),
+                                 episode(metrics={"ear_turns": 1, "ear_turns_followed": 1})])
+        lines = "\n".join(format_arm(reading))
+        self.assertEqual(reading.ear_counts[:2], (4, 3))
+        self.assertFalse(reading.ear_not_run)
+        self.assertIn("THE EAR (ADR-0032): 4 opening(s) turned toward the ear", lines)
+        self.assertEqual(self._exit(), 0)
+
+    def test_an_ear_that_never_turned_is_not_run_and_red(self):
+        reading = self.arm_with([episode(metrics={"ear_turns": 0, "ear_turns_followed": 0})])
+        self.assertTrue(reading.ear_not_run)
+        self.assertIn("never turned this arm", "\n".join(format_arm(reading)))
+        self.assertEqual(self._exit(), 2)
+
+    def test_a_record_the_rule_does_not_rebuild_is_not_run_and_red(self):
+        """A detour step that recorded a forward where the rule, on a dead cue at the
+        scan's first tick, turns toward the heard side."""
+        from earshot.types import Xyz
+
+        rows = tuple(StepRecord(step=i, measured_rms=0.5, lateral_sign=1,
+                                position=Xyz(0.0, 0.0, 0.0),
+                                realizable_action="move_forward") for i in range(3))
+        spec = dict(funnel_stage=REACHED, steps=rows, cast_policy="ear_legs",
+                    metrics={"ear_turns": 2, "ear_turns_followed": 2})
+        reading = self.arm_with([spec])
+        _turns, _followed, checked, agreed = reading.ear_counts
+        self.assertLess(agreed, checked)
+        self.assertTrue(reading.ear_not_run)
+        self.assertIn("does not rebuild", "\n".join(format_arm(reading)))
+        self.assertEqual(self._exit(), 2)
+
+    def test_an_arm_that_does_not_steer_by_the_ear_says_nothing_about_it(self):
+        reading = self.arm_with([episode()], name="full")
+        self.assertIsNone(reading.ear_counts)
+        self.assertNotIn("THE EAR", "\n".join(format_arm(reading)))
+
+
 class TestTheClimbFloorIsReadOffTheCalibration(unittest.TestCase):
     """`cue_render_scatter` per arm. `no-tc` changes the renderer, so it moves the floor
     `is_rising` clears as well as the cue, and a Find-SR delta read without the floor

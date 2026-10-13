@@ -136,11 +136,15 @@ class CastPolicy(Enum):
     first, the leg that just finished keeps its heading if it got louder and turns round
     if it got quieter, at ``controller.READ_LEGS_T_LEG``. A reader that never decides is
     ``CAST``.
+    ``EAR_LEGS`` is ``CAST`` without the odd-leg flip when the ear has an answer (ADR-0032):
+    a leg whose opening hears a side turns toward it, odd or even. A sign of 0 turns as
+    ``CAST`` does, so the cast in silence is ``CAST``'s.
     """
 
     CAST = "cast"
     SCAN_ONLY = "scan_only"
     READ_LEGS = "read_legs"
+    EAR_LEGS = "ear_legs"
 
 
 class IrPolicy(Enum):

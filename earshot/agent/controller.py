@@ -94,6 +94,7 @@ __all__ = [
     "along_leg",
     "leg_t",
     "leg_verdict",
+    "ear_overrides",
     "SILENT_RETURN_M",
     "LoudestPlace",
     "loudest_place",
@@ -299,12 +300,13 @@ def realizable_investigate_step(
     climb_enabled: bool = True,
     lateral_cue_enabled: bool = True,
     leg_verdict: Optional[str] = None,
+    ear_legs: bool = False,
 ) -> str:
     """One step of realizable anomaly-source localization (ADR-0011): SURGE, or CAST.
 
     ``leg_verdict`` is ADR-0029's reading of the leg that just finished, forwarded to
     ``cast_action``. ``None`` is the arm that does not read legs, and the rule below is
-    then exactly what it was.
+    then exactly what it was. ``ear_legs`` is ADR-0032's arm, forwarded the same way.
 
     **ADR-0018's three controller arms land here, as injected parameters, never as a
     config object** (``agent/`` cannot import ``config``; see the module docstring).
@@ -484,7 +486,7 @@ def realizable_investigate_step(
         return ACT_FORWARD  # surge
     sign = int(lateral_sign) if lateral_cue_enabled else 0
     return cast_action(plateau_steps, sign, cast_steps=cast_steps, scan_steps=scan_steps,
-                       leg_verdict=leg_verdict)
+                       leg_verdict=leg_verdict, ear_legs=ear_legs)
 
 
 def _turn_toward(lateral_sign: int) -> str:
@@ -500,6 +502,7 @@ def cast_action(
     cast_steps: int = CAST_STEPS,
     scan_steps: int = SCAN_STEPS,
     leg_verdict: Optional[str] = None,
+    ear_legs: bool = False,
 ) -> str:
     """Where in the scan-then-cast cycle ``plateau_steps`` puts the agent. Pure.
 
@@ -523,6 +526,10 @@ def cast_action(
     turn) and ``LEG_QUIETER`` turns the cast round (``ACT_REVERSE``). Anything else, and
     every first leg, opens with the turn below. The alternation count is not touched, so
     a reader that never decides leaves this function exactly as it was.
+
+    ``ear_legs`` is ADR-0032's arm. An odd leg whose opening hears a side turns toward it
+    instead of away (``ear_overrides`` names those openings). A sign of 0 turns as the
+    flag unset does, so the cast in silence is unchanged.
     """
     index = max(0, int(plateau_steps))
     if index < int(scan_steps):
@@ -545,9 +552,26 @@ def cast_action(
     # alternating there would oscillate the agent on the spot, which is worse than the
     # rule being controlled against rather than equal to it.
     turn_right = int(lateral_sign) > 0
-    if int(cast_steps) and (index // period) % 2:
+    if int(cast_steps) and (index // period) % 2 and not (ear_legs and int(lateral_sign)):
         turn_right = not turn_right
     return ACT_TURN_RIGHT if turn_right else ACT_TURN_LEFT
+
+
+def ear_overrides(
+    plateau_steps: int,
+    lateral_sign: int,
+    *,
+    cast_steps: int = CAST_STEPS,
+    scan_steps: int = SCAN_STEPS,
+) -> bool:
+    """True where ADR-0032's arm turns differently from ``CAST``. Pure.
+
+    The opening of an odd leg whose sign names a side: ``CAST`` turns away from that side
+    there, and ``EAR_LEGS`` turns toward it. Everywhere else the two answer the same, which
+    is what makes this the arm's liveness count.
+    """
+    leg = leg_opening(plateau_steps, cast_steps=cast_steps, scan_steps=scan_steps)
+    return leg is not None and leg % 2 == 1 and int(lateral_sign) != 0
 
 
 def next_plateau_steps(
@@ -987,6 +1011,9 @@ class ControllerDecision:
     # chose the action: a leg's opening, on an arm that reads legs. The record carries it
     # so a replay rebuilds the rule exactly and the night can show the reader was live.
     leg_verdict: Optional[str] = None
+    # ADR-0032: true on the tick the arm turned toward the ear where `CAST` turns away
+    # (`ear_overrides`). The runner counts these, so the night can show the arm acted.
+    ear_turn: bool = False
     force_requery: bool = False
     save_primary_state: bool = False
     restore_primary_state: bool = False
@@ -1073,11 +1100,14 @@ def step_controller(
     climb_enabled: bool = True,
     lateral_cue_enabled: bool = True,
     t_leg: Optional[float] = None,
+    ear_legs: bool = False,
 ) -> Tuple[ControllerState, ControllerDecision]:
     """Advance the machine one tick. Returns ``(next_state, decision)``.
 
     ``t_leg`` is ``CastPolicy.READ_LEGS`` (ADR-0029): the critical value the leg reader
     runs at, or ``None`` for an arm that does not read legs, which is then unchanged.
+    ``ear_legs`` is ``CastPolicy.EAR_LEGS`` (ADR-0032), forwarded to the rule at both
+    places it is called.
 
     ``onset_fired`` and ``is_anomaly`` come from the audio layer: ``is_anomaly`` is True
     (anomalous, interrupt), False (benign, ignore and count it), or None (nothing
@@ -1140,6 +1170,7 @@ def step_controller(
                         cast_steps=cast_steps, scan_steps=scan_steps,
                         climb_enabled=climb_enabled,
                         lateral_cue_enabled=lateral_cue_enabled,
+                        ear_legs=ear_legs,
                     )
                     nxt = replace(nxt, plateau_steps=next_plateau_steps(
                         energy_history or [], eps=rising_eps, plateau_steps=0,
@@ -1179,6 +1210,7 @@ def step_controller(
         # not also handed to the runner to apply.
         action = None
         verdict: Optional[str] = None
+        ear_turn = False
         if realizable:
             if t_leg is not None:
                 levels, positions = _leg_buffer(
@@ -1194,6 +1226,7 @@ def step_controller(
                 climb_enabled=climb_enabled,
                 lateral_cue_enabled=lateral_cue_enabled,
                 leg_verdict=verdict,
+                ear_legs=ear_legs,
             )
             before = state.plateau_steps
             # Advanced whatever the action was, including a forward mid-leg: the count is
@@ -1203,6 +1236,12 @@ def step_controller(
                 energy_history or [], eps=rising_eps,
                 plateau_steps=state.plateau_steps,
                 climb_enabled=climb_enabled))
+            # The cast chose this action only if the plateau ran on and nothing STOPped;
+            # a surge or an arrival acted first and the ear's turn never happened.
+            ear_turn = (
+                ear_legs and action != ACT_STOP and state.plateau_steps == before + 1
+                and ear_overrides(before, lateral_sign if lateral_cue_enabled else 0,
+                                  cast_steps=cast_steps, scan_steps=scan_steps))
             if t_leg is not None:
                 # The cast chose this action only if the plateau ran on and nothing
                 # STOPped. A surge or an arrival acted first: no verdict was used, and a
@@ -1258,6 +1297,7 @@ def step_controller(
                     heading_rad=state.leg_heading_rad if action == ACT_FORWARD else None),
                 realizable_action=action,
                 leg_verdict=verdict,
+                ear_turn=ear_turn,
                 # The probe moves with the cue, so the pool is re-proposed every tick of
                 # the detour rather than on the planner's decision period. A stale probe
                 # is a place the energy reading that chose it no longer supports, and the

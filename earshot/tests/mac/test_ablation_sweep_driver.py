@@ -545,6 +545,37 @@ class TestTheReadLegsNight(unittest.TestCase):
         self.assertEqual(verdict("read-legs"), 1)
 
 
+class TestTheEarLegsNight(unittest.TestCase):
+    """ADR-0032's four arms: `full`, `ear-legs`, and each again under a second name."""
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("bash") is None:
+            raise unittest.SkipTest("no bash on PATH")
+        cls.text = DRIVER.read_text()
+        cls.flags = dict(_select_arms(cls.text, "full ear-legs full-b ear-legs-b"))
+
+    def _config(self, arm):
+        from earshot.__main__ import build_parser, config_from_args
+
+        argv = ["--run-dir", "runs/x"] + self.flags[arm].split()
+        return config_from_args(build_parser().parse_args(argv))
+
+    def test_the_four_arms_select_in_order(self):
+        self.assertEqual(list(self.flags), ["full", "ear-legs", "full-b", "ear-legs-b"])
+
+    def test_the_repeat_carries_exactly_its_originals_flags(self):
+        self.assertEqual(self.flags["ear-legs-b"], self.flags["ear-legs"])
+
+    def test_ear_legs_differs_from_full_in_the_cast_policy_alone(self):
+        from earshot.config import CastPolicy
+
+        full, ear = self._config("full"), self._config("ear-legs")
+        self.assertIs(ear.cast_policy, CastPolicy.EAR_LEGS)
+        self.assertEqual(dataclasses.replace(ear, cast_policy=full.cast_policy), full)
+        print("ear-legs reaches the runner as {}".format(ear.cast_policy))
+
+
 class TestTheNightReadsAsPreRegistered(unittest.TestCase):
     """ADR-0029's six reads, printed one line each so they survive the emailed tail.
 
@@ -562,32 +593,38 @@ class TestTheNightReadsAsPreRegistered(unittest.TestCase):
             raise unittest.SkipTest("no bash on PATH")
         cls.text = DRIVER.read_text()
 
-    def _reads(self):
+    def _reads(self, arm):
         function = extract_function(self.text, "night_reads")
-        done = subprocess.run(["bash", "-c", "{}\nnight_reads".format(function)],
+        done = subprocess.run(["bash", "-c", '{}\nnight_reads "$1"'.format(function), "_", arm],
                               capture_output=True, text=True, check=True)
         return [tuple(line.split()) for line in done.stdout.splitlines()]
 
     def test_the_six_reads_in_the_pre_registered_order(self):
-        self.assertEqual(self._reads(), [
-            ("full", "read-legs", "-"),
-            ("full-b", "read-legs-b", "-"),
-            ("full", "full-b", "-"),
-            ("read-legs", "read-legs-b", "-"),
-            ("full", "read-legs", "INVESTIGATE_ENTERED"),
-            ("full-b", "read-legs-b", "INVESTIGATE_ENTERED"),
-        ])
+        for arm in ("read-legs", "ear-legs"):
+            self.assertEqual(self._reads(arm), [
+                ("full", arm, "-"),
+                ("full-b", arm + "-b", "-"),
+                ("full", "full-b", "-"),
+                (arm, arm + "-b", "-"),
+                ("full", arm, "INVESTIGATE_ENTERED"),
+                ("full-b", arm + "-b", "INVESTIGATE_ENTERED"),
+            ])
 
     def test_every_read_names_real_arms_and_a_real_stage(self):
         from earshot.report.audit import FunnelStage
 
         line = next(r for r in self.text.splitlines() if r.startswith("ARM_NAMES=("))
         names = set(line[len("ARM_NAMES=("):].rstrip(")").split())
-        for left, right, given in self._reads():
-            self.assertIn(left, names)
-            self.assertIn(right, names)
-            if given != "-":
-                FunnelStage[given]
+        for arm in ("read-legs", "ear-legs"):
+            for left, right, given in self._reads(arm):
+                self.assertIn(left, names)
+                self.assertIn(right, names)
+                if given != "-":
+                    FunnelStage[given]
+
+    def test_both_nights_are_read_at_the_end(self):
+        self.assertIn('for night in "read-legs ADR-0029" "ear-legs ADR-0032"; do', self.text)
+        self.assertIn('done < <(night_reads "$treated")', self.text)
 
     def test_the_summary_line_carries_the_net_and_the_p(self):
         from earshot.tools.episode_diff import format_report, mcnemar, pair_episodes
