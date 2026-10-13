@@ -90,6 +90,7 @@ __all__ = [
     "Silence",
     "SilentRun",
     "episode_silence",
+    "scene_audio",
     "load_run",
     "fit_reach_curve",
     "reach_probability",
@@ -273,6 +274,26 @@ def _label(path: pathlib.Path) -> str:
     return "/".join(path.resolve().parts[-2:])
 
 
+def scene_audio(scene_dir: pathlib.Path) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The scene's recorded ``AudioConfig``, or why it cannot be read as a TC-0 render.
+
+    ``env_report.json``'s ``run_config.audio``, which the runner writes per scene
+    directory before any episode. A render whose ``temporal_coherence`` is not exactly
+    ``False`` is refused, ``None`` included: that is a record from before ADR-0030 made
+    the value explicit, and it rendered with the key on.
+    """
+    report = scene_dir / ENV_REPORT_NAME
+    if not report.is_file():
+        return None, ("{} is missing, so the scene's render cannot be confirmed as TC 0"
+                      .format(report))
+    audio = json.loads(report.read_text(encoding="utf-8"))["run_config"]["audio"]
+    if audio.get("temporal_coherence") is not False:
+        return None, ("{} rendered with temporal_coherence {!r}. The reader takes `full`'s "
+                      "rule at TC 0 alone".format(scene_dir.name,
+                                                  audio.get("temporal_coherence")))
+    return dict(audio), ""
+
+
 def load_run(arm_dir: str) -> SilentRun:
     """Every episode under one arm's directory, or the reasons the run is refused."""
     from earshot.task.smoke import episode_indices
@@ -294,17 +315,9 @@ def load_run(arm_dir: str) -> SilentRun:
         indices = episode_indices(str(scene_dir))
         if not indices:
             continue  # a zero-yield scene: nothing to read and nothing to refuse
-        report = scene_dir / ENV_REPORT_NAME
-        if not report.is_file():
-            refusals.append(
-                "{} is missing, so the scene's render cannot be confirmed as TC 0 and "
-                "its bed tolerance is unknown".format(report))
-            continue
-        audio = json.loads(report.read_text(encoding="utf-8"))["run_config"]["audio"]
-        if audio.get("temporal_coherence") is not False:
-            refusals.append(
-                "{} rendered with temporal_coherence {!r}. ADR-0031's gate reads `full`'s "
-                "rule at TC 0 alone".format(scene_dir.name, audio.get("temporal_coherence")))
+        audio, why = scene_audio(scene_dir)
+        if audio is None:
+            refusals.append(why)
             continue
         tolerance = audio.get("pre_onset_rms_tol")
         if tolerance is None:
