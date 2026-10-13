@@ -5102,3 +5102,84 @@ The next candidate ADR-0029 names is the silent half of the detour: where the so
 - Which verdict did what. LOUDER and QUIETER acted together, so a gain from one and a loss from the other would read as this null.
 - Whether anything moved in the sounding half of the detour. `legs_*` are per episode.
 - Anything about TC 1. All four arms render at TC 0.
+
+## ADR-0031's gate: STOP (`silent_replay`, 2026-10-13)
+
+`python -m earshot.tools.silent_replay runs/no-tc/no-tc runs/regate-a/no-tc runs/regate-b/no-tc runs/legs-1/full runs/legs-1/full-b` on riftvm, after PR #174 merged.
+Read under ADR-0031's pre-registration, accepted in PR #173 before the tool read a run.
+
+### What was read
+
+| run | episodes | eligible | no detour | no route at the detour's start | detector never fired |
+|---|---|---|---|---|---|
+| `no-tc/no-tc` | 282 | 189 | 10 | 6 | 77 |
+| `regate-a/no-tc` | 282 | 191 | 11 | 6 | 74 |
+| `regate-b/no-tc` | 282 | 187 | 11 | 6 | 78 |
+| `legs-1/full` | 282 | 190 | 12 | 6 | 74 |
+| `legs-1/full-b` | 282 | 185 | 12 | 6 | 79 |
+
+No episode failed the rule check, so every detour read is the rule that ran.
+"Detector never fired" is a detour that ended before the source had been silent for one whole loop.
+
+### The branch: STOP
+
+| test | result | threshold |
+|---|---|---|
+| price, pooled | **+1.68 points** (runs +1.47 to +1.87) | 7.30 |
+| loudest place nearer, pooled | 410 of 540 informative = 75.9% | 75% |
+| loudest place nearer, worst run | 71 of 101 = 70.3% (`regate-b`) | 70% |
+| eligible per run | 185 to 191 | 100 |
+| reaches after the detector fired, fitted | 122 of 939 | 30 |
+| false fires | 3 of 942 fires, at most 1 per run | 10% |
+
+**The loudest place is nearer, by a small margin, and the return is worth far less than a night can see.**
+Accuracy passes by 0.9 points pooled and by 0.3 in the worst run.
+The price fails by more than four times, and it is optimistic: it does not charge the return's steps, and it credits the restarted cast with what a cast that silence found at that distance reached.
+
+The detector works as built. It fired a median 5 steps after the offset step in every run, and on a sounding source 3 times in 942.
+
+### Why the price is small: the silent cast reaches little from anywhere
+
+| route when the detector fired | eligible | reached after it fired | `d_end − d_off`, median |
+|---|---|---|---|
+| under 2 m | 99 | 28% | +2.53 m |
+| 2 to 3 m | 76 | 20% | +2.21 m |
+| 3 to 5 m | 188 | 22% | +1.12 m |
+| 5 to 8 m | 221 | 10% | +0.48 m |
+| 8 m and over | 358 | 5% | −1.06 m |
+
+The fitted curve is 27.5% at 1.5 m, 18.2% at 4 m and 5.9% at 10 m.
+A return of 2.69 m (median, straight line) moves the cast's reach chance by a few points, and the loudest place is only 0.54 m nearer by route at the median over all eligible episodes.
+**From near the source the silent cast walks away.** From under 2 m, the detour ends a median 2.53 m farther than where the detector fired.
+
+### THE SPLIT: most detours never came near while the source sounded
+
+Rows are the nearest the detour came, up to the step the detector fired. Columns are where it was on that step. Pooled over 942 eligible episode-renders, the detours that had not reached the source when it stopped.
+
+| nearest | under 2 m | 2 to 3 m | 3 to 5 m | 5 to 8 m | 8 m and over | total |
+|---|---|---|---|---|---|---|
+| under 2 m | 99 | 19 | 29 | 28 | 11 | 186 (19.7%) |
+| 2 to 3 m | | 57 | 36 | 28 | 11 | 132 (14.0%) |
+| 3 to 5 m | | | 123 | 54 | 25 | 202 (21.4%) |
+| 5 to 8 m | | | | 111 | 111 | 222 (23.6%) |
+| 8 m and over | | | | | 200 | 200 (21.2%) |
+
+- **590 of 942 (62.6%) are on the diagonal.** Silence found the agent in the band of the nearest it had come. Those detours did not come near and leave. They stopped getting nearer.
+- **68 of 942 (7.2%) came within 2 m and were 3 m or more away when the detector fired.** That is the case ADR-0031 is for. It is 143 (15.2%) if "near" is 3 m.
+- **422 of 942 (44.8%) never came within 5 m of route before the detector fired**, which is the 60 sounding steps and about 5 more.
+
+**The loss is mostly in the sounding half.**
+The silent half has a small case to win (7.2% came near and left) and a cast that converts little even from near the source (28% from under 2 m).
+
+### What follows (ADR-0031)
+
+The arm is not built, and no night is booked.
+`loudest_place` and `back_at_bed` stay in `agent/controller.py` as the replay's functions, with no caller in the rule.
+The next question is in the sounding half: why 44.8% of the detours that had not arrived never came within 5 m of the source while it sounded.
+60 forwards are 15 m of path at most, so the route at the detour's start is the first thing to read beside the nearest approach. That is read-only, and it comes before any ADR.
+
+**What this cannot say.**
+
+- The price is a model of a restarted cast. No arm walked a return.
+- `d_min` is the route at a pose the agent visited. It says the agent came near, not that it knew.
+- Five renders of one set of 282 episodes, not five sets.
