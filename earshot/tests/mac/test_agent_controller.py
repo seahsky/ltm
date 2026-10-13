@@ -1270,3 +1270,64 @@ class TestTheOffsetDetector(unittest.TestCase):
 
     def test_the_return_radius_is_adr_0031s(self):
         self.assertEqual(SILENT_RETURN_M, 1.0)
+
+
+class TestTheEarLegs(unittest.TestCase):
+    """ADR-0032's arm in `cast_action`: an odd leg that hears a side turns toward it."""
+
+    OPEN = [SCAN_STEPS + k * (1 + CAST_STEPS) for k in range(4)]  # legs 0..3 open here
+
+    def turns(self, sign, *, ear_legs):
+        return [cast_action(p, sign, ear_legs=ear_legs) for p in self.OPEN]
+
+    def test_cast_turns_away_from_the_heard_side_on_odd_legs(self):
+        self.assertEqual(self.turns(+1, ear_legs=False),
+                         [ACT_TURN_RIGHT, ACT_TURN_LEFT, ACT_TURN_RIGHT, ACT_TURN_LEFT])
+
+    def test_the_ear_turns_every_leg_toward_the_heard_side(self):
+        self.assertEqual(self.turns(+1, ear_legs=True), [ACT_TURN_RIGHT] * 4)
+        self.assertEqual(self.turns(-1, ear_legs=True), [ACT_TURN_LEFT] * 4)
+
+    def test_a_sign_of_zero_turns_as_cast_does(self):
+        """Silence: the bed is diotic, so the sign is 0, and a polygon of left turns is
+        what the arm would trace if 0 meant "left" here."""
+        self.assertEqual(self.turns(0, ear_legs=True), self.turns(0, ear_legs=False))
+        self.assertEqual(self.turns(0, ear_legs=True),
+                         [ACT_TURN_LEFT, ACT_TURN_RIGHT, ACT_TURN_LEFT, ACT_TURN_RIGHT])
+
+    def test_the_scan_the_forwards_and_scan_only_are_untouched(self):
+        for p in list(range(SCAN_STEPS)) + [SCAN_STEPS + 1, SCAN_STEPS + 5]:
+            for sign in (-1, 0, 1):
+                self.assertEqual(cast_action(p, sign, ear_legs=True),
+                                 cast_action(p, sign, ear_legs=False), (p, sign))
+        for p in range(20):
+            self.assertEqual(cast_action(p, 1, cast_steps=0, ear_legs=True),
+                             cast_action(p, 1, cast_steps=0, ear_legs=False))
+
+    def test_ear_overrides_names_exactly_the_openings_that_differ(self):
+        from earshot.agent.controller import ear_overrides
+
+        for p in range(SCAN_STEPS + 4 * (1 + CAST_STEPS)):
+            for sign in (-1, 0, 1):
+                differs = (cast_action(p, sign, ear_legs=True)
+                           != cast_action(p, sign, ear_legs=False))
+                self.assertEqual(ear_overrides(p, sign), differs, (p, sign))
+        self.assertFalse(ear_overrides(SCAN_STEPS + 1 + CAST_STEPS, 1, cast_steps=0))
+
+    def test_the_decision_marks_the_ears_turn(self):
+        """Through `step_controller`: the tick that opens leg 1 with a sign records the
+        ear's turn, and the same tick without the arm does not."""
+        cfg = ControllerConfig()
+        pose = Pose(position=Xyz(0.0, 0.0, 0.0), yaw_rad=0.0)
+        flat = [0.5] * 12
+        for ear_legs, expect in ((True, True), (False, False)):
+            state = ControllerState(primary_goal="chair", active_goal="sofa",
+                                    mode=NavMode.INVESTIGATE,
+                                    plateau_steps=SCAN_STEPS + 1 + CAST_STEPS)
+            _, decision = step_controller(
+                state, cfg, onset_fired=True, is_anomaly=True, primary_goal_reached=False,
+                energy_history=flat, lateral_sign=1, pose=pose, rising_eps=1.0,
+                ear_legs=ear_legs)
+            self.assertEqual(decision.ear_turn, expect)
+            self.assertEqual(decision.realizable_action,
+                             ACT_TURN_RIGHT if ear_legs else ACT_TURN_LEFT)

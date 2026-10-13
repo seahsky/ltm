@@ -89,12 +89,13 @@ nrun bash earshot/tools/window_pilot.sh --tag <fresh-tag>
 python -m earshot.tools.window_report runs/<tag>
 
 # THE OVERNIGHT SWEEP: the paper's HM3D baseline and the ablation table, in one run.
-# THIRTEEN arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
+# FIFTEEN arms by default. `full` is the baseline of record (ADR-0021); `no-climb`,
 # `no-cue`, `scan-only` and `anechoic` each remove one component; `tc-on` turns the
 # render preset's `temporalCoherence` back on (the pre-ADR-0030 render) and is not an
 # agent component; `dream` and `dream-nomem` are the memory pair (ADR-0025) and differ
 # in `lambda_memory` alone; `read-legs` is ADR-0029's reader, and `full-b` and
-# `read-legs-b` are the same flags under a second name for its night's in-run repeat.
+# `read-legs-b` are the same flags under a second name for its night's in-run repeat;
+# `ear-legs` is ADR-0032's arm, with `ear-legs-b` its repeat.
 # `oracle-loc` and `oracle-loc-matched` are CEILINGS and not ablations -- they ADD the
 # source coordinate. Difference only the MATCHED one against `full`: `oracle-1` measured
 # the other at 94.3% source-reached and 2 of 270 Find-SR@1m out of one arm, because it
@@ -268,6 +269,16 @@ python -m earshot.tools.silent_replay runs/no-tc/no-tc runs/regate-a/no-tc \
 # steering by the ear for the whole sounding window, under its own ADR and gate
 python -m earshot.tools.sounding_replay runs/no-tc/no-tc runs/regate-a/no-tc \
   runs/regate-b/no-tc runs/legs-1/full runs/legs-1/full-b
+
+# ADR-0032's NIGHT: EAR_LEGS against `full`, each twice in the same run. ~7 h 36 m.
+# `ear-legs` is `full`'s cast without the odd-leg flip when the ear names a side: an odd
+# leg that hears a side turns TOWARD it, where `full` turns away. A sign of 0 is `full`,
+# so silence is `full`. Same five branches and six one-line reads as ADR-0029's night,
+# MDE 7.30. LIVENESS first: `window_report` prints THE EAR per arm and exits 2 if an ear
+# arm never turned against `full`'s rule or its record does not rebuild step by step.
+# Before the box: `test_ear_legs_kinematics` prints homing and circling in open floor
+nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
+  --arms "full ear-legs full-b ear-legs-b"
 
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print

@@ -120,6 +120,20 @@ class ArmReading:
     # and legs left unread after a reversal. `None` on an arm whose episodes carry none of
     # it, which is every arm that does not read legs.
     leg_counts: Optional[Tuple[int, int, int, int, int]]
+    # ADR-0032's liveness, summed over the arm: openings where the ear turned the arm
+    # against `CAST`'s rule, how many of those the follower turned that way, and the
+    # rule rebuilt from the record (detour steps checked, steps that agree). `None` on
+    # every arm that does not steer by the ear.
+    ear_counts: Optional[Tuple[int, int, int, int]] = None
+
+    @property
+    def ear_not_run(self) -> bool:
+        """An ear arm that never turned against `CAST`, or whose record the rule does not
+        rebuild. NOT_RUN either way: the arm did not run as ADR-0032 specifies it."""
+        if self.ear_counts is None:
+            return False
+        turns, _followed, checked, agreed = self.ear_counts
+        return turns == 0 or agreed != checked
 
     @property
     def reader_never_decided(self) -> bool:
@@ -341,6 +355,7 @@ def read_arm(arm_dir: str, *, arm: str) -> ArmReading:
         cue_render_scatters=scatters,
         n_cue_render_scatter_absent=len(audits) - len(scatters),
         leg_counts=_leg_counts(audits),
+        ear_counts=_ear_counts(audits),
     )
 
 
@@ -356,6 +371,27 @@ def _leg_counts(audits: Sequence[EpisodeAudit]) -> Optional[Tuple[int, int, int,
         sum(int(_metric(audit, key) or 0) for audit in carrying) for key in LEG_KEYS
     )
     return read, louder, quieter, inconclusive, unread
+
+
+def _ear_counts(audits: Sequence[EpisodeAudit]) -> Optional[Tuple[int, int, int, int]]:
+    """ADR-0032's liveness over the episodes that carried it, or ``None`` if none did.
+
+    The rebuild is ``leg_replay.episode_legs``'s step-by-step check, the one that read
+    every `full` detour exact, run with the record's own ``cast_policy``.
+    """
+    from earshot.tools.leg_replay import episode_legs
+
+    carrying = [audit for audit in audits if "ear_turns" in audit.metrics]
+    if not carrying:
+        return None
+    turns = sum(int(_metric(audit, "ear_turns") or 0) for audit in carrying)
+    followed = sum(int(_metric(audit, "ear_turns_followed") or 0) for audit in carrying)
+    checked = agreed = 0
+    for audit in carrying:
+        replay = episode_legs(audit, run="", scene="")
+        checked += replay.n_steps_checked
+        agreed += replay.n_steps_agree
+    return turns, followed, checked, agreed
 
 
 def read_sweep(root: str, *, arms: Sequence[str] = PILOT_ARMS) -> Tuple[ArmReading, ...]:
@@ -556,6 +592,23 @@ def format_arm(reading: ArmReading) -> List[str]:
                 "  {:11s}     NOT_RUN: the reader said louder or quieter on no leg, so this "
                 "arm cast exactly as `full`. A null here is not a result".format("")
             )
+    if reading.ear_counts is not None:
+        turns, followed, checked, agreed = reading.ear_counts
+        lines.append(
+            "  {:11s}   THE EAR (ADR-0032): {} opening(s) turned toward the ear where "
+            "`full` turns away; the follower turned that way on {}; the rule rebuilt from "
+            "the record on {} of {} detour step(s)".format(
+                "", turns, followed, agreed, checked
+            )
+        )
+        if reading.ear_not_run:
+            lines.append(
+                "  {:11s}     NOT_RUN: {}. A null here is not a result".format(
+                    "",
+                    "the ear never turned this arm against `full`'s rule" if turns == 0
+                    else "the record does not rebuild the rule this arm ran",
+                )
+            )
     if reading.ablation_arms:
         lines.append(
             "  {:11s}   arms: {}".format("", "; ".join(reading.ablation_arms))
@@ -610,9 +663,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # `pilot-1` announced three dead arms and let the driver print its summary anyway.
     if not any(reading.n_episodes for reading in readings):
         return 1
-    # And when a leg-reading arm never decided: NOT_RUN is red, and the driver reads this
-    # exit code, so the night ends red rather than quoting that arm's delta.
-    return 2 if any(reading.reader_never_decided for reading in readings) else 0
+    # And when a leg-reading arm never decided, or an ear arm never acted or does not
+    # rebuild: NOT_RUN is red, and the driver reads this exit code, so the night ends red
+    # rather than quoting that arm's delta.
+    return 2 if any(reading.reader_never_decided or reading.ear_not_run
+                    for reading in readings) else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

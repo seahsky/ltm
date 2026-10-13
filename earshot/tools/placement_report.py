@@ -82,6 +82,7 @@ ANCHOR_METRIC = "source_at_class_anchor"
 ABLATION_ARMS = (
     "full", "no-climb", "no-cue", "scan-only", "anechoic", "tc-on", "oracle-loc",
     "oracle-loc-matched", "dream", "dream-nomem", "read-legs", "full-b", "read-legs-b",
+    "ear-legs", "ear-legs-b",
 )
 
 # The label for an episode whose audit carries no `scene_id`. Not a scene, and not folded

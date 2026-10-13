@@ -1135,6 +1135,10 @@ def run_episode(
     # chose. `None` is every other arm, and the controller is then unchanged.
     t_leg = READ_LEGS_T_LEG if cfg.cast_policy is CastPolicy.READ_LEGS else None
     check_read_legs_render(cfg)
+    # ADR-0032's arm: odd legs turn toward the ear when it names a side. False is every
+    # other arm, and the controller is then unchanged.
+    ear_legs = cfg.cast_policy is CastPolicy.EAR_LEGS
+    ear_turns = ear_turns_followed = 0
     labeler = room_labeler if room_labeler is not None else NullRoomLabeler()
     say = progress if progress is not None else (lambda _message: None)
 
@@ -1607,6 +1611,7 @@ def run_episode(
             climb_enabled=climb_enabled,
             lateral_cue_enabled=lateral_cue_enabled,
             t_leg=t_leg,
+            ear_legs=ear_legs,
         )
         # SWS's numerator, captured here and NOT in the controller. `state.investigated`
         # flips exactly once, in both localization arms, and the runner already holds the
@@ -1851,6 +1856,12 @@ def run_episode(
                 leg_verdict=decision.leg_verdict,
             )
         )
+        if decision.ear_turn:
+            # ADR-0032's liveness: the ear turned the arm where `CAST` turns away, and
+            # whether the follower's own action on that tick was the same turn. A
+            # follower that answered with a forward made the ear's turn a no-op.
+            ear_turns += 1
+            ear_turns_followed += int(action == decision.realizable_action)
         # `a_{t-1}` for the NEXT step's `e_t` (eq. 5). Set here rather than beside the
         # action so it is the action actually RECORDED -- `_steer` can return `None`, and
         # a step that took no action must carry `None` forward rather than repeating the
@@ -2042,6 +2053,10 @@ def run_episode(
         metrics["legs_quieter"] = float(verdicts.count(LEG_QUIETER))
         metrics["legs_inconclusive"] = float(verdicts.count(LEG_INCONCLUSIVE))
         metrics["legs_unread"] = float(verdicts.count(LEG_UNREAD))
+    if ear_legs:
+        # ADR-0032's liveness, absent on every other arm, and absent is not zero.
+        metrics["ear_turns"] = float(ear_turns)
+        metrics["ear_turns_followed"] = float(ear_turns_followed)
     if onset.fired and onset.onset_step is not None:
         # THE NUMBER ADR-0017'S OPEN DURATION QUESTION IS DECIDED ON. A window has to
         # outlast this delay or the episode can never hear the source at all, so one

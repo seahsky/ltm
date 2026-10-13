@@ -401,7 +401,8 @@ def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
     agree = [
         rec == ACT_STOP
         or rule_action(flag, r.lateral_sign, plateau_steps=count,
-                       leg_verdict=r.leg_verdict) == rec
+                       leg_verdict=r.leg_verdict,
+                       ear_legs=audit.cast_policy == CastPolicy.EAR_LEGS.value) == rec
         for r, flag, count, rec in zip(rows, flags, counts, recorded)
     ]
     checked = sum(1 for rec in recorded if rec != ACT_STOP)
