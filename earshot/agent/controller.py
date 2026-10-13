@@ -94,6 +94,10 @@ __all__ = [
     "along_leg",
     "leg_t",
     "leg_verdict",
+    "SILENT_RETURN_M",
+    "LoudestPlace",
+    "loudest_place",
+    "back_at_bed",
     "realizable_investigate_step",
     "realizable_investigate_probe",
     "is_diverting",
@@ -702,6 +706,103 @@ def leg_verdict(t: Optional[float], *, t_leg: float) -> str:
     if float(t) < -bar:
         return LEG_QUIETER
     return LEG_INCONCLUSIVE
+
+
+# provenance: fake -- ADR-0031's return radius, judgment and not derivation. Within it the
+# agent counts as standing at its loudest place: it does not return, and the arm is `full`
+# step for step. Horizontal distance between two of the agent's own positions.
+SILENT_RETURN_M = 1.0
+
+
+@dataclass(frozen=True)
+class LoudestPlace:
+    """ADR-0031: the loudest stretch of the detour so far, and where the agent stood.
+
+    ``mean`` is one whole loop's mean reading, ``position`` the agent's own position at
+    the window's middle step, and ``step`` that step's number, in whatever numbering the
+    caller's ``last_step`` used.
+    """
+
+    mean: float
+    position: Xyz
+    step: int
+
+
+def loudest_place(
+    kept: Optional[LoudestPlace],
+    levels: Sequence[float],
+    positions: Sequence[Xyz],
+    *,
+    last_step: int,
+    folds: int,
+) -> Optional[LoudestPlace]:
+    """ADR-0031's tracker: ``kept``, or the window ending at ``last_step`` if louder. Pure.
+
+    The window is the last ``folds`` of ``levels`` and ``positions``, which are the
+    detour's own readings and the positions they were taken at. ``folds`` is the clip's
+    loop length in steps (``CalibrationRecord.cue_phase_folds``), so the window's mean
+    spans one whole loop and the loop's phase cancels in it.
+
+    Fewer than ``folds`` readings is no window yet, and ``kept`` comes back unchanged. A
+    window replaces ``kept`` only if its mean is strictly higher, so a tie keeps the
+    earlier place. The position is the one at index ``folds // 2`` of the window.
+
+    A turn in place changes the level at a fixed position, so the loudest place can be a
+    heading the agent faced and not a place it stood. Nothing here corrects for that; the
+    gate's accuracy test measures the net result.
+    """
+    period = int(folds)
+    if period < 1:
+        raise ValueError(
+            "a loop is at least one reading long, got folds {}. A window of none would "
+            "have no mean".format(folds))
+    if len(levels) != len(positions):
+        raise ValueError(
+            "one position per reading: got {} level(s) and {} position(s)".format(
+                len(levels), len(positions)))
+    if len(levels) < period:
+        return kept
+    window = [float(v) for v in levels[-period:]]
+    mean = sum(window) / period
+    if kept is not None and not mean > kept.mean:
+        return kept
+    middle = period // 2
+    return LoudestPlace(
+        mean=mean,
+        position=positions[-period:][middle],
+        step=int(last_step) - (period - 1) + middle,
+    )
+
+
+def back_at_bed(
+    levels: Sequence[float], *, bed_level: float, tolerance: float, folds: int
+) -> bool:
+    """ADR-0031's offset detector: True when one whole loop reads the bed again. Pure.
+
+    ``levels`` are the detour's own readings. ``bed_level`` is the agent's own last
+    reading before the sound began (``OnsetRecord.pre_onset_rms``), and ``tolerance`` is
+    relative to it, as ``onset.observe_step``'s check of the same level is. With a zero
+    bed the relative bound is vacuous, so ``tolerance`` is read as absolute, as there.
+
+    The last ``folds`` readings must each be inside the bound: one whole loop, so a quiet
+    fold of a sounding clip does not read as silence. It is NOT "under ``onset_rms``".
+    That threshold sits between the bed and the source's low level across the calibration
+    poses, so a sounding source heard from far away reads under it, and that rule would
+    call far silent. A source too faint to lift the reading by ``tolerance`` still reads
+    as silent here; the gate counts how often that happens.
+    """
+    period = int(folds)
+    if period < 1:
+        raise ValueError(
+            "a loop is at least one reading long, got folds {}. A detector over no "
+            "readings would fire on the detour's first step".format(folds))
+    if float(tolerance) < 0.0:
+        raise ValueError("a tolerance cannot be negative, got {}".format(tolerance))
+    if len(levels) < period:
+        return False
+    bed = float(bed_level)
+    allowed = abs(bed) * float(tolerance) if bed != 0.0 else float(tolerance)
+    return all(abs(float(v) - bed) <= allowed for v in levels[-period:])
 
 
 def realizable_investigate_probe(

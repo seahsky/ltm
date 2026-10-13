@@ -176,6 +176,7 @@ __all__ = [
     "Leg",
     "EpisodeReplay",
     "RunReplay",
+    "detour_steps",
     "episode_legs",
     "load_run",
     "score",
@@ -363,7 +364,7 @@ def _share(numerator: int, denominator: int) -> Optional[float]:
     return (float(numerator) / float(denominator)) if denominator else None
 
 
-def _detour(audit: EpisodeAudit) -> List[int]:
+def detour_steps(audit: EpisodeAudit) -> List[int]:
     """Indices into ``audit.steps`` of the detour, where the realizable rule ran.
 
     The first step that recorded ``realizable_action`` is the tick that opened the
@@ -382,7 +383,7 @@ def _detour(audit: EpisodeAudit) -> List[int]:
 
 def episode_legs(audit: EpisodeAudit, *, run: str, scene: str) -> EpisodeReplay:
     """Every cast leg the episode's detour started, classified and measured. Pure."""
-    detour = _detour(audit)
+    detour = detour_steps(audit)
     scatter = None if audit.calibration is None else audit.calibration.cue_render_scatter
     if not detour:
         return EpisodeReplay((), 0, 0, False, scatter is not None)
