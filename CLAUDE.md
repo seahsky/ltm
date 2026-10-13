@@ -259,7 +259,12 @@ python -m earshot.tools.silent_replay runs/no-tc/no-tc runs/regate-a/no-tc \
 # source is on, at every sounding detour step). The cast reads that sign in one scan and
 # one turn and then ignores it; `abl-2` priced that one use at 14.9 pts. The audit has no
 # heading, so it is rebuilt from forwards that moved plus 30-degree turns, and a step is
-# graded only between two forwards the turns agree with. Read-only, no GPU
+# graded only between two forwards the turns agree with. Read-only, no GPU.
+# RAN 2026-10-13: STEERING IS THE LIMIT, NOT THE CLOCK. 85 of 1,324 detours (6.4%) were out
+# of time; 357 of the 442 that never came within 5 m had it. The detour falls off at 8 m:
+# from 8 to 12 m, 315 of 316 had time and 11 arrived. THE EAR IS RIGHT 71.8% (66.6% at
+# 8 m+, 66.9% around a wall; 0 of 69,971 heading pairs disagree). The candidate is
+# steering by the ear for the whole sounding window, under its own ADR and gate
 python -m earshot.tools.sounding_replay runs/no-tc/no-tc runs/regate-a/no-tc \
   runs/regate-b/no-tc runs/legs-1/full runs/legs-1/full-b
 

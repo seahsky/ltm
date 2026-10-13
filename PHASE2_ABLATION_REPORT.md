@@ -5183,3 +5183,56 @@ The next question is in the sounding half: why 44.8% of the detours that had not
 - The price is a model of a restarted cast. No arm walked a return.
 - `d_min` is the route at a pose the agent visited. It says the agent came near, not that it knew.
 - Five renders of one set of 282 episodes, not five sets.
+
+## The sounding half: the clock and the ear (`sounding_replay`, 2026-10-13)
+
+`python -m earshot.tools.sounding_replay runs/no-tc/no-tc runs/regate-a/no-tc runs/regate-b/no-tc runs/legs-1/full runs/legs-1/full-b` on riftvm, after PR #176 merged.
+**Not a gate.** It asks what ADR-0031's STOP left open: why most detours never came near the source while it sounded.
+1,324 detours read over five renders (264 to 266 per run), each with a route at its start.
+
+### The clock: steering is the limit, not the sounding window
+
+"Out of time" means the route at the detour's start, less the 1 m ring, needs more forwards than the steps the source sounded. It charges no turn and no wall, so it is optimistic for the agent.
+
+| route at the detour's start | detours | reached while sounding | out of time | nearest while sounding, median |
+|---|---|---|---|---|
+| under 3 m | 130 | 92 (70.8%) | 0 | 1.13 m |
+| 3 to 5 m | 280 | 144 (51.4%) | 0 | 1.21 m |
+| 5 to 8 m | 405 | 115 (28.4%) | 0 | 2.28 m |
+| 8 to 12 m | 316 | 11 (3.5%) | 1 (0.3%) | 5.63 m |
+| 12 m and over | 193 | 0 | 84 (43.5%) | 10.39 m |
+
+- **85 of 1,324 detours (6.4%) were out of time.** Every run reads 6.0% to 7.1%.
+- **442 never came within 5 m while it sounded, and 357 of them (80.8%) had the time.**
+- **The detour falls off at 8 m.** From 8 to 12 m, 315 of 316 detours had time and 11 arrived. Their nearest approach is a median 5.63 m: a few metres of an 8 to 12 m gap closed in 60 steps.
+- 509 detours (38.4%) start 8 m or more from the source, and 11 of them (2.2%) arrived while it sounded.
+
+### The ear: the left/right cue is right about 72% of the time
+
+Each sounding detour step with a confirmed heading, graded against the side the source was on by straight line. 50% is chance.
+The heading was rebuilt from 69,971 pairs of forwards, and none disagreed with the turns recorded between them.
+
+| | steps | right |
+|---|---|---|
+| pooled | 64,647 | **71.8%** (runs 71.4% to 72.2%) |
+| under 2 m | 5,647 | 72.0% |
+| 2 to 4 m | 19,407 | 75.1% |
+| 4 to 8 m | 27,645 | 71.7% |
+| 8 m and over | 11,948 | 66.6% |
+| route at most 1.2x the line | 44,221 | 74.1% |
+| around a wall | 20,426 | 66.9% |
+
+The sign was 0 (heard nothing) on 13 steps of 64,647.
+
+### What this says
+
+**The cue carries the side, and the controller does not use it after its first leg.** The cast reads the sign in its scan and at its first leg's turn, and then alternates by rule for the rest of the detour. `abl-2` priced that one use at 14.9 points (`no-cue`, at TC 1).
+**The loss is at 8 m and beyond**, where the ear is weakest (66.6%) and, as an inference, more paths go around a wall; the walled share is not split by distance here. It is still two in three.
+
+By the meanings written in the tool before the read, the second applies: the ear is right well above 50% where detours stall, so steering by it for the whole sounding window is the candidate, under its own ADR and gate.
+
+**What this cannot say.**
+
+- Whether acting on the sign converts. ADR-0029's gate read 94.0% and 77.2% on leg verdicts, and acting on them was a null (`legs-1`).
+- How the errors fall in time. Steps are graded one by one. Neighbouring steps share a pose and a room, so their errors are likely correlated, and averaging several readings may gain less than independent errors would.
+- Whether the sign is wrong around walls or the straight line is the wrong reference there. Through a wall the sound comes in by the door, which is the route's direction and not the line's.
