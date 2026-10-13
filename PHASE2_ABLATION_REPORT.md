@@ -5226,7 +5226,8 @@ The sign was 0 (heard nothing) on 13 steps of 64,647.
 
 ### What this says
 
-**The cue carries the side, and the controller does not use it after its first leg.** The cast reads the sign in its scan and at its first leg's turn, and then alternates by rule for the rest of the detour. `abl-2` priced that one use at 14.9 points (`no-cue`, at TC 1).
+**The cue carries the side, and the cast turns away from it on every other leg.** The cast reads the sign in its scan and at every leg's opening. Even legs turn toward the heard side and odd legs away from it (`cast_action`), so a steady sign alternates the turns. `abl-2`'s `no-cue` arm, which reads every sign as 0, cost 14.9 points at TC 1: that prices every use of the sign together, not one use.
+*Corrected 2026-10-13 (PR #178): this paragraph first said the cast reads the sign only in its scan and first leg. `cast_action` reads it at every opening, and a fresh-context review of ADR-0032's draft found the error.*
 **The loss is at 8 m and beyond**, where the ear is weakest (66.6%) and, as an inference, more paths go around a wall; the walled share is not split by distance here. It is still two in three.
 
 By the meanings written in the tool before the read, the second applies: the ear is right well above 50% where detours stall, so steering by it for the whole sounding window is the candidate, under its own ADR and gate.

@@ -256,8 +256,9 @@ python -m earshot.tools.silent_replay runs/no-tc/no-tc runs/regate-a/no-tc \
 # the same five renders: THE CLOCK (could any steering arrive before the source stopped:
 # route at the detour's start, less the 1 m ring, against the steps it sounded, charging
 # no turn) and THE EAR (is the recorded left/right `lateral_sign` right about the side the
-# source is on, at every sounding detour step). The cast reads that sign in one scan and
-# one turn and then ignores it; `abl-2` priced that one use at 14.9 pts. The audit has no
+# source is on, at every sounding detour step). The cast reads that sign in its scan and
+# at every leg's opening, where even legs turn toward the heard side and ODD LEGS TURN
+# AWAY from it; `abl-2`'s `no-cue` (sign always 0) cost 14.9 pts. The audit has no
 # heading, so it is rebuilt from forwards that moved plus 30-degree turns, and a step is
 # graded only between two forwards the turns agree with. Read-only, no GPU.
 # RAN 2026-10-13: STEERING IS THE LIMIT, NOT THE CLOCK. 85 of 1,324 detours (6.4%) were out

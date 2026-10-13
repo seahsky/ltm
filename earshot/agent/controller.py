@@ -357,8 +357,10 @@ def realizable_investigate_step(
     policy, not a smaller epsilon.
 
     So: **one turn, then ``cast_steps`` forwards, then a turn the other way.** The first
-    leg turns toward the louder half-plane, which is the lateral cue's last useful word.
-    Later legs ALTERNATE regardless of the sign, and that is deliberate — following a
+    leg turns toward the louder half-plane, the side the lateral cue names.
+    Later legs ALTERNATE relative to the sign read at their opening: even legs turn toward
+    the heard side and odd legs away from it (``cast_action``), so the turns alternate only
+    while the sign holds steady. That is deliberate — following a
     stable sign every leg traces a closed polygon, which is an orbit, and an agent
     circling a source at five metres reads exactly like the flat field and stable sign it
     would be circling in. Alternating cannot close: the heading oscillates between two
@@ -534,8 +536,9 @@ def cast_action(
             return ACT_FORWARD
         if leg_verdict == LEG_QUIETER:
             return ACT_REVERSE
-    # Starting one. The lateral sign steers the first leg and the alternation steers the
-    # rest; see the rule's docstring for why a stable sign must not steer them all.
+    # Starting one. Every leg reads the sign at its opening: even legs turn toward the
+    # heard side and odd legs away from it, so a steady sign alternates the turns. See the
+    # rule's docstring for why a stable sign must not steer them all.
     #
     # **The alternation is conditional on there being legs at all.** It exists to stop a
     # TRAVELLING sweep closing into a polygon, and with `cast_steps = 0` nothing travels:
