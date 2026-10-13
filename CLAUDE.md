@@ -247,6 +247,17 @@ nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
 python -m earshot.tools.silent_replay runs/no-tc/no-tc runs/regate-a/no-tc \
   runs/regate-b/no-tc runs/legs-1/full runs/legs-1/full-b
 
+# THE SOUNDING HALF, after ADR-0031's STOP put the loss there. NOT A GATE. Two questions of
+# the same five renders: THE CLOCK (could any steering arrive before the source stopped:
+# route at the detour's start, less the 1 m ring, against the steps it sounded, charging
+# no turn) and THE EAR (is the recorded left/right `lateral_sign` right about the side the
+# source is on, at every sounding detour step). The cast reads that sign in one scan and
+# one turn and then ignores it; `abl-2` priced that one use at 14.9 pts. The audit has no
+# heading, so it is rebuilt from forwards that moved plus 30-degree turns, and a step is
+# graded only between two forwards the turns agree with. Read-only, no GPU
+python -m earshot.tools.sounding_replay runs/no-tc/no-tc runs/regate-a/no-tc \
+  runs/regate-b/no-tc runs/legs-1/full runs/legs-1/full-b
+
 # WHAT DREAM's MEMORY ACTUALLY DID — the numbers `window_report` and `episode_diff` cannot
 # see. `dream-1` wrote `dream_omega_e_spread` onto 282 episodes and no reader could print
 # it, so the run's own central quantity reached nobody.
