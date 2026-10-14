@@ -108,7 +108,7 @@ The tables are in `PHASE2_ABLATION_REPORT.md` under "ADR-0032's night".
 - **The scene level leans the same way and decides nothing.** A is 10 scenes up and 6 down (exact sign test p 0.45), and B is 8 up and 5 down (p 0.58).
 - **The conditioned reads change nothing.** Given INVESTIGATE_ENTERED, both contrasts keep every discordant pair. The drop counts were not read.
 - **Find-SR@1m** is 102, 110, 88 and 100 of 270 for `full`, `ear-legs`, `full-b` and `ear-legs-b`.
-- **The run exited 1 on one smoke gate:** `full-b / mv2HUxq3B53`, criterion 5 alone, 0 of 15 episodes resumed. The paired tables put the other three arms 4, 3 and 2 episodes above `full-b` in that scene. `full-b` keeps the baseline's per-scene bar, so it is red by rule. The cell is unexamined, not cleared; its numbers are kept as measurements, and it gives +2 of B's net and −4 of the `full` repeat's.
+- **The run exited 1 on one smoke gate:** `full-b / mv2HUxq3B53`, criterion 5 alone, 0 of 15 episodes resumed. `full-b` keeps the baseline's per-scene bar, so it is red by rule. Examined on 2026-10-15, it is a measurement and not a fault: `full-b` reached 0 of 15 there against 4, 3 and 2 in the other arms, all 13 of its detours were abandoned with the rule rebuilt on every step checked, and 10 of them started 8 m or more from the source. It gives +2 of B's net and −4 of the `full` repeat's.
 
 DIRECTION ONLY is the first branch that applies: A and B are both positive, and both miss p < 0.05.
 **The sign reproduces and the size is not resolved.** The estimates are +2.8 and +4.3 points, under the pre-registered 7.30-point MDE.
