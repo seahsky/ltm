@@ -276,7 +276,14 @@ python -m earshot.tools.sounding_replay runs/no-tc/no-tc runs/regate-a/no-tc \
 # so silence is `full`. Same five branches and six one-line reads as ADR-0029's night,
 # MDE 7.30. LIVENESS first: `window_report` prints THE EAR per arm and exits 2 if an ear
 # arm never turned against `full`'s rule or its record does not rebuild step by step.
-# Before the box: `test_ear_legs_kinematics` prints homing and circling in open floor
+# Before the box: `test_ear_legs_kinematics` prints homing and circling in open floor.
+# `ear-1` RAN 2026-10-13 at f59cfd7: DIRECTION ONLY. The ear was LIVE (408 and 407
+# turns, every detour step rebuilt), but the follower made only 75.5% and 68.1% of those
+# turns. `full -> ear-legs` net +8 over 54 (p 0.34), `full-b -> ear-legs-b` net +12 over
+# 56 (p 0.14), and the repeats moved as far (-14 and -10). +2.8 and +4.3 pts against a
+# 7.30 MDE: the sign reproduces, the size is not resolved. `full` KEEPS ITS CAST. A
+# second night is Sky's call: the same design has the same MDE, and 3.65 pts needs four
+# times the pairs. Exit 1 was one smoke gate, `full-b/mv2HUxq3B53` criterion 5 at 0/15
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
   --arms "full ear-legs full-b ear-legs-b"
 

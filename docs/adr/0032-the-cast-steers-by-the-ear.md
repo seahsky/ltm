@@ -1,7 +1,8 @@
 # ADR-0032: the cast steers by the ear
 
 Status: **accepted**, 2026-10-13 (PR #178), with the night's numbers as proposed.
-**Built, and the fake-world checks pass** (2026-10-13). See "How it was built". The night is not yet booked.
+**Built, and the fake-world checks pass** (2026-10-13). See "How it was built".
+**The night ran on 2026-10-13 (`ear-1`) and read DIRECTION ONLY.** Both contrasts are positive and neither is significant. `full`'s cast policy does not change, and a second night is Sky's call; see "The night's result".
 Amends ADR-0016's cast at one place: the odd legs' turn. The surge, the scan, the even legs, the arrival rule and `is_rising` carry unchanged.
 **Gated on fake-world checks, then a pre-registered night.** Sky accepted the night's numbers as written on 2026-10-13.
 
@@ -94,6 +95,25 @@ The secondary reads qualify a branch and never pick one, under ADR-0029's drop-c
 **The liveness rule, the 7.30, and the repeat-net rule are judgment carried from ADR-0029, not derivation.**
 
 **What the night cannot say.** Whether a larger turn, or a side voted over the whole leg, would do more: the arm changes the odd-leg flip and nothing else. Anything about TC 1.
+
+### The night's result (`ear-1`, 2026-10-13)
+
+Four arms at commit f59cfd7, 282 episodes each over 19 scenes, 7 h 52 m: **DIRECTION ONLY**.
+The tables are in `PHASE2_ABLATION_REPORT.md` under "ADR-0032's night".
+
+- **The ear was live.** It turned 408 openings in `ear-legs` and 407 in `ear-legs-b` toward the heard side where `full` turns away. Both records rebuild at every detour step (25,099 and 25,273), and `window_report` exited 0. NOT_RUN does not apply.
+- **The follower made 308 of those turns (75.5%) and 277 (68.1%).** On the rest its own action on that tick was something else. Whether `full`'s turns are followed at the same rate is not measured.
+- **The two contrasts have the same sign.** `full -> ear-legs` is net +8 over 54 discordant pairs (exact McNemar p 0.34). `full-b -> ear-legs-b` is net +12 over 56 (p 0.14).
+- **The repeats moved as far.** `full -> full-b` is net −14 over 54 (p 0.076), and `ear-legs -> ear-legs-b` is net −10 over 60 (p 0.25). Both contrasts clear them signed, only because both are negative.
+- **The scene level leans the same way and decides nothing.** A is 10 scenes up and 6 down (exact sign test p 0.45), and B is 8 up and 5 down (p 0.58).
+- **The conditioned reads change nothing.** Given INVESTIGATE_ENTERED, both contrasts keep every discordant pair. The drop counts were not read.
+- **Find-SR@1m** is 102, 110, 88 and 100 of 270 for `full`, `ear-legs`, `full-b` and `ear-legs-b`.
+- **The run exited 1 on one smoke gate:** `full-b / mv2HUxq3B53`, criterion 5 alone, 0 of 15 episodes resumed. The paired tables put the other three arms 4, 3 and 2 episodes above `full-b` in that scene. `full-b` keeps the baseline's per-scene bar, so it is red by rule. The cell is unexamined, not cleared; its numbers are kept as measurements, and it gives +2 of B's net and −4 of the `full` repeat's.
+
+DIRECTION ONLY is the first branch that applies: A and B are both positive, and both miss p < 0.05.
+**The sign reproduces and the size is not resolved.** The estimates are +2.8 and +4.3 points, under the pre-registered 7.30-point MDE.
+`full` keeps its cast, because only GAIN changes it. `CastPolicy.EAR_LEGS` stays in the tree as an arm.
+A second night is Sky's call. One of the same design has the same 7.30-point MDE. At the 19.1% flip rate, `power.mde_paired` gives 3.65 points at four times the pairs (1,128).
 
 ## How it was built (2026-10-13)
 
