@@ -5237,3 +5237,105 @@ By the meanings written in the tool before the read, the second applies: the ear
 - Whether acting on the sign converts. ADR-0029's gate read 94.0% and 77.2% on leg verdicts, and acting on them was a null (`legs-1`).
 - How the errors fall in time. Steps are graded one by one. Neighbouring steps share a pose and a room, so their errors are likely correlated, and averaging several readings may gain less than independent errors would.
 - Whether the sign is wrong around walls or the straight line is the wrong reference there. Through a wall the sound comes in by the door, which is the route's direction and not the line's.
+
+## ADR-0032's night: DIRECTION ONLY (`ear-1`, 2026-10-13)
+
+`nrun bash earshot/tools/ablation_sweep.sh --tag ear-1 --arms "full ear-legs full-b ear-legs-b"` at commit f59cfd7 (`main` after PR #179), riftvm, 7 h 52 m, exit 1 on one smoke gate (below).
+282 episodes per arm over 19 scenes; `mL8ThkuaVTM` yielded zero in all four arms.
+Read under the pre-registration in ADR-0032 ("The night, pre-registered"), which merged before the run started.
+
+### The red gate: one baseline cell, criterion 5 alone
+
+The exit 1 is the smoke gate and not the readout. No run failed, and the driver's closing message is the gate's, which it prints only after the readout passed.
+The gate re-run over every cell on the box on 2026-10-14 found one red cell: `full-b / mv2HUxq3B53`, criterion 5, 0 of 15 episodes closed the loop.
+The other eight criteria passed in that cell. The only other cells the re-run named are the four zero-yield `mL8ThkuaVTM` ones.
+`full-b` keeps the baseline's per-scene bar because the driver treats a zero in a baseline cell as a bug, so this cell is red by rule.
+**The cell is unexamined, not cleared.** No log or record from it was read.
+In that scene the paired tables put `full` 4 episodes above `full-b`, `ear-legs` 3 above and `ear-legs-b` 2 above.
+Criterion 5 counts episodes that resumed the primary task, not episodes that reached the source, so it does not by itself fix `full-b`'s reach at 0.
+Earlier sweeps found `PRIMARY_RESUMED` tracking `SOURCE_REACHED` exactly, and `ear-legs-b`'s criterion 5 reads 2 of 15 there, equal to its derived reach. On the assumption that the same holds for `full-b`, the four arms reached 4, 3, 0 and 2 of 15.
+On that assumption, at the scene's rate over the four arms (9 of 60), 0 of 15 has a probability of 8.7%, and with 38 baseline cells on the night one zero is not out of the ordinary. That is an inference.
+The night's numbers are kept as measurements, as `r2500-b`'s were beside its red criterion 7.
+This cell gives +2 of contrast B's +12 and −4 of the `full` repeat's −14.
+
+### Liveness: the ear turned the arm
+
+| arm | openings turned toward the ear where `full` turns away | the follower made that turn | detour steps rebuilt from the record |
+|---|---|---|---|
+| `ear-legs` | 408 | 308 = 75.5% | 25,099 of 25,099 |
+| `ear-legs-b` | 407 | 277 = 68.1% | 25,273 of 25,273 |
+
+Both arms turned against `full`'s rule, both records rebuild at every detour step, and `window_report` exited 0. NOT_RUN does not apply.
+That is about 1.4 ear turns per episode.
+**On one ear turn in four, or one in three, the follower did something else.** The rule names a probe 2 m out at 60° off the body's heading (`investigate_probe_turn_deg`), and the follower routes to it in 30° turns and 0.25 m forwards. A forward, or the other turn round a wall, are both possible answers. THE EAR does not print which; the per-step `action` holds it.
+Whether `full`'s own cast turns are followed at the same rate is not known. Its records carry `action` and `realizable_action` on every step, so it can be read off-box, but that read was not pre-registered.
+So the night tested the turns the follower made, not all 408 and 407 that the rule asked for.
+
+### The arms
+
+| arm | source reached of 282 | Find-SR@1m of 270 | source SPL, mean | steps per episode | route to source at the final pose, median |
+|---|---|---|---|---|---|
+| `full` | 102 = 36.2% | 37.8% | 0.280 | 190.3 | 6.06 m |
+| `ear-legs` | 110 = 39.0% | 40.7% | 0.301 | 193.9 | 6.13 m |
+| `full-b` | 88 = 31.2% | 32.6% | 0.247 | 194.5 | 5.52 m |
+| `ear-legs-b` | 100 = 35.5% | 37.0% | 0.278 | 190.0 | 5.85 m |
+
+12 of 282 episodes have no navmesh route to the source in every arm, as before.
+
+### The six reads
+
+| # | read | gained | lost | net | discordant of 282 | exact McNemar p |
+|---|---|---|---|---|---|---|
+| 1 | `full -> ear-legs` (contrast A) | 31 | 23 | **+8** (+2.8 pts) | 54 = 19.1% | 0.3409 |
+| 2 | `full-b -> ear-legs-b` (contrast B) | 34 | 22 | **+12** (+4.3 pts) | 56 = 19.9% | 0.1409 |
+| 3 | `full -> full-b` (repeat) | 20 | 34 | −14 (−5.0 pts) | 54 = 19.1% | 0.0759 |
+| 4 | `ear-legs -> ear-legs-b` (repeat) | 25 | 35 | −10 (−3.5 pts) | 60 = 21.3% | 0.2451 |
+| 5 | contrast A, given INVESTIGATE_ENTERED | 31 | 23 | +8 | 54 | 0.3409 |
+| 6 | contrast B, given INVESTIGATE_ENTERED | 34 | 22 | +12 | 56 | 0.1409 |
+
+Net, discordant count and p are the driver's own lines.
+Gained and lost for reads 1 and 3 are summed from the per-scene tables the driver printed. For read 2 they are `episode_diff`'s, re-run by hand on the box on 2026-10-14. For reads 4, 5 and 6 they follow from the net and the count.
+
+### The scene level, and the conditioning
+
+| contrast | scenes up | scenes down | scenes flat | exact sign test p |
+|---|---|---|---|---|
+| A | 10 | 6 | 3 | 0.45 |
+| B | 8 | 5 | 6 | 0.58 |
+
+The sign test p is computed from the printed tables with `funnel_diff.two_sided_exact_binomial`.
+Six scenes are up in both contrasts and two are down in both.
+
+Reads 5 and 6 equal reads 1 and 2, so every discordant pair entered INVESTIGATE in both arms.
+The drop counts were not in the emailed tail and were not re-run. The arm differs from `full` only inside the detour, after INVESTIGATE_ENTERED, so the gate is upstream of the treatment by construction.
+
+### The branch: DIRECTION ONLY
+
+The branches are checked in order.
+
+| branch | applies | why |
+|---|---|---|
+| NOT_RUN | no | both ear arms turned against `full`'s rule (408 and 407 openings), both rebuild at every step, and `window_report` exited 0 |
+| GAIN | no | A and B are both positive, and neither has p < 0.05 (0.34 and 0.14) |
+| LOSS | no | A and B are both positive |
+| **DIRECTION ONLY** | **yes** | A and B have the same sign, and both miss p < 0.05 |
+
+**Steering by the ear moved reach the same way twice, and the night cannot say by how much.**
+A and B are +2.8 and +4.3 points. The pre-registered MDE was 7.30 points per contrast, and at the night's own repeats' flip rate (114 of 564, 20.2%) `power.mde_paired` gives 7.50. The driver prints its own figure before the run, and that line is not in the emailed tail.
+Both nets clear the repeat nets signed, as the rule asks, but only because both repeats are negative.
+In size, the `full` repeat moved 5.0 points and the ear repeat 3.5, as far as either contrast.
+The two cross pairs, which the pre-registration does not read, span the same noise: `full -> ear-legs-b` is net −2, and `full-b -> ear-legs` is net +22 from the arm totals.
+Both `-b` arms came in under their first runs on this night. On `legs-1` both came in over theirs (+9 and +5), so the run order shows no pattern across the two nights.
+
+### What follows (ADR-0032)
+
+Reported as measured. `full`'s cast policy does not change, because only GAIN changes it. `CastPolicy.EAR_LEGS` stays in the tree as built.
+A second night is Sky's call.
+A night of the same design has the same 7.30-point MDE, against contrasts of +2.8 and +4.3 points. At the 19.1% flip rate, `power.mde_paired` gives 5.16 points at twice the pairs (564) and 3.65 at four times (1,128).
+
+**What this night cannot say**, as pre-registered:
+
+- Whether a larger turn, or a side voted over the whole leg, would do more. The arm changes the odd-leg flip and nothing else.
+- Anything about TC 1. All four arms render at TC 0.
+
+And from the night itself: why the follower made 68 to 76% of the ear's turns, and whether `full`'s turns fare the same.
