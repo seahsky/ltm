@@ -181,6 +181,25 @@ class TestTheTwoArms(unittest.TestCase):
         self.assertIn(REACHED, text)
         self.assertIn("carry no per-step position", text)
 
+    def test_an_episode_with_no_detour_is_not_called_unpositioned(self):
+        """`ear-1/full-b/mv2HUxq3B53` printed "2 of 15 episode(s) carry no per-step
+        position ... records written before StepRecord.position landed" over fresh records:
+        the two were the episodes that never entered INVESTIGATE, which have no detour to
+        measure a distance over. The count is over the detours, and a missing position
+        there is still flagged."""
+        positioned = [
+            trace_one(audit([10.0, 5.0], stage=FunnelStage.INVESTIGATE_ENTERED)),
+            trace_one(audit([6.0, 0.4], stage=FunnelStage.PRIMARY_RESUMED, index=1)),
+            trace_one(audit([8.0, 8.0], stage=FunnelStage.T_ANOM_REACHED, index=2)),
+        ]
+        self.assertNotIn("carry no per-step position", format_report(aggregate(positioned)))
+
+        bare = EpisodeAudit(source_xyz=SOURCE, funnel_stage=FunnelStage.INVESTIGATE_ENTERED,
+                            onset=OnsetRecord(onset_step=ONSET_STEP), episode_index=3,
+                            steps=(StepRecord(step=ONSET_STEP, measured_rms=0.05),))
+        text = format_report(aggregate(positioned + [trace_one(bare)]))
+        self.assertIn("1 of 3 detour(s) carry no per-step position", text)
+
 
 def rms_steps(pairs, *, onset=ONSET_STEP, action=None, realizable=None, lateral=0):
     """Steps from explicit ``(distance, measured_rms)`` pairs.

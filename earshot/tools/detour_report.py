@@ -826,11 +826,17 @@ def aggregate(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         if t.get("eps_measured") and t.get("rising_eps") is not None
     ]
     axes = sorted({str(t["distance_axis"]) for t in traces if t.get("distance_axis")})
-    positioned = sum(1 for t in traces if t.get("d_onset_m") is not None)
+    # Over the DETOURS: an episode that never entered INVESTIGATE has no detour window to
+    # place, and counting it here once read as "records written before StepRecord.position
+    # landed" over fresh records. `d_min_m` and not `d_onset_m`, which is also None when
+    # only the onset pose had no route.
+    detoured = [t for t in traces if t.get("outcome") != NO_DETOUR]
+    positioned = sum(1 for t in detoured if t.get("d_min_m") is not None)
     checked = sum(int(t.get("n_rule_checked") or 0) for t in traces)
     agreed = sum(int(t.get("n_rule_agree") or 0) for t in traces)
     return {
         "n_episodes": len(traces),
+        "n_detoured": len(detoured),
         "n_with_position": positioned,
         "arms": {name: _arm(name) for name in (ABANDONED, REACHED, NO_DETOUR)},
         "plateaus": {name: _plateau(name) for name in (ABANDONED, REACHED)},
@@ -934,13 +940,13 @@ def format_report(agg: Mapping[str, Any]) -> str:
         lines.append("  ({} episode(s) never entered INVESTIGATE and are excluded)".format(
             no_detour))
 
-    if agg["n_with_position"] < agg["n_episodes"]:
+    if agg["n_with_position"] < agg["n_detoured"]:
         lines.append("")
         lines.append(
-            "  {} of {} episode(s) carry no per-step position, so their distances read "
+            "  {} of {} detour(s) carry no per-step position, so their distances read "
             "n/a rather than zero — records written before StepRecord.position landed. "
             "Re-run to measure them.".format(
-                agg["n_episodes"] - agg["n_with_position"], agg["n_episodes"]))
+                agg["n_detoured"] - agg["n_with_position"], agg["n_detoured"]))
 
     lines.extend(_arrival_lines(agg))
     lines.extend(_eps_lines(agg))
