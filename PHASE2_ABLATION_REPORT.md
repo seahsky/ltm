@@ -5250,12 +5250,15 @@ The exit 1 is the smoke gate and not the readout. No run failed, and the driver'
 The gate re-run over every cell on the box on 2026-10-14 found one red cell: `full-b / mv2HUxq3B53`, criterion 5, 0 of 15 episodes closed the loop.
 The other eight criteria passed in that cell. The only other cells the re-run named are the four zero-yield `mL8ThkuaVTM` ones.
 `full-b` keeps the baseline's per-scene bar because the driver treats a zero in a baseline cell as a bug, so this cell is red by rule.
-**The cell is unexamined, not cleared.** No log or record from it was read.
-In that scene the paired tables put `full` 4 episodes above `full-b`, `ear-legs` 3 above and `ear-legs-b` 2 above.
-Criterion 5 counts episodes that resumed the primary task, not episodes that reached the source, so it does not by itself fix `full-b`'s reach at 0.
-Earlier sweeps found `PRIMARY_RESUMED` tracking `SOURCE_REACHED` exactly, and `ear-legs-b`'s criterion 5 reads 2 of 15 there, equal to its derived reach. On the assumption that the same holds for `full-b`, the four arms reached 4, 3, 0 and 2 of 15.
-On that assumption, at the scene's rate over the four arms (9 of 60), 0 of 15 has a probability of 8.7%, and with 38 baseline cells on the night one zero is not out of the ordinary. That is an inference.
-The night's numbers are kept as measurements, as `r2500-b`'s were beside its red criterion 7.
+**Examined 2026-10-15 with `detour_report runs/ear-1/full-b/mv2HUxq3B53` on the box: the loop ran, and the arm did not reach the source.**
+`full-b` reached the source in 0 of 15 episodes there. The paired tables put `full` 4 episodes above it, `ear-legs` 3 and `ear-legs-b` 2, so the four arms reached 4, 3, 0 and 2 of 15.
+13 episodes entered INVESTIGATE, and all 13 were abandoned. The other 2 never entered it; episode 2 also stopped at stage 2 in `ear-legs-b`.
+The rule rebuilt from the record on all 1,560 detour steps the report checked, and the 13 detours collided twice.
+Four came within 1.05 to 1.20 m of the source by route. None stood inside the 1.0 m ring, so no arrival was refused.
+10 of the 13 started 8 m or more from the source by route, and 7 started 12 m or more. That is the range where `sounding_replay` found the detour falls off.
+At the scene's rate over the four arms (9 of 60), 0 of 15 has a probability of 8.7%, and with 38 baseline cells on the night one zero is not out of the ordinary. That is an inference.
+**The zero is a measurement, not a fault in the loop.** The night's numbers stand, as `r2500-b`'s did beside its red criterion 7.
+The same report also said 2 of the 15 episodes carry no per-step position. That note was wrong: the 2 are the episodes with no detour, and PR #181 fixes the count.
 This cell gives +2 of contrast B's +12 and −4 of the `full` repeat's −14.
 
 ### Liveness: the ear turned the arm

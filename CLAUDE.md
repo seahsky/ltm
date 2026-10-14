@@ -283,7 +283,8 @@ python -m earshot.tools.sounding_replay runs/no-tc/no-tc runs/regate-a/no-tc \
 # 56 (p 0.14), and the repeats moved as far (-14 and -10). +2.8 and +4.3 pts against a
 # 7.30 MDE: the sign reproduces, the size is not resolved. `full` KEEPS ITS CAST. A
 # second night is Sky's call: the same design has the same MDE, and 3.65 pts needs four
-# times the pairs. Exit 1 was one smoke gate, `full-b/mv2HUxq3B53` criterion 5 at 0/15
+# times the pairs. Exit 1 was one smoke gate, `full-b/mv2HUxq3B53` criterion 5 at 0/15:
+# examined, a measurement (13 detours abandoned, the rule rebuilt on every step checked)
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
   --arms "full ear-legs full-b ear-legs-b"
 
