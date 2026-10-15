@@ -284,7 +284,13 @@ python -m earshot.tools.sounding_replay runs/no-tc/no-tc runs/regate-a/no-tc \
 # 7.30 MDE: the sign reproduces, the size is not resolved. `full` KEEPS ITS CAST. A
 # second night is Sky's call: the same design has the same MDE, and 3.65 pts needs four
 # times the pairs. Exit 1 was one smoke gate, `full-b/mv2HUxq3B53` criterion 5 at 0/15:
-# examined, a measurement (13 detours abandoned, the rule rebuilt on every step checked)
+# examined, a measurement (13 detours abandoned, the rule rebuilt on every step checked).
+# `ear-2` (asked for 2026-10-15) is the SAME command, read by ADR-0032's "The second
+# night, pre-registered": A2 and B2 POOLED by hand off the six reads (gained = (count +
+# net) / 2), one exact binomial over their discordant pairs (564 paired episodes), MDE
+# 5.16. GAIN / LOSS / SPLIT / NULL with no DIRECTION ONLY, and a NULL closes the arm.
+# NOT_RUN if anything under earshot/ outside the tests and detour_report.py differs from
+# f59cfd7. Before launch, `git status --porcelain -- earshot/` on the box prints nothing
 nrun bash earshot/tools/ablation_sweep.sh --tag <fresh-tag> \
   --arms "full ear-legs full-b ear-legs-b"
 

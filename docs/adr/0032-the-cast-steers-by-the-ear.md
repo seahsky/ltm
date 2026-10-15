@@ -3,6 +3,7 @@
 Status: **accepted**, 2026-10-13 (PR #178), with the night's numbers as proposed.
 **Built, and the fake-world checks pass** (2026-10-13). See "How it was built".
 **The night ran on 2026-10-13 (`ear-1`) and read DIRECTION ONLY.** Both contrasts are positive and neither is significant. `full`'s cast policy does not change, and a second night is Sky's call; see "The night's result".
+**Sky asked for a second night (`ear-2`) on 2026-10-15.** Its read is pre-registered in "The second night, pre-registered": the night's two contrasts pooled, and a NULL closes the arm.
 Amends ADR-0016's cast at one place: the odd legs' turn. The surge, the scan, the even legs, the arrival rule and `is_rising` carry unchanged.
 **Gated on fake-world checks, then a pre-registered night.** Sky accepted the night's numbers as written on 2026-10-13.
 
@@ -114,6 +115,79 @@ DIRECTION ONLY is the first branch that applies: A and B are both positive, and 
 **The sign reproduces and the size is not resolved.** The estimates are +2.8 and +4.3 points, under the pre-registered 7.30-point MDE.
 `full` keeps its cast, because only GAIN changes it. `CastPolicy.EAR_LEGS` stays in the tree as an arm.
 A second night is Sky's call. One of the same design has the same 7.30-point MDE. At the 19.1% flip rate, `power.mde_paired` gives 3.65 points at four times the pairs (1,128).
+
+### The second night, pre-registered (`ear-2`)
+
+Sky asked for a second night on 2026-10-15. This section is written before it is booked, and the night is read by it alone.
+
+```
+nrun bash earshot/tools/ablation_sweep.sh --tag ear-2 --arms "full ear-legs full-b ear-legs-b"
+```
+
+The same four arms, the same command and the same episodes as `ear-1`. About 7 h 52 m at `ear-1`'s rate.
+
+**The code that runs is `ear-1`'s.** Since f59cfd7, `main` has changed `earshot/tools/detour_report.py` and its test, and nothing else under `earshot/`. The night's commit must keep that true:
+
+```
+git diff --stat f59cfd7 <ear-2 commit> -- earshot/ ':(exclude)earshot/tests' ':(exclude)earshot/tools/detour_report.py'
+```
+
+must print nothing. `<ear-2 commit>` is the one the driver writes to `provenance.txt` after its own `git pull`, which the email header also carries.
+Any other change under `earshot/` makes the night NOT_RUN, because it would no longer be a second render of the same arm.
+The check covers the tree and not the box. The driver records the commit and never the working tree, so before launch `git status --porcelain -- earshot/` in `~/ltm` must print nothing. Neither check covers the `ss2` env or `data/`.
+
+**The primary read pools the night's two contrasts.** A2 is `full -> ear-legs` and B2 is `full-b -> ear-legs-b`, both on `ear-2`.
+Their discordant pairs are added: gained is gained in A2 plus gained in B2, and lost likewise. The test is the exact two-sided binomial on those totals (`funnel_diff.two_sided_exact_binomial`).
+Each contrast's gained and lost come from the driver's one-line reads: gained = (discordant + net) / 2.
+The pool assumes what each contrast's own McNemar assumes: the renders are independent, and so are the episodes inside a scene.
+Under that assumption, if the arm does nothing, each discordant pair is equally likely either way. A2 and B2 share episodes but no render, so a pair in one says nothing about the other's pair on the same episode.
+Episodes in one scene share a room and a source. If the discordant pairs cluster by scene the p is anti-conservative, as `episode_diff` itself warns, so the scene sign test over the per-scene A2 + B2 nets is reported beside it.
+ADR-0029 and ADR-0032 read their contrasts apart. That was a choice for a first night, made so that one contrast could not carry the other; the pool is what gives this night more power than `ear-1`.
+
+**What this n can resolve.** 564 pairs: `power.mde_paired` gives 5.16 points at the 19.1% flip rate, and 5.30 at `ear-1`'s repeat rate of 20.2%.
+`ear-1` estimated 3.55 points (net +20 over 564 pairs). At that size the night has about 49% power at the 19.1% flip rate and 47% at 20.2%, by the normal approximation to the same test.
+That estimate was chosen to be followed up because it was positive, so the true effect is likely smaller than it.
+
+**The repeats set the noise and not a bar.** The first night asked each contrast to beat both repeat nets, signed.
+On one set of episodes every net is a difference of two arms' reach counts. So A minus `full -> full-b`, and B minus `ear-legs -> ear-legs-b`, both reduce to `ear-legs` against `full-b`, and all four of the rule's comparisons depend on which render carries the `-b` name.
+That rule is not carried. It did not decide `ear-1`, which failed GAIN on p. The repeats are reported, with the flip rate they give.
+
+**The branches**, checked in order. The first that applies is the reading.
+
+| result | reading | what happens |
+|---|---|---|
+| **NOT_RUN.** ADR-0032's three conditions (`window_report` exits 2; an ear arm never turned against `full`'s rule; a rebuild disagrees with its record on any step); or a run failed; or the code check above prints anything; or the examination of a red smoke gate finds a fault in the loop; or A2 and B2 have no discordant pair between them, so the pooled p is undefined | the arm did not run as specified | not a result. Find the cause first |
+| **GAIN.** Pooled net positive, pooled exact p < 0.05, and A2 and B2 both net positive | steering by the ear converts into reach | `EAR_LEGS` becomes `full`'s cast policy. The ablation table is re-run on the new baseline before any component is quoted against it |
+| **LOSS.** Pooled net negative, pooled exact p < 0.05, and A2 and B2 both net negative | turning toward the ear costs reach | `EAR_LEGS` is retired. `detour_report`'s metres walked per metre closed, per arm, says whether it circled |
+| **SPLIT.** Pooled exact p < 0.05, and A2 and B2 do not share a sign (either may be 0) | one render's contrast carries the pool | reported as measured. `EAR_LEGS` is neither adopted nor retired, and what follows is Sky's call |
+| **NULL.** Pooled exact p of 0.05 or more | the ear's steering is not resolved at 564 pairs | `EAR_LEGS` closes as a lever on Find-SR. No third night of this design |
+
+The branches cover every result: a pooled p under 0.05 means a nonzero pooled net, which is GAIN, LOSS or SPLIT, and anything else is NULL.
+There is no DIRECTION ONLY branch. This night exists to resolve the direction `ear-1` left open, so a pooled read that does not reach p < 0.05 closes the arm.
+A NULL does not rule out an effect of `ear-1`'s estimated size: the night has about even odds of detecting one.
+A red smoke gate is not NOT_RUN on its own. It is examined with `detour_report` before the night is read, as `ear-1`'s was.
+
+**Secondary reads**, which qualify the branch and never pick one:
+
+- A2 and B2 each alone, with its exact p and its scene sign test.
+- The scene sign test over the per-scene A2 + B2 nets.
+- The two repeats, and the flip rate they give.
+- Both contrasts given INVESTIGATE_ENTERED, under ADR-0029's drop-count rule.
+- THE EAR: turns, turns the follower made, and steps rebuilt, per arm.
+- Both nights pooled: A, B, A2 and B2, 1,128 pairs (MDE 3.65 at 19.1%). Reported and never a branch, because `ear-1` was read before this night was chosen, and a test that includes it is not a clean test.
+
+**What the email carries.** The primary read needs only A2's and B2's net and discordant count, from the six one-line reads.
+The secondary reads need more: B2's scene table (the driver prints scene tables only against `full`), the paired counts and the drop counts. These come from three commands on the box after the night:
+
+```
+python -m earshot.tools.episode_diff runs/ear-2/full-b runs/ear-2/ear-legs-b
+python -m earshot.tools.episode_diff runs/ear-2/full runs/ear-2/ear-legs --given-stage INVESTIGATE_ENTERED
+python -m earshot.tools.episode_diff runs/ear-2/full-b runs/ear-2/ear-legs-b --given-stage INVESTIGATE_ENTERED
+```
+
+The scene sign tests are computed from the printed tables with `funnel_diff.two_sided_exact_binomial`, as for `ear-1`; `episode_diff` prints the tables and not the test.
+
+**The liveness rule, the choice to pool, the SPLIT branch and closing the arm on a NULL are judgment, not derivation.**
 
 ## How it was built (2026-10-13)
 
